@@ -1,0 +1,16 @@
+api_version = "2025-10"
+
+[[extensions]]
+uid = "5d4fd9c8-9ffe-27f5-b3a1-c7f81186bbf83c90721a"
+type = "ui_extension"
+name = "在庫処理"
+handle = "stock-transfer-tile"
+description = "POS UI extension"
+
+[[extensions.targeting]]
+target = "pos.home.tile.render"
+module = "./src/Tile.jsx"
+
+[[extensions.targeting]]
+target = "pos.home.modal.render"
+module = "./src/Modal.jsx"

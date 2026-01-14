@@ -1,0 +1,30 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "906bc9ebbe2a0812df1abfc257e378f1"
+name = "stock-transfer-pos"
+application_url = "https://stock-transfer-pos.onrender.com"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2026-01"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/scopes_update" ]
+  uri = "/webhooks/app/scopes_update"
+
+  [[webhooks.subscriptions]]
+  topics = [ "app/uninstalled" ]
+  uri = "/webhooks/app/uninstalled"
+
+[access_scopes]
+scopes = "read_products,read_locations,read_inventory,write_inventory,read_inventory_transfers,write_inventory_transfers,write_inventory_shipments,write_inventory_shipments_received_items"
+
+[auth]
+redirect_urls = [ "https://stock-transfer-pos.onrender.com" ]
+
+[access.admin]
+embedded_app_direct_api_access = true
+direct_api_mode = "offline"
