@@ -12095,7 +12095,11 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
         destination { name location { id name } }
 
         shipments(first: 10) {
-          nodes { id status }
+          nodes {
+            id
+            status
+            tracking { trackingNumber company trackingUrl arrivesAt }
+          }
         }
 
         lineItems(first: 250) {
@@ -12133,7 +12137,11 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
     destinationName: String(t?.destination?.name || ""),
     destinationLocationId: String(t?.destination?.location?.id || ""),
 
-    shipments: shipmentNodes.map((s) => ({ id: String(s.id || ""), status: String(s.status || "") })),
+    shipments: shipmentNodes.map((s) => ({
+      id: String(s.id || ""),
+      status: String(s.status || ""),
+      tracking: s.tracking ?? null,
+    })),
     lineItems: lineNodes.map((li) => ({
       id: String(li.id || ""),
       title: String(li.title || ""),

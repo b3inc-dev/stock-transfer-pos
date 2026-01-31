@@ -276,8 +276,7 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
   return (
     <s-box padding="base">
       <s-stack gap="base">
-        <s-text emphasis="bold">ロス</s-text>
-
+        {/* ロスタイトルは非表示（ロスのメニューから開いた時の「ロケーション上のロス」表記を避ける） */}
         {/* ロケーション（出庫「出庫元を設定」同様） */}
         <s-stack gap="small">
           <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
