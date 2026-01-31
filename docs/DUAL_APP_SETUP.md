@@ -50,7 +50,7 @@ location-stock-indicator と同様に、**同じアプリのコード**を「自
    → 既存の `shopify.app.toml` はそのまま残り、`shopify.app.public.toml` が新規作成されます。
 3. **「新規アプリを作成」** または **Create new app** を選ぶ  
    → パートナーに新しいアプリが作成され、その Client ID が自動で `shopify.app.public.toml` に書き込まれます。
-4. 必要ならパートナーダッシュボードで、そのアプリを「公開アプリ」にし、名前（例: POS STOCK）を設定します。
+4. 必要ならパートナーダッシュボードで、そのアプリを「公開アプリ」にし、名前（例: POS Stock）を設定します。
 
 ※ 既にパートナーで公開用アプリを作ってある場合は、`shopify app config link` 実行時に **既存のアプリを選択** し、設定名を `public` にすると、そのアプリ用の `shopify.app.public.toml` が作られます。
 
@@ -60,7 +60,7 @@ location-stock-indicator と同様に、**同じアプリのコード**を「自
 2. **アプリ** → **アプリの作成** → **アプリを作成** を選択
 3. **公開アプリ**（App Store に出す方）として作成
 4. 作成されたアプリの **クライアントID**（Client ID）を控える
-5. 必要に応じて **アプリ名**（例: POS STOCK）や説明を設定
+5. 必要に応じて **アプリ名**（例: POS Stock）や説明を設定
 6. プロジェクトで `shopify app config link` を実行し、設定名 `public` で **今作成したアプリを選択** すると、`shopify.app.public.toml` が自動作成されます。
 
 ※ いま自社で使っている方は「カスタムアプリ」のまま利用し、新しく作った方を「公開用」にします。

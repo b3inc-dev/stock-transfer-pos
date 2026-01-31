@@ -278,6 +278,19 @@ const SCREENS = {
 
 const SCAN_QUEUE_KEY = "stock_transfer_pos_scan_queue_v1";
 
+// 予定日表示用（登録がない場合は空文字）
+function formatArrivesAtDisplay(iso) {
+  if (!iso || typeof iso !== "string") return "";
+  const s = String(iso).trim();
+  if (!s) return "";
+  try {
+    const d = new Date(s);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  } catch {
+    return s.slice(0, 10) || "";
+  }
+}
+
 // storage helper（安全に配列化）
 function normalizeScanQueue_(v) {
   if (Array.isArray(v)) return v;
@@ -4358,6 +4371,18 @@ function OutboundHistoryDetail({
               <s-text tone="subdued" size="small">
                 入庫先: {outbound.historySelectedDestName || detail?.destinationName || "（不明）"}
               </s-text>
+              {/* 配送業者（未登録は空白） */}
+              <s-text tone="subdued" size="small">
+                配送業者：{String((detail?.shipments?.[0]?.tracking?.company) ?? "").trim() || " "}
+              </s-text>
+              {/* 配送番号（未登録は空白） */}
+              <s-text tone="subdued" size="small">
+                配送番号：{String((detail?.shipments?.[0]?.tracking?.trackingNumber) ?? "").trim() || " "}
+              </s-text>
+              {/* 予定日（未登録は空白） */}
+              <s-text tone="subdued" size="small">
+                予定日：{formatArrivesAtDisplay(detail?.shipments?.[0]?.tracking?.arrivesAt) || " "}
+              </s-text>
             </s-stack>
           </s-box>
 
@@ -4381,6 +4406,9 @@ function OutboundHistoryDetail({
     outbound.historySelectedDestName,
     detail?.originName,
     detail?.destinationName,
+    detail?.shipments?.[0]?.tracking?.company,
+    detail?.shipments?.[0]?.tracking?.trackingNumber,
+    detail?.shipments?.[0]?.tracking?.arrivesAt,
     prepareEditOrDuplicate_,
     CONFIRM_EDIT_OR_DUPLICATE_MODAL_ID,
   ]);
@@ -5099,6 +5127,18 @@ function OutboundList({
               <s-text emphasis="bold" size="small">{title}</s-text>
               <s-text size="small">出庫元：{originLocationName}</s-text>
               <s-text size="small">宛先：{destinationLocationName}</s-text>
+              {/* 配送業者（未登録は空白） */}
+              <s-text size="small">
+                配送業者：{resolvedCompany || " "}
+              </s-text>
+              {/* 配送番号（未登録は空白） */}
+              <s-text size="small">
+                配送番号：{String(outbound.trackingNumber ?? "").trim() || " "}
+              </s-text>
+              {/* 予定日（未登録は空白） */}
+              <s-text size="small">
+                予定日：{formatArrivesAtDisplay(outbound.arrivesAtIso) || " "}
+              </s-text>
             </s-stack>
 
             <s-stack direction="inline" gap="base" alignItems="center">
@@ -5152,6 +5192,9 @@ function OutboundList({
     historyDraftSourceTransferId,
     originLocationName,
     destinationLocationName,
+    resolvedCompany,
+    outbound.trackingNumber,
+    outbound.arrivesAtIso,
     liteMode,
     refreshing,
     lines.length,
@@ -10388,6 +10431,31 @@ function InboundList({
               >
                 入庫先：{inboundTo}
               </s-text>
+
+              {/* 4行目：配送業者（未登録は空白） */}
+              <s-text
+                size="small"
+                tone="subdued"
+                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+              >
+                配送業者：{String(shipment?.tracking?.company ?? "").trim() || " "}
+              </s-text>
+              {/* 5行目：配送番号（未登録は空白） */}
+              <s-text
+                size="small"
+                tone="subdued"
+                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+              >
+                配送番号：{String(shipment?.tracking?.trackingNumber ?? "").trim() || " "}
+              </s-text>
+              {/* 6行目：予定日（未登録は空白） */}
+              <s-text
+                size="small"
+                tone="subdued"
+                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+              >
+                予定日：{formatArrivesAtDisplay(shipment?.tracking?.arrivesAt) || " "}
+              </s-text>
             </s-stack>
 
             {/* 右：絶対に折り返さない */}
@@ -10471,6 +10539,9 @@ function InboundList({
     clearAddSearch,
     addOrIncrementByResolved,
     showImages,
+    shipment?.tracking?.company,
+    shipment?.tracking?.trackingNumber,
+    shipment?.tracking?.arrivesAt,
   ]);
 
   useEffect(() => {

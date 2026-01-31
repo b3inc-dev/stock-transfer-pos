@@ -6,7 +6,7 @@
 # 4. shopify app config use public のあと shopify app deploy で公開用にデプロイ
 
 client_id = "YOUR_PUBLIC_APP_CLIENT_ID"
-name = "POS STOCK"
+name = "POS Stock"
 application_url = "https://pos-stock-public.onrender.com"
 embedded = true
 
