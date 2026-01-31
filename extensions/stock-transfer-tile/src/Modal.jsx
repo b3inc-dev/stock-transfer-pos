@@ -13761,13 +13761,8 @@ function renderInboundShipmentItems_({ rows, showImages, dialog, setRowQty }) {
 
         const bottomLeft = `予定 ${planned} / 入庫 ${received}`;
 
-        // 未入庫（0/予定）を全部赤にしないため「進捗がある行だけ」差異判定する
-        const hasAnyProgress =
-          received > 0 ||
-          Number(r?.alreadyAcceptedTotalQty ?? 0) > 0 ||
-          Number(r?.alreadyRejectedQty ?? 0) > 0;
-
-        const hasDiff = hasAnyProgress && received !== planned;
+        // 予定と入庫に差がある行は赤色で表示（編集前・未カウント（0）でも差があれば赤）
+        const hasDiff = planned !== received;
         const bottomLeftTone = hasDiff ? "critical" : "subdued";
 
         return (
