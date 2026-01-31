@@ -1546,6 +1546,27 @@ export default function InventoryCountPage() {
     return filteredCollections.filter((col) => selectedSet.has(col.id));
   }, [showOnlySelectedCollection, filteredCollections, selectedCollectionIds]);
 
+  const ITEMS_PER_PAGE = 1000;
+  const [collectionPage, setCollectionPage] = useState(1);
+  const [skuPage, setSkuPage] = useState(1);
+  const paginatedCollections = useMemo(() => {
+    const start = (collectionPage - 1) * ITEMS_PER_PAGE;
+    return displayCollections.slice(start, start + ITEMS_PER_PAGE);
+  }, [displayCollections, collectionPage]);
+  const paginatedSkuVariants = useMemo(() => {
+    const start = (skuPage - 1) * ITEMS_PER_PAGE;
+    return displaySkuVariants.slice(start, start + ITEMS_PER_PAGE);
+  }, [displaySkuVariants, skuPage]);
+  const collectionTotalPages = Math.max(1, Math.ceil(displayCollections.length / ITEMS_PER_PAGE));
+  const skuTotalPages = Math.max(1, Math.ceil(displaySkuVariants.length / ITEMS_PER_PAGE));
+
+  useEffect(() => {
+    setCollectionPage(1);
+  }, [collectionSearchQuery, showOnlySelectedCollection]);
+  useEffect(() => {
+    setSkuPage(1);
+  }, [skuSearchQuery, showOnlySelectedSku]);
+
   // コレクション選択時に商品リストを取得
   const handleOpenCollectionModal = async (collectionId: string, productGroupId?: string) => {
     setCollectionModalCollectionId(collectionId);
@@ -2214,7 +2235,9 @@ export default function InventoryCountPage() {
                               <s-text tone="subdued" size="small">
                                 {showOnlySelectedCollection
                                   ? `表示: 選択済み${displayCollections.length}件`
-                                  : `表示: ${filteredCollections.length}件 / 全${collections.length}件`}
+                                  : displayCollections.length <= ITEMS_PER_PAGE
+                                    ? `表示: ${filteredCollections.length}件 / 全${collections.length}件`
+                                    : `表示: ${(collectionPage - 1) * ITEMS_PER_PAGE + 1}-${Math.min(collectionPage * ITEMS_PER_PAGE, displayCollections.length)}件 / 全${displayCollections.length}件`}
                               </s-text>
                               <s-button
                                 size="small"
@@ -2234,7 +2257,7 @@ export default function InventoryCountPage() {
                               </s-box>
                             ) : (
                               <>
-                                {displayCollections.map((col) => {
+                                {paginatedCollections.map((col) => {
                                   const isSelected = selectedCollectionIds.includes(col.id);
                                   const config = collectionConfigs.get(col.id);
                                   const selectedCount = config?.selectedVariantIds?.length ?? 0;
@@ -2295,6 +2318,45 @@ export default function InventoryCountPage() {
                               </>
                             )}
                           </div>
+                          {displayCollections.length > ITEMS_PER_PAGE && (
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "12px", padding: "8px 0" }}>
+                              <button
+                                type="button"
+                                onClick={() => setCollectionPage((p) => Math.max(1, p - 1))}
+                                disabled={collectionPage <= 1}
+                                style={{
+                                  padding: "6px 12px",
+                                  border: "1px solid #c9cccf",
+                                  borderRadius: "6px",
+                                  background: collectionPage <= 1 ? "#f6f6f7" : "#fff",
+                                  cursor: collectionPage <= 1 ? "not-allowed" : "pointer",
+                                  fontSize: "13px",
+                                  color: collectionPage <= 1 ? "#8c9196" : "#202223",
+                                }}
+                              >
+                                前へ
+                              </button>
+                              <span style={{ fontSize: "13px", color: "#6d7175" }}>
+                                {(collectionPage - 1) * ITEMS_PER_PAGE + 1}-{Math.min(collectionPage * ITEMS_PER_PAGE, displayCollections.length)} / {displayCollections.length}件
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setCollectionPage((p) => Math.min(collectionTotalPages, p + 1))}
+                                disabled={collectionPage >= collectionTotalPages}
+                                style={{
+                                  padding: "6px 12px",
+                                  border: "1px solid #c9cccf",
+                                  borderRadius: "6px",
+                                  background: collectionPage >= collectionTotalPages ? "#f6f6f7" : "#fff",
+                                  cursor: collectionPage >= collectionTotalPages ? "not-allowed" : "pointer",
+                                  fontSize: "13px",
+                                  color: collectionPage >= collectionTotalPages ? "#8c9196" : "#202223",
+                                }}
+                              >
+                                次へ
+                              </button>
+                            </div>
+                          )}
                           {selectedCollectionIds.length > 0 && (
                             <s-text tone="subdued" size="small">
                               選択中: {selectedCollectionIds.length}件
@@ -2356,7 +2418,9 @@ export default function InventoryCountPage() {
                               <s-text tone="subdued" size="small">
                                 {showOnlySelectedSku
                                   ? `表示: 選択済み${displaySkuVariants.length}件`
-                                  : `表示: ${filteredSkuVariants.length}件 / 全${allSkuVariants.length}件`}
+                                  : displaySkuVariants.length <= ITEMS_PER_PAGE
+                                    ? `表示: ${filteredSkuVariants.length}件 / 全${allSkuVariants.length}件`
+                                    : `表示: ${(skuPage - 1) * ITEMS_PER_PAGE + 1}-${Math.min(skuPage * ITEMS_PER_PAGE, displaySkuVariants.length)}件 / 全${displaySkuVariants.length}件`}
                               </s-text>
                               <s-button
                                 size="small"
@@ -2369,7 +2433,7 @@ export default function InventoryCountPage() {
                           )}
                           {allSkuVariants.length > 0 && (
                             <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                              {displaySkuVariants.length > 0 ? displaySkuVariants.map((v) => {
+                              {displaySkuVariants.length > 0 ? paginatedSkuVariants.map((v) => {
                                 const isSelected = selectedSkuVariants.some((x) => x.inventoryItemId === v.inventoryItemId);
                                 return (
                                   <div
@@ -2406,13 +2470,52 @@ export default function InventoryCountPage() {
                                     </div>
                                   </div>
                                 );
-                              }) : (
+                              }                              ) : (
                                 <s-box padding="base">
                                   <s-text tone="subdued" size="small">
                                     {showOnlySelectedSku ? "選択済みの商品がありません" : "該当するSKUがありません"}
                                   </s-text>
                                 </s-box>
                               )}
+                            </div>
+                          )}
+                          {displaySkuVariants.length > ITEMS_PER_PAGE && (
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "12px", padding: "8px 0" }}>
+                              <button
+                                type="button"
+                                onClick={() => setSkuPage((p) => Math.max(1, p - 1))}
+                                disabled={skuPage <= 1}
+                                style={{
+                                  padding: "6px 12px",
+                                  border: "1px solid #c9cccf",
+                                  borderRadius: "6px",
+                                  background: skuPage <= 1 ? "#f6f6f7" : "#fff",
+                                  cursor: skuPage <= 1 ? "not-allowed" : "pointer",
+                                  fontSize: "13px",
+                                  color: skuPage <= 1 ? "#8c9196" : "#202223",
+                                }}
+                              >
+                                前へ
+                              </button>
+                              <span style={{ fontSize: "13px", color: "#6d7175" }}>
+                                {(skuPage - 1) * ITEMS_PER_PAGE + 1}-{Math.min(skuPage * ITEMS_PER_PAGE, displaySkuVariants.length)} / {displaySkuVariants.length}件
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setSkuPage((p) => Math.min(skuTotalPages, p + 1))}
+                                disabled={skuPage >= skuTotalPages}
+                                style={{
+                                  padding: "6px 12px",
+                                  border: "1px solid #c9cccf",
+                                  borderRadius: "6px",
+                                  background: skuPage >= skuTotalPages ? "#f6f6f7" : "#fff",
+                                  cursor: skuPage >= skuTotalPages ? "not-allowed" : "pointer",
+                                  fontSize: "13px",
+                                  color: skuPage >= skuTotalPages ? "#8c9196" : "#202223",
+                                }}
+                              >
+                                次へ
+                              </button>
                             </div>
                           )}
                           {(selectedSkuVariants.length > 0 || editingSkuOnlyPreservedIds.length > 0) && (
