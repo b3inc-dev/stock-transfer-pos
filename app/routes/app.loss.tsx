@@ -563,9 +563,9 @@ export default function LossPage() {
         <s-stack gap="base">
           <s-section heading="ロス履歴">
             <s-box padding="base">
-              <div style={{ display: "flex", gap: "24px", alignItems: "flex-start" }}>
+              <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                 {/* 左: フィルター（リスト選択で絞り込み） */}
-                <div style={{ flex: "0 0 260px" }}>
+                <div style={{ flex: "0 1 260px", minWidth: 0 }}>
                   <s-stack gap="base">
                     <s-text emphasis="bold" size="large">フィルター</s-text>
                     <s-text tone="subdued" size="small">
@@ -676,7 +676,7 @@ export default function LossPage() {
                 </div>
 
                 {/* 右: 履歴一覧 */}
-                <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                <div style={{ flex: "1 1 400px", minWidth: 0 }}>
                   <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
                       <s-text tone="subdued" size="small">

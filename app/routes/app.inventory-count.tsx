@@ -74,28 +74,12 @@ export type InventoryCount = {
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin } = await authenticate.admin(request);
 
-  const [locResp, collectionsResp, appResp] = await Promise.all([
+  // ロケーション・メタフィールドは単発取得。コレクション・商品はページネーションで全件取得
+  const [locResp, appResp] = await Promise.all([
     admin.graphql(
       `#graphql
         query Locations($first: Int!) {
           locations(first: $first) { nodes { id name } }
-        }
-      `,
-      { variables: { first: 250 } }
-    ),
-    admin.graphql(
-      `#graphql
-        query Collections($first: Int!) {
-          collections(first: $first) {
-            nodes {
-              id
-              title
-              image {
-                url
-                altText
-              }
-            }
-          }
         }
       `,
       { variables: { first: 250 } }
@@ -113,11 +97,41 @@ export async function loader({ request }: LoaderFunctionArgs) {
   ]);
 
   const locData = await locResp.json();
-  const collectionsData = await collectionsResp.json();
   const appData = await appResp.json();
 
   const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
-  const collections: CollectionNode[] = collectionsData?.data?.collections?.nodes ?? [];
+
+  // コレクション: ページネーションで全件取得（250件以上対応）
+  const collections: CollectionNode[] = [];
+  let collectionsCursor: string | null = null;
+  const COLLECTIONS_QUERY = `#graphql
+    query Collections($first: Int!, $after: String) {
+      collections(first: $first, after: $after) {
+        nodes {
+          id
+          title
+          image {
+            url
+            altText
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  `;
+  do {
+    const collectionsResp: Response = await admin.graphql(COLLECTIONS_QUERY, {
+      variables: { first: 250, after: collectionsCursor },
+    });
+    const collectionsData = (await collectionsResp.json()) as { data?: { collections?: { nodes?: CollectionNode[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } } } };
+    const nodes = collectionsData?.data?.collections?.nodes ?? [];
+    const pageInfo = collectionsData?.data?.collections?.pageInfo ?? {};
+    collections.push(...nodes);
+    collectionsCursor = pageInfo.hasNextPage ? pageInfo.endCursor ?? null : null;
+  } while (collectionsCursor);
 
   let productGroups: ProductGroup[] = [];
   const groupsRaw = appData?.data?.currentAppInstallation?.productGroupsMetafield?.value;
@@ -211,59 +225,69 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
-  // SKU一覧: 初回表示用に商品・バリアントを取得（最大1000件＝商品100×バリアント10）。画面上で入力により絞り込み。
-  let skuVariantList: Array<{ variantId: string; inventoryItemId: string; sku: string; barcode?: string; variantTitle: string; productTitle: string; title: string; option1?: string; option2?: string; option3?: string }> = [];
+  // SKU一覧: ページネーションで全商品・バリアントを取得（250件以上のショップ対応）。画面上で入力により絞り込み。
+  const skuVariantList: Array<{ variantId: string; inventoryItemId: string; sku: string; barcode?: string; variantTitle: string; productTitle: string; title: string; option1?: string; option2?: string; option3?: string }> = [];
   try {
-    const skuResp = await admin.graphql(
-      `#graphql
-        query ProductsWithVariants($first: Int!, $variantsFirst: Int!) {
-          products(first: $first) {
-            nodes {
-              id
-              title
-              variants(first: $variantsFirst) {
-                nodes {
-                  id
-                  title
-                  sku
-                  barcode
-                  inventoryItem { id }
-                  selectedOptions { name value }
-                }
+    const PRODUCTS_QUERY = `#graphql
+      query ProductsWithVariants($first: Int!, $after: String, $variantsFirst: Int!) {
+        products(first: $first, after: $after) {
+          nodes {
+            id
+            title
+            variants(first: $variantsFirst) {
+              nodes {
+                id
+                title
+                sku
+                barcode
+                inventoryItem { id }
+                selectedOptions { name value }
               }
             }
           }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
         }
-      `,
-      { variables: { first: 100, variantsFirst: 10 } }
-    );
-    const skuJson = await skuResp.json();
-    const products = skuJson?.data?.products?.nodes ?? [];
-    for (const p of products) {
-      const productTitle = p.title ?? "";
-      for (const v of p.variants?.nodes ?? []) {
-        const invId = v.inventoryItem?.id;
-        if (!invId) continue;
-        const opts = (v.selectedOptions as { name: string; value: string }[] | undefined) ?? [];
-        const option1 = opts[0]?.value?.trim() ?? "";
-        const option2 = opts[1]?.value?.trim() ?? "";
-        const option3 = opts[2]?.value?.trim() ?? "";
-        skuVariantList.push({
-          variantId: v.id,
-          inventoryItemId: invId,
-          sku: v.sku ?? "",
-          barcode: v.barcode ?? "",
-          variantTitle: v.title ?? "",
-          productTitle,
-          title: productTitle + (v.title && v.title !== "Default Title" ? ` / ${v.title}` : ""),
-          option1: option1 || undefined,
-          option2: option2 || undefined,
-          option3: option3 || undefined,
-        });
       }
-    }
+    `;
+    let productsCursor: string | null = null;
+    const VARIANTS_FIRST = 250; // 商品あたり最大250バリアント（API上限）
+    do {
+      const skuResp: Response = await admin.graphql(PRODUCTS_QUERY, {
+        variables: { first: 250, after: productsCursor, variantsFirst: VARIANTS_FIRST },
+      });
+      const skuJson = (await skuResp.json()) as { data?: { products?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } } } };
+      const products = skuJson?.data?.products?.nodes ?? [];
+      const pageInfo = skuJson?.data?.products?.pageInfo ?? {};
+      for (const p of products) {
+        const productTitle = p.title ?? "";
+        for (const v of p.variants?.nodes ?? []) {
+          const invId = v.inventoryItem?.id;
+          if (!invId) continue;
+          const opts = (v.selectedOptions as { name: string; value: string }[] | undefined) ?? [];
+          const option1 = opts[0]?.value?.trim() ?? "";
+          const option2 = opts[1]?.value?.trim() ?? "";
+          const option3 = opts[2]?.value?.trim() ?? "";
+          skuVariantList.push({
+            variantId: v.id,
+            inventoryItemId: invId,
+            sku: v.sku ?? "",
+            barcode: v.barcode ?? "",
+            variantTitle: v.title ?? "",
+            productTitle,
+            title: productTitle + (v.title && v.title !== "Default Title" ? ` / ${v.title}` : ""),
+            option1: option1 || undefined,
+            option2: option2 || undefined,
+            option3: option3 || undefined,
+          });
+        }
+      }
+      productsCursor = pageInfo.hasNextPage ? (pageInfo.endCursor ?? null) : null;
+    } while (productsCursor);
   } catch {
-    skuVariantList = [];
+    // skuVariantList は空のまま
   }
 
   return { locations, collections, productGroups, inventoryCounts, skuVariantList };
@@ -2101,10 +2125,10 @@ export default function InventoryCountPage() {
           {activeTab === "groups" && (
             <s-section heading="商品グループ設定">
               <s-box padding="base">
-                {/* 二分割レイアウト */}
-                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start" }}>
+                {/* 二分割レイアウト（SP時は右カラムを左下部に回す） */}
+                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   {/* 左側: 作成方法タブ + 各フォーム */}
-                  <div style={{ flex: "0 0 320px" }}>
+                  <div style={{ flex: "0 1 320px", minWidth: 0 }}>
                     <s-stack gap="base">
                       <s-text emphasis="bold" size="large">商品グループ</s-text>
                       <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
@@ -2311,7 +2335,7 @@ export default function InventoryCountPage() {
                           )}
                           <s-text emphasis="bold" size="small">SKU選択から作成</s-text>
                           <s-text tone="subdued" size="small">
-                            グループ名を入力し、一覧から商品を選択してグループを作成します。最大1000件（商品100×バリアント10）表示。入力で絞り込み。
+                            グループ名を入力し、一覧から商品を選択してグループを作成します。全商品・全バリアントを読み込み（多数の場合は初回ロードに時間がかかります）。入力で絞り込み。
                           </s-text>
                           <s-text-field
                             label="グループ名"
@@ -2332,7 +2356,7 @@ export default function InventoryCountPage() {
                               <s-text tone="subdued" size="small">
                                 {showOnlySelectedSku
                                   ? `表示: 選択済み${displaySkuVariants.length}件`
-                                  : `表示: ${filteredSkuVariants.length}件 / 全${allSkuVariants.length}件（最大1000件）`}
+                                  : `表示: ${filteredSkuVariants.length}件 / 全${allSkuVariants.length}件`}
                               </s-text>
                               <s-button
                                 size="small"
@@ -2503,7 +2527,7 @@ export default function InventoryCountPage() {
                   </div>
 
                   {/* 右側: 登録済み商品グループリスト */}
-                  <div style={{ flex: "1 1 auto" }}>
+                  <div style={{ flex: "1 1 400px", minWidth: 0 }}>
                     <s-stack gap="base">
                       <s-stack direction="inline" gap="base" inlineAlignment="space-between">
                         <s-text emphasis="bold" size="large">登録済み商品グループ</s-text>
@@ -2739,9 +2763,9 @@ export default function InventoryCountPage() {
           {activeTab === "create" && (
             <s-section heading="棚卸ID発行">
               <s-box padding="base">
-                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start" }}>
+                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   {/* 左側: 発行フォーム */}
-                  <div style={{ flex: "0 0 320px" }}>
+                  <div style={{ flex: "0 1 320px", minWidth: 0 }}>
                     <s-stack gap="base">
                       <s-text emphasis="bold" size="large">棚卸IDを発行</s-text>
                       <s-text tone="subdued" size="small">
@@ -2873,7 +2897,7 @@ export default function InventoryCountPage() {
                   </div>
 
                   {/* 右側: 発行の流れ・直近一覧 */}
-                  <div style={{ flex: "1 1 auto" }}>
+                  <div style={{ flex: "1 1 400px", minWidth: 0 }}>
                     <s-stack gap="base">
                       <s-text emphasis="bold" size="large">発行の流れ</s-text>
                       <s-box padding="base" background="subdued" style={{ borderRadius: "8px" }}>
@@ -2934,9 +2958,9 @@ export default function InventoryCountPage() {
             <>
               <s-section heading="履歴">
                 <s-box padding="base">
-                  <div style={{ display: "flex", gap: "24px", alignItems: "flex-start" }}>
+                  <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                     {/* 左: フィルター（リスト選択で絞り込み） */}
-                    <div style={{ flex: "0 0 260px" }}>
+                    <div style={{ flex: "0 1 260px", minWidth: 0 }}>
                       <s-stack gap="base">
                         <s-text emphasis="bold" size="large">フィルター</s-text>
                         <s-text tone="subdued" size="small">
@@ -3057,7 +3081,7 @@ export default function InventoryCountPage() {
                     </div>
 
                     {/* 右: 履歴一覧 */}
-                    <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                    <div style={{ flex: "1 1 400px", minWidth: 0 }}>
                       <s-stack gap="base">
                         <s-text tone="subdued" size="small">
                           表示: {filteredCounts.length}件 / 全{inventoryCounts.length}件

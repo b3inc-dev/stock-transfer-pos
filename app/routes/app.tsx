@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useRouteError } from "react-router";
+import { Outlet, useLoaderData, useNavigation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
@@ -16,9 +16,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
 export default function App() {
   const { apiKey } = useLoaderData<typeof loader>();
+  const navigation = useNavigation();
+  const isLoading = navigation.state === "loading";
 
   return (
     <AppProvider embedded apiKey={apiKey}>
+      {isLoading && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            padding: "12px 16px",
+            background: "#008060",
+            color: "#fff",
+            fontSize: "14px",
+            fontWeight: 500,
+            textAlign: "center",
+            zIndex: 9999,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+          }}
+        >
+          読み込み中…
+        </div>
+      )}
       {/* App Bridge ナビゲーション（location-stock-indicator と同じ s-app-nav / s-link） */}
       {/* @ts-expect-error s-app-nav は App Bridge の Web コンポーネント */}
       <s-app-nav>

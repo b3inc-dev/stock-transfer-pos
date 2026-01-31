@@ -137,7 +137,7 @@ function sanitizeSettings(input: any): SettingsV1 {
           ? input.outbound.allowForceCancel
           : true,
       historyInitialLimit: clampInt(
-        Number(input.outbound.historyInitialLimit),
+        input.outbound.historyInitialLimit,
         1,
         250,
         100
@@ -157,7 +157,7 @@ function sanitizeSettings(input: any): SettingsV1 {
           ? input.inbound.allowExtraReceive
           : true,
       listInitialLimit: clampInt(
-        Number(input.inbound.listInitialLimit),
+        input.inbound.listInitialLimit,
         1,
         250,
         100
@@ -168,27 +168,37 @@ function sanitizeSettings(input: any): SettingsV1 {
   // 商品リスト表示件数（初期）。lineItems API 上限250
   if (input?.productList && typeof input.productList === "object") {
     s.productList = {
-      initialLimit: clampInt(Number(input.productList.initialLimit), 1, 250, 250),
+      initialLimit: clampInt(input.productList.initialLimit, 1, 250, 250),
     };
   }
 
   // 検索リスト表示件数（初期）。productVariants 検索 API 上限50
   if (input?.searchList && typeof input.searchList === "object") {
     s.searchList = {
-      initialLimit: clampInt(Number(input.searchList.initialLimit), 1, 50, 50),
+      initialLimit: clampInt(input.searchList.initialLimit, 1, 50, 50),
     };
   }
 
   return s;
 }
 
+/** 文字列を半角数字に変換（全角数字→半角、空白除去） */
+function normalizeToHalfWidthDigits(s: unknown): string {
+  const str = String(s ?? "")
+    .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/\s/g, "")
+    .trim();
+  return str.replace(/\D/g, ""); // 数字以外を除去
+}
+
 function clampInt(
-  v: number,
+  v: number | string,
   min: number,
   max: number,
   defaultVal: number
 ): number {
-  const n = Number(v);
+  const normalized = normalizeToHalfWidthDigits(v);
+  const n = normalized ? parseInt(normalized, 10) : Number(v);
   if (!Number.isFinite(n)) return defaultVal;
   return Math.max(min, Math.min(max, Math.round(n)));
 }
@@ -351,9 +361,44 @@ export default function SettingsPage() {
   // carrier presets UI
   const [showCarrierPresets, setShowCarrierPresets] = useState(false);
 
+  // アプリ表示件数の入力検証エラー（半角数字以外など）
+  const [displayCountErrors, setDisplayCountErrors] = useState<{
+    historyList?: string;
+    productList?: string;
+    searchList?: string;
+  }>({});
+
   const readValue = (e: any) => String(e?.currentTarget?.value ?? e?.currentValue?.value ?? "");
 
-  useEffect(() => setSettings(initial), [initial]);
+  const DISPLAY_COUNT_ERROR_MSG = "値を確認してください。半角数字で入力をお願いします。";
+
+  /** 全角数字→半角変換・空白除去し、半角数字のみ抽出。無効・範囲外の場合はエラーを返す。範囲外はclamped値を適用。 */
+  const parseDisplayCountInput = (
+    raw: string,
+    min: number,
+    max: number,
+    defaultVal: number
+  ): { value: number; displayValue: string; error: string | null; shouldUpdate: boolean } => {
+    const s = String(raw ?? "")
+      .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+      .replace(/\s/g, "")
+      .trim();
+    if (!s) return { value: defaultVal, displayValue: String(defaultVal), error: null, shouldUpdate: true };
+    const digitsOnly = s.replace(/\D/g, "");
+    if (digitsOnly !== s) {
+      return { value: defaultVal, displayValue: s, error: DISPLAY_COUNT_ERROR_MSG, shouldUpdate: false };
+    }
+    const n = parseInt(digitsOnly, 10);
+    if (!Number.isFinite(n)) return { value: defaultVal, displayValue: s, error: DISPLAY_COUNT_ERROR_MSG, shouldUpdate: false };
+    const clamped = Math.max(min, Math.min(max, n));
+    const hasRangeError = clamped !== n;
+    return { value: clamped, displayValue: String(clamped), error: hasRangeError ? DISPLAY_COUNT_ERROR_MSG : null, shouldUpdate: true };
+  };
+
+  useEffect(() => {
+    setSettings(initial);
+    setDisplayCountErrors({});
+  }, [initial]);
 
   const saving = fetcher.state !== "idle";
   const saveOk = fetcher.data && (fetcher.data as any).ok === true;
@@ -553,58 +598,82 @@ export default function SettingsPage() {
                   <s-box padding="base">
                     <s-stack gap="base">
                       <s-text-field
-                        type="number"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
                         label="履歴一覧リスト"
                         value={String(settings.outbound?.historyInitialLimit ?? 100)}
+                        helpText={displayCountErrors.historyList}
+                        tone={displayCountErrors.historyList ? "critical" : undefined}
                         onInput={(e: any) => {
-                          const n = parseInt(readValue(e), 10);
-                          if (!Number.isFinite(n)) return;
-                          setSettings((s) => ({
-                            ...s,
-                            outbound: { ...(s.outbound ?? {}), historyInitialLimit: Math.max(1, Math.min(250, n)) },
-                            inbound: { ...(s.inbound ?? {}), listInitialLimit: Math.max(1, Math.min(250, n)) },
-                          }));
+                          const r = parseDisplayCountInput(readValue(e), 1, 250, 100);
+                          setDisplayCountErrors((prev) => ({ ...prev, historyList: r.error ?? undefined }));
+                          if (r.shouldUpdate) {
+                            setSettings((s) => ({
+                              ...s,
+                              outbound: { ...(s.outbound ?? {}), historyInitialLimit: r.value },
+                              inbound: { ...(s.inbound ?? {}), listInitialLimit: r.value },
+                            }));
+                          }
                         }}
                         onChange={(e: any) => {
-                          const n = parseInt(readValue(e), 10);
-                          if (!Number.isFinite(n)) return;
-                          setSettings((s) => ({
-                            ...s,
-                            outbound: { ...(s.outbound ?? {}), historyInitialLimit: Math.max(1, Math.min(250, n)) },
-                            inbound: { ...(s.inbound ?? {}), listInitialLimit: Math.max(1, Math.min(250, n)) },
-                          }));
+                          const r = parseDisplayCountInput(readValue(e), 1, 250, 100);
+                          setDisplayCountErrors((prev) => ({ ...prev, historyList: r.error ?? undefined }));
+                          if (r.shouldUpdate) {
+                            setSettings((s) => ({
+                              ...s,
+                              outbound: { ...(s.outbound ?? {}), historyInitialLimit: r.value },
+                              inbound: { ...(s.inbound ?? {}), listInitialLimit: r.value },
+                            }));
+                          }
                         }}
                       />
-                      <s-text tone="subdued" size="small">アプリの出庫履歴・入庫履歴・ロス履歴の一覧表示に適用（棚卸履歴は全件取得のため対象外）。最大250件、推奨100件</s-text>
+                      <s-text tone="subdued" size="small">アプリの出庫履歴・入庫履歴・ロス履歴の一覧表示に適用（棚卸履歴は全件取得のため対象外）。最大250件、推奨100件。全角数字・スペースは半角に自動変換されます。</s-text>
                       <s-text-field
-                        type="number"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
                         label="商品リスト"
                         value={String(settings.productList?.initialLimit ?? 250)}
+                        helpText={displayCountErrors.productList}
+                        tone={displayCountErrors.productList ? "critical" : undefined}
                         onInput={(e: any) => {
-                          const n = parseInt(readValue(e), 10);
-                          if (!Number.isFinite(n)) return;
-                          setSettings((s) => ({ ...s, productList: { ...(s.productList ?? {}), initialLimit: Math.max(1, Math.min(250, n)) } }));
+                          const r = parseDisplayCountInput(readValue(e), 1, 250, 250);
+                          setDisplayCountErrors((prev) => ({ ...prev, productList: r.error ?? undefined }));
+                          if (r.shouldUpdate) {
+                            setSettings((s) => ({ ...s, productList: { ...(s.productList ?? {}), initialLimit: r.value } }));
+                          }
                         }}
                         onChange={(e: any) => {
-                          const n = parseInt(readValue(e), 10);
-                          if (!Number.isFinite(n)) return;
-                          setSettings((s) => ({ ...s, productList: { ...(s.productList ?? {}), initialLimit: Math.max(1, Math.min(250, n)) } }));
+                          const r = parseDisplayCountInput(readValue(e), 1, 250, 250);
+                          setDisplayCountErrors((prev) => ({ ...prev, productList: r.error ?? undefined }));
+                          if (r.shouldUpdate) {
+                            setSettings((s) => ({ ...s, productList: { ...(s.productList ?? {}), initialLimit: r.value } }));
+                          }
                         }}
                       />
                       <s-text tone="subdued" size="small">アプリの出庫・入庫・ロス・棚卸の商品リスト表示に適用。最大250件、推奨250件</s-text>
                       <s-text-field
-                        type="number"
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
                         label="検索リスト"
                         value={String(settings.searchList?.initialLimit ?? 50)}
+                        helpText={displayCountErrors.searchList}
+                        tone={displayCountErrors.searchList ? "critical" : undefined}
                         onInput={(e: any) => {
-                          const n = parseInt(readValue(e), 10);
-                          if (!Number.isFinite(n)) return;
-                          setSettings((s) => ({ ...s, searchList: { ...(s.searchList ?? {}), initialLimit: Math.max(1, Math.min(50, n)) } }));
+                          const r = parseDisplayCountInput(readValue(e), 1, 50, 50);
+                          setDisplayCountErrors((prev) => ({ ...prev, searchList: r.error ?? undefined }));
+                          if (r.shouldUpdate) {
+                            setSettings((s) => ({ ...s, searchList: { ...(s.searchList ?? {}), initialLimit: r.value } }));
+                          }
                         }}
                         onChange={(e: any) => {
-                          const n = parseInt(readValue(e), 10);
-                          if (!Number.isFinite(n)) return;
-                          setSettings((s) => ({ ...s, searchList: { ...(s.searchList ?? {}), initialLimit: Math.max(1, Math.min(50, n)) } }));
+                          const r = parseDisplayCountInput(readValue(e), 1, 50, 50);
+                          setDisplayCountErrors((prev) => ({ ...prev, searchList: r.error ?? undefined }));
+                          if (r.shouldUpdate) {
+                            setSettings((s) => ({ ...s, searchList: { ...(s.searchList ?? {}), initialLimit: r.value } }));
+                          }
                         }}
                       />
                       <s-text tone="subdued" size="small">アプリの出庫・入庫・ロス・棚卸の検索結果表示に適用。最大50件、推奨50件</s-text>
