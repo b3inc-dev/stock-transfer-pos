@@ -7,7 +7,7 @@ const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 
 export default async () => {
   try {
-    const root = document.body; // ✅ DOM root を自作しない（getElementById/createElement禁止）
+    const root = document.body;
 
     // 前回ツリーが残っていても確実に破棄
     render(null, root);
@@ -19,7 +19,6 @@ export default async () => {
       root
     );
   } catch (e) {
-    console.error(e);
     SHOPIFY?.toast?.show?.(`Render Error: ${e?.message ?? e}`);
   }
 };
@@ -30,7 +29,6 @@ class ErrorBoundary extends Component {
     this.state = { err: null };
   }
   componentDidCatch(err) {
-    console.error(err);
     this.setState({ err });
     try { SHOPIFY?.toast?.show?.(`UI Error: ${err?.message ?? err}`); } catch {}
   }
@@ -48,9 +46,7 @@ class ErrorBoundary extends Component {
   }
 }
 
-// ================================
-// Dialog統一（alert / confirm / input）
-// ================================
+// Dialog
 
 const DIALOG_KIND = {
   ALERT: "ALERT",
@@ -176,8 +172,6 @@ function useUnifiedDialog() {
     const toneOk =
       dlg.type === "destructive" || dlg.type === "error" ? "critical" : "success";
 
-    // ✅ s-modal は常に描画して ref を維持（showOverlay/hideOverlay のため）
-    // ✅ slot は s-modal 直下に置く（重要）
     return (
       <s-modal ref={modalRef} heading={dlg.title || "確認"}>
         <s-box padding="base">
@@ -241,9 +235,7 @@ function useUnifiedDialog() {
   return { alert, confirm, input, DialogHost };
 }
 
-/* =========================
-   Const
-========================= */
+/* Const */
 
 const SETTINGS_NS = "stock_transfer_pos";
 const SETTINGS_KEY = "settings_v1";
@@ -261,35 +253,20 @@ const SCREENS = {
   OUTBOUND_COND: "out_cond",
   OUTBOUND_LIST: "out_list",
 
-  // ✅ 追加：出庫履歴一覧（InboundConditions同型）
+  // 追加：出庫履歴一覧（InboundConditions同型）
   OUTBOUND_HIST_COND: "out_hist_cond",
 
   OUTBOUND_HIST_DETAIL: "out_hist_detail",
 
   INBOUND_COND: "in_cond",
   INBOUND_LIST: "in_list",
-  INBOUND_SHIPMENT_SELECTION: "in_shipment_selection", // ✅ Phase 1.3: シップメント選択画面
+  INBOUND_SHIPMENT_SELECTION: "in_shipment_selection", // Phase 1.3: シップメント選択画面
 
 };
 
-/* =========================
-   UI Root（Fixed Footer 安定版）
-========================= */
+/* UI Root */
 
 const SCAN_QUEUE_KEY = "stock_transfer_pos_scan_queue_v1";
-
-// 予定日表示用（登録がない場合は空文字）
-function formatArrivesAtDisplay(iso) {
-  if (!iso || typeof iso !== "string") return "";
-  const s = String(iso).trim();
-  if (!s) return "";
-  try {
-    const d = new Date(s);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  } catch {
-    return s.slice(0, 10) || "";
-  }
-}
 
 // storage helper（安全に配列化）
 function normalizeScanQueue_(v) {
@@ -307,7 +284,7 @@ function normalizeScanQueue_(v) {
 }
 
 function normalizeScanQueueObj_(raw) {
-  // ✅ 旧形式（配列）→ 新形式へ
+  // 旧形式（配列）→ 新形式へ
   if (Array.isArray(raw)) {
     const items = raw
       .map((x) => {
@@ -320,7 +297,7 @@ function normalizeScanQueueObj_(raw) {
     return { items, lastV, lastT: Date.now(), updatedAt: Date.now() };
   }
 
-  // ✅ 新形式（object）
+  // 新形式（object）
   if (raw && typeof raw === "object") {
     const items = Array.isArray(raw.items)
       ? raw.items.map((s) => String(s || "").trim()).filter(Boolean)
@@ -363,7 +340,6 @@ async function pushScanToQueue_(value) {
       updatedAt: now,
     });
   } catch (e) {
-    console.error("pushScanToQueue_ failed", e);
   }
 }
 
@@ -430,17 +406,17 @@ function Extension() {
   const dialog = useUnifiedDialog();
   const DialogHost = dialog.DialogHost;
 
-  // ✅ header/footer を保持（どちらも任意）
+  // header/footer を保持（どちらも任意）
   const [header, setHeader] = useState(null);
   const [footer, setFooter] = useState(null);
 
   const liteMode = !!prefs?.liteMode;
   const showImages = !liteMode; // 画像ON/OFFを単独運用しない
 
-  // ✅ nav.current が一瞬でも崩れても真っ白にしない
+  // nav.current が一瞬でも崩れても真っ白にしない
   const screen = nav.current?.id || SCREENS.MENU;
 
-  // ✅ 追加：軽量モード切替（showImagesは派生なので触らない）
+  // 追加：軽量モード切替（showImagesは派生なので触らない）
   const toggleLiteMode = useCallback(() => {
     setPrefs((prev) => {
       const p = prev && typeof prev === "object" ? prev : {};
@@ -460,7 +436,7 @@ function Extension() {
     appStateRef.current = appState;
   }, [appState]);
 
-  // ✅ スキャナー購読（元のまま）
+  // スキャナー購読（元のまま）
   useEffect(() => {
     const subscribe = SHOPIFY?.scanner?.scannerData?.current?.subscribe;
     if (typeof subscribe !== "function") {
@@ -473,18 +449,18 @@ function Extension() {
       const source = String(result?.source || "");
       if (!data) return;
 
-      // ✅ 受信は確認できる
+      // 受信は確認できる
       toast(`SCAN: ${data} (${source})`);
 
       const sc = screenRef.current;
       
-      // ✅ 出庫コンディション画面の時は配送番号に自動入力
+      // 出庫コンディション画面の時は配送番号に自動入力
       if (sc === SCREENS.OUTBOUND_COND) {
         setStateSlice(setAppState, "outbound", { trackingNumber: data });
         return;
       }
 
-      // ✅ 出庫リスト画面で確定モーダルが開いている時は配送番号に自動入力
+      // 出庫リスト画面で確定モーダルが開いている時は配送番号に自動入力
       if (sc === SCREENS.OUTBOUND_LIST) {
         // モーダルが開いているかどうかをappStateから確認（ref経由で最新値を取得）
         const currentAppState = appStateRef.current;
@@ -498,7 +474,7 @@ function Extension() {
         return;
       }
 
-      // ✅ 重要：入庫リスト画面の時だけキューに積む
+      // 重要：入庫リスト画面の時だけキューに積む
       if (sc === SCREENS.INBOUND_LIST) {
         pushScanToQueue_(data);
       }
@@ -511,7 +487,7 @@ function Extension() {
     };
   }, []);
 
-  // ✅ MENUに戻ったら header/footer を消す（元の footer クリア + header追加）
+  // MENUに戻ったら header/footer を消す（元の footer クリア + header追加）
   useEffect(() => {
     if (screen === SCREENS.MENU) {
       setHeader(null);
@@ -519,7 +495,7 @@ function Extension() {
     }
   }, [screen]);
 
-  // ✅ 画面遷移前に header/footer を必ずクリア
+  // 画面遷移前に header/footer を必ずクリア
   const clearBars = useCallback(() => {
     setHeader(null);
     setFooter(null);
@@ -541,7 +517,7 @@ function Extension() {
     nav.push(SCREENS.OUTBOUND_COND);
   }, [nav.push, clearBars]);
 
-  // ✅ 新規作成で OutboundList に入る時は「履歴選択状態」を必ずクリア
+  // 新規作成で OutboundList に入る時は「履歴選択状態」を必ずクリア
   const goOutboundListNew = useCallback(() => {
     clearBars();
 
@@ -550,7 +526,7 @@ function Extension() {
     setStateSlice(setAppState, "outbound", (prev) => ({
       ...(prev || {}),
 
-      // ✅ これが効く可能性が高い
+      // これが効く可能性が高い
       lines: [],
       result: null,
 
@@ -710,7 +686,7 @@ function Extension() {
         setAppState={setAppState}
         onBack={goBack}
         onAfterReceive={async (transferId) => {
-          // ✅ Phase 1.3: 確定後の遷移制御（全シップメント完了判定）
+          // Phase 1.3: 確定後の遷移制御（全シップメント完了判定）
           if (!transferId) {
             // transferId が無い場合は通常の戻る
             goBack();
@@ -719,7 +695,7 @@ function Extension() {
 
           try {
             // Transfer の全シップメントを取得して完了判定
-            // ✅ UI Root 側では useOriginLocationGid は使えないため、appState から取得
+            // UI Root 側では useOriginLocationGid は使えないため、appState から取得
             const sessionLocationId = SHOPIFY?.session?.currentSession?.locationId ?? null;
             const locationGid = sessionLocationId 
               ? (String(sessionLocationId).startsWith("gid://shopify/Location/") 
@@ -759,8 +735,6 @@ function Extension() {
               nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION);
             }
           } catch (e) {
-            // エラー時は通常の戻る
-            console.error("onAfterReceive error:", e);
             goBack();
           }
         }}
@@ -772,7 +746,7 @@ function Extension() {
     );
   }
 
-  // ✅ これが無いと「真っ白」になり得る（あなたの症状の最有力）
+  // これが無いと「真っ白」になり得る（あなたの症状の最有力）
   if (!body) {
     body = (
       <s-box padding="base">
@@ -847,15 +821,9 @@ function MenuScreen({ prefs, setPrefs, onOutbound, onInbound }) {
   );
 }
 
-/* =========================
-   Common helpers
-========================= */
+/* Helpers */
 
-const debug = (...args) => {
-  try {
-    console.log("[stock-transfer-pos]", ...args);
-  } catch {}
-};
+const debug = () => {};
 
 const toUserMessage = (e) => {
   const msg = e?.message ?? String(e);
@@ -876,7 +844,7 @@ function safeParseJson(s, fallback) {
 }
 
 const readValue = (eOrValue) => {
-  // ✅ POS UI は onChange/onInput が「文字列」を直接返す実装があるため両対応
+  // POS UI は onChange/onInput が「文字列」を直接返す実装があるため両対応
   if (typeof eOrValue === "string" || typeof eOrValue === "number") {
     return String(eOrValue);
   }
@@ -890,7 +858,7 @@ const readValue = (eOrValue) => {
   );
 };
 
-/** field配列を "a.b[0].c" っぽく整形 */
+/** fieldPath */
 function fieldPath(field) {
   if (!Array.isArray(field) || field.length === 0) return "";
   let out = "";
@@ -1048,7 +1016,7 @@ function FixedFooterNavBar({
   summaryCenter,
   summaryRight,
 
-  // ✅ 追加：サマリーの2行目（中央）
+  // 追加：サマリーの2行目（中央）
   summaryBelow,
 
   leftLabel,
@@ -1210,7 +1178,7 @@ function calcQtyWidthPx_(v) {
 // Inbound: write memo into InventoryTransfer.note (Admin visible)
 // =========================
 
-// ✅ Transferのステータスも取得（note編集可能かどうかを確認するため）
+// Transferのステータスも取得（note編集可能かどうかを確認するため）
 const INVENTORY_TRANSFER_NOTE_QUERY = `
   query TransferNote($id: ID!) {
     inventoryTransfer(id: $id) {
@@ -1222,7 +1190,7 @@ const INVENTORY_TRANSFER_NOTE_QUERY = `
   }
 `;
 
-// ✅ Shopify公式のinventoryTransferEdit mutationを使用
+// Shopify公式のinventoryTransferEdit mutationを使用
 // 公式ドキュメントによると、InventoryTransferEditInputにnoteフィールドが含まれる
 // 注意: inputオブジェクトとして渡す必要がある
 const INVENTORY_TRANSFER_EDIT_NOTE_MUTATION = `
@@ -1254,12 +1222,12 @@ function buildInboundNoteLine_({ shipmentId, locationId, finalize, note, over, e
     lines.push("状態: 一部入庫");
   }
   
-  // ✅ メモがある場合は記載
+  // メモがある場合は記載
   if (note) {
     lines.push(`メモ: ${note}`);
   }
   
-  // ✅ 予定超過の詳細（商品名、SKU、数量を記載）
+  // 予定超過の詳細（商品名、SKU、数量を記載）
   if (Array.isArray(over) && over.length > 0) {
     lines.push(`予定超過: ${over.length}件`);
     over.forEach((o) => {
@@ -1274,11 +1242,11 @@ function buildInboundNoteLine_({ shipmentId, locationId, finalize, note, over, e
     });
   }
   
-  // ✅ 予定外入庫の詳細（商品名、オプション、SKU、JAN、数量を記載、画像は不要）
+  // 予定外入庫の詳細（商品名、オプション、SKU、JAN、数量を記載、画像は不要）
   if (Array.isArray(extras) && extras.length > 0) {
     lines.push(`予定外入庫: ${extras.length}件`);
     extras.forEach((e) => {
-      // ✅ 商品名とオプションを分離
+      // 商品名とオプションを分離
       const titleRaw = String(e?.title || e?.inventoryItemId || "不明").trim();
       const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
       const productName = parts[0] || titleRaw;
@@ -1299,7 +1267,7 @@ function buildInboundNoteLine_({ shipmentId, locationId, finalize, note, over, e
     });
   }
   
-  // ✅ 在庫調整履歴を追加
+  // 在庫調整履歴を追加
   if (Array.isArray(inventoryAdjustments) && inventoryAdjustments.length > 0) {
     lines.push(`在庫調整履歴:`);
     inventoryAdjustments.forEach((adj) => {
@@ -1322,21 +1290,19 @@ function buildInboundNoteLine_({ shipmentId, locationId, finalize, note, over, e
 
 async function appendInventoryTransferNote_({ transferId, line, maxLen = 5000, processLogCallback }) {
   if (!transferId || !line) {
-    console.warn("[appendInventoryTransferNote_] transferId または line が空です", { transferId, line });
     return false;
   }
 
   try {
     if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] 開始: transferId=${transferId}`);
     
-    // ✅ 現在のメモとステータスを取得
+    // 現在のメモとステータスを取得
     if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] 現在のメモを取得中...`);
   const q1 = await adminGraphql(INVENTORY_TRANSFER_NOTE_QUERY, { id: transferId });
     
     if (!q1?.inventoryTransfer) {
       const msg = "Transferが見つかりません";
       if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] エラー: ${msg}`);
-      console.warn("[appendInventoryTransferNote_] inventoryTransfer が取得できませんでした", { transferId, response: q1 });
       toast(`メモ保存エラー: ${msg}`);
       return false;
     }
@@ -1347,15 +1313,14 @@ async function appendInventoryTransferNote_({ transferId, line, maxLen = 5000, p
     
     if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] 取得完了: status=${status}, currentNoteLength=${current.length}`);
     
-    // ✅ Transferのステータスを確認（DraftやReady to Ship状態でないと編集できない可能性がある）
+    // Transferのステータスを確認（DraftやReady to Ship状態でないと編集できない可能性がある）
     // ただし、公式ドキュメントでは「一部のフィールドは編集可能」とされているため、noteは試してみる
     if (status && !["DRAFT", "READY_TO_SHIP", "IN_TRANSIT"].includes(status)) {
       if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] 警告: ステータスが編集可能でない可能性 (status=${status})`);
-      console.warn("[appendInventoryTransferNote_] Transferのステータスが編集可能でない可能性があります", { transferId, status });
       // 警告のみで続行（noteは編集可能かもしれないため）
     }
 
-    // ✅ 新しいメモを追記（既存のメモがある場合は改行で区切る）
+    // 新しいメモを追記（既存のメモがある場合は改行で区切る）
     const merged = current ? `${current}\n\n${String(line)}` : String(line);
 
     // NOTE: note の上限が明記されていないため、安全に切る（最新の内容を優先）
@@ -1363,14 +1328,13 @@ async function appendInventoryTransferNote_({ transferId, line, maxLen = 5000, p
 
     if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] メモ内容準備: mergedLength=${merged.length}, clippedLength=${clipped.length}`);
 
-    // ✅ メモを更新（Shopify公式のinventoryTransferEdit mutationを使用）
+    // メモを更新（Shopify公式のinventoryTransferEdit mutationを使用）
     // 公式ドキュメントの例に従い、inputオブジェクトとして note を渡す
     const noteValue = clipped.trim() || null;
     
     if (!noteValue) {
       const msg = "noteが空のため更新をスキップします";
       if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] ${msg}`);
-      console.warn("[appendInventoryTransferNote_] " + msg, { transferId });
       toast("メモが空のため更新をスキップしました");
       return false;
     }
@@ -1390,7 +1354,6 @@ async function appendInventoryTransferNote_({ transferId, line, maxLen = 5000, p
       const msg = "レスポンスが空です";
       if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] エラー: ${msg}`);
       toast(`メモ保存エラー: ${msg}`);
-      console.warn("[appendInventoryTransferNote_] " + msg, { transferId });
       return false;
     }
     
@@ -1398,11 +1361,6 @@ async function appendInventoryTransferNote_({ transferId, line, maxLen = 5000, p
       const msg = "inventoryTransferEditがレスポンスに含まれていません";
       if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] エラー: ${msg}`);
       toast(`メモ保存エラー: ${msg}`);
-      console.warn("[appendInventoryTransferNote_] " + msg, { 
-        transferId, 
-        status,
-        response: q2 
-      });
       return false;
     }
     
@@ -1410,7 +1368,7 @@ async function appendInventoryTransferNote_({ transferId, line, maxLen = 5000, p
 
     const errs = q2.inventoryTransferEdit.userErrors || [];
   if (errs.length) {
-      // ✅ エラーメッセージを詳細にtoastで表示（タブレットアプリでも確認できるように）
+      // エラーメッセージを詳細にtoastで表示（タブレットアプリでも確認できるように）
       const errorDetails = errs.map((err) => {
         const field = err.field || "unknown";
         const message = err.message || "unknown error";
@@ -1420,30 +1378,16 @@ async function appendInventoryTransferNote_({ transferId, line, maxLen = 5000, p
       if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] userErrors: ${errorDetails}`);
       toast(`メモ保存エラー: ${errorDetails}`);
       
-      // ✅ エラーの詳細をログに出力（デバッグ用）
-      console.error("[appendInventoryTransferNote_] userErrors:", {
-        transferId,
-        status,
-        input: { note: noteValue.slice(0, 200) },
-        errors: errs,
-        response: q2
-      });
-      
     return false;
   }
     
     if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] userErrorsなし、inventoryTransfer確認中...`);
     
-    // ✅ userErrorsがなくても、inventoryTransferが返されない場合はエラー
+    // userErrorsがなくても、inventoryTransferが返されない場合はエラー
     if (!q2.inventoryTransferEdit.inventoryTransfer) {
       const msg = "レスポンスが不正です（Transferが返されませんでした）";
       if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] エラー: ${msg}`);
       toast(`メモ保存エラー: ${msg}`);
-      console.warn("[appendInventoryTransferNote_] inventoryTransfer がレスポンスに含まれていません", { 
-        transferId, 
-        status,
-        response: q2 
-      });
       return false;
     }
     
@@ -1451,65 +1395,44 @@ async function appendInventoryTransferNote_({ transferId, line, maxLen = 5000, p
     
     if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] userErrorsなし、inventoryTransferあり`);
 
-    // ✅ レスポンスから更新後のメモを取得（即座に確認）
+    // レスポンスから更新後のメモを取得（即座に確認）
     const updatedTransfer = q2.inventoryTransferEdit.inventoryTransfer;
     const updatedNoteFromResponse = String(updatedTransfer?.note || "").trim();
     
-    // ✅ 更新後のメモを再度クエリで確認（確実性のため）
+    // 更新後のメモを再度クエリで確認（確実性のため）
     const q3 = await adminGraphql(INVENTORY_TRANSFER_NOTE_QUERY, { id: transferId });
     const updatedNoteFromQuery = String(q3?.inventoryTransfer?.note || "").trim();
     
-    // ✅ どちらかの方法でメモが更新されているか確認
-    const noteWasUpdated = 
+    // どちらかの方法でメモが更新されているか確認
+    const noteWasUpdated =
       updatedNoteFromResponse.includes(String(line).slice(0, 50)) ||
       updatedNoteFromQuery.includes(String(line).slice(0, 50));
-    
-    console.log("[appendInventoryTransferNote_] メモ更新の結果", { 
-      transferId, 
-      status: updatedTransfer?.status || status,
-      noteLength: clipped.length,
-      preview: clipped.slice(0, 100) + (clipped.length > 100 ? "..." : ""),
-      updatedNoteFromResponseLength: updatedNoteFromResponse.length,
-      updatedNoteFromQueryLength: updatedNoteFromQuery.length,
-      noteMatches: noteWasUpdated
-    });
     
     if (!noteWasUpdated) {
       const msg = "メモが更新されていない可能性があります";
       if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] 警告: ${msg}`);
-      // ✅ メモが更新されていない場合は警告をtoastで表示
+      // メモが更新されていない場合は警告をtoastで表示
       toast("メモの保存を確認できませんでした（管理画面で確認してください）");
-      console.warn("[appendInventoryTransferNote_] 警告: " + msg, {
-        transferId,
-        status: updatedTransfer?.status || status,
-        expected: String(line).slice(0, 100),
-        actualFromResponse: updatedNoteFromResponse.slice(0, 100),
-        actualFromQuery: updatedNoteFromQuery.slice(0, 100),
-        currentLength: current.length,
-        updatedLength: updatedNoteFromResponse.length
-      });
-      // エラーではないが、確認が必要なためfalseを返す
       return false;
     }
     
     if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] 成功: メモが更新されました`);
     
-    // ✅ 成功時はtoastで通知（デバッグ用、必要に応じてコメントアウト）
+    // 成功時はtoastで通知（デバッグ用、必要に応じてコメントアウト）
     toast("管理画面メモに記録しました");
     
   return true;
   } catch (e) {
     const errorMsg = String(e?.message || e);
     if (processLogCallback) processLogCallback(`[appendInventoryTransferNote_] 例外: ${errorMsg}`);
-    console.error("[appendInventoryTransferNote_] 例外が発生しました", { transferId, error: e });
-    // ✅ エラー内容をtoastで表示
+    // エラー内容をtoastで表示
     toast(`メモ保存例外: ${errorMsg}`);
     return false;
   }
 }
 
 // =========================
-// ✅ missing inventoryLevel 検知（宛先ロケーション）
+// missing inventoryLevel 検知（宛先ロケーション）
 // =========================
 async function findMissingInventoryLevelsAtLocation({
   locationId,
@@ -1604,9 +1527,7 @@ async function waitForMissingInventoryLevelsToClear({
   return { ok: false, remaining: Array.isArray(remaining) ? remaining : [] };
 }
 
-/* =========================
-   Nav (internal stack) + Persistent Store (localStorage)
-========================= */
+/* Nav + Store */
 
 // ナビ（戻る固定）
 function useNavStack(initial = { id: SCREENS.MENU, params: {} }) {
@@ -1712,9 +1633,7 @@ function setStateSlice(setAppState, key, patch) {
   });
 }
 
-/* =========================
-   Blocking Alert Modal（OK必須）
-========================= */
+/* AlertModal */
 
 function BlockingAlertModal({ open, title = "エラー", message, onOk }) {
   if (!open) return null;
@@ -1735,9 +1654,7 @@ function BlockingAlertModal({ open, title = "エラー", message, onOk }) {
   );
 }
 
-/* =========================
-   Qty Input Modal（タップで数値入力）
-========================= */
+/* QtyModal */
 
 // “入力”ボタンなし版：数字タップでモーダルを開く
 function QtyStepperCompact({
@@ -1875,11 +1792,9 @@ function useSessionLocationId() {
   return rawId;
 }
 
-/* =========================
-   POS current location gid
-========================= */
+/* useOriginLocationGid */
 
-// ✅ origin location id 正規化（数値 or gid）
+// origin location id 正規化（数値 or gid）
 function useOriginLocationGid() {
   const raw = useSessionLocationId();
 
@@ -1902,11 +1817,7 @@ function useOriginLocationGid() {
   }, [raw]);
 }
 
-/* =========================
-   Admin GraphQL（POSタイマー不安定対策版）
-   - setTimeout 依存を避け、短周期 setInterval でタイムアウト監視
-   - Promise.race で「await が永遠に返らない」を防止
-========================= */
+/* adminGraphql */
 
 async function adminGraphql(query, variables, opts = {}) {
   const timeoutMsRaw = opts?.timeoutMs;
@@ -1928,7 +1839,7 @@ async function adminGraphql(query, variables, opts = {}) {
   const timeoutPromise = new Promise((_, reject) => {
     const started = Date.now();
 
-    // ✅ POS iOS で setTimeout が不安定な報告があるため、短周期で監視する
+    // POS iOS で setTimeout が不安定な報告があるため、短周期で監視する
     iv = setInterval(() => {
       if (done) return;
 
@@ -1966,9 +1877,7 @@ async function adminGraphql(query, variables, opts = {}) {
   }
 }
 
-/* =========================
-   Outbound screen split
-========================= */
+/* Outbound split */
 
 function OutboundConditions({
   showImages,
@@ -2009,15 +1918,15 @@ function OutboundConditions({
 
     showArrivesTimePicker: false,
 
-    // ✅ クリア後に自動入力を止める
+    // クリア後に自動入力を止める
     arrivesAutoDisabled: false,
 
-    // ✅ 日付入力の表示/入力用（TextFieldのvalue）
+    // 日付入力の表示/入力用（TextFieldのvalue）
     arrivesDateDraft: "",
 
     settings: { version: 1, destinationGroups: [], carriers: [] },
     allLocations: [],
-    editingTransferId: "", // ✅ 編集モード用
+    editingTransferId: "", // 編集モード用
   });
 
   const [settingsLoading, setSettingsLoading] = useState(false);
@@ -2035,7 +1944,7 @@ function OutboundConditions({
   const [historyError, setHistoryError] = useState("");
   const [historyTransfers, setHistoryTransfers] = useState([]);
 
-  // ✅ 追加：履歴で選択しているtransfer（フッターへ反映）
+  // 追加：履歴で選択しているtransfer（フッターへ反映）
   const [selectedHistoryTransfer, setSelectedHistoryTransfer] = useState(null);
 
   const selectedHistoryTitle = useMemo(() => {
@@ -2045,7 +1954,7 @@ function OutboundConditions({
     return name ? `${name}` : `#${String(t?.id || "").slice(-6)}`;
   }, [selectedHistoryTransfer]);
 
-  // ✅ 先に宣言（TDZ回避）
+  // 先に宣言（TDZ回避）
   const isCompletedTransfer = useCallback((t) => {
     const total = Number(t?.totalQuantity ?? 0);
     const received = Number(t?.receivedQuantity ?? 0);
@@ -2058,7 +1967,7 @@ function OutboundConditions({
       if (!t || !t.id) return;
       const readOnly = isCompletedTransfer(t);
 
-      // ✅ ここで必ず定義（未定義参照で落ちるのを防止）
+      // ここで必ず定義（未定義参照で落ちるのを防止）
       const shipmentId = String(getShipmentIdFromTransferForHistory(t) || "").trim();
 
       setStateSlice(setAppState, "outbound", {
@@ -2071,7 +1980,7 @@ function OutboundConditions({
         historySelectedShipmentId: shipmentId,
       });
     },
-    // ✅ v37: isCompletedTransfer が後で定義されているため deps に入れるとTDZで落ちる
+    // v37: isCompletedTransfer が後で定義されているため deps に入れるとTDZで落ちる
     [setAppState]
   );
 
@@ -2111,7 +2020,7 @@ function OutboundConditions({
       RECEIVED: "入庫",
       TRANSFERRED: "入庫済み",
       CANCELED: "キャンセル",
-      FORCED_CANCEL: "強制キャンセル", // ✅ 強制キャンセル用のラベルを追加
+      FORCED_CANCEL: "強制キャンセル", // 強制キャンセル用のラベルを追加
       OTHER: "その他",
     }),
     []
@@ -2122,7 +2031,7 @@ function OutboundConditions({
     setHistoryLoading(true);
     setHistoryError("");
 
-    // ✅ 再取得したら選択はいったん解除（ズレ防止）
+    // 再取得したら選択はいったん解除（ズレ防止）
     setSelectedHistoryTransfer(null);
     setStateSlice(setAppState, "outbound", {
       historySelectedTransferId: "",
@@ -2157,12 +2066,12 @@ function OutboundConditions({
       const status = String(t?.status || "").toUpperCase();
       const readOnly = status === "TRANSFERRED";
 
-      // ✅ Inbound同型：shipmentId を「混在吸収 helper」で確実に取る
+      // Inbound同型：shipmentId を「混在吸収 helper」で確実に取る
       const shipmentId = String(getShipmentIdFromTransferForHistory(t) || "").trim();
 
       if (!shipmentId) return toast("履歴詳細に必要なshipmentIdが取得できませんでした");
 
-      // ✅ OutboundHistoryDetail が読む state を必ず全部セット（未定義参照防止）
+      // OutboundHistoryDetail が読む state を必ず全部セット（未定義参照防止）
       setStateSlice(setAppState, "outbound", {
         historySelectedTransferId: String(t.id),
         historySelectedTransferName: String(t?.name || ""),
@@ -2248,7 +2157,7 @@ function OutboundConditions({
     return `${hh}:${mm}`;
   }, [outbound.arrivesAtIso, parseIsoToLocalParts_]);
 
-  // ✅ 初期は「1日後 12:00」を ISO + draft の両方に入れる（クリア後はしない）
+  // 初期は「1日後 12:00」を ISO + draft の両方に入れる（クリア後はしない）
   useEffect(() => {
     const isoCur = String(outbound.arrivesAtIso || "").trim();
     const draftCur = String(outbound.arrivesDateDraft || "").trim();
@@ -2312,7 +2221,7 @@ function OutboundConditions({
     ]
   );
 
-  // ✅ 右寄せプリセット（押したら必ず日付が見えるようにdraftも更新）
+  // 右寄せプリセット（押したら必ず日付が見えるようにdraftも更新）
   const setArrivesPreset_ = useCallback(
     (kind) => {
       if (kind === "clear") {
@@ -2351,7 +2260,7 @@ function OutboundConditions({
     ]
   );
 
-  // ✅ 日付入力：入力中はdraftだけ更新 → 確定（onChange）でISOへ反映
+  // 日付入力：入力中はdraftだけ更新 → 確定（onChange）でISOへ反映
   const onArrivesDateDraftInput_ = useCallback(
     (e) => {
       const raw = readValue(e);
@@ -2388,7 +2297,7 @@ function OutboundConditions({
     return allLocations.find((l) => l.id === originLocationGid)?.name ?? "（不明）";
   }, [originLocationGid, locIndex.byId, allLocations]);
 
-  // ✅ 店舗グループ設定は削除されたため、全ロケーションを表示
+  // 店舗グループ設定は削除されたため、全ロケーションを表示
   // 後方互換性のため、destinationGroupsが存在する場合は従来の動作を維持
   const destinationGroups = useMemo(() => {
     const gs = Array.isArray(settings?.destinationGroups) ? settings.destinationGroups : [];
@@ -2515,11 +2424,11 @@ function OutboundConditions({
     }
   }
 
-  // ✅ 下書き復元用のref
+  // 下書き復元用のref
   const conditionsDraftLoadedRef = useRef(false);
   const conditionsDraftRestoredRef = useRef(false);
 
-  // ✅ 下書き復元（マウント時のみ実行、1回だけ）
+  // 下書き復元（マウント時のみ実行、1回だけ）
   useEffect(() => {
     if (conditionsDraftLoadedRef.current) return;
     conditionsDraftLoadedRef.current = true;
@@ -2575,13 +2484,12 @@ function OutboundConditions({
           conditionsDraftRestoredRef.current = true;
         }, 100);
       } catch (e) {
-        console.error("Failed to restore outbound conditions draft:", e);
         conditionsDraftRestoredRef.current = true;
       }
     })();
   }, []);
 
-  // ✅ 自動保存（入力値変更時に下書きを保存）
+  // 自動保存（入力値変更時に下書きを保存）
   useEffect(() => {
     // 下書き復元が完了していない場合は保存しない
     if (!conditionsDraftRestoredRef.current) return;
@@ -2600,7 +2508,6 @@ function OutboundConditions({
           savedAt: Date.now(),
         });
       } catch (e) {
-        console.error("Failed to save outbound conditions draft:", e);
       }
     }, 500); // 500msのデバウンス
 
@@ -2641,9 +2548,9 @@ function OutboundConditions({
 
   const canNext = !!originLocationGid && !!outbound.destinationLocationId;
 
-  // ✅ 次へボタンのハンドラー（商品リストに進む時点では下書きをクリアしない）
+  // 次へボタンのハンドラー（商品リストに進む時点では下書きをクリアしない）
   const handleNext = useCallback(async () => {
-    // ✅ 商品リストに進む時点では下書きをクリアしない（確定時のみクリア）
+    // 商品リストに進む時点では下書きをクリアしない（確定時のみクリア）
     // これにより、戻った時に復元できる
     onNext?.();
   }, [onNext]);
@@ -2703,7 +2610,7 @@ function OutboundConditions({
           </s-text>
         ) : null}
 
-        {/* ===== 出庫元 & 宛先 ===== */}
+        {/* 出庫元&宛先 */}
         <s-stack gap="small">
           <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
             <s-box style={{ flex: "1 1 auto", minInlineSize: 0 }}>
@@ -2795,7 +2702,7 @@ function OutboundConditions({
 
         <s-divider />
 
-        {/* ===== 配送情報（任意） ===== */}
+        {/* 配送情報 */}
         <s-stack gap="base">
           <s-text emphasis="bold">配送情報（任意）</s-text>
 
@@ -2877,7 +2784,7 @@ function OutboundConditions({
             onChange={(e) => setStateSlice(setAppState, "outbound", { trackingNumber: readValue(e) })}
           />
 
-          {/* ===== 到着予定（任意） ===== */}
+          {/* 到着予定 */}
           <s-stack gap="small">
             <s-text emphasis="bold">到着予定（任意）</s-text>
 
@@ -2942,7 +2849,7 @@ function OutboundConditions({
           </s-stack>
         </s-stack>
 
-        {/* ===== 出庫履歴（別画面へ） ===== */}
+        {/* 出庫履歴 */}
         <s-divider />
 
         <s-stack gap="tight">
@@ -2979,7 +2886,6 @@ async function pullScanFromQueue_() {
 
     return first || null;
   } catch (e) {
-    console.error("pullScanFromQueue_ failed", e);
     return null;
   }
 }
@@ -3061,7 +2967,7 @@ function isEan8_(code) {
   return check === (code.charCodeAt(7) - 48);
 }
 
-// ✅ Outbound履歴：Transfer から ShipmentId を取り出す（v39/v40/v43 混在吸収）
+// Outbound履歴：Transfer から ShipmentId を取り出す（v39/v40/v43 混在吸収）
 function getShipmentIdFromTransferForHistory(t) {
   // v43: { shipmentIds: [...] }
   const ids = Array.isArray(t?.shipmentIds) ? t.shipmentIds : [];
@@ -3079,12 +2985,7 @@ function getShipmentIdFromTransferForHistory(t) {
   return n0;
 }
 
-/* =========================
-   OutboundHistoryConditions（出庫履歴一覧 / InboundConditions同型）
-   - タブ: 左右50%領域確保（Inboundと同じ）
-   - 行: ボタンではなく情報テキストのタップ行（Inboundと同じ）
-   - 更新/戻る: 固定フッターのみ
-========================= */
+/* OutboundHistoryConditions */
 
 function OutboundHistoryConditions({
   showImages,
@@ -3122,8 +3023,8 @@ function OutboundHistoryConditions({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [historyTransfers, setHistoryTransfers] = useState([]);
-  const [transfersPageInfo, setTransfersPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ✅ ページネーション用
-  const [loadingMore, setLoadingMore] = useState(false); // ✅ 追加読み込み中フラグ
+  const [transfersPageInfo, setTransfersPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ページネーション用
+  const [loadingMore, setLoadingMore] = useState(false); // 追加読み込み中フラグ
 
   const STATUS_LABEL = useMemo(
     () => ({
@@ -3149,11 +3050,11 @@ function OutboundHistoryConditions({
     if (!originLocationGid) return;
     setHistoryLoading(true);
     setHistoryError("");
-    // ✅ 既存データをクリア（一度読み込まれたデータが残らないように）
+    // 既存データをクリア（一度読み込まれたデータが残らないように）
     setHistoryTransfers([]);
     setTransfersPageInfo({ hasNextPage: false, endCursor: null });
 
-    // ✅ 再取得時は選択をクリア（ズレ防止）
+    // 再取得時は選択をクリア（ズレ防止）
     setStateSlice(setAppState, "outbound", {
       historySelectedTransferId: "",
       historySelectedTransferName: "",
@@ -3167,20 +3068,14 @@ function OutboundHistoryConditions({
     try {
       const historyLimit = Math.max(1, Math.min(250, Number(outbound?.settings?.outbound?.historyInitialLimit ?? 100)));
       const result = await fetchTransfersForOriginAll(originLocationGid, { first: historyLimit });
-      console.log("[OutboundHistoryConditions] fetchTransfersForOriginAll result:", {
-        transfersCount: result?.transfers?.length ?? 0,
-        pageInfo: result?.pageInfo,
-        originLocationGid,
-      });
-      
-      // ✅ 監査ログから過剰分/予定外分/拒否分を合算して display に反映
+      // 監査ログから過剰分/予定外分/拒否分を合算して display に反映
       let patched = Array.isArray(result?.transfers) ? result.transfers : [];
       try {
         const audit = await readInboundAuditLog();
         const overIdx = buildInboundOverIndex_(audit, { locationId: originLocationGid });
         const extrasIdx = buildInboundExtrasIndex_(audit, { locationId: originLocationGid });
         
-        // ✅ 拒否分を集計（shipmentsのlineItemsから取得）
+        // 拒否分を集計（shipmentsのlineItemsから取得）
         const shipmentIds = patched.flatMap((t) => 
           (Array.isArray(t?.shipments) ? t.shipments : [])
             .map((s) => String(s?.id || "").trim())
@@ -3196,7 +3091,6 @@ function OutboundHistoryConditions({
       setHistoryTransfers(patched);
       setTransfersPageInfo(result?.pageInfo || { hasNextPage: false, endCursor: null });
     } catch (e) {
-      console.error("[OutboundHistoryConditions] fetchTransfersForOriginAll error:", e);
       setHistoryError(toUserMessage(e));
       setHistoryTransfers([]);
       setTransfersPageInfo({ hasNextPage: false, endCursor: null });
@@ -3206,17 +3100,11 @@ function OutboundHistoryConditions({
   }, [originLocationGid, setAppState, outbound?.settings?.outbound?.historyInitialLimit]);
 
   useEffect(() => {
-    console.log("[OutboundHistoryConditions] useEffect - originLocationGid:", originLocationGid);
-    if (!originLocationGid) {
-      console.warn("[OutboundHistoryConditions] originLocationGid is empty, skipping refresh");
-      return;
-    }
-    refreshOutboundHistory().catch((e) => {
-      console.error("[OutboundHistoryConditions] refreshOutboundHistory error:", e);
-    });
+    if (!originLocationGid) return;
+    refreshOutboundHistory().catch(() => {});
   }, [originLocationGid, refreshOutboundHistory]);
 
-  // ✅ タブ分けの判定関数
+  // タブ分けの判定関数
   // 「未出庫」：DRAFT（下書き）とREADY_TO_SHIP（配送準備完了）
   // 「出庫済み」：IN_PROGRESS（処理中）とTRANSFERRED（処理済み）
   const isPendingTransfer = useCallback((t) => {
@@ -3234,16 +3122,8 @@ function OutboundHistoryConditions({
   const shippedTransfersAll = baseAll.filter((t) => isShippedTransfer(t));
 
   const listToShow = useMemo(() => {
-    const result = historyMode === "shipped" ? shippedTransfersAll : pendingTransfersAll;
-      console.log("[OutboundHistoryConditions] listToShow calculation:", {
-        historyMode,
-        baseAllLength: baseAll.length,
-        pendingTransfersAllLength: pendingTransfersAll.length,
-        shippedTransfersAllLength: shippedTransfersAll.length,
-        listToShowLength: result.length,
-      });
-      return result;
-    }, [historyMode, pendingTransfersAll, shippedTransfersAll]);
+    return historyMode === "shipped" ? shippedTransfersAll : pendingTransfersAll;
+  }, [historyMode, pendingTransfersAll, shippedTransfersAll]);
 
   const onTapHistoryTransfer = useCallback(
     (t) => {
@@ -3269,7 +3149,7 @@ function OutboundHistoryConditions({
     [setAppState, onOpenOutboundHistoryDetail]
   );
 
-  // ✅ 次のページのTransfer一覧を読み込む関数
+  // 次のページのTransfer一覧を読み込む関数
   const loadMoreTransfers_ = useCallback(async () => {
     if (!originLocationGid || !transfersPageInfo?.hasNextPage || !transfersPageInfo?.endCursor) return;
     if (loadingMore) return; // 既に読み込み中の場合はスキップ
@@ -3288,14 +3168,14 @@ function OutboundHistoryConditions({
 
       const newTransfers = Array.isArray(result?.transfers) ? result.transfers : [];
       
-      // ✅ 監査ログから過剰分/予定外分/拒否分を合算
+      // 監査ログから過剰分/予定外分/拒否分を合算
       let patched = newTransfers;
       try {
         const audit = await readInboundAuditLog();
         const overIdx = buildInboundOverIndex_(audit, { locationId: originLocationGid });
         const extrasIdx = buildInboundExtrasIndex_(audit, { locationId: originLocationGid });
         
-        // ✅ 拒否分を集計（shipmentsのlineItemsから取得）
+        // 拒否分を集計（shipmentsのlineItemsから取得）
         const shipmentIds = newTransfers.flatMap((t) => 
           (Array.isArray(t?.shipments) ? t.shipments : [])
             .map((s) => String(s?.id || "").trim())
@@ -3308,14 +3188,13 @@ function OutboundHistoryConditions({
       
       setHistoryTransfers((prev) => [...prev, ...patched]);
     } catch (e) {
-      console.error("loadMoreTransfers_ error:", e);
       toast(String(e?.message || e || "追加読み込みに失敗しました"));
     } finally {
       setLoadingMore(false);
     }
   }, [originLocationGid, transfersPageInfo, loadingMore]);
 
-  // ✅ Header（タブ + さらに読み込みボタン）
+  // Header（タブ + さらに読み込みボタン）
   useEffect(() => {
     setHeader?.(
       <s-box padding="base">
@@ -3373,7 +3252,7 @@ function OutboundHistoryConditions({
     loadMoreTransfers_,
   ]);
 
-  // ✅ Footer（戻る／軽量／再取得）…InboundConditionsと同型
+  // Footer（戻る／軽量／再取得）…InboundConditionsと同型
   useEffect(() => {
     const summaryLeft = `出庫元: ${originLocationName}`;
     const summaryRight =
@@ -3431,7 +3310,7 @@ function OutboundHistoryConditions({
               const total = Number(t?.totalQuantity ?? 0);
               const received = Number(t?.receivedQuantityDisplay ?? t?.receivedQuantity ?? 0);
 
-              // ✅ 強制キャンセル判定：noteに[強制キャンセル]が含まれている場合は「強制キャンセル」と表示
+              // 強制キャンセル判定：noteに[強制キャンセル]が含まれている場合は「強制キャンセル」と表示
               const note = String(t?.note || "").trim();
               const isForcedCancel = note.includes("[強制キャンセル]");
               
@@ -3482,9 +3361,7 @@ function OutboundHistoryConditions({
   );
 }
 
-/* =========================
-   OutboundHistoryDetail
-========================= */
+/* OutboundHistoryDetail */
 
 function OutboundHistoryDetail({
   showImages,
@@ -3515,12 +3392,13 @@ function OutboundHistoryDetail({
 
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
-  const [detail, setDetail] = useState(null); // fetchInventoryTransferDetailForHistory result
-  const [items, setItems] = useState([]); // unified display items
-  const [lineItemsPageInfo, setLineItemsPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ✅ ページネーション用
-  const [loadingMore, setLoadingMore] = useState(false); // ✅ 追加読み込み中フラグ
+  const [detail, setDetail] = useState(null);
+  const [items, setItems] = useState([]);
+  const [lineItemsPageInfo, setLineItemsPageInfo] = useState({ hasNextPage: false, endCursor: null });
+  const [loadingMore, setLoadingMore] = useState(false);
   const [cancelArmedAt, setCancelArmedAt] = useState(0);
-  const [editOrDuplicateMode, setEditOrDuplicateMode] = useState(null); // "edit" or "duplicate"
+  const [editOrDuplicateMode, setEditOrDuplicateMode] = useState(null);
+  const [historyShipmentTracking, setHistoryShipmentTracking] = useState(null);
 
   const loadSeqRef = useRef(0);
   const abortRef = useRef(null);
@@ -3542,13 +3420,13 @@ function OutboundHistoryDetail({
       RECEIVED: "入庫",
       TRANSFERRED: "入庫済み",
       CANCELED: "キャンセル",
-      FORCED_CANCEL: "強制キャンセル", // ✅ 強制キャンセル用のラベルを追加
+      FORCED_CANCEL: "強制キャンセル", // 強制キャンセル用のラベルを追加
       OTHER: "その他",
     }),
     []
   );
 
-  // ✅ 親から毎回変わる可能性がある関数は ref に逃がして deps から外す（無限レンダー防止）
+  // 親から毎回変わる可能性がある関数は ref に逃がして deps から外す（無限レンダー防止）
   const openOutboundListRef = useRef(null);
 
   useEffect(() => {
@@ -3562,19 +3440,19 @@ function OutboundHistoryDetail({
   const createDraftAndOpen_ = useCallback(async () => {
     if (!detail?.id) return;
 
-    // ✅ OutboundList の「下書き復元」に勝つため、先に保存下書きを消す
+    // OutboundList の「下書き復元」に勝つため、先に保存下書きを消す
     try {
       if (SHOPIFY?.storage?.delete) {
         await SHOPIFY.storage.delete(OUTBOUND_DRAFT_KEY);
       }
     } catch {}
 
-    // ✅ items → OutboundList 用 lines を作る（ここはあなたの lines 形式に合わせて）
+    // items → OutboundList 用 lines を作る（ここはあなたの lines 形式に合わせて）
     const nextLines = (Array.isArray(items) ? items : []).map((it, i) => {
-      // ✅ 数量を確実に取得（quantity を優先、なければ qty、どちらもなければ 0）
+      // 数量を確実に取得（quantity を優先、なければ qty、どちらもなければ 0）
       const q = Math.max(0, Number(it.quantity ?? it.qty ?? 0));
       
-      // ✅ idを一意に生成（loadDetail_で設定されたkeyを優先、なければinventoryItemId > variantId > インデックス）
+      // idを一意に生成（loadDetail_で設定されたkeyを優先、なければinventoryItemId > variantId > インデックス）
       //    loadDetail_では key = inventoryItemId || variantId || id で生成されているため、同じロジックを使用
       //    keyが空文字列の場合は次の候補を使用
       const keyCandidate = String(it.key || "").trim();
@@ -3597,13 +3475,13 @@ function OutboundHistoryDetail({
         productTitle: String(it.productTitle || ""),
         variantTitle: String(it.variantTitle || ""),
         imageUrl: String(it.imageUrl || ""),
-        qty: q,          // ✅ OutboundList が参照する本体 - 確実に設定
-        quantity: q,     // ✅ 既存ロジック互換（draft保存など）
+        qty: q,          // OutboundList が参照する本体 - 確実に設定
+        quantity: q,     // 既存ロジック互換（draft保存など）
         // stock系など必要なら追加
       };
-    }).filter((l) => Number(l.qty || 0) > 0); // ✅ qtyが0のアイテムは除外
+    }).filter((l) => Number(l.qty || 0) > 0); // qtyが0のアイテムは除外
 
-    // ✅ 既存Transferは触らず、OutboundList を「新規下書き」扱いで初期化
+    // 既存Transferは触らず、OutboundList を「新規下書き」扱いで初期化
     setStateSlice(setAppState, "outbound", (prev) => ({
       ...(prev || {}),
       destinationLocationId: detail.destinationLocationId || prev?.destinationLocationId || "",
@@ -3617,34 +3495,34 @@ function OutboundHistoryDetail({
       historySelectedStatus: "",
       historySelectedReadOnly: false,
 
-      // ✅ 編集モードをクリア（複製時は新規下書き）
+      // 編集モードをクリア（複製時は新規下書き）
       editingTransferId: "",
 
       // 任意：どの履歴から作ったか
       historyDraftSourceTransferId: detail.id,
     }));
 
-    // ✅ OutboundListへ
+    // OutboundListへ
     openOutboundListRef.current?.();
   }, [detail, items, setAppState]);
 
-  // ✅ 「編集」＝同ID編集モードでOutboundListへ（下書き蓄積させない）
+  // 「編集」＝同ID編集モードでOutboundListへ（下書き蓄積させない）
   const openEditAndOpen_ = useCallback(async () => {
     if (!detail?.id) return;
 
-    // ✅ OutboundList の「下書き復元」に勝つため、先に保存下書きを消す（編集時も同様）
+    // OutboundList の「下書き復元」に勝つため、先に保存下書きを消す（編集時も同様）
     try {
       if (SHOPIFY?.storage?.delete) {
         await SHOPIFY.storage.delete(OUTBOUND_DRAFT_KEY);
       }
     } catch {}
 
-    // ✅ items → OutboundList 用 lines を作る（createDraftAndOpen_と同じ形式）
+    // items → OutboundList 用 lines を作る（createDraftAndOpen_と同じ形式）
     const nextLines = (Array.isArray(items) ? items : []).map((it, i) => {
-      // ✅ 数量を確実に取得（quantity を優先、なければ qty、どちらもなければ 0）
+      // 数量を確実に取得（quantity を優先、なければ qty、どちらもなければ 0）
       const q = Math.max(0, Number(it.quantity ?? it.qty ?? 0));
       
-      // ✅ idを一意に生成（loadDetail_で設定されたkeyを優先、なければinventoryItemId > variantId > インデックス）
+      // idを一意に生成（loadDetail_で設定されたkeyを優先、なければinventoryItemId > variantId > インデックス）
       //    loadDetail_では key = inventoryItemId || variantId || id で生成されているため、同じロジックを使用
       //    keyが空文字列の場合は次の候補を使用
       const keyCandidate = String(it.key || "").trim();
@@ -3667,16 +3545,16 @@ function OutboundHistoryDetail({
         productTitle: String(it.productTitle || ""),
         variantTitle: String(it.variantTitle || ""),
         imageUrl: String(it.imageUrl || ""),
-        qty: q,          // ✅ OutboundList が参照する本体（必須）- 確実に設定
-        quantity: q,     // ✅ 既存ロジック互換（draft保存など）
+        qty: q,          // OutboundList が参照する本体（必須）- 確実に設定
+        quantity: q,     // 既存ロジック互換（draft保存など）
       };
-    }).filter((l) => Number(l.qty || 0) > 0); // ✅ qtyが0のアイテムは除外
+    }).filter((l) => Number(l.qty || 0) > 0); // qtyが0のアイテムは除外
 
     setStateSlice(setAppState, "outbound", (prev) => ({
       ...(prev || {}),
-      // ✅ ここが本丸：OutboundList側で「同ID更新」に分岐するためのフラグ
+      // ここが本丸：OutboundList側で「同ID更新」に分岐するためのフラグ
       editingTransferId: String(detail.id),
-      // ✅ Transfer名を保存（OutboundHistoryDetailと同じ方式でnameを優先表示するため）
+      // Transfer名を保存（OutboundHistoryDetailと同じ方式でnameを優先表示するため）
       editingTransferName: String(detail?.name || "").trim(),
 
       destinationLocationId: detail.destinationLocationId || prev?.destinationLocationId || "",
@@ -3690,7 +3568,7 @@ function OutboundHistoryDetail({
       historySelectedStatus: "",
       historySelectedReadOnly: false,
 
-      // ✅ 編集なので「どの履歴から複製したか」は空にする
+      // 編集なので「どの履歴から複製したか」は空にする
       historyDraftSourceTransferId: "",
     }));
 
@@ -3705,7 +3583,7 @@ function OutboundHistoryDetail({
   }, [outbound.historySelectedTransferName, transferId]);
 
   const statusLabel = useMemo(() => {
-    // ✅ 強制キャンセル判定：noteに[強制キャンセル]が含まれている場合は「強制キャンセル」と表示
+    // 強制キャンセル判定：noteに[強制キャンセル]が含まれている場合は「強制キャンセル」と表示
     const note = String(detail?.note || "").trim();
     const isForcedCancel = note.includes("[強制キャンセル]");
     
@@ -3721,10 +3599,10 @@ function OutboundHistoryDetail({
     return String(outbound.historySelectedStatus || detail?.status || "").toUpperCase();
   }, [outbound.historySelectedStatus, detail?.status]);
 
-  // ✅ 編集モード（スキャン/検索/数量/確定 = OutboundList に任せる）
+  // 編集モード（スキャン/検索/数量/確定 = OutboundList に任せる）
   const isEditable = statusRaw === "DRAFT" || statusRaw === "READY_TO_SHIP";
 
-  // ✅ 処理中/処理済み（=複製＋キャンセルのみ）
+  // 処理中/処理済み（=複製＋キャンセルのみ）
   const isReadOnlyOps = !isEditable;
 
   const loadDetail_ = useCallback(async () => {
@@ -3740,34 +3618,34 @@ function OutboundHistoryDetail({
     setDetailLoading(true);
     setDetailError("");
     setItems([]);
-    // ✅ 既存データをクリア（一度読み込まれたデータが残らないように）
     setLineItemsPageInfo({ hasNextPage: false, endCursor: null });
+    setHistoryShipmentTracking(null);
 
     try {
       const d = await fetchInventoryTransferDetailForHistory({ id: transferId, signal: ac.signal });
       if (seq !== loadSeqRef.current) return;
 
-      // ✅ detailオブジェクトにreceivedQuantityDisplayを追加（拒否分を考慮）
+      // detailオブジェクトにreceivedQuantityDisplayを追加（拒否分を考慮）
       // shipmentsは { nodes: [...] } の形式または配列の可能性がある
       const shipmentsNodes = Array.isArray(d?.shipments?.nodes) ? d.shipments.nodes : (Array.isArray(d?.shipments) ? d.shipments : []);
       const shipmentIds = shipmentsNodes.map((s) => String(s?.id || "").trim()).filter(Boolean);
       
       let receivedQuantityDisplay = Number(d?.receivedQuantity ?? 0);
       try {
-        // ✅ 監査ログから予定外分を取得
+        // 監査ログから予定外分を取得
         const audit = await readInboundAuditLog();
         const extrasIdx = buildInboundExtrasIndex_(audit, { locationId: null });
         const extrasQuantity = shipmentIds.reduce((a, sid) => {
           return a + (sid ? Number(extrasIdx.get(sid) || 0) : 0);
         }, 0);
         
-        // ✅ 拒否分を集計（shipmentsのlineItemsから取得）
+        // 拒否分を集計（shipmentsのlineItemsから取得）
         const rejectedIdx = await buildInboundRejectedIndex_(shipmentIds);
         const rejectedQuantity = shipmentIds.reduce((a, sid) => {
           return a + (sid ? Number(rejectedIdx.get(sid) || 0) : 0);
         }, 0);
         
-        // ✅ 修正：receivedQuantityは既に過剰分を含んでいるため、監査ログの過剰分は加算しない
+        // 修正：receivedQuantityは既に過剰分を含んでいるため、監査ログの過剰分は加算しない
         // GraphQLのreceivedQuantityは拒否分も含んでいるため、rejectedQuantityを引く
         // 予定外商品（extras）は加算する
         receivedQuantityDisplay = Number(d?.receivedQuantity ?? 0) - Number(rejectedQuantity || 0) + Number(extrasQuantity || 0);
@@ -3782,52 +3660,49 @@ function OutboundHistoryDetail({
 
       setDetail(detailWithDisplay);
 
-      // ✅ shipmentId があれば shipment ベースで items を作る（画像/商品情報が揃う）
+      // shipmentId があれば shipment ベースで items を作る（画像/商品情報が揃う）
       const sid = String(selectedShipmentId || d?.shipments?.[0]?.id || "").trim();
 
       if (sid) {
-        // ✅ state にも反映（次回以降の安定化）
+        // state にも反映（次回以降の安定化）
         // 注意: setStateSliceを呼び出すとselectedShipmentIdが変更され、loadDetail_が再実行される可能性がある
         // そのため、この処理はコメントアウトして無限ループを防ぐ
         // 親コンポーネントでselectedShipmentIdを管理する
         // if (!selectedShipmentId && setAppStateRef.current) {
         //   try {
         //     setStateSlice(setAppStateRef.current, "outbound", { historySelectedShipmentId: sid });
-        //   } catch (e) {
-        //     console.warn("setStateSlice error in loadDetail_:", e);
-        //   }
+        //   } catch (e) {}
         // }
 
         try {
           const includeImages = !!showImages && !liteMode;
 
-          // ✅ v51の関数定義に合わせる：fetchInventoryShipmentEnriched(id, { includeImages, signal })
           const shipResult = await fetchInventoryShipmentEnriched(sid, {
             includeImages,
             signal: ac.signal,
           });
           if (seq !== loadSeqRef.current) return;
 
-          // ✅ pageInfoを処理
           const ship = shipResult || {};
           const src = Array.isArray(ship?.lineItems) ? ship.lineItems : [];
           const pageInfo = ship?.pageInfo || { hasNextPage: false, endCursor: null };
           setLineItemsPageInfo(pageInfo);
+          setHistoryShipmentTracking(ship?.tracking ?? null);
 
-          // ✅ 同一商品をマージ（Inboundと同じ考え方）
+          // 同一商品をマージ（Inboundと同じ考え方）
           const map = new Map();
           for (const li of src) {
             const key = String(li?.inventoryItemId || li?.variantId || li?.id || "").trim();
             if (!key) continue;
 
             const qty = Number(li?.quantity ?? 0);
-            // ✅ acceptedQuantityは既に過剰分を含み、拒否分は除かれている
+            // acceptedQuantityは既に過剰分を含み、拒否分は除かれている
             const acceptedQty = Number(li?.acceptedQuantity ?? 0);
             
             const prev = map.get(key);
             if (prev) {
               prev.quantity += qty;
-              // ✅ 受領数も合算
+              // 受領数も合算
               prev.receivedQuantity = (prev.receivedQuantity ?? 0) + acceptedQty;
             } else {
               map.set(key, {
@@ -3841,10 +3716,10 @@ function OutboundHistoryDetail({
                 imageUrl: String(li?.imageUrl || ""),
                 quantity: qty,
 
-                // ✅ 追加：UI表示用
+                // 追加：UI表示用
                 available: li?.available ?? null,
                 plannedQuantity: li?.plannedQuantity ?? li?.quantity ?? null,
-                // ✅ 修正：acceptedQuantityを使用（receivedQuantityフィールドは存在しない）
+                // 修正：acceptedQuantityを使用（receivedQuantityフィールドは存在しない）
                 receivedQuantity: acceptedQty,
               });
             }
@@ -3857,7 +3732,7 @@ function OutboundHistoryDetail({
         }
       }
 
-      // ✅ shipment が無い/読めない場合：下書き状態の場合はfetchTransferLineItemsEnrichedで画像付きで取得
+      // shipment が無い/読めない場合：下書き状態の場合はfetchTransferLineItemsEnrichedで画像付きで取得
       const includeImages = !!showImages && !liteMode;
       try {
         const transferResult = await fetchTransferLineItemsEnriched(transferId, {
@@ -3871,14 +3746,14 @@ function OutboundHistoryDetail({
         setLineItemsPageInfo(pageInfo);
         const detailLineItems = Array.isArray(d?.lineItems) ? d.lineItems : [];
 
-        // ✅ 数量情報をdetailLineItemsから取得してマージ
+        // 数量情報をdetailLineItemsから取得してマージ
         //    下書き（DRAFT）やREADY_TO_SHIPではshippableQuantity/shippedQuantityが0の可能性があるため、
         //    processableQuantityも確認する
         const quantityMap = new Map();
         for (const dli of detailLineItems) {
           const key = String(dli?.inventoryItemId || "").trim();
           if (!key) continue;
-          // ✅ 数量の取得順序：shippableQuantity + shippedQuantity > processableQuantity > 0
+          // 数量の取得順序：shippableQuantity + shippedQuantity > processableQuantity > 0
           const shippableQty = Number(dli.shippableQuantity ?? 0);
           const shippedQty = Number(dli.shippedQuantity ?? 0);
           const processableQty = Number(dli.processableQuantity ?? 0);
@@ -3887,13 +3762,13 @@ function OutboundHistoryDetail({
           quantityMap.set(key, qty);
         }
 
-        // ✅ 同一商品をマージ（画像情報 + 数量情報）
+        // 同一商品をマージ（画像情報 + 数量情報）
         const map = new Map();
         for (const li of src) {
           const key = String(li?.inventoryItemId || li?.variantId || li?.id || "").trim();
           if (!key) continue;
 
-          // ✅ 数量はdetailLineItemsから取得、なければ0
+          // 数量はdetailLineItemsから取得、なければ0
           const qty = quantityMap.get(li?.inventoryItemId) ?? Number(li?.quantity ?? 0);
           const prev = map.get(key);
           if (prev) {
@@ -3910,7 +3785,7 @@ function OutboundHistoryDetail({
               imageUrl: String(li?.imageUrl || ""),
               quantity: qty,
 
-              // ✅ UI表示用
+              // UI表示用
               available: null,
               plannedQuantity: qty,
               receivedQuantity: null,
@@ -3921,23 +3796,23 @@ function OutboundHistoryDetail({
         setItems(Array.from(map.values()));
         return;
       } catch (e) {
-        // ✅ fetchTransferLineItemsEnrichedが失敗した場合はtransfer lineItems で最低限表示（止めない）
+        // fetchTransferLineItemsEnrichedが失敗した場合はtransfer lineItems で最低限表示（止めない）
       }
 
-      // ✅ フォールバック：transfer lineItems で最低限表示（画像なし）
+      // フォールバック：transfer lineItems で最低限表示（画像なし）
       //    下書き（DRAFT）やREADY_TO_SHIPではshippableQuantity/shippedQuantityが0の可能性があるため、
       //    processableQuantityも確認する
       const lis = Array.isArray(d?.lineItems) ? d.lineItems : [];
       setItems(
         lis.map((li, i) => {
-          // ✅ 数量の取得順序：shippableQuantity + shippedQuantity > processableQuantity > 0
+          // 数量の取得順序：shippableQuantity + shippedQuantity > processableQuantity > 0
           const shippableQty = Number(li.shippableQuantity ?? 0);
           const shippedQty = Number(li.shippedQuantity ?? 0);
           const processableQty = Number(li.processableQuantity ?? 0);
           
           const qty = (shippableQty + shippedQty) || processableQty || 0;
           
-          // ✅ key生成ロジックを統一（inventoryItemId || variantId || id || インデックス）
+          // key生成ロジックを統一（inventoryItemId || variantId || id || インデックス）
           const key = String(li?.inventoryItemId || li?.variantId || li?.id || i).trim();
           return {
             key,
@@ -3957,9 +3832,8 @@ function OutboundHistoryDetail({
         })
       );
     } catch (e) {
-      console.error("loadDetail_ error:", e);
       setDetailError(String(e?.message || e || "詳細の取得に失敗しました"));
-      // ✅ エラー時もitemsを空配列に設定（「商品がありません」メッセージを表示）
+      // エラー時もitemsを空配列に設定（「商品がありません」メッセージを表示）
       setItems([]);
     } finally {
       if (seq === loadSeqRef.current) {
@@ -3972,7 +3846,7 @@ function OutboundHistoryDetail({
     loadDetail_();
   }, [loadDetail_]);
 
-  // ✅ 商品リストの追加読み込み
+  // 商品リストの追加読み込み
   const loadMoreLineItems_ = useCallback(async () => {
     if (loadingMore || !lineItemsPageInfo?.hasNextPage || !lineItemsPageInfo?.endCursor) return;
 
@@ -3982,7 +3856,7 @@ function OutboundHistoryDetail({
       const sid = String(selectedShipmentId || detail?.shipments?.[0]?.id || "").trim();
 
       if (sid) {
-        // ✅ shipmentベースで追加読み込み
+        // shipmentベースで追加読み込み
         const includeImages = !!showImages && !liteMode;
         const shipmentResult = await fetchInventoryShipmentEnriched(sid, {
           includeImages,
@@ -3994,7 +3868,7 @@ function OutboundHistoryDetail({
         const newLineItems = Array.isArray(newShip?.lineItems) ? newShip.lineItems : [];
         const newPageInfo = newShip?.pageInfo || { hasNextPage: false, endCursor: null };
 
-        // ✅ 既存のitemsに追加（同一商品をマージ）
+        // 既存のitemsに追加（同一商品をマージ）
         const existingMap = new Map();
         items.forEach((it) => {
           const key = String(it?.inventoryItemId || it?.variantId || it?.id || "").trim();
@@ -4030,7 +3904,7 @@ function OutboundHistoryDetail({
         setItems(Array.from(existingMap.values()));
         setLineItemsPageInfo(newPageInfo);
       } else if (transferId) {
-        // ✅ transferベースで追加読み込み
+        // transferベースで追加読み込み
         const includeImages = !!showImages && !liteMode;
         const transferResult = await fetchTransferLineItemsEnriched(transferId, {
           includeImages,
@@ -4041,7 +3915,7 @@ function OutboundHistoryDetail({
         const newLineItems = Array.isArray(transferResult?.lineItems) ? transferResult.lineItems : [];
         const newPageInfo = transferResult?.pageInfo || { hasNextPage: false, endCursor: null };
 
-        // ✅ 既存のitemsに追加（同一商品をマージ）
+        // 既存のitemsに追加（同一商品をマージ）
         const existingMap = new Map();
         items.forEach((it) => {
           const key = String(it?.inventoryItemId || it?.variantId || it?.id || "").trim();
@@ -4078,32 +3952,31 @@ function OutboundHistoryDetail({
         setLineItemsPageInfo(newPageInfo);
       }
     } catch (e) {
-      console.error("loadMoreLineItems_ error:", e);
       toast(`追加読み込みエラー: ${toUserMessage(e)}`);
     } finally {
       setLoadingMore(false);
     }
   }, [loadingMore, lineItemsPageInfo, selectedShipmentId, detail, transferId, showImages, liteMode, items]);
 
-  // ✅ 複製処理はcreateDraftAndOpen_に統一（OutboundListに遷移して編集）
+  // 複製処理はcreateDraftAndOpen_に統一（OutboundListに遷移して編集）
   // onDuplicate_は削除し、createDraftAndOpen_を使用
 
   const CONFIRM_CANCEL_MODAL_ID = "confirm-cancel-modal";
   const CONFIRM_EDIT_OR_DUPLICATE_MODAL_ID = "confirm-edit-or-duplicate-modal";
 
-  // ✅ 現在の自動保存を確認（OutboundListを開いて下書きを復元）
+  // 現在の自動保存を確認（OutboundListを開いて下書きを復元）
   const openCurrentDraft_ = useCallback(async () => {
-    // ✅ OutboundListを開く（下書き復元機能が自動的に動作する）
+    // OutboundListを開く（下書き復元機能が自動的に動作する）
     // モーダルはcommand="--hide"で閉じられる
     openOutboundListRef.current?.();
   }, []);
 
-  // ✅ 編集/複製の確認ダイアログを開く準備（モードを設定）
+  // 編集/複製の確認ダイアログを開く準備（モードを設定）
   const prepareEditOrDuplicate_ = useCallback((isEdit) => {
     setEditOrDuplicateMode(isEdit ? "edit" : "duplicate");
   }, []);
 
-  // ✅ 編集/複製を実行する関数（確認ダイアログのOKボタンから呼ばれる）
+  // 編集/複製を実行する関数（確認ダイアログのOKボタンから呼ばれる）
   const executeEditOrDuplicate_ = useCallback(() => {
     if (editOrDuplicateMode === "edit") {
       openEditAndOpen_();
@@ -4113,12 +3986,12 @@ function OutboundHistoryDetail({
     setEditOrDuplicateMode(null);
   }, [editOrDuplicateMode, openEditAndOpen_, createDraftAndOpen_]);
 
-  // ✅ キャンセル可能かどうか（TRANSFERRED/CANCELEDは不可）
+  // キャンセル可能かどうか（TRANSFERRED/CANCELEDは不可）
   const canCancel = useMemo(() => {
     return statusRaw !== "TRANSFERRED" && statusRaw !== "CANCELED";
   }, [statusRaw]);
 
-  // ✅ 強制キャンセル処理（IN_TRANSIT/IN_PROGRESS時）
+  // 強制キャンセル処理（IN_TRANSIT/IN_PROGRESS時）
   const executePseudoCancel_ = useCallback(async () => {
     if (!transferId || !selectedShipmentId) {
       toast("強制キャンセルできません（transferId/shipmentId 未取得）");
@@ -4126,7 +3999,7 @@ function OutboundHistoryDetail({
     }
 
     try {
-      // ✅ shipmentのlineItemsを取得して、unreceivedQuantityを全てREJECTEDとして受領
+      // shipmentのlineItemsを取得して、unreceivedQuantityを全てREJECTEDとして受領
       const shipment = await fetchInventoryShipmentEnriched(selectedShipmentId, {
         includeImages: false,
       });
@@ -4136,7 +4009,7 @@ function OutboundHistoryDetail({
         return;
       }
 
-      // ✅ 全てのアイテムをunreceivedQuantityでREJECTEDとして受領
+      // 全てのアイテムをunreceivedQuantityでREJECTEDとして受領
       const rejectItems = shipment.lineItems
         .filter((li) => {
           const unreceived = Number(li.unreceivedQuantity ?? 0);
@@ -4153,14 +4026,14 @@ function OutboundHistoryDetail({
         return;
       }
 
-      // ✅ 全拒否受領を実行
+      // 全拒否受領を実行
       await receiveShipmentWithFallbackV2({
         shipmentId: selectedShipmentId,
         items: rejectItems,
       });
 
-      // ✅ 在庫を出庫元ロケーションに戻す
-      // ✅ detailオブジェクトにはoriginLocationIdが直接プロパティとして含まれている
+      // 在庫を出庫元ロケーションに戻す
+      // detailオブジェクトにはoriginLocationIdが直接プロパティとして含まれている
       const originLocationId = detail?.originLocationId || 
         detail?.origin?.location?.id || 
         outbound.historySelectedOriginLocationId;
@@ -4174,7 +4047,7 @@ function OutboundHistoryDetail({
         }).filter((d) => d.inventoryItemId);
 
         if (deltas.length > 0) {
-          // ✅ 在庫を有効化（必要に応じて）
+          // 在庫を有効化（必要に応じて）
           const inventoryItemIds = deltas.map((d) => d.inventoryItemId).filter(Boolean);
           await ensureInventoryActivatedAtLocation({
             locationId: originLocationId,
@@ -4187,8 +4060,8 @@ function OutboundHistoryDetail({
             deltas,
           });
 
-          // ✅ 在庫調整履歴をメモに反映
-          // ✅ detailオブジェクトにはoriginNameが直接プロパティとして含まれている
+          // 在庫調整履歴をメモに反映
+          // detailオブジェクトにはoriginNameが直接プロパティとして含まれている
           const originLocationName = detail?.originName || 
             detail?.origin?.name || 
             outbound.historySelectedOriginName || 
@@ -4225,7 +4098,7 @@ function OutboundHistoryDetail({
       }
 
       toast("全拒否入庫で確定しました");
-      // ✅ 画面をリロード
+      // 画面をリロード
       setTimeout(() => {
         loadDetail_().catch(() => {});
       }, 500);
@@ -4234,7 +4107,7 @@ function OutboundHistoryDetail({
     }
   }, [transferId, selectedShipmentId, detail, outbound.historySelectedOriginLocationId, loadDetail_]);
 
-  // ✅ 通常キャンセル処理（DRAFT/READY_TO_SHIP時）
+  // 通常キャンセル処理（DRAFT/READY_TO_SHIP時）
   const executeCancel_ = useCallback(async () => {
     if (!transferId) {
       toast("キャンセルできません（transferId 未取得）");
@@ -4244,8 +4117,8 @@ function OutboundHistoryDetail({
     try {
       await inventoryTransferCancelSafe({ id: transferId });
 
-      // ✅ 在庫を出庫元ロケーションに戻す
-      // ✅ detailオブジェクトにはoriginLocationIdが直接プロパティとして含まれている
+      // 在庫を出庫元ロケーションに戻す
+      // detailオブジェクトにはoriginLocationIdが直接プロパティとして含まれている
       const originLocationId = detail?.originLocationId || 
         detail?.origin?.location?.id || 
         outbound.historySelectedOriginLocationId;
@@ -4256,7 +4129,7 @@ function OutboundHistoryDetail({
         })).filter((d) => d.inventoryItemId && d.delta > 0);
 
         if (deltas.length > 0) {
-          // ✅ 在庫を有効化（必要に応じて）
+          // 在庫を有効化（必要に応じて）
           const inventoryItemIds = deltas.map((d) => d.inventoryItemId).filter(Boolean);
           await ensureInventoryActivatedAtLocation({
             locationId: originLocationId,
@@ -4269,8 +4142,8 @@ function OutboundHistoryDetail({
             deltas,
           });
 
-          // ✅ 在庫調整履歴をメモに反映
-          // ✅ detailオブジェクトにはoriginNameが直接プロパティとして含まれている
+          // 在庫調整履歴をメモに反映
+          // detailオブジェクトにはoriginNameが直接プロパティとして含まれている
           const originLocationName = detail?.originName || 
             detail?.origin?.name || 
             outbound.historySelectedOriginName || 
@@ -4313,7 +4186,7 @@ function OutboundHistoryDetail({
     }
   }, [transferId, detail, outbound.historySelectedOriginLocationId, items, onBack]);
 
-  // ✅ 削除処理（DRAFT/READY_TO_SHIP時）
+  // 削除処理（DRAFT/READY_TO_SHIP時）
   const executeDelete_ = useCallback(async () => {
     if (!transferId) {
       toast("削除できません（transferId 未取得）");
@@ -4321,7 +4194,7 @@ function OutboundHistoryDetail({
     }
 
     try {
-      // ✅ 在庫を出庫元ロケーションに戻す（削除前に実行）
+      // 在庫を出庫元ロケーションに戻す（削除前に実行）
       const originLocationId = detail?.originLocationId || outbound.historySelectedOriginLocationId;
       if (originLocationId && Array.isArray(items) && items.length > 0) {
         const deltas = items.map((it) => ({
@@ -4337,7 +4210,7 @@ function OutboundHistoryDetail({
         }
       }
 
-      // ✅ Shopify公式APIで削除
+      // Shopify公式APIで削除
       await inventoryTransferDeleteSafe({ id: transferId });
 
       toast("削除しました");
@@ -4347,41 +4220,48 @@ function OutboundHistoryDetail({
     }
   }, [transferId, detail, outbound.historySelectedOriginLocationId, items, onBack]);
 
-  // ✅ キャンセルボタンクリック時（モーダルを開く）
+  // キャンセルボタンクリック時（モーダルを開く）
   const onCancel_ = useCallback(() => {
     if (!canCancel) {
       toast("キャンセルできません（入庫済みまたはキャンセル済み）");
       return;
     }
-    // ✅ モーダルはJSXでcommand="--show"で開く
+    // モーダルはJSXでcommand="--show"で開く
   }, [canCancel]);
 
+  const formatArrivesAt_ = (iso) => {
+    const s = String(iso || "").trim();
+    if (!s) return "";
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? "" : s.slice(0, 10);
+  };
+
   const headerNode = useMemo(() => {
+    const tr = historyShipmentTracking;
+    const carrierText = String(tr?.company || "").trim();
+    const trackingText = String(tr?.trackingNumber || "").trim();
+    const etaText = formatArrivesAt_(tr?.arrivesAt);
+
     return (
       <s-box padding="base">
         <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-          {/* ✅ 左：ID + 出庫元 + 入庫先 を “3行まとめて” */}
           <s-box style={{ flex: "1 1 auto", minInlineSize: 0 }}>
             <s-stack gap="extra-tight">
               <s-text emphasis="bold">{title}</s-text>
-
               <s-text tone="subdued" size="small">
                 出庫元: {outbound.historySelectedOriginName || detail?.originName || "（不明）"}
               </s-text>
               <s-text tone="subdued" size="small">
                 入庫先: {outbound.historySelectedDestName || detail?.destinationName || "（不明）"}
               </s-text>
-              {/* 配送業者（未登録は空白） */}
               <s-text tone="subdued" size="small">
-                配送業者：{String((detail?.shipments?.[0]?.tracking?.company) ?? "").trim() || " "}
+                配送業者: {carrierText || ""}
               </s-text>
-              {/* 配送番号（未登録は空白） */}
               <s-text tone="subdued" size="small">
-                配送番号：{String((detail?.shipments?.[0]?.tracking?.trackingNumber) ?? "").trim() || " "}
+                配送番号: {trackingText || ""}
               </s-text>
-              {/* 予定日（未登録は空白） */}
               <s-text tone="subdued" size="small">
-                予定日：{formatArrivesAtDisplay(detail?.shipments?.[0]?.tracking?.arrivesAt) || " "}
+                予定日: {etaText || ""}
               </s-text>
             </s-stack>
           </s-box>
@@ -4406,9 +4286,7 @@ function OutboundHistoryDetail({
     outbound.historySelectedDestName,
     detail?.originName,
     detail?.destinationName,
-    detail?.shipments?.[0]?.tracking?.company,
-    detail?.shipments?.[0]?.tracking?.trackingNumber,
-    detail?.shipments?.[0]?.tracking?.arrivesAt,
+    historyShipmentTracking,
     prepareEditOrDuplicate_,
     CONFIRM_EDIT_OR_DUPLICATE_MODAL_ID,
   ]);
@@ -4511,14 +4389,14 @@ function OutboundHistoryDetail({
                   ? `${sku ? `SKU: ${sku}` : ""}${sku && jan ? " / " : ""}${jan ? `JAN: ${jan}` : ""}`
                   : "";
 
-              // ✅ 状態で「画像下の行」に出す文言を切替（見た目はInbound/Outbound寄せ）
+              // 状態で「画像下の行」に出す文言を切替（見た目はInbound/Outbound寄せ）
               const belowLeft = isEditable
                 ? `在庫: ${it.available ?? "—"}`
                 : `予定: ${Number(it.plannedQuantity ?? it.quantity ?? 0)} / 入庫: ${Number(
                     it.receivedQuantity ?? 0
                   )}`;
 
-              // ✅ 右側はボタンではなく “数量表示だけ”
+              // 右側はボタンではなく “数量表示だけ”
               const belowRight = isEditable ? `数量: ${Number(it.quantity ?? 0)}` : "";
 
               return (
@@ -4575,25 +4453,25 @@ function OutboundHistoryDetail({
         <s-box padding="base" paddingBlockEnd="none">
           <s-stack gap="base">
             {statusRaw === "IN_TRANSIT" || statusRaw === "IN_PROGRESS" ? (
-              // ✅ 強制キャンセル（IN_TRANSIT/IN_PROGRESS）
+              // 強制キャンセル（IN_TRANSIT/IN_PROGRESS）
               <s-text tone="subdued">
                 キャンセル不可のため、全拒否入庫で確定します。
                 {"\n"}よろしいですか？
               </s-text>
             ) : statusRaw === "DRAFT" ? (
-              // ✅ キャンセル/削除選択（DRAFTのみ）
+              // キャンセル/削除選択（DRAFTのみ）
               <s-text tone="subdued">
                 キャンセル：履歴を残す
                 {"\n"}削除：履歴を残さない
               </s-text>
             ) : statusRaw === "READY_TO_SHIP" ? (
-              // ✅ キャンセルのみ（READY_TO_SHIPは削除不可）
+              // キャンセルのみ（READY_TO_SHIPは削除不可）
               <s-text tone="subdued">
                 この出庫をキャンセルします。
                 {"\n"}よろしいですか？
               </s-text>
             ) : (
-              // ✅ 通常キャンセル（その他）
+              // 通常キャンセル（その他）
               <s-text tone="subdued">
                 この出庫をキャンセルします。
                 {"\n"}よろしいですか？
@@ -4617,7 +4495,7 @@ function OutboundHistoryDetail({
         </s-box>
 
         {statusRaw === "IN_TRANSIT" || statusRaw === "IN_PROGRESS" ? (
-          // ✅ 強制キャンセル（IN_TRANSIT/IN_PROGRESS）
+          // 強制キャンセル（IN_TRANSIT/IN_PROGRESS）
           <s-button
             slot="primary-action"
             tone="critical"
@@ -4626,7 +4504,7 @@ function OutboundHistoryDetail({
             確定
           </s-button>
         ) : statusRaw === "DRAFT" ? (
-          // ✅ キャンセル/削除選択（DRAFTのみ）※他モーダルと同様 primary-action を追加
+          // キャンセル/削除選択（DRAFTのみ）※他モーダルと同様 primary-action を追加
           <>
             <s-button slot="secondary-actions" onClick={executeCancel_}>
               キャンセル
@@ -4640,7 +4518,7 @@ function OutboundHistoryDetail({
             </s-button>
           </>
         ) : statusRaw === "READY_TO_SHIP" ? (
-          // ✅ キャンセルのみ（READY_TO_SHIPは削除不可）
+          // キャンセルのみ（READY_TO_SHIPは削除不可）
           <s-button
             slot="primary-action"
             tone="critical"
@@ -4649,7 +4527,7 @@ function OutboundHistoryDetail({
             キャンセルする
           </s-button>
         ) : (
-          // ✅ 通常キャンセル（その他）
+          // 通常キャンセル（その他）
           <s-button
             slot="primary-action"
             tone="critical"
@@ -4709,14 +4587,7 @@ function OutboundHistoryDetail({
   );
 }
 
-/* =========================
-   OutboundList（貼り替え完全版 / 同一SKU安定版）
-   - 外部スキャンは Extension 側で toast 表示できている前提
-   - このリスト側で「SCAN_QUEUE_KEY を購読」して処理（queue滞留数/RPS計測）
-   - JAN/SKU -> variant は resolveVariantByCode（永続キャッシュ）で高速化
-   - ✅ 連続スキャンで “同一SKUが別行になる” を防ぐため、hit判定を必ず setLines(prev) 内で実施
-========================= */
-
+/* OutboundList */
 function OutboundList({
   showImages,
   liteMode,
@@ -4728,8 +4599,8 @@ function OutboundList({
   setHeader,
   setFooter,
 }) {
-  const UI_REV = "OutboundList v2025-12-30 UI-FIX";
-  const DEBUG_UI = false; // ✅ デバッグ表示は消す（必要なら true）
+  const UI_REV = "OutboundList";
+  const DEBUG_UI = false;
 
   const CONFIRM_TRANSFER_MODAL_ID = "confirm-transfer-modal";
 
@@ -4752,7 +4623,7 @@ function OutboundList({
     editingTransferName: "",
     draftTransferId: "",
     result: null,
-    confirmModalOpen: false, // ✅ 確定モーダルが開いているかどうか
+    confirmModalOpen: false, // 確定モーダルが開いているかどうか
   });
 
   const settings =
@@ -4802,7 +4673,7 @@ function OutboundList({
   const editingTransferId = String(outbound.editingTransferId || "").trim();
   const historyDraftSourceTransferId = String(outbound.historyDraftSourceTransferId || "").trim();
 
-  // ✅ 商品リストの在庫自動取得用のref（無限ループ防止）
+  // 商品リストの在庫自動取得用のref（無限ループ防止）
   const linesStockAutoFetchRef = useRef(false);
 
   // -------------------------
@@ -4827,7 +4698,7 @@ function OutboundList({
   const [candidates, setCandidates] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searchMountKey, setSearchMountKey] = useState(0);
-  const [candidatesDisplayLimit, setCandidatesDisplayLimit] = useState(50); // ✅ 初期表示50件（「さらに表示」で追加読み込み可能）
+  const [candidatesDisplayLimit, setCandidatesDisplayLimit] = useState(50); // 初期表示50件（「さらに表示」で追加読み込み可能）
 
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -4837,22 +4708,22 @@ function OutboundList({
   const scanProcessedTimestampsRef = useRef([]);
   const scanWorkingRef = useRef(false);
 
-  const OUTBOUND_DRAFT_MAX_LINES = 300; // ✅ まずは安全側。必要なら 500 に
+  const OUTBOUND_DRAFT_MAX_LINES = 300; // まずは安全側。必要なら 500 に
   const OUTBOUND_DRAFT_VERSION = 2;
 
   const normalizeDraftLine_ = (l, idx) => {
-    const qtyRaw = l?.qty ?? l?.quantity ?? 0; // ✅ 互換（quantity も受ける）
+    const qtyRaw = l?.qty ?? l?.quantity ?? 0; // 互換（quantity も受ける）
     const qty = Math.max(0, Number(qtyRaw || 0));
 
     const variantId = l?.variantId ?? null;
     const inventoryItemId = l?.inventoryItemId ?? null;
 
-    // ✅ 最低限のキーが無い行は捨てる（壊れた下書き対策）
+    // 最低限のキーが無い行は捨てる（壊れた下書き対策）
     if (!variantId && !inventoryItemId && !String(l?.sku || "") && !String(l?.barcode || "")) return null;
 
     return {
       id: String(l?.id ?? `${idx}`),
-      qty, // ✅ OutboundList 内部は基本 qty に寄せる
+      qty, // OutboundList 内部は基本 qty に寄せる
       variantId,
       inventoryItemId,
       sku: String(l?.sku || ""),
@@ -4860,7 +4731,7 @@ function OutboundList({
       productTitle: String(l?.productTitle || ""),
       variantTitle: String(l?.variantTitle || ""),
       imageUrl: String(l?.imageUrl || ""),
-      // ✅ stockLoading / available など派生は保存しない（復元後に再計算）
+      // stockLoading / available など派生は保存しない（復元後に再計算）
     };
   };
 
@@ -4871,7 +4742,7 @@ function OutboundList({
     for (let i = 0; i < src.length; i++) {
       const n = normalizeDraftLine_(src[i], i);
       if (n) normalized.push(n);
-      if (normalized.length >= OUTBOUND_DRAFT_MAX_LINES) break; // ✅ 上限
+      if (normalized.length >= OUTBOUND_DRAFT_MAX_LINES) break; // 上限
     }
     return normalized;
   };
@@ -4879,7 +4750,7 @@ function OutboundList({
   const outboundDraftLoadedRef = useRef(false);
   const submitLockRef = useRef(false);
 
-  // ✅ OutboundListがマウントされたら下書き復元フラグをリセット（履歴一覧から開いた際に復元できるようにする）
+  // OutboundListがマウントされたら下書き復元フラグをリセット（履歴一覧から開いた際に復元できるようにする）
   useEffect(() => {
     outboundDraftLoadedRef.current = false;
   }, []);
@@ -4897,7 +4768,7 @@ function OutboundList({
   };
 
   const resetCandidateQty = (key) => {
-    setCandidateQtyMap((prev) => ({ ...(prev || {}), [key]: 0 })); // ✅ タイポ修正
+    setCandidateQtyMap((prev) => ({ ...(prev || {}), [key]: 0 })); // タイポ修正
   };
 
   const toSafeId = (s) =>
@@ -4918,18 +4789,18 @@ function OutboundList({
 
   // 下書き復元（マウント時のみ実行）
   useEffect(() => {
-    // ✅ 既に復元済みの場合はスキップ（無限ループ防止）
+    // 既に復元済みの場合はスキップ（無限ループ防止）
     if (outboundDraftLoadedRef.current) return;
 
-    // ✅ 編集モードの場合は復元しない（編集前の下書きを復元しない）
+    // 編集モードの場合は復元しない（編集前の下書きを復元しない）
     const currentEditingTransferId = String(outbound?.editingTransferId || "").trim();
     if (currentEditingTransferId) return;
 
-    // ✅ すでに lines があるなら復元しない（ユーザー操作や別ルート初期化を優先）
+    // すでに lines があるなら復元しない（ユーザー操作や別ルート初期化を優先）
     const currentLines = Array.isArray(lines) ? lines : [];
     if (currentLines.length > 0) return;
 
-    // ✅ 復元処理開始をマーク
+    // 復元処理開始をマーク
     outboundDraftLoadedRef.current = true;
 
     (async () => {
@@ -4941,21 +4812,21 @@ function OutboundList({
 
         const saved = await SHOPIFY.storage.get(OUTBOUND_DRAFT_KEY);
         if (!saved || typeof saved !== "object") {
-          outboundDraftLoadedRef.current = false; // ✅ 下書きがない場合はリセット
+          outboundDraftLoadedRef.current = false; // 下書きがない場合はリセット
           return;
         }
 
         const savedLinesRaw = Array.isArray(saved.lines) ? saved.lines : [];
 
-        // ✅ 空の下書きは“復元しない”（setStateしない＝割り込みを消す）
+        // 空の下書きは“復元しない”（setStateしない＝割り込みを消す）
         if (savedLinesRaw.length === 0) {
-          outboundDraftLoadedRef.current = false; // ✅ 空の下書きの場合はリセット
+          outboundDraftLoadedRef.current = false; // 空の下書きの場合はリセット
           return;
         }
 
-        // ✅ 下書き復元時に正規化して、qtyフィールドを確実に設定する
+        // 下書き復元時に正規化して、qtyフィールドを確実に設定する
         const normalizedLines = savedLinesRaw.map((l, i) => {
-          // ✅ quantity または qty から数量を取得（両方を確認）
+          // quantity または qty から数量を取得（両方を確認）
           const q = Math.max(0, Number(l?.quantity ?? l?.qty ?? 0));
           return {
             id: String(l?.id ?? `${i}`),
@@ -4966,12 +4837,12 @@ function OutboundList({
             productTitle: String(l?.productTitle || ""),
             variantTitle: String(l?.variantTitle || ""),
             imageUrl: String(l?.imageUrl || ""),
-            qty: q,          // ✅ OutboundList が参照する本体（必須）
-            quantity: q,     // ✅ 既存ロジック互換（draft保存など）
+            qty: q,          // OutboundList が参照する本体（必須）
+            quantity: q,     // 既存ロジック互換（draft保存など）
           };
-        }).filter((l) => Number(l.qty || 0) > 0); // ✅ qtyが0以下のアイテムは除外
+        }).filter((l) => Number(l.qty || 0) > 0); // qtyが0以下のアイテムは除外
 
-        // ✅ 正規化後のlinesが空の場合はリセット
+        // 正規化後のlinesが空の場合はリセット
         if (normalizedLines.length === 0) {
           outboundDraftLoadedRef.current = false;
           return;
@@ -4980,15 +4851,14 @@ function OutboundList({
         setStateSlice(setAppState, "outbound", (prev) => ({
           ...prev,
           lines: normalizedLines,
-          // ✅ editingTransferId は保持（編集モードの場合は復元しない）
+          // editingTransferId は保持（編集モードの場合は復元しない）
         }));
         toast("出庫の下書きを復元しました");
       } catch (e) {
-        console.error("Failed to load outbound draft:", e);
-        outboundDraftLoadedRef.current = false; // ✅ エラー時もリセット
+        outboundDraftLoadedRef.current = false; // エラー時もリセット
       }
     })();
-  }, [setAppState, outbound?.editingTransferId]); // ✅ linesを依存配列から削除（マウント時のみ実行）
+  }, [setAppState, outbound?.editingTransferId]); // linesを依存配列から削除（マウント時のみ実行）
 
   const minimizeLineForDraft_ = (line, idx) => {
     const q = Math.max(0, Number(line?.quantity ?? line?.qty ?? 0));
@@ -5001,8 +4871,8 @@ function OutboundList({
       productTitle: String(line?.productTitle || ""),
       variantTitle: String(line?.variantTitle || ""),
       imageUrl: String(line?.imageUrl || ""),
-      qty: q,          // ✅ OutboundList が参照する本体（必須）
-      quantity: q,     // ✅ 既存ロジック互換（draft保存など）
+      qty: q,          // OutboundList が参照する本体（必須）
+      quantity: q,     // 既存ロジック互換（draft保存など）
     };
   };
 
@@ -5016,9 +4886,9 @@ function OutboundList({
           const src = Array.isArray(lines) ? lines : [];
           const minimized = src
             .map((l, i) => minimizeLineForDraft_(l, i))
-            .filter((l) => Number(l.qty || l.quantity || 0) > 0); // ✅ qtyもチェック
+            .filter((l) => Number(l.qty || l.quantity || 0) > 0); // qtyもチェック
 
-          // ✅ 編集モードの場合は下書きを保存しない（編集前の下書きを保存しない）
+          // 編集モードの場合は下書きを保存しない（編集前の下書きを保存しない）
           const currentEditingTransferId = String(outbound?.editingTransferId || "").trim();
           if (currentEditingTransferId) {
             // 編集モードの場合は下書きを保存しない
@@ -5030,9 +4900,7 @@ function OutboundList({
             savedAt: Date.now(),
             lines: minimized,
           });
-        } catch (e) {
-          console.error("Failed to save outbound draft:", e);
-        }
+        } catch (e) {}
       })();
     }, 250);
     return () => clearTimeout(t);
@@ -5042,12 +4910,10 @@ function OutboundList({
     try {
       if (!SHOPIFY?.storage?.delete) return;
       await SHOPIFY.storage.delete(OUTBOUND_DRAFT_KEY);
-    } catch (e) {
-      console.error("Failed to clear outbound draft:", e);
-    }
+    } catch (e) {}
   };
 
-  // ✅ 手動「下書き保存」（確定モーダル用）
+  // 手動「下書き保存」（確定モーダル用）
   const saveOutboundDraftNow_ = async () => {
     try {
       if (!SHOPIFY?.storage?.set) return;
@@ -5065,7 +4931,6 @@ function OutboundList({
 
       toast("下書きを保存しました");
     } catch (e) {
-      console.error("Failed to save outbound draft (manual):", e);
       toast("下書き保存に失敗しました");
     }
   };
@@ -5097,12 +4962,12 @@ function OutboundList({
     const q = String(query || "");
     const showCount = q.trim().length > 0;
 
-    // ✅ ID表示（OutboundHistoryDetailと同じ方式：nameを優先、なければ# + 6桁）
+    // ID表示（OutboundHistoryDetailと同じ方式：nameを優先、なければ# + 6桁）
     // 複製時は「新規出庫」として表示（商品リストの内容だけコピーして新規扱い）
     let title = "新規出庫"; // デフォルトは新規（新規作成時と複製時）
     
     if (editingTransferId) {
-      // ✅ 編集モード時：Transfer名を優先、なければIDを表示（OutboundHistoryDetailと同じ方式）
+      // 編集モード時：Transfer名を優先、なければIDを表示（OutboundHistoryDetailと同じ方式）
       const name = String(outbound.editingTransferName || "").trim();
       if (name) {
         title = name;
@@ -5111,7 +4976,7 @@ function OutboundList({
         title = `#${editingTransferId.slice(-6)}`;
       }
     }
-    // ✅ 複製時（historyDraftSourceTransferId）は「新規出庫」のまま（IDを表示しない）
+    // 複製時（historyDraftSourceTransferId）は「新規出庫」のまま（IDを表示しない）
 
     setHeader?.(
       <s-box padding="base">
@@ -5127,18 +4992,9 @@ function OutboundList({
               <s-text emphasis="bold" size="small">{title}</s-text>
               <s-text size="small">出庫元：{originLocationName}</s-text>
               <s-text size="small">宛先：{destinationLocationName}</s-text>
-              {/* 配送業者（未登録は空白） */}
-              <s-text size="small">
-                配送業者：{resolvedCompany || " "}
-              </s-text>
-              {/* 配送番号（未登録は空白） */}
-              <s-text size="small">
-                配送番号：{String(outbound.trackingNumber ?? "").trim() || " "}
-              </s-text>
-              {/* 予定日（未登録は空白） */}
-              <s-text size="small">
-                予定日：{formatArrivesAtDisplay(outbound.arrivesAtIso) || " "}
-              </s-text>
+              <s-text size="small" tone="subdued">配送業者: {resolvedCompany || ""}</s-text>
+              <s-text size="small" tone="subdued">配送番号: {trackingNumberTrim || ""}</s-text>
+              <s-text size="small" tone="subdued">予定日: {String(outbound.arrivesAtIso || "").trim().slice(0, 10) || ""}</s-text>
             </s-stack>
 
             <s-stack direction="inline" gap="base" alignItems="center">
@@ -5193,7 +5049,7 @@ function OutboundList({
     originLocationName,
     destinationLocationName,
     resolvedCompany,
-    outbound.trackingNumber,
+    trackingNumberTrim,
     outbound.arrivesAtIso,
     liteMode,
     refreshing,
@@ -5217,12 +5073,12 @@ function OutboundList({
         if (mounted) {
           setCandidates([]);
           setLoading(false);
-          setCandidatesDisplayLimit(20); // ✅ 検索クリア時に表示件数もリセット
+          setCandidatesDisplayLimit(20); // 検索クリア時に表示件数もリセット
         }
         return;
       }
 
-      // ✅ 1文字から検索可能に変更（文字数制限を削除）
+      // 1文字から検索可能に変更（文字数制限を削除）
       setLoading(true);
       try {
         const includeImages = showImages && !liteMode;
@@ -5230,7 +5086,7 @@ function OutboundList({
         const list = await searchVariants(raw, { includeImages, first: searchLimit });
         if (mounted) {
           setCandidates(Array.isArray(list) ? list : []);
-          setCandidatesDisplayLimit(20); // ✅ 新しい検索時は表示件数をリセット
+          setCandidatesDisplayLimit(20); // 新しい検索時は表示件数をリセット
         }
       } catch (e) {
         toast(`検索エラー: ${toUserMessage(e)}`);
@@ -5253,9 +5109,9 @@ function OutboundList({
     setStateSlice(setAppState, "outbound", (prev) => {
       const cur = Array.isArray(prev?.lines) ? prev.lines : [];
       const next = typeof updater === "function" ? updater(cur) : updater;
-      // ✅ 安全のため、配列でない場合は現在の配列を保持
+      // 安全のため、配列でない場合は現在の配列を保持
       const safeNext = Array.isArray(next) ? next : cur;
-      // ✅ すべてのプロパティを保持しながらlinesのみ更新
+      // すべてのプロパティを保持しながらlinesのみ更新
       return { ...(prev || {}), lines: safeNext };
     });
   };
@@ -5263,11 +5119,11 @@ function OutboundList({
   const closeSearchHard = () => {
     setQuery("");
     setCandidates([]);
-    setCandidatesDisplayLimit(20); // ✅ 検索クリア時に表示件数もリセット
+    setCandidatesDisplayLimit(20); // 検索クリア時に表示件数もリセット
     setSearchMountKey((k) => k + 1);
   };
 
-  // ✅ 「さらに表示」ボタン用
+  // 「さらに表示」ボタン用
   const handleShowMoreCandidates = useCallback(() => {
     setCandidatesDisplayLimit((prev) => prev + 20);
   }, []);
@@ -5355,13 +5211,13 @@ function OutboundList({
 
   const inc = (id, delta) => {
     setLines((prev) => {
-      // ✅ 安全のため、配列でない場合は空配列を返す
+      // 安全のため、配列でない場合は空配列を返す
       if (!Array.isArray(prev)) return [];
-      // ✅ idの型を統一して比較（null/undefined対策）
+      // idの型を統一して比較（null/undefined対策）
       const targetId = String(id || "").trim();
       if (!targetId) return prev; // idが空の場合は何もしない
       
-      // ✅ すべてのアイテムを保持しながら、一致するidのアイテムのみ更新
+      // すべてのアイテムを保持しながら、一致するidのアイテムのみ更新
       const updated = prev.map((l) => {
         const lineId = String(l?.id || "").trim();
         if (lineId && lineId === targetId) {
@@ -5369,7 +5225,7 @@ function OutboundList({
         }
         return l;
       });
-      // ✅ qtyが0以下のアイテムをフィルタリング（削除）
+      // qtyが0以下のアイテムをフィルタリング（削除）
       return updated.filter((l) => Number(l?.qty || 0) > 0);
     });
   };
@@ -5377,13 +5233,13 @@ function OutboundList({
   const setQty = (id, qty) => {
     const n = Math.max(1, Number(qty || 1));
     setLines((prev) => {
-      // ✅ 安全のため、配列でない場合は空配列を返す
+      // 安全のため、配列でない場合は空配列を返す
       if (!Array.isArray(prev)) return [];
-      // ✅ idの型を統一して比較（null/undefined対策）
+      // idの型を統一して比較（null/undefined対策）
       const targetId = String(id || "").trim();
       if (!targetId) return prev; // idが空の場合は何もしない
       
-      // ✅ すべてのアイテムを保持しながら、一致するidのアイテムのみ更新
+      // すべてのアイテムを保持しながら、一致するidのアイテムのみ更新
       return prev.map((l) => {
         const lineId = String(l?.id || "").trim();
         if (lineId && lineId === targetId) {
@@ -5402,7 +5258,7 @@ function OutboundList({
       return;
     }
     
-    // ✅ lines を直接参照せず、setLines のコールバック内で参照する
+    // lines を直接参照せず、setLines のコールバック内で参照する
     let currentLines = [];
     setLines((prev) => {
       currentLines = prev;
@@ -5490,9 +5346,8 @@ function OutboundList({
       arr.push(now);
       scanProcessedTimestampsRef.current = arr;
       setScanRps(arr.length);
-    } catch (e) {
-      console.error("processScanQueueOnce error:", e);
-    } finally {
+    } catch (e) {}
+    finally {
       scanWorkingRef.current = false;
     }
   }, [originLocationGid, showImages, liteMode]);
@@ -5510,7 +5365,7 @@ function OutboundList({
   const canSubmit = !!originLocationGid && !!destinationLocationId && lines.length > 0 && !submitting;
 
   // =========================
-  // ✅ 確定前ゲート（警告 / 在庫レベル不足 / マイナス在庫）
+  // 確定前ゲート（警告 / 在庫レベル不足 / マイナス在庫）
   // =========================
   const [gateDestMissing, setGateDestMissing] = useState([]);
   const [gateOriginMissing, setGateOriginMissing] = useState([]);
@@ -5619,7 +5474,7 @@ function OutboundList({
     const trackingUrl = String(outbound?.trackingUrl || "").trim();
     const eta = String(outbound?.arrivesAtIso || "").trim();
 
-    // ✅ company は resolvedCompany（carrier設定の company → 無ければ手入力 manualCompany）
+    // company は resolvedCompany（carrier設定の company → 無ければ手入力 manualCompany）
     const company = String(resolvedCompany || "").trim();
 
     // 二重実行ガード
@@ -5642,7 +5497,7 @@ function OutboundList({
       return null;
     }
 
-    // ✅ lineItems を作る（InventoryTransferLineItemInput の形）
+    // lineItems を作る（InventoryTransferLineItemInput の形）
     const lineItems = lines
       .map((l) => ({
         inventoryItemId: String(l?.inventoryItemId || "").trim(),
@@ -5669,14 +5524,14 @@ function OutboundList({
     setSubmitting(true);
 
     try {
-      // ✅ stocked化（ゲート側でやった場合はスキップ）
+      // stocked化（ゲート側でやった場合はスキップ）
       if (!skipActivate) {
         const inventoryItemIds = lineItems.map((x) => x.inventoryItemId).filter(Boolean);
         
-        // ✅ 出庫元（origin）の在庫追跡を有効化（必須）
-        // ✅ 公式推奨：エラーがある場合は例外を投げて処理を中断
+        // 出庫元（origin）の在庫追跡を有効化（必須）
+        // 公式推奨：エラーがある場合は例外を投げて処理を中断
         if (originLocationGid && inventoryItemIds.length > 0) {
-          // ✅ ensureInventoryActivatedAtLocation が利用可能か確認
+          // ensureInventoryActivatedAtLocation が利用可能か確認
           if (typeof ensureInventoryActivatedAtLocation !== "function") {
             const msg = `ensureInventoryActivatedAtLocation が利用できません（typeof=${typeof ensureInventoryActivatedAtLocation}）`;
             toast(msg);
@@ -5691,7 +5546,7 @@ function OutboundList({
             debug,
           });
           
-          // ✅ エラーがある場合は例外を投げる（公式推奨）
+          // エラーがある場合は例外を投げる（公式推奨）
           if (!activateResult?.ok) {
             const errorDetails = (activateResult?.errors || [])
               .map((e) => {
@@ -5705,7 +5560,7 @@ function OutboundList({
             throw new Error(msg);
           }
           
-          // ✅ 有効化されたアイテム数を確認
+          // 有効化されたアイテム数を確認
           const activatedCount = Array.isArray(activateResult?.activated) ? activateResult.activated.length : 0;
           if (activatedCount < inventoryItemIds.length) {
             const failedCount = inventoryItemIds.length - activatedCount;
@@ -5716,10 +5571,10 @@ function OutboundList({
           toast(`出庫元の在庫追跡有効化完了 (${activatedCount}件)`);
         }
         
-        // ✅ 宛先（destination）の在庫追跡を有効化
-        // ✅ 公式推奨：エラーがある場合は例外を投げて処理を中断
+        // 宛先（destination）の在庫追跡を有効化
+        // 公式推奨：エラーがある場合は例外を投げて処理を中断
         if (destinationLocationId && inventoryItemIds.length > 0) {
-          // ✅ ensureInventoryActivatedAtLocation が利用可能か確認
+          // ensureInventoryActivatedAtLocation が利用可能か確認
           if (typeof ensureInventoryActivatedAtLocation !== "function") {
             const msg = `ensureInventoryActivatedAtLocation が利用できません（typeof=${typeof ensureInventoryActivatedAtLocation}）`;
             toast(msg);
@@ -5734,7 +5589,7 @@ function OutboundList({
               debug,
             });
           
-          // ✅ エラーがある場合は例外を投げる（公式推奨）
+          // エラーがある場合は例外を投げる（公式推奨）
           if (!activateResult?.ok) {
             const errorDetails = (activateResult?.errors || [])
               .map((e) => {
@@ -5748,7 +5603,7 @@ function OutboundList({
             throw new Error(msg);
           }
           
-          // ✅ 有効化されたアイテム数を確認
+          // 有効化されたアイテム数を確認
           const activatedCount = Array.isArray(activateResult?.activated) ? activateResult.activated.length : 0;
           if (activatedCount < inventoryItemIds.length) {
             const failedCount = inventoryItemIds.length - activatedCount;
@@ -5760,7 +5615,7 @@ function OutboundList({
         }
       }
 
-      // ✅ 編集モード（同ID）：lineItems を差し替えるだけ（下書き蓄積させない）
+      // 編集モード（同ID）：lineItems を差し替えるだけ（下書き蓄積させない）
       const editingTransferId = String(outbound?.editingTransferId || "").trim();
       if (editingTransferId) {
         const transfer = await inventoryTransferSetItemsSafe({
@@ -5789,12 +5644,12 @@ function OutboundList({
         return { transfer, shipment: null };
       }
 
-      // ✅ 1) 在庫追跡有効化処理が完了したことを最終確認（公式推奨：ポーリングで確認）
+      // 1) 在庫追跡有効化処理が完了したことを最終確認（公式推奨：ポーリングで確認）
       // 有効化処理で例外が投げられていればここには到達しない
       // 念のため、在庫レベルが確実に反映されていることを確認してからTransfer作成に進む
       if (!skipActivate) {
         const inventoryItemIdsForCheck = lineItems.map((x) => x.inventoryItemId).filter(Boolean);
-        // ✅ metaById を構築（buildMetaByInventoryItemId は lines を参照するため、lineItems から構築）
+        // metaById を構築（buildMetaByInventoryItemId は lines を参照するため、lineItems から構築）
         const metaById = {};
         for (const l of Array.isArray(lines) ? lines : []) {
           const inventoryItemId = String(l?.inventoryItemId || "").trim();
@@ -5817,7 +5672,7 @@ function OutboundList({
           };
         }
         
-        // ✅ 出庫元の在庫レベルが反映されるまで待機（公式推奨）
+        // 出庫元の在庫レベルが反映されるまで待機（公式推奨）
         if (inventoryItemIdsForCheck.length > 0 && originLocationGid) {
           if (typeof waitForMissingInventoryLevelsToClear === "function") {
             toast("出庫元の在庫レベル反映待ち中...");
@@ -5843,7 +5698,7 @@ function OutboundList({
           }
         }
         
-        // ✅ 宛先の在庫レベルが反映されるまで待機（公式推奨）
+        // 宛先の在庫レベルが反映されるまで待機（公式推奨）
         if (inventoryItemIdsForCheck.length > 0 && destinationLocationId) {
           if (typeof waitForMissingInventoryLevelsToClear === "function") {
             toast("宛先の在庫レベル反映待ち中...");
@@ -5869,7 +5724,7 @@ function OutboundList({
           }
         }
         
-        // ✅ 最終確認：Transfer作成前に、すべてのアイテムの在庫レベルを再確認
+        // 最終確認：Transfer作成前に、すべてのアイテムの在庫レベルを再確認
         // 在庫レベルが存在しないアイテムがあれば、再度有効化を試みる
         if (inventoryItemIdsForCheck.length > 0) {
           // 出庫元の最終確認
@@ -5984,7 +5839,7 @@ function OutboundList({
         }
       }
 
-      // ✅ 2) Transfer 作成（Ready to ship）
+      // 2) Transfer 作成（Ready to ship）
       // 有効化処理が確実に完了しているため、ここではエラー時の再試行は行わない
       toast("Transfer作成中...");
       const transfer = await createTransferReadyToShipWithFallback({
@@ -6000,7 +5855,7 @@ function OutboundList({
         throw new Error("transfer.id が取得できません");
       }
 
-      // ✅ 2) Shipment 作成（tracking が何も無い時は作らない）
+      // 2) Shipment 作成（tracking が何も無い時は作らない）
       let shipment = null;
 
       const hasAnyTracking = Boolean(company || trackingNumber || trackingUrl || eta);
@@ -6036,7 +5891,7 @@ function OutboundList({
         editingTransferId: "",
       }));
 
-      // ✅ v50寄せ：成功したら戻る（不要ならここだけ消してOK）
+      // v50寄せ：成功したら戻る（不要ならここだけ消してOK）
       onBack?.();
 
       return { transfer, shipment };
@@ -6053,13 +5908,13 @@ function OutboundList({
     }
   };
 
-  // ✅ フッターの「確定」ボタンから呼ぶ用（押下ログだけ）
+  // フッターの「確定」ボタンから呼ぶ用（押下ログだけ）
   const submitTransfer = async () => {
     toast("submitTransfer: pressed");
     // ここでは確定処理を走らせない（confirm modal を開くだけにする）
   };
 
-  // ✅ 「配送準備完了にする」ボタン用（Shipment作成なし）
+  // 「配送準備完了にする」ボタン用（Shipment作成なし）
   const createTransferAsReadyToShipOnly = async ({ skipActivate = false } = {}) => {
     toast("createTransferAsReadyToShipOnly: start");
 
@@ -6083,7 +5938,7 @@ function OutboundList({
       return null;
     }
 
-    // ✅ lineItems を作る（InventoryTransferLineItemInput の形）
+    // lineItems を作る（InventoryTransferLineItemInput の形）
     const lineItems = lines
       .map((l) => ({
         inventoryItemId: String(l?.inventoryItemId || "").trim(),
@@ -6110,7 +5965,7 @@ function OutboundList({
     setSubmitting(true);
 
     try {
-      // ✅ 在庫追跡有効化（submitTransferCoreと同じ処理）
+      // 在庫追跡有効化（submitTransferCoreと同じ処理）
       if (!skipActivate) {
         const inventoryItemIds = lineItems.map((x) => x.inventoryItemId).filter(Boolean);
         
@@ -6269,7 +6124,7 @@ function OutboundList({
         }
       }
 
-      // ✅ 編集モード（同ID）：明細更新 + ステータス変更（DRAFT → READY_TO_SHIP）
+      // 編集モード（同ID）：明細更新 + ステータス変更（DRAFT → READY_TO_SHIP）
       const editingTransferId = String(outbound?.editingTransferId || "").trim();
       if (editingTransferId) {
         // 明細を更新
@@ -6306,7 +6161,7 @@ function OutboundList({
         return { transfer, shipment: null };
       }
 
-      // ✅ 既存下書き（draftTransferId）がある場合：明細更新 + ステータス変更
+      // 既存下書き（draftTransferId）がある場合：明細更新 + ステータス変更
       // 注意: outboundはOutboundListコンポーネントのスコープ内にある
       const currentDraftTransferId = String(outbound?.draftTransferId || "").trim();
       if (currentDraftTransferId) {
@@ -6344,7 +6199,7 @@ function OutboundList({
         return { transfer, shipment: null };
       }
 
-      // ✅ 新規作成：READY_TO_SHIPステータスで作成
+      // 新規作成：READY_TO_SHIPステータスで作成
       toast("Transfer作成中...");
       const transfer = await createTransferReadyToShipWithFallback({
         originLocationId: String(originLocationGid || "").trim(),
@@ -6354,7 +6209,7 @@ function OutboundList({
       });
       toast("配送準備完了で作成しました");
 
-      // ✅ Shipmentは作成しない（tracking情報なし）
+      // Shipmentは作成しない（tracking情報なし）
 
       // 後処理
       try { await clearOutboundDraft?.(); } catch (_) {}
@@ -6394,12 +6249,6 @@ function OutboundList({
   };
 
   // =========================
-  // Header（OutboundHistoryDetailと完全に同じ方式で、ID + 出庫元 + 宛先 を3行表示）
-  // 検索枠は別のuseEffectで管理（このヘッダーの下に表示）
-  // =========================
-  // ✅ このuseEffectは削除：4178行目付近のuseEffectでヘッダーを設定しているため重複を避ける
-
-  // =========================
   // Footer（1行固定：戻る / 情報 / 確定）
   // =========================
   useEffect(() => {
@@ -6410,7 +6259,7 @@ function OutboundList({
           alignItems="center"
           justifyContent="space-between"
           gap="base"
-          style={{ width: "100%", flexWrap: "nowrap" }}  // ✅ 絶対に折り返さない
+          style={{ width: "100%", flexWrap: "nowrap" }}  // 絶対に折り返さない
         >
           {/* 左：戻る */}
           <s-box style={{ flex: "0 0 auto" }}>
@@ -6443,13 +6292,13 @@ function OutboundList({
               onClick={() => {
                 refreshOutboundGate();
                 setGateAck(false);
-                // ✅ モーダルが開いたことを記録
+                // モーダルが開いたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: true });
               }}
               onPress={() => {
                 refreshOutboundGate();
                 setGateAck(false);
-                // ✅ モーダルが開いたことを記録
+                // モーダルが開いたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: true });
               }}
             >
@@ -6569,7 +6418,7 @@ function OutboundList({
     void candidateStockVersion;
     useEffect(() => {
       if (!c?.variantId) return;
-      // ✅ 制限を外してすべての候補に対して在庫を取得
+      // 制限を外してすべての候補に対して在庫を取得
       ensureCandidateStock(key, c.variantId);
     }, [key, c?.variantId, ensureCandidateStock]);
 
@@ -6699,7 +6548,7 @@ function OutboundList({
   // =========================
   // Return（余白調整：gap none + divider）
   // =========================
-  // ✅ 表示する候補（表示件数制限適用）
+  // 表示する候補（表示件数制限適用）
   const displayedCandidates = useMemo(() => {
     return candidates.slice(0, candidatesDisplayLimit);
   }, [candidates, candidatesDisplayLimit]);
@@ -6745,7 +6594,7 @@ function OutboundList({
 
             {gateLoading ? <s-text size="small" tone="subdued">判定中...</s-text> : null}
 
-            {/* ===== 宛先 missing（自動で在庫有効化対象） ===== */}
+            {/* 宛先missing */}
             {gateDestMissing.length > 0 ? (
               <s-box>
                 <s-text size="small" tone="critical" emphasis="bold">
@@ -6764,7 +6613,7 @@ function OutboundList({
               </s-box>
             ) : null}
 
-            {/* ===== 出庫元 missing（確認必須） ===== */}
+            {/* 出庫元missing */}
             {gateOriginMissing.length > 0 ? (
               <s-box>
                 <s-text size="small" tone="critical" emphasis="bold">
@@ -6783,7 +6632,7 @@ function OutboundList({
               </s-box>
             ) : null}
 
-            {/* ===== negative（確認必須） ===== */}
+            {/* negative */}
             {gateNegative.length > 0 ? (
               <s-box>
                 <s-text size="small" tone="critical" emphasis="bold">
@@ -6804,7 +6653,7 @@ function OutboundList({
 
             {gateNeedsAck ? <s-divider /> : null}
 
-            {/* ===== チェック必須（出庫元missing or negative がある場合） ===== */}
+            {/* チェック必須 */}
             {gateNeedsAck ? (
               <s-stack gap="small" alignItems="center" justifyContent="start">
                 <s-button tone={gateAck ? "success" : "critical"} onClick={() => setGateAck((v) => !v)}>
@@ -6835,7 +6684,7 @@ function OutboundList({
                 command="--hide"
                 commandFor={CONFIRM_TRANSFER_MODAL_ID}
                 onClick={() => {
-                  // ✅ モーダルが閉じたことを記録
+                  // モーダルが閉じたことを記録
                   setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
                 }}
               >
@@ -6926,7 +6775,7 @@ function OutboundList({
               if (r) {
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
-                // ✅ モーダルが閉じたことを記録
+                // モーダルが閉じたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
               }
             } catch (e) {
@@ -7007,7 +6856,7 @@ function OutboundList({
               if (r) {
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
-                // ✅ モーダルが閉じたことを記録
+                // モーダルが閉じたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
               }
             } catch (e) {
@@ -7062,7 +6911,6 @@ function OutboundList({
 
                 toast("下書きを作成しました（履歴に表示されます）");
               } catch (e) {
-                console.error(e);
                 toast(toUserMessage(e));
               }
             }}
@@ -7142,14 +6990,14 @@ function OutboundList({
               }
 
               // 5) 確定（submitTransferCore 内で全アイテムを確実に有効化するため skipActivate: false）
-              // ✅ ゲートで検出されなかったアイテムでも在庫追跡が無効な場合があるため、
+              // ゲートで検出されなかったアイテムでも在庫追跡が無効な場合があるため、
               //    すべての lineItems に対して在庫追跡有効化を実行する
               const r = await submitTransferCore({ skipActivate: false });
 
               if (r) {
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
-                // ✅ モーダルが閉じたことを記録
+                // モーダルが閉じたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
               }
             } catch (e) {
@@ -7225,14 +7073,14 @@ function OutboundList({
               }
 
               // 5) 確定（submitTransferCore 内で全アイテムを確実に有効化するため skipActivate: false）
-              // ✅ ゲートで検出されなかったアイテムでも在庫追跡が無効な場合があるため、
+              // ゲートで検出されなかったアイテムでも在庫追跡が無効な場合があるため、
               //    すべての lineItems に対して在庫追跡有効化を実行する
               const r = await submitTransferCore({ skipActivate: false });
 
               if (r) {
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
-                // ✅ モーダルが閉じたことを記録
+                // モーダルが閉じたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
               }
             } catch (e) {
@@ -7279,9 +7127,7 @@ function toSafeId(s) {
   return String(s || "x").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60);
 }
 
-/* =========================
-   ✅ OutboundAddedLineRow（2行構成：SKUは上段、在庫は下段左）
-========================= */
+/* OutboundAddedLineRow */
 function OutboundAddedLineRow({
   line,
   showImages,
@@ -7306,10 +7152,10 @@ function OutboundAddedLineRow({
   const sku = String(line?.sku || "").trim();
   const barcode = String(line?.barcode || "").trim();
 
-  // ✅ 上段3行目（SKU/JANのみ）
+  // 上段3行目（SKU/JANのみ）
   const skuLine = `${sku ? `SKU: ${sku}` : ""}${barcode ? `${sku ? " / " : ""}JAN: ${barcode}` : ""}`.trim();
 
-  // ✅ 下段左（在庫のみ）
+  // 下段左（在庫のみ）
   const stockText = line?.stockLoading ? "在庫: …" : `在庫: ${line?.available ?? "—"}`;
 
   return (
@@ -7366,12 +7212,7 @@ function OutboundAddedLineRow({
   );
 }
 
-/* =========================
-   ✅ QtyControlCompact_3Buttons
-   - リッチテキストの QtyControlCompact（commandFor + s-modal）をベースに、
-     「qty=1 のとき左を ×（削除）」に拡張
-   - 数量表示幅（valueWidth）もリッチテキスト準拠
-========================= */
+/* QtyControlCompact_3Buttons */
 function QtyControlCompact_3Buttons({
   value,
   min = 1,
@@ -7492,9 +7333,7 @@ function QtyControlCompact_3Buttons({
   );
 }
 
-/* =========================
-   Inbound screen split
-========================= */
+/* Inbound split */
 
 function InboundConditions({
   showImages,
@@ -7504,7 +7343,7 @@ function InboundConditions({
   setAppState,
   onNext,
   onBack,
-  onOpenShipmentSelection, // ✅ Phase 1.3: シップメント選択画面への遷移
+  onOpenShipmentSelection, // Phase 1.3: シップメント選択画面への遷移
   setHeader,
   setFooter,
 }) {
@@ -7525,10 +7364,10 @@ function InboundConditions({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [transfers, setTransfers] = useState([]);
-  const [transfersPageInfo, setTransfersPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ✅ ページネーション用
-  const [loadingMore, setLoadingMore] = useState(false); // ✅ 追加読み込み中フラグ
+  const [transfersPageInfo, setTransfersPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ページネーション用
+  const [loadingMore, setLoadingMore] = useState(false); // 追加読み込み中フラグ
 
-  // ✅ Phase 1.2: Shipment選択モーダル用の状態（refで管理）
+  // Phase 1.2: Shipment選択モーダル用の状態（refで管理）
   const SHIPMENT_MODE_SELECTION_MODAL_ID = "shipment-mode-selection-modal";
   const shipmentModeSelectionModalRef = useRef(null);
   const [pendingTransferForModal, setPendingTransferForModal] = useState(null);
@@ -7563,7 +7402,7 @@ function InboundConditions({
     return s.slice(0, 10);
   };
 
-  // ✅ Phase 1.2: Transfer名からShipmentラベルを生成
+  // Phase 1.2: Transfer名からShipmentラベルを生成
   const formatShipmentLabel = useCallback((transferName, index) => {
     const base = String(transferName || "").trim() || "T0000";
     // Transfer名から末尾の数字部分を抽出（例: "T0000" → "T0000"）
@@ -7573,7 +7412,7 @@ function InboundConditions({
   }, []);
 
   const isCompleted = (t) => {
-    // ✅ 管理画面と揃える：入庫済みは status === "TRANSFERRED" のときだけ
+    // 管理画面と揃える：入庫済みは status === "TRANSFERRED" のときだけ
     // （received >= total では判定しない。二重基準・一部受領ずれを防ぐ）
     return String(t?.status || "").toUpperCase() === "TRANSFERRED";
   };
@@ -7591,14 +7430,14 @@ function InboundConditions({
     if (!locationGid) return;
     setLoading(true);
     setError("");
-    // ✅ 既存データをクリア（一度読み込まれたデータが残らないように）
+    // 既存データをクリア（一度読み込まれたデータが残らないように）
     setTransfers([]);
     setTransfersPageInfo({ hasNextPage: false, endCursor: null });
     try {
       const listLimit = Math.max(1, Math.min(250, Number(appState?.outbound?.settings?.inbound?.listInitialLimit ?? 100)));
       const result = await fetchTransfersForDestinationAll(locationGid, { first: listLimit });
 
-      // ✅ 監査ログから過剰分/予定外分を合算して display に反映
+      // 監査ログから過剰分/予定外分を合算して display に反映
       let patched = Array.isArray(result?.transfers) ? result.transfers : [];
       setTransfersPageInfo(result?.pageInfo || { hasNextPage: false, endCursor: null });
       try {
@@ -7606,7 +7445,7 @@ function InboundConditions({
         const overIdx = buildInboundOverIndex_(audit, { locationId: locationGid });
         const extrasIdx = buildInboundExtrasIndex_(audit, { locationId: locationGid }); // ✅追加
         
-        // ✅ 拒否分を集計（shipmentsのlineItemsから取得）
+        // 拒否分を集計（shipmentsのlineItemsから取得）
         const shipmentIds = patched.flatMap((t) => 
           (Array.isArray(t?.shipments) ? t.shipments : [])
             .map((s) => String(s?.id || "").trim())
@@ -7646,7 +7485,7 @@ function InboundConditions({
   };
 
   const onTapTransfer = (t) => {
-    // ✅ Phase 1.2: Shipment数が2つ以上の場合、選択モーダルを表示
+    // Phase 1.2: Shipment数が2つ以上の場合、選択モーダルを表示
     const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
     const shipmentCount = shipments.length;
 
@@ -7660,7 +7499,7 @@ function InboundConditions({
       const shipmentId = pickShipmentIdFromTransfer(t);
       if (!shipmentId) return;
 
-      const readOnly = isCompleted(t); // ✅ 入庫済み（処理済み）扱い
+      const readOnly = isCompleted(t); // 入庫済み（処理済み）扱い
 
       setStateSlice(setAppState, "inbound", {
         selectedShipmentId: shipmentId,
@@ -7669,7 +7508,7 @@ function InboundConditions({
         selectedTransferId: String(t?.id || ""),
         selectedTransferName: String(t?.name || ""),
 
-        // ✅ ここが重要：InboundList ヘッダーの fallback 用
+        // ここが重要：InboundList ヘッダーの fallback 用
         selectedOriginName: String(t?.originName || ""),
         selectedDestinationName: String(t?.destinationName || ""),
         selectedTransferStatus: String(t?.status || ""),
@@ -7687,7 +7526,7 @@ function InboundConditions({
     // モーダル表示はuseEffectで制御（状態更新後に実行される）
   };
 
-  // ✅ Phase 1.3: シップメントごとに選択（1つ選択してInboundListへ）
+  // Phase 1.3: シップメントごとに選択（1つ選択してInboundListへ）
   const handleSelectSingleShipment = useCallback(() => {
     const t = pendingTransferForModal;
     if (!t) {
@@ -7721,7 +7560,7 @@ function InboundConditions({
     onOpenShipmentSelection?.();
   }, [pendingTransferForModal, setAppState, onOpenShipmentSelection]);
 
-  // ✅ Phase 1.2: まとめて表示（全Shipmentを1画面で表示）
+  // Phase 1.2: まとめて表示（全Shipmentを1画面で表示）
   const handleShowAllShipments = useCallback(() => {
     const t = pendingTransferForModal;
     if (!t) return;
@@ -7761,7 +7600,7 @@ function InboundConditions({
     onNext?.();
   }, [pendingTransferForModal, setAppState, onNext]);
 
-  // ✅ 次のページのTransfer一覧を読み込む関数
+  // 次のページのTransfer一覧を読み込む関数
   const loadMoreTransfers_ = useCallback(async () => {
     if (!locationGid || !transfersPageInfo?.hasNextPage || !transfersPageInfo?.endCursor) return;
     if (loadingMore) return; // 既に読み込み中の場合はスキップ
@@ -7780,14 +7619,14 @@ function InboundConditions({
 
       const newTransfers = Array.isArray(result?.transfers) ? result.transfers : [];
       
-      // ✅ 監査ログから過剰分/予定外分を合算
+      // 監査ログから過剰分/予定外分を合算
       let patched = newTransfers;
       try {
         const audit = await readInboundAuditLog();
         const overIdx = buildInboundOverIndex_(audit, { locationId: locationGid });
         const extrasIdx = buildInboundExtrasIndex_(audit, { locationId: locationGid });
         
-        // ✅ 拒否分を集計（shipmentsのlineItemsから取得）
+        // 拒否分を集計（shipmentsのlineItemsから取得）
         const shipmentIds = newTransfers.flatMap((t) => 
           (Array.isArray(t?.shipments) ? t.shipments : [])
             .map((s) => String(s?.id || "").trim())
@@ -7800,14 +7639,13 @@ function InboundConditions({
 
       setTransfers((prev) => [...prev, ...patched]);
     } catch (e) {
-      console.error("loadMoreTransfers_ error:", e);
       toast(String(e?.message || e || "追加読み込みに失敗しました"));
     } finally {
       setLoadingMore(false);
     }
   }, [locationGid, transfersPageInfo, loadingMore]);
 
-  // ✅ Header（タブ + さらに読み込みボタン）
+  // Header（タブ + さらに読み込みボタン）
   useEffect(() => {
     setHeader?.(
       <s-box padding="base">
@@ -7865,7 +7703,7 @@ function InboundConditions({
     loadMoreTransfers_,
   ]);
 
-  // ✅ Phase 1.2: pendingTransferForModalが設定されたらモーダルを表示
+  // Phase 1.2: pendingTransferForModalが設定されたらモーダルを表示
   // 注意: 「開く」ボタンに直接command="--show"を設定しているため、useEffectは不要
 
   // Footer（戻る／軽量／再取得）
@@ -7928,14 +7766,14 @@ function InboundConditions({
               const rawStatus = String(t?.status || "").trim();
               const statusJa = STATUS_LABEL[rawStatus] || (rawStatus ? rawStatus : "不明");
 
-              // ✅ Phase 1.1: Shipment数の表示（2つ以上の場合のみ）
+              // Phase 1.1: Shipment数の表示（2つ以上の場合のみ）
               const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
               const shipmentCount = shipments.length;
 
               return (
                 <s-box key={t.id}>
                   {shipmentCount > 1 ? (
-                    // ✅ シップメントが2つ以上の場合：シップメントが1つの場合と同じレイアウト + 右端に「リスト」ボタン
+                    // シップメントが2つ以上の場合：シップメントが1つの場合と同じレイアウト + 右端に「リスト」ボタン
                     // ⚠️ POS UI制限：日付と数量をボタンの左端に完全に合わせることは困難
                     // - s-clickableがflex: 1で親コンテナの一部を占めるため、その中での右寄せはs-clickableの右端にしかならない
                     // - ボタンの左端に合わせるには「親コンテナ幅 - ボタン幅 - gap」の動的計算が必要だが、POS UIではcalc()や動的幅計算が制限される
@@ -7995,7 +7833,7 @@ function InboundConditions({
                       </s-box>
                     </s-stack>
                   ) : (
-                    // ✅ シップメントが1つの場合：元のレイアウト（全体がクリック可能、右上に日付、右下に数量）
+                    // シップメントが1つの場合：元のレイアウト（全体がクリック可能、右上に日付、右下に数量）
                     <s-clickable onClick={() => onTapTransfer(t)}>
                       <s-box padding="small">
                         <s-stack gap="tight">
@@ -8104,7 +7942,7 @@ function InboundConditions({
 /* =========================
    ✅ Phase 1.3: InboundShipmentSelection（シップメント選択画面）
    - Transfer に複数シップメントがある場合、1つずつ選択して処理する画面
-========================= */
+*/
 function InboundShipmentSelection({
   showImages,
   liteMode,
@@ -8134,9 +7972,9 @@ function InboundShipmentSelection({
   const [error, setError] = useState("");
   const [transfer, setTransfer] = useState(null);
   const [shipments, setShipments] = useState([]);
-  const [shipmentQuantities, setShipmentQuantities] = useState(new Map()); // ✅ 各シップメントの数量情報
+  const [shipmentQuantities, setShipmentQuantities] = useState(new Map()); // 各シップメントの数量情報
 
-  // ✅ Phase 1.2: Transfer名からShipmentラベルを生成
+  // Phase 1.2: Transfer名からShipmentラベルを生成
   const formatShipmentLabel = useCallback((transferName, index) => {
     const base = String(transferName || "").trim() || "T0000";
     const match = base.match(/(\d+)$/);
@@ -8166,7 +8004,7 @@ function InboundShipmentSelection({
       const ships = Array.isArray(t?.shipments) ? t.shipments : [];
       setShipments(ships);
 
-      // ✅ 各シップメントの数量情報を取得
+      // 各シップメントの数量情報を取得
       const qtyMap = new Map();
       try {
         await Promise.all(
@@ -8318,7 +8156,7 @@ function InboundShipmentSelection({
                           status === "READY_TO_SHIP" ? "配送準備完了" :
                           status || "不明";
           
-          // ✅ 数量情報を取得
+          // 数量情報を取得
           const qtyInfo = shipmentQuantities.get(shipmentId) || { total: 0, received: 0 };
           const qtyText = `${qtyInfo.received}/${qtyInfo.total}`;
 
@@ -8326,7 +8164,7 @@ function InboundShipmentSelection({
             <s-box key={shipmentId} padding="none">
               <s-clickable 
                 onClick={() => {
-                  // ✅ 入庫済みでもInboundListに遷移（readOnlyモードで表示）
+                  // 入庫済みでもInboundListに遷移（readOnlyモードで表示）
                   onSelectShipment(shipmentId);
                 }}
               >
@@ -8380,7 +8218,7 @@ function InboundShipmentSelection({
    - JAN/SKU -> variant は resolveVariantByCode（永続キャッシュ）を利用
    - footer に滞留数/処理率を表示
    - ✅ addOrIncrement の hit 判定が stale にならないよう rows/extras を ref で最新参照
-========================= */
+*/
 
 function InboundList({
   showImages,
@@ -8389,7 +8227,7 @@ function InboundList({
   appState,
   setAppState,
   onBack,
-  onAfterReceive, // ✅ Phase 1.3: 確定後の遷移制御
+  onAfterReceive, // Phase 1.3: 確定後の遷移制御
   dialog,
   setHeader,
   setFooter,
@@ -8399,8 +8237,8 @@ function InboundList({
   const locIndex = useLocationsIndex(appState, setAppState);
   const inbound = getStateSlice(appState, "inbound", {
     selectedShipmentId: "",
-    selectedShipmentIds: [],        // ✅ Phase 1.4: 複数Shipment対応
-    shipmentMode: "single",         // ✅ Phase 1.4: "single" | "multiple"
+    selectedShipmentIds: [],        // Phase 1.4: 複数Shipment対応
+    shipmentMode: "single",         // Phase 1.4: "single" | "multiple"
     selectedTransferId: "",
     selectedTransferName: "",
     selectedOriginName: "",
@@ -8412,7 +8250,7 @@ function InboundList({
   });
   const selectedShipmentId = String(inbound.selectedShipmentId || "").trim();
   
-  // ✅ Phase 1.4: 複数Shipmentモードの判定
+  // Phase 1.4: 複数Shipmentモードの判定
   const isMultipleMode = inbound.shipmentMode === "multiple" && 
                          Array.isArray(inbound.selectedShipmentIds) && 
                          inbound.selectedShipmentIds.length > 1;
@@ -8426,10 +8264,10 @@ function InboundList({
     { id: "other", label: "その他" },
   ];
 
-  // ✅ 予定差異モーダル：各カテゴリの表示は“1件だけ”にして、残りは「…他N件」
+  // 予定差異モーダル：各カテゴリの表示は“1件だけ”にして、残りは「…他N件」
   const DIFF_PREVIEW_LIMIT = 1;
 
-  // ✅ 長い商品名で縦に伸びないように 1 行 + 省略
+  // 長い商品名で縦に伸びないように 1 行 + 省略
   const oneLineStyle = {
     whiteSpace: "nowrap",
     overflow: "hidden",
@@ -8455,7 +8293,7 @@ function InboundList({
         const overIndex = buildInboundOverIndex_(audit, { locationId: locationGid });
         const extrasIndex = buildInboundExtrasIndex_(audit, { locationId: locationGid });
         
-        // ✅ 拒否分を集計（shipmentsのlineItemsから取得）
+        // 拒否分を集計（shipmentsのlineItemsから取得）
         const shipmentIds = list.flatMap((t) => 
           (Array.isArray(t?.shipments) ? t.shipments : [])
             .map((s) => String(s?.id || "").trim())
@@ -8487,7 +8325,7 @@ function InboundList({
         const overIndex = buildInboundOverIndex_(audit, { locationId: locationGid });
         const extrasIndex = buildInboundExtrasIndex_(audit, { locationId: locationGid });
         
-        // ✅ 拒否分を集計（shipmentsのlineItemsから取得）
+        // 拒否分を集計（shipmentsのlineItemsから取得）
         const shipmentIds = list.flatMap((t) => 
           (Array.isArray(t?.shipments) ? t.shipments : [])
             .map((s) => String(s?.id || "").trim())
@@ -8506,7 +8344,7 @@ function InboundList({
     }
   };
 
-  // ✅ 追加：InboundList を開いたら pendingTransfers を自動取得（ヘッダーの #T / 出庫元 / 入庫先用）
+  // 追加：InboundList を開いたら pendingTransfers を自動取得（ヘッダーの #T / 出庫元 / 入庫先用）
   useEffect(() => {
     if (!locationGid) return;
     refreshPending().catch(() => {});
@@ -8520,10 +8358,10 @@ function InboundList({
 
   const [rows, setRows] = useState([]);
   const [extras, setExtras] = useState([]);
-  const [lineItemsPageInfo, setLineItemsPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ✅ ページネーション用
-  const [loadingMore, setLoadingMore] = useState(false); // ✅ 追加読み込み中フラグ
+  const [lineItemsPageInfo, setLineItemsPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ページネーション用
+  const [loadingMore, setLoadingMore] = useState(false); // 追加読み込み中フラグ
 
-  // ✅ stale回避用 ref
+  // stale回避用 ref
   const rowsRef = useRef([]);
   const extrasRef = useRef([]);
   useEffect(() => {
@@ -8558,7 +8396,7 @@ function InboundList({
     scanDisabledRef.current = scanDisabled;
   }, [scanDisabled]);
 
-  // ✅ readOnly中の編集を完全に止める（state更新をブロック）
+  // readOnly中の編集を完全に止める（state更新をブロック）
   const readOnlyRef = useRef(false);
   const toastReadOnlyOnceRef = useRef(false);
 
@@ -8594,18 +8432,18 @@ function InboundList({
   const debouncedAddQuery = useDebounce(addQuery.trim(), 200);
   const [addLoading, setAddLoading] = useState(false);
   const [addCandidates, setAddCandidates] = useState([]);
-  const [addCandidatesDisplayLimit, setAddCandidatesDisplayLimit] = useState(50); // ✅ 初期表示50件（「さらに表示」で追加読み込み可能）
+  const [addCandidatesDisplayLimit, setAddCandidatesDisplayLimit] = useState(50); // 初期表示50件（「さらに表示」で追加読み込み可能）
 
   const [addQtyById, setAddQtyById] = useState({});
 
   const clearAddSearch = useCallback(() => {
     setAddQuery("");
     setAddCandidates([]);
-    setAddCandidatesDisplayLimit(20); // ✅ 検索クリア時に表示件数もリセット
+    setAddCandidatesDisplayLimit(20); // 検索クリア時に表示件数もリセット
     setAddQtyById({});
   }, []);
 
-  // ✅ 「さらに表示」ボタン用（Inbound）
+  // 「さらに表示」ボタン用（Inbound）
   const handleShowMoreAddCandidates = useCallback(() => {
     setAddCandidatesDisplayLimit((prev) => prev + 20);
   }, []);
@@ -8649,7 +8487,7 @@ function InboundList({
       setScanDisabled(false);
 
       setShipmentLoading(true);
-      // ✅ 既存データをクリア（一度読み込まれたデータが残らないように）
+      // 既存データをクリア（一度読み込まれたデータが残らないように）
       setLineItemsPageInfo({ hasNextPage: false, endCursor: null });
     }, signal);
 
@@ -8659,12 +8497,12 @@ function InboundList({
         signal,
       });
 
-      // ✅ pageInfoを処理
+      // pageInfoを処理
       const s = shipmentResult || {};
       const pageInfo = shipmentResult?.pageInfo || { hasNextPage: false, endCursor: null };
       safeSet(() => setLineItemsPageInfo(pageInfo), signal);
 
-      // ✅ 監査ログの over（過剰分）を「明細（SKU行）」にも反映するために取得
+      // 監査ログの over（過剰分）を「明細（SKU行）」にも反映するために取得
       //    ※ readInboundAuditLog / buildInboundOverItemIndex_ は事前に定義済み前提
       let overByInventoryItemId = new Map();
       try {
@@ -8677,25 +8515,25 @@ function InboundList({
         overByInventoryItemId = new Map();
       }
 
-      // ✅ baseRows は safeSet の外で作る（同期処理なのでOK）
+      // baseRows は safeSet の外で作る（同期処理なのでOK）
       const baseRows = (s.lineItems ?? []).map((li) => {
         const plannedQty = Number(li.quantity ?? 0);
 
-        // ✅ Shopify側の実績（未入庫=0 / 部分受領は>0）
+        // Shopify側の実績（未入庫=0 / 部分受領は>0）
         const alreadyAcceptedQty = Math.max(0, Number(li.acceptedQuantity ?? 0));
         const alreadyRejectedQty = Math.max(0, Number(li.rejectedQuantity ?? 0));
 
-        // ✅ 監査ログ over（過剰分）を取得（表示用のみ、加算しない）
+        // 監査ログ over（過剰分）を取得（表示用のみ、加算しない）
         //    GraphQLのacceptedQuantityは既に過剰分を含んでいるため、加算すると2倍になる
         const inventoryItemId = li.inventoryItemId;
         const overAcceptedQty = Math.max(
           0,
           Math.floor(Number(inventoryItemId ? overByInventoryItemId.get(String(inventoryItemId)) || 0 : 0))
         );
-        // ✅ 修正：acceptedQuantityは既に過剰分を含んでいるため、監査ログの過剰分は加算しない
+        // 修正：acceptedQuantityは既に過剰分を含んでいるため、監査ログの過剰分は加算しない
         const alreadyAcceptedTotalQty = alreadyAcceptedQty;
 
-        // ✅ 初期表示は「accepted」に合わせる（acceptedQuantityは既に過剰分を含んでいる）
+        // 初期表示は「accepted」に合わせる（acceptedQuantityは既に過剰分を含んでいる）
         const initialReceiveQty = alreadyAcceptedTotalQty;
 
         return {
@@ -8709,8 +8547,8 @@ function InboundList({
           plannedQty,
           alreadyAcceptedQty,        // Shopify accepted（そのまま）
           alreadyRejectedQty,
-          overAcceptedQty,           // ✅ 追加：監査ログ over
-          alreadyAcceptedTotalQty,   // ✅ 追加：accepted + over
+          overAcceptedQty,           // 追加：監査ログ over
+          alreadyAcceptedTotalQty,   // 追加：accepted + over
           receiveQty: initialReceiveQty,
         };
       });
@@ -8724,7 +8562,7 @@ function InboundList({
         draft = null;
       }
 
-      // ✅ safeSet の中は “同期” で state を当てるだけにする
+      // safeSet の中は “同期” で state を当てるだけにする
       safeSet(() => {
         setShipment(s);
 
@@ -8761,7 +8599,7 @@ function InboundList({
 
   const loadShipmentById = loadShipment;
 
-  // ✅ Phase 1.4: formatShipmentLabel関数（InboundList内で使用）- loadMultipleShipmentsより前に定義
+  // Phase 1.4: formatShipmentLabel関数（InboundList内で使用）- loadMultipleShipmentsより前に定義
   const formatShipmentLabelLocal = useCallback((transferName, index) => {
     const base = String(transferName || "").trim() || "T0000";
     const match = base.match(/(\d+)$/);
@@ -8769,7 +8607,7 @@ function InboundList({
     return `#${numPart}-${index + 1}`;
   }, []);
 
-  // ✅ Phase 1.4: 複数Shipmentモード用のデータ取得
+  // Phase 1.4: 複数Shipmentモード用のデータ取得
   const loadMultipleShipments = useCallback(async (shipmentIds, { signal } = {}) => {
     if (!Array.isArray(shipmentIds) || shipmentIds.length === 0) {
       toast("Shipment ID が空です");
@@ -8831,7 +8669,7 @@ function InboundList({
         overByInventoryItemId = new Map();
       }
 
-      // ✅ まとめて表示モード：下書きを先に読み込む
+      // まとめて表示モード：下書きを先に読み込む
       const transferId = String(inbound?.selectedTransferId || "").trim();
       let draft = null;
       try {
@@ -8856,15 +8694,15 @@ function InboundList({
           );
           const alreadyAcceptedTotalQty = alreadyAcceptedQty;
           
-          // ✅ 下書きから復元（shipmentIdとshipmentLineItemIdで一致する行を探す）
+          // 下書きから復元（shipmentIdとshipmentLineItemIdで一致する行を探す）
           let initialReceiveQty = alreadyAcceptedTotalQty;
           if (draft && Array.isArray(draft.rows)) {
             const savedRow = draft.rows.find((r) => {
-              // ✅ shipmentIdが保存されている場合は、shipmentIdとshipmentLineItemIdの両方が一致する必要がある
+              // shipmentIdが保存されている場合は、shipmentIdとshipmentLineItemIdの両方が一致する必要がある
               if (r.shipmentId) {
                 return String(r.shipmentId) === String(s.id) && String(r.shipmentLineItemId) === String(li.id);
               }
-              // ✅ shipmentIdが保存されていない場合（旧データ）は、shipmentLineItemIdのみで一致
+              // shipmentIdが保存されていない場合（旧データ）は、shipmentLineItemIdのみで一致
               return String(r.shipmentLineItemId) === String(li.id);
             });
             if (savedRow) {
@@ -8875,8 +8713,8 @@ function InboundList({
           return {
             key: `${s.id}-${li.id}`, // 複数Shipment対応のため、shipmentIdも含める
             shipmentLineItemId: li.id,
-            shipmentId: s.id,              // ✅ Phase 1.4: shipmentIdを付与
-            shipmentLabel: shipmentLabel,  // ✅ Phase 1.4: shipmentLabelを付与
+            shipmentId: s.id,              // Phase 1.4: shipmentIdを付与
+            shipmentLabel: shipmentLabel,  // Phase 1.4: shipmentLabelを付与
             inventoryItemId: li.inventoryItemId,
             title: li.title || li.sku || li.inventoryItemId || "(unknown)",
             sku: li.sku || "",
@@ -8897,7 +8735,7 @@ function InboundList({
         setRows(allRows);
         setShipmentError("");
         
-        // ✅ 下書きから復元（extras、reason、note、onlyUnreceivedも復元）
+        // 下書きから復元（extras、reason、note、onlyUnreceivedも復元）
         if (draft) {
           setExtras(Array.isArray(draft.extras) ? draft.extras : []);
           setOnlyUnreceived(!!draft.onlyUnreceived);
@@ -8917,7 +8755,7 @@ function InboundList({
   }, [showImages, liteMode, locationGid, inbound?.selectedTransferName, formatShipmentLabelLocal]);
 
   useEffect(() => {
-    // ✅ Phase 1.4: 複数Shipmentモードの場合
+    // Phase 1.4: 複数Shipmentモードの場合
     if (isMultipleMode) {
       const selectedShipmentIds = Array.isArray(inbound.selectedShipmentIds) 
         ? inbound.selectedShipmentIds 
@@ -8946,7 +8784,7 @@ function InboundList({
       setRows([]);
       setExtras([]);
       setShipmentError("");
-      // ✅ lineItemsPageInfoもクリア
+      // lineItemsPageInfoもクリア
       setLineItemsPageInfo({ hasNextPage: false, endCursor: null });
       return;
     }
@@ -8960,7 +8798,7 @@ function InboundList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMultipleMode, selectedShipmentId, inbound.selectedShipmentIds, showImages, liteMode, loadMultipleShipments]);
 
-  // ✅ 商品リストの追加読み込み
+  // 商品リストの追加読み込み
   const loadMoreLineItems_ = useCallback(async () => {
     if (loadingMore || !lineItemsPageInfo?.hasNextPage || !lineItemsPageInfo?.endCursor || !selectedShipmentId || !locationGid) return;
 
@@ -8977,7 +8815,7 @@ function InboundList({
       const newLineItems = Array.isArray(newShip?.lineItems) ? newShip.lineItems : [];
       const newPageInfo = newShip?.pageInfo || { hasNextPage: false, endCursor: null };
 
-      // ✅ 監査ログの over（過剰分）を「明細（SKU行）」にも反映するために取得
+      // 監査ログの over（過剰分）を「明細（SKU行）」にも反映するために取得
       let overByInventoryItemId = new Map();
       try {
         if (locationGid) {
@@ -8991,7 +8829,7 @@ function InboundList({
         overByInventoryItemId = new Map();
       }
 
-      // ✅ 新しい行を作成
+      // 新しい行を作成
       const newBaseRows = newLineItems.map((li) => {
         const plannedQty = Number(li.quantity ?? 0);
         const alreadyAcceptedQty = Math.max(0, Number(li.acceptedQuantity ?? 0));
@@ -9002,7 +8840,7 @@ function InboundList({
           0,
           Math.floor(Number(inventoryItemId ? overByInventoryItemId.get(String(inventoryItemId)) || 0 : 0))
         );
-        // ✅ 修正：acceptedQuantityは既に過剰分を含んでいるため、監査ログの過剰分は加算しない
+        // 修正：acceptedQuantityは既に過剰分を含んでいるため、監査ログの過剰分は加算しない
         const alreadyAcceptedTotalQty = alreadyAcceptedQty;
         const initialReceiveQty = alreadyAcceptedTotalQty;
 
@@ -9023,7 +8861,7 @@ function InboundList({
         };
       });
 
-      // ✅ 既存のrowsに追加（同一shipmentLineItemIdは上書きしない）
+      // 既存のrowsに追加（同一shipmentLineItemIdは上書きしない）
       //    rowsRef.currentを使用してstale closureを避ける
       const existingMap = new Map();
       const currentRows = rowsRef.current || [];
@@ -9040,7 +8878,6 @@ function InboundList({
       setRows(Array.from(existingMap.values()));
       setLineItemsPageInfo(newPageInfo);
     } catch (e) {
-      console.error("loadMoreLineItems_ error:", e);
       toast(`追加読み込みエラー: ${toUserMessage(e)}`);
     } finally {
       setLoadingMore(false);
@@ -9053,11 +8890,11 @@ function InboundList({
     (async () => {
       const q = String(debouncedAddQuery || "").trim();
 
-      // ✅ 1文字未満は候補を消す
+      // 1文字未満は候補を消す
       if (q.length < 1) {
         if (alive) {
           setAddCandidates([]);
-          setAddCandidatesDisplayLimit(20); // ✅ 検索クリア時に表示件数もリセット
+          setAddCandidatesDisplayLimit(20); // 検索クリア時に表示件数もリセット
         }
         return;
       }
@@ -9073,7 +8910,7 @@ function InboundList({
 
         if (!alive) return;
         setAddCandidates(Array.isArray(list) ? list : []);
-        setAddCandidatesDisplayLimit(20); // ✅ 新しい検索時は表示件数をリセット
+        setAddCandidatesDisplayLimit(20); // 新しい検索時は表示件数をリセット
       } catch (e) {
         if (!alive) return;
         setAddCandidates([]);
@@ -9088,7 +8925,7 @@ function InboundList({
     };
   }, [debouncedAddQuery, showImages, liteMode]);
 
-  // ✅ 受領入力の安全クランプ：下限=既受領（減らせない）/ 上限は設けない（予定超過を許可）
+  // 受領入力の安全クランプ：下限=既受領（減らせない）/ 上限は設けない（予定超過を許可）
   const clampReceiveQty_ = (r, n) => {
     const min = Math.max(0, Math.floor(Number(r?.alreadyAcceptedTotalQty ?? (Number(r?.alreadyAcceptedQty || 0) + Number(r?.overAcceptedQty || 0)))));
     const v = Math.max(min, Math.floor(Number(n || 0)));
@@ -9157,7 +8994,7 @@ function InboundList({
     );
   };
 
-  // ✅ 同一行加算（inventoryItemId優先） ※ rows/extras は ref で最新参照
+  // 同一行加算（inventoryItemId優先） ※ rows/extras は ref で最新参照
   const addOrIncrementByResolved = useCallback((resolved, delta = 1, opts = {}) => {
     if (readOnlyRef.current) return denyEdit_();
     const inventoryItemId = resolved?.inventoryItemId;
@@ -9286,7 +9123,7 @@ function InboundList({
     })();
   };
 
-  // ✅ スキャン確定（入力フィールド用）
+  // スキャン確定（入力フィールド用）
   const scanFinalizeSoon = (nextValue) => {
     const next = String(nextValue ?? "");
     lastScanValueRef.current = next;
@@ -9315,7 +9152,7 @@ function InboundList({
     }, FINALIZE_MS);
   };
 
-  // ✅ 外部スキャン（SCAN_QUEUE_KEY）を取り出して scanQueueRef に合流（100msで1件ずつ）
+  // 外部スキャン（SCAN_QUEUE_KEY）を取り出して scanQueueRef に合流（100msで1件ずつ）
   useEffect(() => {
     let stop = false;
 
@@ -9330,7 +9167,7 @@ function InboundList({
       const head = String(list[0] || "").trim();
       const rest = list.slice(1);
 
-      // ✅ lastV/lastT を壊さない（...q を維持）
+      // lastV/lastT を壊さない（...q を維持）
       await SHOPIFY.storage.set(SCAN_QUEUE_KEY, { ...q, items: rest, updatedAt: Date.now() });
 
       if (!head) return;
@@ -9383,23 +9220,23 @@ function InboundList({
   const overQtyTotal = overRows.reduce((a, x) => a + Number(x.overQty || 0), 0);
   const extrasQtyTotal = extras.reduce((a, x) => a + Number(x.receiveQty || 0), 0);
 
-  // ✅ 追加：不足（予定 > 受領 の差分合計）
+  // 追加：不足（予定 > 受領 の差分合計）
   const shortageQtyTotal = (Array.isArray(rows) ? rows : []).reduce((a, r) => {
     const planned = Number(r.plannedQty || 0);
     const received = Number(r.receiveQty || 0);
     return a + Math.max(0, planned - received);
   }, 0);
 
-  // ✅ 警告：予定外 / 超過 / 不足 のいずれかがあれば warning 扱い
+  // 警告：予定外 / 超過 / 不足 のいずれかがあれば warning 扱い
   const hasWarning =
     overRows.length > 0 ||
     extras.length > 0 ||
     shortageQtyTotal > 0;
 
-  // ✅ GID/文字列差を吸収（末尾IDで一致させる）
+  // GID/文字列差を吸収（末尾IDで一致させる）
   const normalizeId_ = (v) => String(v || "").trim().split("/").pop();
 
-  // ✅ shipmentId（選択中）から、それを含む Transfer を逆引き（出庫元/入庫先/Transfer名を確実に出す）
+  // shipmentId（選択中）から、それを含む Transfer を逆引き（出庫元/入庫先/Transfer名を確実に出す）
   const transferForShipment = useMemo(() => {
     const sidRaw = String(shipment?.id || selectedShipmentId || "").trim();
     if (!sidRaw) return null;
@@ -9409,7 +9246,7 @@ function InboundList({
     const p = Array.isArray(pendingTransfers) ? pendingTransfers : [];
     const a = Array.isArray(allTransfers) ? allTransfers : [];
 
-    // ✅ pending優先でユニーク化
+    // pending優先でユニーク化
     const merged = [];
     const seen = new Set();
     [...p, ...a].forEach((t) => {
@@ -9466,18 +9303,18 @@ function InboundList({
     if (!readOnly) toastReadOnlyOnceRef.current = false;
   }, [readOnly]);
 
-  // ✅ 下書き（自動保存）：Transfer単位で保存（transferIdが無ければshipmentIdでフォールバック）
-  // ✅ まとめて表示モードでも動作（transferIdで保存されるため、複数Shipmentでも1つの下書きとして保存）
+  // 下書き（自動保存）：Transfer単位で保存（transferIdが無ければshipmentIdでフォールバック）
+  // まとめて表示モードでも動作（transferIdで保存されるため、複数Shipmentでも1つの下書きとして保存）
   useEffect(() => {
     if (!locationGid) return;
     if (shipmentLoading) return; // load中に “空保存” して上書きしない
     if (readOnlyRef.current) return;
     
-    // ✅ まとめて表示モードの場合：shipment?.idがなくても、transferIdがあれば保存可能
+    // まとめて表示モードの場合：shipment?.idがなくても、transferIdがあれば保存可能
     const transferId = String(inbound?.selectedTransferId || "").trim();
     const shipmentId = String(shipment?.id || "").trim();
     
-    // ✅ まとめて表示モードの場合：transferIdがあれば保存可能（shipment?.idは最初のShipmentのみ）
+    // まとめて表示モードの場合：transferIdがあれば保存可能（shipment?.idは最初のShipmentのみ）
     if (!transferId && !shipmentId) return; // transferIdもshipmentIdもない場合はスキップ
 
     const timer = setTimeout(() => {
@@ -9489,7 +9326,7 @@ function InboundList({
             shipmentId: shipmentId || (isMultipleMode && Array.isArray(inbound.selectedShipmentIds) && inbound.selectedShipmentIds.length > 0 ? inbound.selectedShipmentIds[0] : ""),
             rows: (rowsRef.current || []).map((r) => ({
               shipmentLineItemId: r.shipmentLineItemId,
-              shipmentId: r.shipmentId || null, // ✅ まとめて表示モード用：shipmentIdも保存
+              shipmentId: r.shipmentId || null, // まとめて表示モード用：shipmentIdも保存
               receiveQty: Number(r.receiveQty || 0),
             })),
             extras: Array.isArray(extrasRef.current) ? extrasRef.current : [],
@@ -9529,15 +9366,15 @@ function InboundList({
     extras,
   ]);
 
-  // ✅ 確定できる条件（Shipmentあり + 処理中でない + スキャン停止でない）
+  // 確定できる条件（Shipmentあり + 処理中でない + スキャン停止でない）
   const canConfirm = !!shipment?.id && !receiveSubmitting && !scanDisabled && !readOnly;
 
-  const warningReady = !hasWarning ? true : !!ackWarning; // ✅ 警告がある時だけ確認(ack)必須
+  const warningReady = !hasWarning ? true : !!ackWarning; // 警告がある時だけ確認(ack)必須
 
-  // ✅ モーダルを開ける条件（確定可能 + warning条件が揃っている）
+  // モーダルを開ける条件（確定可能 + warning条件が揃っている）
   const canOpenConfirm = canConfirm;
 
-  // ✅ 表示対象行（未受領のみフィルタ）
+  // 表示対象行（未受領のみフィルタ）
   const visibleRows = useMemo(() => {
     const base = Array.isArray(rows) ? rows : [];
     if (!onlyUnreceived) return base;
@@ -9551,7 +9388,7 @@ function InboundList({
     });
   }, [rows, onlyUnreceived]);
 
-  // ✅ 表示する入庫ID：#T00... を優先（なければ #末尾8桁フォールバック）
+  // 表示する入庫ID：#T00... を優先（なければ #末尾8桁フォールバック）
   const headNo = useMemo(() => {
     const raw = String(
       transferForShipment?.name || inbound?.selectedTransferName || ""
@@ -9565,7 +9402,7 @@ function InboundList({
     return s ? `#${s.slice(-8)}` : "—";
   }, [transferForShipment?.name, inbound?.selectedTransferName, shipment?.id, selectedShipmentId]);
 
-  // ✅ 出庫元名：Transferの originName を最優先（shipment側に無いのでここが本命）
+  // 出庫元名：Transferの originName を最優先（shipment側に無いのでここが本命）
   const originName = useMemo(() => {
     const n = String(
       transferForShipment?.originName || inbound?.selectedOriginName || ""
@@ -9573,7 +9410,7 @@ function InboundList({
     return n || "—";
   }, [transferForShipment?.originName, inbound?.selectedOriginName]);
 
-  // ✅ 入庫先名：Transferの destinationName を最優先。無ければ現在ロケの名前へ
+  // 入庫先名：Transferの destinationName を最優先。無ければ現在ロケの名前へ
   const inboundTo = useMemo(() => {
     const n = String(
       transferForShipment?.destinationName || inbound?.selectedDestinationName || ""
@@ -9584,7 +9421,7 @@ function InboundList({
     return String(fallback || "").trim() || "—";
   }, [transferForShipment?.destinationName, inbound?.selectedDestinationName, locationGid, locIndex.byId]);
 
-  // ✅ 処理ログのstate定義（receiveConfirmより前に定義する必要がある）
+  // 処理ログのstate定義（receiveConfirmより前に定義する必要がある）
   const [processLog, setProcessLog] = useState([]);
 
   const receiveConfirm = useCallback(async ({ finalize = true } = {}) => {
@@ -9598,7 +9435,7 @@ function InboundList({
       return false;
     }
 
-    // ✅ 警告が出ている場合：理由は不要、確認（ackWarning）だけ必須
+    // 警告が出ている場合：理由は不要、確認（ackWarning）だけ必須
     if (hasWarning && !ackWarning) {
       toast("差異があります。内容を確認してから確定してください。");
       return false;
@@ -9608,7 +9445,7 @@ function InboundList({
     receiveLockRef.current = true;
     setReceiveSubmitting(true);
     
-    // ✅ 処理ログをリセット（デバッグ用、必要に応じてコメントアウト可能）
+    // 処理ログをリセット（デバッグ用、必要に応じてコメントアウト可能）
     // setProcessLog([]);
     // const processLogArray = [];
     // const addProcessLog = (message) => {
@@ -9617,11 +9454,11 @@ function InboundList({
     //   // 最新のログをstateに保存（表示用）
     //   setProcessLog([...processLogArray]);
     // };
-    // ✅ ログ機能を無効化（メモ保存処理は継続）
+    // ログ機能を無効化（メモ保存処理は継続）
     const addProcessLog = () => {}; // 空関数（ログを記録しない）
 
     try {
-      // ✅ ステップ0: 確定処理の前に、メモまたは予定外商品がある場合は管理画面メモを先に更新
+      // ステップ0: 確定処理の前に、メモまたは予定外商品がある場合は管理画面メモを先に更新
       // （確定後はTransferのステータスが変わり、noteが編集できなくなる可能性があるため）
       const transferId = String(
         transferForShipment?.id || 
@@ -9632,13 +9469,13 @@ function InboundList({
       addProcessLog(`開始: transferId=${transferId || "なし"}`);
 
       if (transferId) {
-        // ✅ メモまたは予定外商品の情報を準備（確定処理前に取得）
+        // メモまたは予定外商品の情報を準備（確定処理前に取得）
         const noteText = String(note || "").trim();
         const hasNote = noteText.length > 0;
         
         addProcessLog(`メモチェック: hasNote=${hasNote}, noteText="${noteText.slice(0, 50)}"`);
         
-        // ✅ 予定外商品と予定超過の情報を準備（確定処理前に取得）
+        // 予定外商品と予定超過の情報を準備（確定処理前に取得）
         // 注意: この時点では確定処理前なので、実際の確定結果はまだ分からない
         // そのため、現在の画面の状態から情報を取得
         const overForLog = (overRows || [])
@@ -9699,7 +9536,7 @@ function InboundList({
 
             addProcessLog(`メモ内容生成: length=${noteLine.length}, preview="${noteLine.slice(0, 100)}"`);
 
-            // ✅ メモ内容が空でないことを確認
+            // メモ内容が空でないことを確認
             if (String(noteLine || "").trim()) {
               const ok = await appendInventoryTransferNote_({
                 transferId,
@@ -9732,7 +9569,7 @@ function InboundList({
 
       // 0) shortage（不足）を payload 化（※完了(finalize)のときだけ REJECT で送る）
       //    ✅ delta=0 でも「不足がある」なら「完了」は確定できる
-      // ✅ Phase 3-3: extraDeltasMerged / rejectedDeltas は single/multiple 共通で使用するため外側で宣言
+      // Phase 3-3: extraDeltasMerged / rejectedDeltas は single/multiple 共通で使用するため外側で宣言
       let extraDeltasMerged;
       let rejectedDeltas = [];
 
@@ -10062,11 +9899,11 @@ function InboundList({
       }
 
       // 4) extras（＋予定超過fallback分）がある場合は、入庫ロケーションに在庫を加算（Activate → Adjust）
-      // ✅ 同時に出庫元ロケーションの在庫をマイナス処理（single/multiple 共通）
+      // 同時に出庫元ロケーションの在庫をマイナス処理（single/multiple 共通）
       if (extraDeltasMerged.length > 0) {
         const inventoryItemIds = extraDeltasMerged.map((d) => d.inventoryItemId);
 
-        // ✅ 入庫先に在庫を追加
+        // 入庫先に在庫を追加
         const act = await ensureInventoryActivatedAtLocation({
           locationId: locationGid,
           inventoryItemIds,
@@ -10087,20 +9924,12 @@ function InboundList({
           deltas: extraDeltasMerged,
         });
         
-        // ✅ 出庫元の在庫をマイナス処理
+        // 出庫元の在庫をマイナス処理
         const originLocationId = transferForShipment?.originLocationId || 
           transferForShipment?.origin?.location?.id || 
           null;
         
         if (!originLocationId) {
-          // ✅ デバッグ用：originLocationIdが取得できない場合の警告
-          console.warn("[receiveConfirm] 出庫元のlocationIdが取得できませんでした", {
-            transferForShipment: transferForShipment ? {
-              id: transferForShipment.id,
-              originLocationId: transferForShipment.originLocationId,
-              origin: transferForShipment.origin,
-            } : null,
-          });
           toast("警告: 出庫元のlocationIdが取得できませんでした（出庫元の在庫調整をスキップします）");
         } else {
           // 出庫元でも在庫を有効化（必要に応じて）
@@ -10134,8 +9963,8 @@ function InboundList({
           const reasonText = String(reason || "").trim();
           const noteText = String(note || "").trim();
 
-          // ✅ overRows は「この確定で発生した過剰分（planned超え）」の増分
-          // ✅ extraDeltasMerged は「予定外入荷 + 過剰fallback」を含む場合がある
+          // overRows は「この確定で発生した過剰分（planned超え）」の増分
+          // extraDeltasMerged は「予定外入荷 + 過剰fallback」を含む場合がある
           const overForLog = (overRows || [])
             .map((x) => ({
               inventoryItemId: String(x?.inventoryItemId || "").trim(),
@@ -10144,7 +9973,7 @@ function InboundList({
             }))
             .filter((x) => x.inventoryItemId && x.qty > 0);
 
-          // ✅ extrasForLog に title, sku, barcode, imageUrl を追加（履歴表示用・管理画面メモ用）
+          // extrasForLog に title, sku, barcode, imageUrl を追加（履歴表示用・管理画面メモ用）
           const extrasMap = new Map();
           (extras || []).forEach((x) => {
             const id = String(x?.inventoryItemId || "").trim();
@@ -10188,12 +10017,12 @@ function InboundList({
         }
       }
 
-      // ✅ 在庫調整履歴をメモに追加（確定処理後に実行）
+      // 在庫調整履歴をメモに追加（確定処理後に実行）
       if (transferId && (rejectedDeltas.length > 0 || extraDeltasMerged.length > 0)) {
         try {
           const adjustments = [];
           
-          // ✅ 拒否入庫による出庫元への在庫戻し
+          // 拒否入庫による出庫元への在庫戻し
           if (rejectedDeltas.length > 0) {
             const originLocationId = transferForShipment?.originLocationId || 
               transferForShipment?.origin?.location?.id || 
@@ -10214,7 +10043,7 @@ function InboundList({
             });
           }
           
-          // ✅ 予定外入庫・過剰入庫による在庫調整
+          // 予定外入庫・過剰入庫による在庫調整
           if (extraDeltasMerged.length > 0) {
             const originLocationId = transferForShipment?.originLocationId || 
               transferForShipment?.origin?.location?.id || 
@@ -10226,7 +10055,7 @@ function InboundList({
               transferForShipment?.destination?.name || 
               "入庫先";
             
-            // ✅ extrasMapを再構築（在庫調整履歴用）
+            // extrasMapを再構築（在庫調整履歴用）
             const extrasMapForAdjustment = new Map();
             (extras || []).forEach((x) => {
               const id = String(x?.inventoryItemId || "").trim();
@@ -10285,15 +10114,12 @@ function InboundList({
               line: adjustmentNote,
           });
         }
-      } catch (e) {
-          // 在庫調整履歴のメモ追加失敗は警告のみ（確定処理は成功している）
-          console.warn("在庫調整履歴のメモ追加に失敗:", e);
-        }
+      } catch (e) {}
       }
 
       toast(finalize ? "入庫を完了しました" : "一部入庫を確定しました");
 
-      // ✅ 確定後：下書きをリセット（次回に残さない）
+      // 確定後：下書きをリセット（次回に残さない）
       try {
         await clearInboundDraft({
           locationGid,
@@ -10317,7 +10143,7 @@ function InboundList({
         }
       } catch (_) {}
 
-      // ✅ Phase 1.3: 確定後の遷移制御（シップメント選択モードの場合のみ）
+      // Phase 1.3: 確定後の遷移制御（シップメント選択モードの場合のみ）
       // まとめて表示（multiple mode）の時は既存の動作を維持（onAfterReceive を呼ばない）
       if (!isMultipleMode && typeof onAfterReceive === "function") {
         const transferId = String(
@@ -10327,10 +10153,7 @@ function InboundList({
         ).trim();
         if (transferId) {
           // 非同期で実行（await しない - 遷移処理なので）
-          onAfterReceive(transferId).catch((e) => {
-            console.error("onAfterReceive error:", e);
-            // エラー時は通常の戻る動作（onBack）は呼ばない - 既に画面更新済み
-          });
+          onAfterReceive(transferId).catch(() => {});
           return true;
         }
       }
@@ -10339,10 +10162,10 @@ function InboundList({
     } catch (e) {
       const msg = toUserMessage(e);
 
-      // ✅ まず必ず可視化（POSで modal を await すると“確定中..”で固まることがある）
+      // まず必ず可視化（POSで modal を await すると“確定中..”で固まることがある）
       toast(`入庫確定エラー: ${msg}`);
 
-      // ✅ dialog は “await しない” （表示できれば出す、できなくても処理は戻す）
+      // dialog は “await しない” （表示できれば出す、できなくても処理は戻す）
       try {
         dialog?.alert?.({
           type: "error",
@@ -10374,7 +10197,7 @@ function InboundList({
     loadShipmentById,
     loadMultipleShipments,
     isMultipleMode,
-    onAfterReceive, // ✅ Phase 1.3: 確定後の遷移制御
+    onAfterReceive, // Phase 1.3: 確定後の遷移制御
     overRows,
     setProcessLog,
     shortageRows,
@@ -10382,12 +10205,6 @@ function InboundList({
     scanDisabled,
   ]);
 
-  // =========================
-  // Header（固定領域 / 出庫と同じ setHeader 方式）
-  //  - 1行目：#番号 + 出庫元/入庫先
-  //  - 右：軽量 / 全受領 / リセット
-  //  - 2行目：リスト外追加（検索）＋結果
-  // =========================
   const headerNode = useMemo(() => {
     if (!setHeader) return null;
 
@@ -10431,30 +10248,14 @@ function InboundList({
               >
                 入庫先：{inboundTo}
               </s-text>
-
-              {/* 4行目：配送業者（未登録は空白） */}
-              <s-text
-                size="small"
-                tone="subdued"
-                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-              >
-                配送業者：{String(shipment?.tracking?.company ?? "").trim() || " "}
+              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                配送業者: {String(shipment?.tracking?.company || "").trim() || ""}
               </s-text>
-              {/* 5行目：配送番号（未登録は空白） */}
-              <s-text
-                size="small"
-                tone="subdued"
-                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-              >
-                配送番号：{String(shipment?.tracking?.trackingNumber ?? "").trim() || " "}
+              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                配送番号: {String(shipment?.tracking?.trackingNumber || "").trim() || ""}
               </s-text>
-              {/* 6行目：予定日（未登録は空白） */}
-              <s-text
-                size="small"
-                tone="subdued"
-                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-              >
-                予定日：{formatArrivesAtDisplay(shipment?.tracking?.arrivesAt) || " "}
+              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                予定日: {shipment?.tracking?.arrivesAt ? String(shipment.tracking.arrivesAt).trim().slice(0, 10) : ""}
               </s-text>
             </s-stack>
 
@@ -10539,9 +10340,6 @@ function InboundList({
     clearAddSearch,
     addOrIncrementByResolved,
     showImages,
-    shipment?.tracking?.company,
-    shipment?.tracking?.trackingNumber,
-    shipment?.tracking?.arrivesAt,
   ]);
 
   useEffect(() => {
@@ -10550,7 +10348,7 @@ function InboundList({
     return () => setHeader(null);
   }, [setHeader, headerNode]);
 
-  // ✅ 下部固定フッター（戻る + 中央2行 + 確定）
+  // 下部固定フッター（戻る + 中央2行 + 確定）
   const footerLine1 = shipment?.id
     ? `予定 ${plannedTotal} / 入庫 ${receiveTotal}`
     : "未選択";
@@ -10641,18 +10439,18 @@ function InboundList({
   ]);
 
   const renderExtras_ = () => {
-    // ✅ 予定外履歴がある場合は「予定外追加はありません」を非表示
+    // 予定外履歴がある場合は「予定外追加はありません」を非表示
     const hasExtrasHistory = Array.isArray(extrasHistory) && extrasHistory.length > 0;
     
     if (!Array.isArray(extras) || extras.length === 0) {
-      // ✅ 履歴がある場合は何も表示しない（履歴セクションで表示される）
+      // 履歴がある場合は何も表示しない（履歴セクションで表示される）
       if (hasExtrasHistory) {
         return null;
       }
       return <s-text tone="subdued" size="small">予定外追加はありません</s-text>;
     }
 
-    // ✅ 現在の予定外追加がある場合は表示（履歴と混在する可能性があるが、現在の追加を優先）
+    // 現在の予定外追加がある場合は表示（履歴と混在する可能性があるが、現在の追加を優先）
 
     return (
       <s-stack gap="none">
@@ -10662,14 +10460,14 @@ function InboundList({
           const sku = String(x?.sku || "").trim();
           const barcode = String(x?.barcode || "").trim();
 
-          // ✅ Shipment内の skuLine と同じ作り（SKU/JAN をここで確実に定義）
+          // Shipment内の skuLine と同じ作り（SKU/JAN をここで確実に定義）
           const skuLine = sku
             ? `SKU:${sku}${barcode ? ` / JAN:${barcode}` : ""}`
             : barcode
             ? `JAN:${barcode}`
             : "";
 
-          // ✅ 下段左：予定外は「予定外 / 入庫 n」にする（要件に合わせて文言はここで調整）
+          // 下段左：予定外は「予定外 / 入庫 n」にする（要件に合わせて文言はここで調整）
           const bottomLeft = `予定外 / 入庫 ${received}`;
           const bottomLeftTone = received > 0 ? "critical" : "subdued";
 
@@ -10699,11 +10497,11 @@ function InboundList({
     );
   };
 
-  // ✅ 予定外入庫の履歴を表示する関数
+  // 予定外入庫の履歴を表示する関数
   const [extrasHistory, setExtrasHistory] = useState([]);
   const [extrasHistoryLoading, setExtrasHistoryLoading] = useState(false);
   const [confirmMemo, setConfirmMemo] = useState(null);
-  // ✅ processLogはreceiveConfirmより前に定義済み（重複定義を避ける）
+  // processLogはreceiveConfirmより前に定義済み（重複定義を避ける）
 
   const loadExtrasHistory = useCallback(async () => {
     if (!shipment?.id || !locationGid) {
@@ -10717,7 +10515,7 @@ function InboundList({
       const audit = await readInboundAuditLog();
       const shipmentId = String(shipment.id || "").trim();
 
-      // ✅ このshipmentに関連する履歴エントリを取得
+      // このshipmentに関連する履歴エントリを取得
       const auditEntries = (audit || [])
         .filter((e) => {
           const sid = String(e?.shipmentId || "").trim();
@@ -10725,13 +10523,13 @@ function InboundList({
           return sid === shipmentId && loc === String(locationGid || "").trim();
         })
         .sort((a, b) => {
-          // ✅ 最新のエントリを優先（日時でソート）
+          // 最新のエントリを優先（日時でソート）
           const aTime = new Date(a?.at || a?.createdAt || 0).getTime();
           const bTime = new Date(b?.at || b?.createdAt || 0).getTime();
           return bTime - aTime;
         });
 
-      // ✅ 最新の確定時メモを取得
+      // 最新の確定時メモを取得
       const latestEntry = auditEntries[0];
       if (latestEntry && String(latestEntry?.note || "").trim()) {
         setConfirmMemo(String(latestEntry.note).trim());
@@ -10739,7 +10537,7 @@ function InboundList({
         setConfirmMemo(null);
       }
 
-      // ✅ 予定外入庫の履歴を抽出
+      // 予定外入庫の履歴を抽出
       const historyEntries = auditEntries
         .flatMap((e) => {
           const extrasArr = Array.isArray(e?.extras) ? e.extras : [];
@@ -10754,7 +10552,6 @@ function InboundList({
 
       setExtrasHistory(historyEntries);
     } catch (e) {
-      console.error("[loadExtrasHistory] エラー:", e);
       setExtrasHistory([]);
       setConfirmMemo(null);
     } finally {
@@ -10788,17 +10585,17 @@ function InboundList({
       }
     };
 
-    // ✅ 履歴を入庫リストと同じスタイルで表示（タイトルなし、パディングなし、日時なし）
+    // 履歴を入庫リストと同じスタイルで表示（タイトルなし、パディングなし、日時なし）
     return (
       <s-stack gap="none">
         {extrasHistory.map((h, idx) => {
-          // ✅ title から商品名とバリアント名を抽出
+          // title から商品名とバリアント名を抽出
           const titleRaw = String(h.title || h.inventoryItemId || "(unknown)").trim();
           const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
           const productTitle = parts[0] || titleRaw;
           const variantTitle = parts.length >= 2 ? parts.slice(1).join(" / ") : "";
 
-          // ✅ SKU情報（履歴データに含まれている場合）
+          // SKU情報（履歴データに含まれている場合）
           const sku = String(h.sku || "").trim();
           const barcode = String(h.barcode || "").trim();
           const skuLine = sku
@@ -10807,10 +10604,10 @@ function InboundList({
             ? `JAN:${barcode}`
             : "";
 
-          // ✅ 画像URL（履歴データに含まれている場合、なければ空）
+          // 画像URL（履歴データに含まれている場合、なければ空）
           const imageUrl = String(h.imageUrl || "").trim();
 
-          // ✅ 下段左：確定前と同じ「予定外 / 入庫 n」
+          // 下段左：確定前と同じ「予定外 / 入庫 n」
           const received = Number(h.qty || 0);
           const bottomLeft = `予定外 / 入庫 ${received}`;
           const bottomLeftTone = received > 0 ? "critical" : "subdued";
@@ -10832,7 +10629,7 @@ function InboundList({
               skuLine={skuLine}
               bottomLeft={bottomLeft}
               bottomLeftTone={bottomLeftTone}
-              // ✅ 履歴は編集不可
+              // 履歴は編集不可
               onDec={null}
               onInc={null}
               onSetQty={null}
@@ -10844,13 +10641,13 @@ function InboundList({
     );
   };
 
-  // ✅ 確定時メモを表示する関数（履歴から取得）
+  // 確定時メモを表示する関数（履歴から取得）
   const renderConfirmMemo_ = () => {
     if (extrasHistoryLoading || !confirmMemo) {
       return null;
     }
 
-    // ✅ パディングを予定外入荷のタイトルや商品リストに合わせる（padding="small"を削除）
+    // パディングを予定外入荷のタイトルや商品リストに合わせる（padding="small"を削除）
     return (
       <s-stack gap="small">
         <s-text emphasis="bold" size="small">確定時メモ</s-text>
@@ -10861,7 +10658,7 @@ function InboundList({
     );
   };
 
-  // ✅ 処理ログを表示する関数
+  // 処理ログを表示する関数
   const renderProcessLog_ = () => {
     if (!Array.isArray(processLog) || processLog.length === 0) {
       return null;
@@ -10952,12 +10749,12 @@ function InboundList({
       setText(String(shownQty > 0 ? shownQty : 1));
     }, [shownQty]);
 
-    // ✅ すべての候補に対して在庫を取得
+    // すべての候補に対して在庫を取得
     useEffect(() => {
       // state を使って再描画が走るための参照（preact対策）
       void inbCandidateStockVersion;
 
-      // ✅ 制限を外してすべての候補に対して在庫を取得
+      // 制限を外してすべての候補に対して在庫を取得
         ensureInbCandidateStock(vid, vid);
     }, [vid, ensureInbCandidateStock, inbCandidateStockVersion]);
 
@@ -10990,7 +10787,7 @@ function InboundList({
 
       addOrIncrementByResolved(resolved, next, { toastOnExtra: true });
 
-      // ✅ 出庫と同じ：右の数字ボタンは累積で増やす
+      // 出庫と同じ：右の数字ボタンは累積で増やす
       setAddQtyById((prev) => {
         const cur = Number(prev?.[vid] || 0);
         return { ...prev, [vid]: cur + next };
@@ -11000,7 +10797,7 @@ function InboundList({
     const addOne = () => {
       addOrIncrementByResolved(resolved, 1, { toastOnExtra: true });
 
-      // ✅ 出庫と同じ：右の数字ボタンも増やす
+      // 出庫と同じ：右の数字ボタンも増やす
       setAddQtyById((prev) => {
         const cur = Number(prev?.[vid] || 0);
         return { ...prev, [vid]: cur + 1 };
@@ -11469,7 +11266,7 @@ function InboundList({
 
 /* =========================
    ✅ InboundAddedLineRow（2行構成：SKUは上段、予定/受領は下段左）
-========================= */
+*/
 function InboundAddedLineRow({
   row,
   showImages,
@@ -11563,10 +11360,9 @@ function InboundAddedLineRow({
 }
 
 /* =========================
-   Search / Inventory (Outbound+Inbound)
-========================= */
+/* Search/Inventory */
 
-// ✅ 大規模カタログ対策：短いフリーテキスト検索を抑制して固まりを回避
+// 大規模カタログ対策：短いフリーテキスト検索を抑制して固まりを回避
 function buildVariantSearchQuery(raw) {
   const q = String(raw || "").trim();
   if (!q) return "";
@@ -11578,7 +11374,7 @@ function buildVariantSearchQuery(raw) {
 
   const parts = [];
 
-  // ✅ 1文字から検索可能に変更
+  // 1文字から検索可能に変更
   // バーコード検索：数字のみの場合（1文字以上）
   if (isDigitsOnly) {
     // 8桁以上なら barcode 検索、それ以下は通常検索
@@ -11609,7 +11405,7 @@ async function searchVariants(q, opts = {}) {
   const first = Math.max(10, Math.min(50, Number.isFinite(firstRaw) ? firstRaw : 50));
 
   const query = buildVariantSearchQuery(q);
-  if (!query) return []; // ✅ ここで止めることで「1文字入力で固まる」を回避
+  if (!query) return []; // ここで止めることで「1文字入力で固まる」を回避
 
   // 画像不要なら最初から軽量クエリへ
   if (!includeImages) {
@@ -11775,9 +11571,9 @@ async function fetchVariantAvailable({ variantGid, locationGid }) {
 
 /* =========================
    Ensure destination has inventory levels (Outbound/Inbound extras)
-========================= */
+*/
 
-// ✅ inventoryActivate を “必要なときだけ available 付き” で呼べるようにする
+// inventoryActivate を “必要なときだけ available 付き” で呼べるようにする
 async function ensureInventoryActivatedAtLocation({
   locationId,
   inventoryItemIds,
@@ -11791,7 +11587,7 @@ async function ensureInventoryActivatedAtLocation({
     return { ok: true, activated, errors };
   }
 
-  // ✅ 最適化: まず一括で tracked と inventoryLevel の状態を確認
+  // 最適化: まず一括で tracked と inventoryLevel の状態を確認
   const ids = inventoryItemIds
     .map((x) => String(x || "").trim())
     .filter(Boolean);
@@ -11835,7 +11631,7 @@ async function ensureInventoryActivatedAtLocation({
         const isTracked = node?.tracked === true;
         const hasInventoryLevel = !!node?.inventoryLevel?.id;
 
-        // ✅ 処理が必要なアイテムのみを抽出
+        // 処理が必要なアイテムのみを抽出
         // - tracked が false の場合
         // - inventoryLevel が存在しない場合
         if (!isTracked || !hasInventoryLevel) {
@@ -11872,7 +11668,7 @@ async function ensureInventoryActivatedAtLocation({
     }
   }
 
-  // ✅ 処理が必要なアイテムのみを処理
+  // 処理が必要なアイテムのみを処理
   for (const item of itemsToProcess) {
     const inventoryItemId = item.inventoryItemId;
     const initialQty = initialQtyMap[inventoryItemId] ?? null;
@@ -11913,7 +11709,7 @@ async function ensureInventoryActivatedAtLocation({
           continue;
         }
 
-        // ✅ 更新後、在庫アイテムの状態を再確認（反映を待つ）
+        // 更新後、在庫アイテムの状態を再確認（反映を待つ）
         // POS Extensionでは setTimeout は使用可能だが、公式仕様では反映時間が保証されていないため、
         // 実際に tracked が true になったことを確認するまで待機する
         let retryCount = 0;
@@ -11958,7 +11754,7 @@ async function ensureInventoryActivatedAtLocation({
       // 3) inventoryActivate を実行
       const variables = { inventoryItemId, locationId };
 
-      // ✅ Shopify公式：inventoryActivate は available/onHand を渡せる。
+      // Shopify公式：inventoryActivate は available/onHand を渡せる。
       //    渡さないと 0 扱いになりやすいので、初期数量を入れる場合は両方そろえる。
       if (initialQty !== null) {
         variables.available = initialQty;
@@ -12005,7 +11801,7 @@ async function ensureInventoryActivatedAtLocation({
       if (payload?.inventoryLevel?.id) {
         activated.push({ inventoryItemId, locationId, initialQty });
       } else {
-        // ✅ inventoryLevel が返されない場合はエラーとして記録
+        // inventoryLevel が返されない場合はエラーとして記録
         // userErrors が空でも inventoryLevel が返されない場合は、在庫追跡が無効な可能性がある
         const errorMsg = Array.isArray(userErrors) && userErrors.length > 0
           ? userErrors.map((e) => String(e?.message || "").trim()).filter(Boolean).join(" / ")
@@ -12095,11 +11891,7 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
         destination { name location { id name } }
 
         shipments(first: 10) {
-          nodes {
-            id
-            status
-            tracking { trackingNumber company trackingUrl arrivesAt }
-          }
+          nodes { id status }
         }
 
         lineItems(first: 250) {
@@ -12127,7 +11919,7 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
     id: String(t.id || ""),
     name: String(t.name || ""),
     status: String(t.status || ""),
-    note: String(t.note || ""), // ✅ noteを追加（強制キャンセル判定用）
+    note: String(t.note || ""), // noteを追加（強制キャンセル判定用）
     dateCreated: String(t.dateCreated || ""),
     totalQuantity: Number(t.totalQuantity ?? 0),
     receivedQuantity: Number(t.receivedQuantity ?? 0),
@@ -12137,11 +11929,7 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
     destinationName: String(t?.destination?.name || ""),
     destinationLocationId: String(t?.destination?.location?.id || ""),
 
-    shipments: shipmentNodes.map((s) => ({
-      id: String(s.id || ""),
-      status: String(s.status || ""),
-      tracking: s.tracking ?? null,
-    })),
+    shipments: shipmentNodes.map((s) => ({ id: String(s.id || ""), status: String(s.status || "") })),
     lineItems: lineNodes.map((li) => ({
       id: String(li.id || ""),
       title: String(li.title || ""),
@@ -12155,8 +11943,7 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
 }
 
 /* =========================
-   Inventory Transfer / Shipment (Outbound)
-========================= */
+/* Transfer/Shipment */
 
 async function inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta }) {
   const mutation = `#graphql
@@ -12254,12 +12041,12 @@ async function fetchTransfer(id) {
 
 /* =========================
    Transfer から直接 lineItems を取得（下書き状態対応）
-========================= */
+*/
 async function fetchTransferLineItemsEnriched(transferId, opts = {}) {
   const includeImages = opts?.includeImages !== false;
   const signal = opts?.signal || null;
   const after = opts?.after || null;
-  const first = Math.max(1, Math.min(250, Number(opts.first ?? 250))); // ✅ 商品リスト：250件/ページ（最大値）
+  const first = Math.max(1, Math.min(250, Number(opts.first ?? 250))); // 商品リスト：250件/ページ（最大値）
 
   const id = String(transferId || "").trim();
   if (!id) throw new Error("Transfer ID が空です");
@@ -12304,12 +12091,12 @@ async function fetchTransferLineItemsEnriched(transferId, opts = {}) {
         const productTitle = String(v?.product?.title || "").trim();
         const variantTitle = String(v?.title || "").trim();
 
-        // ✅ 画像URL取得：variant.image → product.featuredImage の順で取得
+        // 画像URL取得：variant.image → product.featuredImage の順で取得
         const variantImageUrl = v?.image?.url ?? null;
         const productImageUrl = v?.product?.featuredImage?.url ?? null;
         const imageUrl = String(variantImageUrl ?? productImageUrl ?? "").trim();
 
-        // ✅ inventoryTransfer.lineItemsには数量フィールドが存在しないため、0を設定
+        // inventoryTransfer.lineItemsには数量フィールドが存在しないため、0を設定
         const quantity = 0;
 
         return {
@@ -12332,9 +12119,8 @@ async function fetchTransferLineItemsEnriched(transferId, opts = {}) {
       };
     } catch (e) {
       const msg = String(e?.message ?? e ?? "不明なエラー");
-      // ✅ 画像フィールドが存在しないエラーの場合のみフォールバック
       if (/doesn\\'t exist|Field .* doesn't exist|undefined/i.test(msg)) {
-        console.warn("Transfer画像取得に失敗しました（フォールバック処理に進みます）:", msg);
+        // 画像フィールドが存在しない場合はフォールバック処理に進む
       } else {
         throw e;
       }
@@ -12376,7 +12162,7 @@ async function fetchTransferLineItemsEnriched(transferId, opts = {}) {
       const productTitle = String(v?.product?.title || "").trim();
       const variantTitle = String(v?.title || "").trim();
 
-      // ✅ inventoryTransfer.lineItemsには数量フィールドが存在しないため、0を設定
+      // inventoryTransfer.lineItemsには数量フィールドが存在しないため、0を設定
       const quantity = 0;
 
       return {
@@ -12402,7 +12188,6 @@ async function fetchTransferLineItemsEnriched(transferId, opts = {}) {
     if (!/doesn\\'t exist|Field .* doesn't exist|undefined/i.test(msg)) {
       throw e;
     }
-    console.warn("[fetchTransferLineItemsEnriched] エラー（フォールバック処理に進みます）:", msg);
   }
 
   // 最小限のフォールバック（数量フィールドは使わない）
@@ -12427,7 +12212,7 @@ async function fetchTransferLineItemsEnriched(transferId, opts = {}) {
 
   return {
     lineItems: (t3.lineItems?.nodes ?? []).map((li) => {
-    // ✅ inventoryTransfer.lineItemsには数量フィールドが存在しないため、0を設定
+    // inventoryTransfer.lineItemsには数量フィールドが存在しないため、0を設定
     const quantity = 0;
     
     return {
@@ -12448,8 +12233,7 @@ async function fetchTransferLineItemsEnriched(transferId, opts = {}) {
 }
 
 /* =========================
-   Inbound APIs
-========================= */
+/* Inbound APIs */
 
 /**
  * ✅ 入庫予定一覧（Transfer）: inventoryTransfers を使う
@@ -12503,12 +12287,12 @@ async function fetchPendingTransfersForDestination(destinationLocationGid, opts 
     id: t.id,
     name: t.name,
     status: t.status,
-    note: t.note ?? "", // ✅ noteを追加（強制キャンセル判定用）
+    note: t.note ?? "", // noteを追加（強制キャンセル判定用）
     dateCreated: t.dateCreated ?? null,
     originName: t.origin?.name ?? t.origin?.location?.name ?? "",
-    originLocationId: t.origin?.location?.id ?? null, // ✅ 出庫元のlocationIdを追加
+    originLocationId: t.origin?.location?.id ?? null, // 出庫元のlocationIdを追加
     destinationName: t.destination?.name ?? t.destination?.location?.name ?? "",
-    destinationLocationId: t.destination?.location?.id ?? null, // ✅ 入庫先のlocationIdも追加（一貫性のため）
+    destinationLocationId: t.destination?.location?.id ?? null, // 入庫先のlocationIdも追加（一貫性のため）
     totalQuantity: t.totalQuantity ?? 0,
     receivedQuantity: t.receivedQuantity ?? 0,
     shipments: (t.shipments?.nodes ?? []).map((s) => ({
@@ -12520,9 +12304,9 @@ async function fetchPendingTransfersForDestination(destinationLocationGid, opts 
 }
 
 async function fetchTransfersForDestinationAll(destinationLocationGid, opts = {}) {
-  // ✅ ページネーション対応：afterが指定されている場合は1ページのみ取得
+  // ページネーション対応：afterが指定されている場合は1ページのみ取得
   const after = opts?.after || null;
-  const first = Math.max(1, Math.min(250, Number(opts.first ?? 100))); // ✅ Transfer一覧：100件/ページ（パフォーマンス最適化：拒否分集計のため）
+  const first = Math.max(1, Math.min(250, Number(opts.first ?? 100))); // Transfer一覧：100件/ページ（パフォーマンス最適化：拒否分集計のため）
 
   const query = `#graphql
     query TransfersAll($first: Int!, $after: String) {
@@ -12569,16 +12353,16 @@ async function fetchTransfersForDestinationAll(destinationLocationGid, opts = {}
       id: t.id,
       name: t.name,
       status: t.status,
-      note: t.note ?? "", // ✅ noteを追加（強制キャンセル判定用）
+      note: t.note ?? "", // noteを追加（強制キャンセル判定用）
       dateCreated: t.dateCreated ?? null,
       originName: t.origin?.name ?? t.origin?.location?.name ?? "",
-      originLocationId: t.origin?.location?.id ?? null, // ✅ 出庫元のlocationIdを追加
+      originLocationId: t.origin?.location?.id ?? null, // 出庫元のlocationIdを追加
       destinationName: t.destination?.name ?? t.destination?.location?.name ?? "",
-      destinationLocationId: t.destination?.location?.id ?? null, // ✅ 入庫先のlocationIdも追加（一貫性のため）
+      destinationLocationId: t.destination?.location?.id ?? null, // 入庫先のlocationIdも追加（一貫性のため）
       totalQuantity: t.totalQuantity ?? 0,
       receivedQuantity,
 
-      // ✅ 追加：過剰分（監査ログで後から上書き）
+      // 追加：過剰分（監査ログで後から上書き）
       overQuantity: 0,
       receivedQuantityDisplay: receivedQuantity,
 
@@ -12606,12 +12390,12 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
   const originId = String(originLocationGid || "").trim();
   if (!originId) return { transfers: [], pageInfo: { hasNextPage: false, endCursor: null } };
 
-  // ✅ ページネーション対応：afterが指定されている場合は1ページのみ取得
+  // ページネーション対応：afterが指定されている場合は1ページのみ取得
   const after = opts?.after || null;
   const isPagination = !!after;
 
   // POSでフリーズしやすいので、デフォルトは控えめ（必要なら増やせる）
-  const first = Math.max(1, Math.min(250, Number(opts.first ?? 100))); // ✅ Transfer一覧：100件/ページ（パフォーマンス最適化：拒否分集計のため）
+  const first = Math.max(1, Math.min(250, Number(opts.first ?? 100))); // Transfer一覧：100件/ページ（パフォーマンス最適化：拒否分集計のため）
   const maxPages = isPagination ? 1 : Math.max(1, Math.min(20, Number(opts.maxPages ?? 8))); // ページネーション時は1ページのみ
   const maxItems = Math.max(1, Math.min(2000, Number(opts.maxItems ?? 500)));
 
@@ -12635,7 +12419,7 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
       id: String(t?.id || ""),
       name: String(t?.name || ""),
       status: String(t?.status || ""),
-      note: String(t?.note || ""), // ✅ noteを追加（強制キャンセル判定用）
+      note: String(t?.note || ""), // noteを追加（強制キャンセル判定用）
       dateCreated: t?.dateCreated || "",
       totalQuantity: Number(t?.totalQuantity ?? 0),
       receivedQuantity: Number(t?.receivedQuantity ?? 0),
@@ -12643,19 +12427,19 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
       originName: String(t?.origin?.name || t?.origin?.location?.name || ""),
       destinationName: String(t?.destination?.name || t?.destination?.location?.name || ""),
 
-      // ✅ Inboundと完全に同じ形（OutboundHistoryもこれを使う）
+      // Inboundと完全に同じ形（OutboundHistoryもこれを使う）
       shipments: ships,
 
-      // ✅ 互換用（残してもOK）
+      // 互換用（残してもOK）
       shipmentIds: ships.map((s) => s.id),
 
-      // ✅ UI 絞り込み用（現状の設計維持）
+      // UI 絞り込み用（現状の設計維持）
       originLocationId: oId,
       destinationLocationId: dId,
     };
   };
 
-  // ✅ fetchTransfersForDestinationAllと同じアプローチ：queryパラメータを使わず、全件取得してローカルでフィルタリング
+  // fetchTransfersForDestinationAllと同じアプローチ：queryパラメータを使わず、全件取得してローカルでフィルタリング
   const query = `#graphql
     query TransfersAll($first: Int!, $after: String) {
       inventoryTransfers(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) {
@@ -12684,11 +12468,11 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
     const nodes = data?.inventoryTransfers?.nodes ?? [];
     const pageInfo = data?.inventoryTransfers?.pageInfo || { hasNextPage: false, endCursor: null };
 
-  // ✅ origin が取れる時だけ一致判定（fetchTransfersForDestinationAllと同じ方針）
+  // origin が取れる時だけ一致判定（fetchTransfersForDestinationAllと同じ方針）
   const filtered = nodes.filter((t) => {
     const origId = t?.origin?.location?.id;
     if (originId && origId !== originId) return false;
-    // ✅ 出庫履歴ではshipmentsの存在チェックは不要（全て表示）
+    // 出庫履歴ではshipmentsの存在チェックは不要（全て表示）
     return true;
   });
 
@@ -12708,7 +12492,7 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
       id: t.id,
       name: t.name,
       status: t.status,
-      note: t.note ?? "", // ✅ noteを追加（強制キャンセル判定用）
+      note: t.note ?? "", // noteを追加（強制キャンセル判定用）
       dateCreated: t.dateCreated ?? null,
       originName: t.origin?.name ?? t.origin?.location?.name ?? "",
       originLocationId: t.origin?.location?.id ?? null,
@@ -12717,16 +12501,16 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
       totalQuantity: t.totalQuantity ?? 0,
       receivedQuantity,
 
-      // ✅ 追加：過剰分・予定外分・拒否分（監査ログで後から上書き）
+      // 追加：過剰分・予定外分・拒否分（監査ログで後から上書き）
       overQuantity: 0,
       extrasQuantity: 0,
       rejectedQuantity: 0,
       receivedQuantityDisplay: receivedQuantity,
 
-      // ✅ Inboundと完全に同じ形（OutboundHistoryもこれを使う）
+      // Inboundと完全に同じ形（OutboundHistoryもこれを使う）
       shipments: ships,
 
-      // ✅ 互換用（残してもOK）
+      // 互換用（残してもOK）
       shipmentIds: ships.map((s) => s.id),
     };
   });
@@ -12735,14 +12519,13 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
 }
 
 /* =========================
-   Shipment fetch (Inbound)
-========================= */
+/* Shipment fetch */
 
 async function fetchInventoryShipmentEnriched(id, opts = {}) {
   const includeImages = opts?.includeImages !== false;
   const signal = opts?.signal;
   const after = opts?.after || null;
-  const first = Math.max(1, Math.min(250, Number(opts.first ?? 250))); // ✅ 商品リスト：250件/ページ（最大値）
+  const first = Math.max(1, Math.min(250, Number(opts.first ?? 250))); // 商品リスト：250件/ページ（最大値）
 
   const shipmentId = String(id || "").trim();
   if (!shipmentId) throw new Error("Shipment ID が空です");
@@ -12798,7 +12581,7 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
           id: li.id,
           quantity: Number(li.quantity ?? 0),
 
-          // ✅ 追加：Shopify側の受領/却下/未受領
+          // 追加：Shopify側の受領/却下/未受領
           acceptedQuantity: Number(li.acceptedQuantity ?? 0),
           rejectedQuantity: Number(li.rejectedQuantity ?? 0),
           unreceivedQuantity: Number(li.unreceivedQuantity ?? 0),
@@ -12875,7 +12658,7 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
         id: li.id,
         quantity: Number(li.quantity ?? 0),
 
-        // ✅ 追加：Shopify側の受領/却下/未受領
+        // 追加：Shopify側の受領/却下/未受領
         acceptedQuantity: Number(li.acceptedQuantity ?? 0),
         rejectedQuantity: Number(li.rejectedQuantity ?? 0),
         unreceivedQuantity: Number(li.unreceivedQuantity ?? 0),
@@ -12948,8 +12731,7 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
 }
 
 /* =========================
-   Receive shipment (Inbound)
-========================= */
+/* Receive shipment */
 
 async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
   const clean = (items || [])
@@ -12957,7 +12739,7 @@ async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
       shipmentLineItemId: x.shipmentLineItemId || x.id || x.lineItemId || null,
       quantity: Number(x.quantity || 0),
 
-      // ✅ 新しめのスキーマでは reason が必須になる場合があるため保険（ACCEPTED / REJECTED）
+      // 新しめのスキーマでは reason が必須になる場合があるため保険（ACCEPTED / REJECTED）
       reason: String(x.reason || "ACCEPTED").trim().toUpperCase(),
     }))
     .filter((x) => x.shipmentLineItemId && x.quantity > 0);
@@ -12994,7 +12776,7 @@ async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
     assertNoUserErrors(d2?.inventoryShipmentReceive, "inventoryShipmentReceive");
     return d2?.inventoryShipmentReceive?.inventoryShipment ?? null;
   } catch (e) {
-    // ✅ もし reason が未対応のAPIバージョンなら、reason無しで再トライ
+    // もし reason が未対応のAPIバージョンなら、reason無しで再トライ
     const msg = String(e?.message ?? e);
     if (/reason/i.test(msg) && /(not defined by type|Unknown field|invalid)/i.test(msg)) {
       const noReason = clean.map(({ shipmentLineItemId, quantity }) => ({ shipmentLineItemId, quantity }));
@@ -13015,11 +12797,10 @@ async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
 }
 
 /* =========================
-   Adjust inventory (Inbound extras)
-========================= */
+/* Adjust inventory */
 
 async function adjustInventoryAtLocationWithFallback({ locationId, deltas }) {
-  // ✅ プラス値もマイナス値も処理できるように、delta !== 0 でフィルター
+  // プラス値もマイナス値も処理できるように、delta !== 0 でフィルター
   const changes = (deltas ?? [])
     .filter((x) => x?.inventoryItemId && Number(x?.delta || 0) !== 0)
     .map((x) => ({ inventoryItemId: x.inventoryItemId, delta: Number(x.delta) }));
@@ -13107,7 +12888,7 @@ async function adjustInventoryAtLocationWithFallback({ locationId, deltas }) {
 // =========================================================
 // Inbound Draft（下書き：Transfer優先）
 // =========================================================
-const INBOUND_DRAFT_PREFIX_V2 = "stock_transfer_pos_inbound_draft_v2"; // ✅ Transfer基準
+const INBOUND_DRAFT_PREFIX_V2 = "stock_transfer_pos_inbound_draft_v2"; // Transfer基準
 const INBOUND_DRAFT_PREFIX_V1 = "stock_transfer_pos_inbound_draft_v1"; // 旧：Shipment基準（移行用）
 
 function inboundDraftKeyV2({ locationGid, transferId }) {
@@ -13122,7 +12903,7 @@ function inboundDraftKeyV1({ locationGid, shipmentId }) {
   return `${INBOUND_DRAFT_PREFIX_V1}:${loc}:${sid}`;
 }
 
-// ✅ 互換：transferId があれば必ず v2 を使う（Transferごと保存）
+// 互換：transferId があれば必ず v2 を使う（Transferごと保存）
 function inboundDraftKey({ locationGid, transferId, shipmentId }) {
   const tid = String(transferId || "").trim();
   if (tid) return inboundDraftKeyV2({ locationGid, transferId: tid });
@@ -13225,7 +13006,7 @@ async function loadInboundDraft({ locationGid, transferId, shipmentId }) {
 async function saveInboundDraft({ locationGid, transferId, shipmentId, payload }) {
   const key = inboundDraftKey({ locationGid, transferId, shipmentId });
 
-  // ✅ まずは storage に保存
+  // まずは storage に保存
   try {
     if (SHOPIFY?.storage?.set) {
       await SHOPIFY.storage.set(key, payload);
@@ -13245,7 +13026,7 @@ async function saveInboundDraft({ locationGid, transferId, shipmentId, payload }
 }
 
 async function clearInboundDraft({ locationGid, transferId, shipmentId }) {
-  // ✅ v2（Transfer）
+  // v2（Transfer）
   const tid = String(transferId || "").trim();
   if (tid) {
     const keyV2 = inboundDraftKeyV2({ locationGid, transferId: tid });
@@ -13258,7 +13039,7 @@ async function clearInboundDraft({ locationGid, transferId, shipmentId }) {
     } catch {}
   }
 
-  // ✅ v1（Shipment）も掃除（移行前の残骸対策）
+  // v1（Shipment）も掃除（移行前の残骸対策）
   const sid = String(shipmentId || "").trim();
   if (sid) {
     const keyV1 = inboundDraftKeyV1({ locationGid, shipmentId: sid });
@@ -13275,7 +13056,7 @@ async function clearInboundDraft({ locationGid, transferId, shipmentId }) {
 /* =========================
    Inbound Audit Log (AppInstallation Metafield)
    - 任意: write_metafields があれば保存
-========================= */
+*/
 
 const INBOUND_AUDIT_NS = "stock_transfer_pos";
 const INBOUND_AUDIT_KEY = "inbound_audit_v1";
@@ -13384,12 +13165,12 @@ async function buildInboundRejectedIndex_(shipmentIds) {
   const idx = new Map(); // shipmentId -> rejectedSum
   if (!Array.isArray(shipmentIds) || shipmentIds.length === 0) return idx;
 
-  // ✅ バッチ処理でshipmentsのlineItemsを取得（最大10件ずつ）
+  // バッチ処理でshipmentsのlineItemsを取得（最大10件ずつ）
   const batchSize = 10;
   for (let i = 0; i < shipmentIds.length; i += batchSize) {
     const batch = shipmentIds.slice(i, i + batchSize);
     try {
-      // ✅ 各shipmentのlineItemsからrejectedQuantityを集計
+      // 各shipmentのlineItemsからrejectedQuantityを集計
       await Promise.all(
         batch.map(async (shipmentId) => {
           try {
@@ -13406,16 +13187,10 @@ async function buildInboundRejectedIndex_(shipmentIds) {
             if (rejectedSum > 0) {
               idx.set(String(shipmentId), rejectedSum);
             }
-          } catch (e) {
-            // エラー時はスキップ（パフォーマンスを優先）
-            console.warn(`buildInboundRejectedIndex_: shipment ${shipmentId} failed:`, e);
-          }
+          } catch (e) {}
         })
       );
-    } catch (e) {
-      // バッチ全体のエラー時もスキップ
-      console.warn("buildInboundRejectedIndex_: batch failed:", e);
-    }
+    } catch (e) {}
   }
 
   return idx;
@@ -13430,26 +13205,26 @@ function mergeInboundOverIntoTransfers_(transfers, overByShipmentId, extrasByShi
   return arr.map((t) => {
     const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
 
-    // ✅ 過剰分（overQuantity）は監査ログから取得するが、GraphQLのreceivedQuantityに既に含まれているため加算しない
+    // 過剰分（overQuantity）は監査ログから取得するが、GraphQLのreceivedQuantityに既に含まれているため加算しない
     const overQuantity = shipments.reduce((a, s) => {
       const sid = String(s?.id || "").trim();
       return a + (sid ? Number(overMap.get(sid) || 0) : 0);
     }, 0);
 
-    // ✅ 予定外商品（extrasQuantity）は監査ログから取得して加算
+    // 予定外商品（extrasQuantity）は監査ログから取得して加算
     const extrasQuantity = shipments.reduce((a, s) => {
       const sid = String(s?.id || "").trim();
       return a + (sid ? Number(extrasMap.get(sid) || 0) : 0);
     }, 0);
 
-    // ✅ 拒否分（rejectedQuantity）はshipmentsのlineItemsから集計して引く
+    // 拒否分（rejectedQuantity）はshipmentsのlineItemsから集計して引く
     const rejectedQuantity = shipments.reduce((a, s) => {
       const sid = String(s?.id || "").trim();
       return a + (sid ? Number(rejectedMap.get(sid) || 0) : 0);
     }, 0);
 
     const receivedQuantity = Number(t?.receivedQuantity ?? 0);
-    // ✅ 修正：過剰分は加算せず、拒否分を引き、予定外商品は加算
+    // 修正：過剰分は加算せず、拒否分を引き、予定外商品は加算
     // GraphQLのreceivedQuantityは既に過剰分を含んでいるため、overQuantityは加算しない
     // GraphQLのreceivedQuantityは拒否分も含んでいるため、rejectedQuantityを引く
     // 予定外商品（extras）は加算する
@@ -13525,11 +13300,11 @@ async function appendInboundAuditLog({ locationId, shipmentId, reason, note, ove
 
 /* =========================
    Row UI helpers（1行: [画像][テキスト][数量]）
-========================= */
+*/
 
 function RowShell({ children }) {
-  // ✅ 横paddingは付けない（親のbaseに合わせる）
-  // ✅ 縦だけ余白を付ける
+  // 横paddingは付けない（親のbaseに合わせる）
+  // 縦だけ余白を付ける
   return (
     <s-box padding="none" style={{ paddingTop: "8px", paddingBottom: "8px" }}>
       {children}
@@ -13561,7 +13336,7 @@ function ItemLeftInline({ showImages, imageUrl, productTitle, variantTitle, line
    Variant Cache（永続チャンク / SHOPIFY.storage）
    - JAN/SKU -> {variantId, inventoryItemId, sku, barcode, productTitle, variantTitle, imageUrl?}
    - storage key はチャンク数ぶんだけ（100キー制限に引っかからない設計）
-========================= */
+*/
 
 const VARIANT_CACHE_NS = "stock_transfer_pos_variant_cache_v1";
 const VARIANT_CACHE_META_KEY = `${VARIANT_CACHE_NS}:meta`;
@@ -13852,12 +13627,12 @@ async function resolveVariantByCode(codeRaw, { includeImages = false } = {}) {
    - 旧 row.title 互換も維持（"商品 / バリアント" 形式）
    - right があれば右側を差し替え（数量UI以外も置ける）
    - QtyControlCompact（commandFor版/旧版 両対応で連携）
-========================= */
+*/
 function StockLineRow({ row, showImages, dialog, right, onSetQty }) {
   const productTitle = String(row?.productTitle || "").trim();
   const variantTitle = String(row?.variantTitle || "").trim();
 
-  // ✅ 互換：row.title / row.label が "商品 / バリアント" 形式のとき
+  // 互換：row.title / row.label が "商品 / バリアント" 形式のとき
   const raw = String(row?.title || row?.label || "").trim();
   const parts = raw ? raw.split("/").map((s) => s.trim()).filter(Boolean) : [];
 
@@ -13940,7 +13715,7 @@ function renderInboundShipmentItems_({ rows, showImages, dialog, setRowQty }) {
 
         const bottomLeft = `予定 ${planned} / 入庫 ${received}`;
 
-        // ✅ 未入庫（0/予定）を全部赤にしないため「進捗がある行だけ」差異判定する
+        // 未入庫（0/予定）を全部赤にしないため「進捗がある行だけ」差異判定する
         const hasAnyProgress =
           received > 0 ||
           Number(r?.alreadyAcceptedTotalQty ?? 0) > 0 ||
@@ -13972,7 +13747,7 @@ function renderInboundShipmentItems_({ rows, showImages, dialog, setRowQty }) {
 
 /* =========================
    UI parts (Thumb / ItemLeft) - s-image版
-========================= */
+*/
 
 function safeImageSrc_(maybeUrl) {
   const u = typeof maybeUrl === "string" ? maybeUrl.trim() : "";
@@ -14059,7 +13834,7 @@ function ItemLeftCompact({ showImages, imageUrl, productTitle, variantTitle, lin
     return t.length > max ? t.slice(0, max - 1) + "…" : t;
   };
 
-  // ✅ ここで確実に短くする（環境差ゼロ）
+  // ここで確実に短くする（環境差ゼロ）
   const pRaw = String(productTitle || "").trim() || "(unknown)";
   const vRaw = String(variantTitle || "").trim();
 
@@ -14079,9 +13854,9 @@ function ItemLeftCompact({ showImages, imageUrl, productTitle, variantTitle, lin
       tone={subdued ? "subdued" : "auto"}
       style={{
         display: "block",
-        whiteSpace: "normal",        // ✅ 折り返す
-        overflow: "visible",         // ✅ 切らない
-        wordBreak: "break-word",     // ✅ 長い英数字も折る
+        whiteSpace: "normal",        // 折り返す
+        overflow: "visible",         // 切らない
+        wordBreak: "break-word",     // 長い英数字も折る
       }}
     >
       {children}
@@ -14155,7 +13930,7 @@ export function QtyControlCompact({
         gap="extra-tight"
         alignItems="center"
         justifyContent="end"
-        style={{ flexWrap: "nowrap" }}   // ✅ 折り返しを防ぐ
+        style={{ flexWrap: "nowrap" }}   // 折り返しを防ぐ
       >
         <s-box inlineSize="44px" style={{ flex: "0 0 auto" }}>
           <s-button
@@ -14172,7 +13947,7 @@ export function QtyControlCompact({
             command="--show"
             commandFor={id}
             onClick={() => setText(String(v))}
-            style={{ width: "100%" }}   // ✅ 数字ボタンを固定幅に
+            style={{ width: "100%" }}   // 数字ボタンを固定幅に
           >
             {v}
           </s-button>
@@ -14211,7 +13986,6 @@ export function QtyControlCompact({
                 command="--hide"
                 commandFor={id}
                 onClick={() => {
-                  // 何も実行せずにモーダルを閉じる
                 }}
               >
                 戻る
@@ -14234,7 +14008,6 @@ export function QtyControlCompact({
   );
 }
 
-/** ✅ 行：左右パディングなし、縦だけ（propsで指定） */
 function StockyRowShell({ children }) {
   return (
     <s-box
@@ -14247,9 +14020,7 @@ function StockyRowShell({ children }) {
   );
 }
 
-/* =========================
-   UI parts (ItemLeft)
-========================= */
+/* UI parts (ItemLeft)*/
 
 function ItemLeft(props) {
   const showImages = !!(props.showImages ?? props.showImage);
@@ -14287,9 +14058,7 @@ function ItemLeft(props) {
   );
 }
 
-/* =========================
-   debounce
-========================= */
+/* debounce */
 
 function useDebounce(value, ms) {
   const [v, setV] = useState(value);
