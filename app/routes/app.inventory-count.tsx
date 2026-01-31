@@ -1025,61 +1025,68 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     try {
-      // コレクションから商品を取得
-      const productsResp = await admin.graphql(
-        `#graphql
-          query CollectionProducts($id: ID!, $first: Int!) {
-            collection(id: $id) {
-              id
-              title
-              products(first: $first) {
-                nodes {
-                  id
-                  title
-                  variants(first: 250) {
-                    nodes {
-                      id
-                      title
-                      sku
-                      barcode
-                      inventoryItem {
-                        id
-                      }
-                    }
+      const COLLECTION_PRODUCTS_QUERY = `#graphql
+        query CollectionProducts($id: ID!, $first: Int!, $after: String) {
+          collection(id: $id) {
+            id
+            title
+            products(first: $first, after: $after) {
+              nodes {
+                id
+                title
+                variants(first: 250) {
+                  nodes {
+                    id
+                    title
+                    sku
+                    barcode
+                    inventoryItem { id }
                   }
                 }
               }
+              pageInfo { hasNextPage endCursor }
             }
           }
-        `,
-        { variables: { id: collectionId, first: 250 } }
-      );
-
-      const productsData = await productsResp.json();
-      const collection = productsData?.data?.collection;
-      if (!collection) {
-        return { ok: false, error: "コレクションが見つかりません" as const };
-      }
+        }
+      `;
 
       const products: CollectionProduct[] = [];
-      for (const product of collection.products?.nodes || []) {
-        for (const variant of product.variants?.nodes || []) {
-          if (variant.inventoryItem?.id) {
-            products.push({
-              variantId: variant.id,
-              inventoryItemId: variant.inventoryItem.id,
-              productTitle: product.title || "",
-              variantTitle: variant.title || "",
-              sku: variant.sku || "",
-              barcode: variant.barcode || "",
-            });
+      let collectionTitle = "";
+      let productsCursor: string | null = null;
+
+      do {
+        const productsResp = await admin.graphql(COLLECTION_PRODUCTS_QUERY, {
+          variables: { id: collectionId, first: 250, after: productsCursor },
+        });
+        const productsData = await productsResp.json();
+        const collection = productsData?.data?.collection;
+        if (!collection) {
+          return { ok: false, error: "コレクションが見つかりません" as const };
+        }
+        collectionTitle = collection.title || "";
+
+        const productNodes = collection.products?.nodes ?? [];
+        const pageInfo = collection.products?.pageInfo ?? {};
+        for (const product of productNodes) {
+          for (const variant of product.variants?.nodes ?? []) {
+            if (variant?.inventoryItem?.id) {
+              products.push({
+                variantId: variant.id,
+                inventoryItemId: variant.inventoryItem.id,
+                productTitle: product.title || "",
+                variantTitle: variant.title || "",
+                sku: variant.sku || "",
+                barcode: variant.barcode || "",
+              });
+            }
           }
         }
-      }
+        productsCursor = pageInfo.hasNextPage ? pageInfo.endCursor ?? null : null;
+      } while (productsCursor);
 
       return {
         ok: true,
-        collectionTitle: collection.title || "",
+        collectionTitle,
         products,
       };
     } catch (error) {
@@ -1389,7 +1396,37 @@ export default function InventoryCountPage() {
   const [collectionModalSelectedVariantIds, setCollectionModalSelectedVariantIds] = useState<Set<string>>(new Set());
   const [collectionModalLoading, setCollectionModalLoading] = useState(false);
   const [collectionModalProductGroupId, setCollectionModalProductGroupId] = useState<string | null>(null); // 右側から開いた場合の商品グループID
+  const [collectionModalSearchQuery, setCollectionModalSearchQuery] = useState("");
+  const [showOnlySelectedInModal, setShowOnlySelectedInModal] = useState(false);
+  const [collectionModalPage, setCollectionModalPage] = useState(1);
   const collectionProductsFetcher = useFetcher<typeof action>();
+  const MODAL_ITEMS_PER_PAGE = 1000;
+
+  const filteredModalProducts = useMemo(() => {
+    const list = collectionModalProducts;
+    if (!collectionModalSearchQuery.trim()) return list;
+    const q = collectionModalSearchQuery.trim().toLowerCase();
+    return list.filter(
+      (p) =>
+        (p.sku || "").toLowerCase().includes(q) ||
+        (p.barcode || "").toLowerCase().includes(q) ||
+        (p.productTitle || "").toLowerCase().includes(q) ||
+        (p.variantTitle || "").toLowerCase().includes(q)
+    );
+  }, [collectionModalProducts, collectionModalSearchQuery]);
+  const displayModalProducts = useMemo(() => {
+    if (!showOnlySelectedInModal) return filteredModalProducts;
+    const selectedSet = collectionModalSelectedVariantIds;
+    return filteredModalProducts.filter((p) => selectedSet.has(p.variantId));
+  }, [showOnlySelectedInModal, filteredModalProducts, collectionModalSelectedVariantIds]);
+  const paginatedModalProducts = useMemo(() => {
+    const start = (collectionModalPage - 1) * MODAL_ITEMS_PER_PAGE;
+    return displayModalProducts.slice(start, start + MODAL_ITEMS_PER_PAGE);
+  }, [displayModalProducts, collectionModalPage]);
+  const modalTotalPages = Math.max(1, Math.ceil(displayModalProducts.length / MODAL_ITEMS_PER_PAGE));
+  useEffect(() => {
+    setCollectionModalPage(1);
+  }, [collectionModalSearchQuery, showOnlySelectedInModal]);
 
   const [createLocationId, setCreateLocationId] = useState("");
   const [createLocationSearchQuery, setCreateLocationSearchQuery] = useState("");
@@ -1574,6 +1611,9 @@ export default function InventoryCountPage() {
     setCollectionModalOpen(true);
     setCollectionModalLoading(true);
     setCollectionModalProducts([]);
+    setCollectionModalSearchQuery("");
+    setShowOnlySelectedInModal(false);
+    setCollectionModalPage(1);
 
     // 既存の設定があれば復元（商品リスト取得前に設定）
     // 右側から開いた場合は、その商品グループの設定を読み込む
@@ -2273,6 +2313,7 @@ export default function InventoryCountPage() {
                                         cursor: "pointer",
                                         backgroundColor: isSelected ? "#f0f9f7" : "transparent",
                                         border: isSelected ? "1px solid #008060" : "1px solid transparent",
+                                        borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
                                         marginTop: "4px",
                                         display: "flex",
                                         alignItems: "center",
@@ -2445,6 +2486,7 @@ export default function InventoryCountPage() {
                                       cursor: "pointer",
                                       backgroundColor: isSelected ? "#f0f9f7" : "transparent",
                                       border: isSelected ? "1px solid #008060" : "1px solid transparent",
+                                      borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
                                       marginTop: "4px",
                                       display: "flex",
                                       alignItems: "center",
@@ -4252,83 +4294,168 @@ export default function InventoryCountPage() {
                   </div>
                 ) : (
                   <div>
-                    <div style={{ marginBottom: "12px", display: "flex", gap: "8px" }}>
-                      <button
-                        onClick={() => {
-                          const allIds = new Set(collectionModalProducts.map((p) => p.variantId));
-                          setCollectionModalSelectedVariantIds(allIds);
-                        }}
+                    <div style={{ marginBottom: "12px" }}>
+                      <input
+                        type="text"
+                        value={collectionModalSearchQuery}
+                        onChange={(e) => setCollectionModalSearchQuery(e.target.value)}
+                        placeholder="SKU・商品名・JANの一部で絞り込み"
                         style={{
-                          padding: "8px 16px",
-                          backgroundColor: "#007bff",
-                          color: "white",
-                          border: "none",
-                          borderRadius: "4px",
-                          cursor: "pointer",
+                          width: "100%",
+                          padding: "8px 12px",
+                          border: "1px solid #e1e3e5",
+                          borderRadius: "6px",
                           fontSize: "14px",
+                          marginBottom: "8px",
+                          boxSizing: "border-box",
                         }}
-                      >
-                        全選択
-                      </button>
-                      <button
-                        onClick={() => {
-                          setCollectionModalSelectedVariantIds(new Set());
-                        }}
-                        style={{
-                          padding: "8px 16px",
-                          backgroundColor: "#6c757d",
-                          color: "white",
-                          border: "none",
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                          fontSize: "14px",
-                        }}
-                      >
-                        全解除
-                      </button>
-                    </div>
-                    <div style={{ maxHeight: "400px", overflowY: "auto" }}>
-                      {collectionModalProducts.map((product) => {
-                        const isSelected = collectionModalSelectedVariantIds.has(product.variantId);
-                        const title = [product.productTitle, product.variantTitle]
-                          .filter(Boolean)
-                          .join(" / ");
-
-                        return (
-                          <div
-                            key={product.variantId}
+                      />
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                        <span style={{ fontSize: "13px", color: "#6d7175" }}>
+                          {showOnlySelectedInModal
+                            ? `表示: 選択済み${displayModalProducts.length}件`
+                            : displayModalProducts.length <= MODAL_ITEMS_PER_PAGE
+                              ? `表示: ${displayModalProducts.length}件 / 全${collectionModalProducts.length}件`
+                              : `表示: ${(collectionModalPage - 1) * MODAL_ITEMS_PER_PAGE + 1}-${Math.min(collectionModalPage * MODAL_ITEMS_PER_PAGE, displayModalProducts.length)}件 / 全${displayModalProducts.length}件`}
+                        </span>
+                        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            onClick={() => setShowOnlySelectedInModal((prev) => !prev)}
                             style={{
-                              padding: "12px",
-                              marginBottom: "8px",
-                              backgroundColor: isSelected ? "#e7f3ff" : "#f5f5f5",
-                              borderRadius: "4px",
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "12px",
+                              padding: "6px 12px",
+                              backgroundColor: showOnlySelectedInModal ? "#008060" : "#e5e7eb",
+                              color: showOnlySelectedInModal ? "#fff" : "#202223",
+                              border: "none",
+                              borderRadius: "6px",
+                              cursor: "pointer",
+                              fontSize: "13px",
                             }}
                           >
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={(e) => {
-                                const newSet = new Set(collectionModalSelectedVariantIds);
-                                if (e.target.checked) {
-                                  newSet.add(product.variantId);
-                                } else {
-                                  newSet.delete(product.variantId);
-                                }
-                                setCollectionModalSelectedVariantIds(newSet);
-                              }}
-                              style={{ width: "20px", height: "20px", cursor: "pointer" }}
-                            />
-                            <div style={{ flex: 1, fontSize: "14px" }}>
-                              {title}
-                              {product.sku && <span style={{ color: "#666", marginLeft: "8px" }}>(SKU: {product.sku})</span>}
-                            </div>
-                          </div>
-                        );
-                      })}
+                            {showOnlySelectedInModal ? "一覧表示に戻る" : "選択済み"}
+                          </button>
+                          <button
+                            onClick={() => {
+                              const allIds = new Set(collectionModalProducts.map((p) => p.variantId));
+                              setCollectionModalSelectedVariantIds(allIds);
+                            }}
+                            style={{
+                              padding: "6px 12px",
+                              backgroundColor: "#007bff",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "6px",
+                              cursor: "pointer",
+                              fontSize: "13px",
+                            }}
+                          >
+                            全選択
+                          </button>
+                          <button
+                            onClick={() => setCollectionModalSelectedVariantIds(new Set())}
+                            style={{
+                              padding: "6px 12px",
+                              backgroundColor: "#6c757d",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "6px",
+                              cursor: "pointer",
+                              fontSize: "13px",
+                            }}
+                          >
+                            全解除
+                          </button>
+                        </div>
+                      </div>
                     </div>
+                    <div style={{ maxHeight: "400px", overflowY: "auto" }}>
+                      {displayModalProducts.length === 0 ? (
+                        <div style={{ padding: "24px", textAlign: "center", fontSize: "14px", color: "#6d7175" }}>
+                          {showOnlySelectedInModal ? "選択済みの商品がありません" : "該当する商品がありません"}
+                        </div>
+                      ) : (
+                        paginatedModalProducts.map((product) => {
+                          const isSelected = collectionModalSelectedVariantIds.has(product.variantId);
+                          const title = [product.productTitle, product.variantTitle]
+                            .filter(Boolean)
+                            .join(" / ");
+
+                          return (
+                            <div
+                              key={product.variantId}
+                              style={{
+                                padding: "12px",
+                                marginBottom: "0",
+                                borderBottom: "1px solid #e5e7eb",
+                                backgroundColor: isSelected ? "#e7f3ff" : "#f5f5f5",
+                                borderRadius: "0",
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "12px",
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={(e) => {
+                                  const newSet = new Set(collectionModalSelectedVariantIds);
+                                  if (e.target.checked) {
+                                    newSet.add(product.variantId);
+                                  } else {
+                                    newSet.delete(product.variantId);
+                                  }
+                                  setCollectionModalSelectedVariantIds(newSet);
+                                }}
+                                style={{ width: "20px", height: "20px", cursor: "pointer" }}
+                              />
+                              <div style={{ flex: 1, fontSize: "14px" }}>
+                                {title}
+                                {product.sku && <span style={{ color: "#666", marginLeft: "8px" }}>(SKU: {product.sku})</span>}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                    {displayModalProducts.length > MODAL_ITEMS_PER_PAGE && (
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "12px", padding: "12px 0" }}>
+                        <button
+                          type="button"
+                          onClick={() => setCollectionModalPage((p) => Math.max(1, p - 1))}
+                          disabled={collectionModalPage <= 1}
+                          style={{
+                            padding: "6px 12px",
+                            border: "1px solid #c9cccf",
+                            borderRadius: "6px",
+                            background: collectionModalPage <= 1 ? "#f6f6f7" : "#fff",
+                            cursor: collectionModalPage <= 1 ? "not-allowed" : "pointer",
+                            fontSize: "13px",
+                            color: collectionModalPage <= 1 ? "#8c9196" : "#202223",
+                          }}
+                        >
+                          前へ
+                        </button>
+                        <span style={{ fontSize: "13px", color: "#6d7175" }}>
+                          {(collectionModalPage - 1) * MODAL_ITEMS_PER_PAGE + 1}-{Math.min(collectionModalPage * MODAL_ITEMS_PER_PAGE, displayModalProducts.length)} / {displayModalProducts.length}件
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setCollectionModalPage((p) => Math.min(modalTotalPages, p + 1))}
+                          disabled={collectionModalPage >= modalTotalPages}
+                          style={{
+                            padding: "6px 12px",
+                            border: "1px solid #c9cccf",
+                            borderRadius: "6px",
+                            background: collectionModalPage >= modalTotalPages ? "#f6f6f7" : "#fff",
+                            cursor: collectionModalPage >= modalTotalPages ? "not-allowed" : "pointer",
+                            fontSize: "13px",
+                            color: collectionModalPage >= modalTotalPages ? "#8c9196" : "#202223",
+                          }}
+                        >
+                          次へ
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 
