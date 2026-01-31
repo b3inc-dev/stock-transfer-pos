@@ -4,31 +4,73 @@ import { useFetcher, useLoaderData } from "react-router";
 import { useEffect, useMemo, useState } from "react";
 import { authenticate } from "../shopify.server";
 
-type LocationNode = { id: string; name: string };
+export type LocationNode = { id: string; name: string };
 
-type DestinationGroup = {
+export type DestinationGroup = {
   id: string;
   name: string;
   locationIds: string[]; // ✅ origin も必ず含める（POS側で所属グループ判定に使う）
 };
 
-type CarrierOption = {
+export type CarrierOption = {
   id: string;
   label: string; // POSに出す表示名（例：ヤマト運輸）
-  company: string; // APIに渡す company（例：Yamato (JA)）
+  company: string; // Shopifyプリセットの company（例：Yamato (JA)）
+  sortOrder?: number; // 表示順（小さい順、デフォルト: 999）
 };
 
-type SettingsV1 = {
+export type SettingsV1 = {
   version: 1;
-  destinationGroups: DestinationGroup[];
+  destinationGroups?: DestinationGroup[]; // 非推奨（後方互換性のため残す）
   carriers: CarrierOption[];
+  // 追加設定項目
+  visibleLocationIds?: string[]; // 表示ロケーション選択設定（空配列=全ロケーション表示）
+  outbound?: {
+    allowForceCancel?: boolean; // 強制キャンセル処理許可（デフォルト: true）
+    historyInitialLimit?: number; // 出庫履歴（Transfer）初回件数。API上限250、推奨100
+  };
+  inbound?: {
+    allowOverReceive?: boolean; // 過剰入庫許可（デフォルト: true）
+    allowExtraReceive?: boolean; // 予定外入庫許可（デフォルト: true）
+    listInitialLimit?: number; // 入庫リスト（Transfer）初回件数。API上限250、推奨100
+  };
+  productList?: {
+    initialLimit?: number; // 商品リスト（追加行表示）初回件数。lineItems上限250、推奨250
+  };
+  searchList?: {
+    initialLimit?: number; // 検索リスト（検索結果表示）初回件数。productVariants上限50、推奨50
+  };
 };
 
 const NS = "stock_transfer_pos";
 const KEY = "settings_v1";
 
+// 日本の配送会社のデフォルト設定
+const DEFAULT_CARRIERS_JP: CarrierOption[] = [
+  { id: "car_yamato", label: "ヤマト運輸", company: "Yamato (JA)", sortOrder: 1 },
+  { id: "car_sagawa", label: "佐川急便", company: "Sagawa (JA)", sortOrder: 2 },
+  { id: "car_japanpost", label: "日本郵便", company: "Japan Post (JA)", sortOrder: 3 },
+  { id: "car_ecohai", label: "エコ配", company: "エコ配", sortOrder: 4 },
+];
+
 function defaultSettings(): SettingsV1 {
-  return { version: 1, destinationGroups: [], carriers: [] };
+  return {
+    version: 1,
+    destinationGroups: [], // 後方互換性のため残す（非推奨）
+    carriers: DEFAULT_CARRIERS_JP.map((c) => ({ ...c })), // デフォルトで日本の配送会社を設定
+    visibleLocationIds: [], // 空配列=全ロケーション表示
+    outbound: {
+      allowForceCancel: true, // デフォルト: 許可
+      historyInitialLimit: 100, // 出庫履歴 初回表示件数
+    },
+    inbound: {
+      allowOverReceive: true,
+      allowExtraReceive: true,
+      listInitialLimit: 100, // 入庫リスト 初回。API上限250、推奨100
+    },
+    productList: { initialLimit: 250 }, // 商品リスト 初回。上限250、推奨250
+    searchList: { initialLimit: 50 },  // 検索リスト 初回。API上限50、推奨50
+  };
 }
 
 function safeParseSettings(raw: unknown): SettingsV1 {
@@ -43,8 +85,25 @@ function safeParseSettings(raw: unknown): SettingsV1 {
 }
 
 function sanitizeSettings(input: any): SettingsV1 {
-  const s: SettingsV1 = { version: 1, destinationGroups: [], carriers: [] };
+  const s: SettingsV1 = {
+    version: 1,
+    destinationGroups: [], // 後方互換性のため残す（非推奨）
+    carriers: [],
+    visibleLocationIds: [],
+    outbound: {
+      allowForceCancel: true,
+      historyInitialLimit: 100,
+    },
+    inbound: {
+      allowOverReceive: true,
+      allowExtraReceive: true,
+      listInitialLimit: 100,
+    },
+    productList: { initialLimit: 250 },
+    searchList: { initialLimit: 50 },
+  };
 
+  // 後方互換性のため、destinationGroupsは読み込むが表示しない
   const groups = Array.isArray(input?.destinationGroups) ? input.destinationGroups : [];
   s.destinationGroups = groups
     .map((g: any) => ({
@@ -60,10 +119,78 @@ function sanitizeSettings(input: any): SettingsV1 {
       id: String(c?.id ?? "").trim(),
       label: String(c?.label ?? "").trim(),
       company: String(c?.company ?? "").trim(),
+      sortOrder: Number.isFinite(Number(c?.sortOrder)) ? Number(c.sortOrder) : 999,
     }))
-    .filter((c: CarrierOption) => c.id && c.label && c.company);
+    .filter((c: CarrierOption) => c.id && c.label && c.company)
+    .sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999)); // 表示順でソート
+
+  // 表示ロケーション選択設定
+  if (Array.isArray(input?.visibleLocationIds)) {
+    s.visibleLocationIds = input.visibleLocationIds.map((id: any) => String(id)).filter(Boolean);
+  }
+
+  // 出庫設定
+  if (input?.outbound && typeof input.outbound === "object") {
+    s.outbound = {
+      allowForceCancel:
+        typeof input.outbound.allowForceCancel === "boolean"
+          ? input.outbound.allowForceCancel
+          : true,
+      historyInitialLimit: clampInt(
+        Number(input.outbound.historyInitialLimit),
+        1,
+        250,
+        100
+      ),
+    };
+  }
+
+  // 入庫設定
+  if (input?.inbound && typeof input.inbound === "object") {
+    s.inbound = {
+      allowOverReceive:
+        typeof input.inbound.allowOverReceive === "boolean"
+          ? input.inbound.allowOverReceive
+          : true,
+      allowExtraReceive:
+        typeof input.inbound.allowExtraReceive === "boolean"
+          ? input.inbound.allowExtraReceive
+          : true,
+      listInitialLimit: clampInt(
+        Number(input.inbound.listInitialLimit),
+        1,
+        250,
+        100
+      ),
+    };
+  }
+
+  // 商品リスト表示件数（初期）。lineItems API 上限250
+  if (input?.productList && typeof input.productList === "object") {
+    s.productList = {
+      initialLimit: clampInt(Number(input.productList.initialLimit), 1, 250, 250),
+    };
+  }
+
+  // 検索リスト表示件数（初期）。productVariants 検索 API 上限50
+  if (input?.searchList && typeof input.searchList === "object") {
+    s.searchList = {
+      initialLimit: clampInt(Number(input.searchList.initialLimit), 1, 50, 50),
+    };
+  }
 
   return s;
+}
+
+function clampInt(
+  v: number,
+  min: number,
+  max: number,
+  defaultVal: number
+): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return defaultVal;
+  return Math.max(min, Math.min(max, Math.round(n)));
 }
 
 /**
@@ -95,29 +222,44 @@ const COMPANY_PRESETS_JP_EXTRA = [
 ];
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  try {
+    const { admin } = await authenticate.admin(request);
 
-  const resp = await admin.graphql(
-    `#graphql
-      query SettingsBoot($first: Int!) {
-        locations(first: $first) { nodes { id name } }
-        currentAppInstallation {
-          id
-          metafield(namespace: "${NS}", key: "${KEY}") { id value type }
+    const resp = await admin.graphql(
+      `#graphql
+        query SettingsBoot($first: Int!) {
+          locations(first: $first) { nodes { id name } }
+          currentAppInstallation {
+            id
+            metafield(namespace: "${NS}", key: "${KEY}") { id value type }
+          }
         }
-      }
-    `,
-    { variables: { first: 250 } }
-  );
+      `,
+      { variables: { first: 250 } }
+    );
 
-  const data = await resp.json();
-  const locations: LocationNode[] = data?.data?.locations?.nodes ?? [];
-  const raw = data?.data?.currentAppInstallation?.metafield?.value ?? null;
+    const data = await resp.json();
+    const locations: LocationNode[] = data?.data?.locations?.nodes ?? [];
+    const raw = data?.data?.currentAppInstallation?.metafield?.value ?? null;
 
-  const settings = safeParseSettings(raw);
+    let settings = safeParseSettings(raw);
 
-  // ✅ React Router template: json() を使わず、そのまま返す
-  return { locations, settings };
+    // 初回インストール時（carriersが空の場合）はデフォルト値を設定
+    if (settings.carriers.length === 0) {
+      settings = {
+        ...settings,
+        carriers: DEFAULT_CARRIERS_JP.map((c) => ({ ...c })),
+      };
+    }
+
+    // ✅ React Router template: json() を使わず、そのまま返す
+    return { locations, settings };
+  } catch (error) {
+    // 認証エラーの場合は、authenticate.admin が自動的にリダイレクトする
+    // ここに到達することは通常ないが、念のためエラーハンドリング
+    console.error("Settings loader error:", error);
+    throw error;
+  }
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -187,14 +329,24 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function SettingsPage() {
-  const { locations, settings: initial } = useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
 
-  const [settings, setSettings] = useState<SettingsV1>(initial);
+  // loaderDataが存在しない場合（認証エラーなど）のエラーハンドリング
+  if (!loaderData) {
+    return (
+      <s-page heading="設定">
+        <s-box padding="base">
+          <s-text tone="critical">
+            設定を読み込めませんでした。ページをリロードしてください。
+          </s-text>
+        </s-box>
+      </s-page>
+    );
+  }
 
-  // group creation UI
-  const [groupName, setGroupName] = useState("");
-  const [groupSelection, setGroupSelection] = useState<Record<string, boolean>>({});
+  const { locations, settings: initial } = loaderData;
+  const [settings, setSettings] = useState<SettingsV1>(initial);
 
   // carrier presets UI
   const [showCarrierPresets, setShowCarrierPresets] = useState(false);
@@ -215,74 +367,85 @@ export default function SettingsPage() {
     }
   }, [fetcher.data]);
 
-  const locById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const l of locations) m.set(l.id, l.name);
-    return m;
-  }, [locations]);
-
-  // どのロケがどのグループに所属してるか（診断用）
-  const groupMembership = useMemo(() => {
-    const map = new Map<string, string[]>(); // locationId -> group names
-    for (const g of settings.destinationGroups) {
-      for (const id of g.locationIds) {
-        const arr = map.get(id) ?? [];
-        arr.push(g.name);
-        map.set(id, arr);
-      }
-    }
-    return map;
-  }, [settings.destinationGroups]);
-
-  const toggleSelection = (id: string) => {
-    setGroupSelection((s) => ({ ...s, [id]: !s[id] }));
-  };
-
-  const addGroup = () => {
-    const name = groupName.trim();
-    if (!name) return;
-
-    const locationIds = Object.entries(groupSelection)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
-
-    const id = `grp_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-
-    setSettings((s) => ({
-      ...s,
-      destinationGroups: [...s.destinationGroups, { id, name, locationIds }],
-    }));
-
-    setGroupName("");
-    setGroupSelection({});
-  };
-
-  const removeGroup = (id: string) => {
-    setSettings((s) => ({
-      ...s,
-      destinationGroups: s.destinationGroups.filter((g) => g.id !== id),
-    }));
-  };
-
   const addCarrier = () => {
     const id = `car_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const maxSortOrder = Math.max(...settings.carriers.map((c) => c.sortOrder ?? 999), 0);
     setSettings((s) => ({
       ...s,
-      carriers: [...s.carriers, { id, label: "例）ヤマト運輸", company: "Yamato (JA)" }],
+      carriers: [
+        ...s.carriers,
+        { id, label: "例）ヤマト運輸", company: "Yamato (JA)", sortOrder: maxSortOrder + 1 },
+      ].sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999)),
     }));
   };
 
   const updateCarrier = (id: string, patch: Partial<CarrierOption>) => {
-    setSettings((s) => ({
-      ...s,
-      carriers: s.carriers.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-    }));
+    setSettings((s) => {
+      const updated = s.carriers.map((c) => (c.id === id ? { ...c, ...patch } : c));
+      return {
+        ...s,
+        carriers: updated.sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999)),
+      };
+    });
   };
 
   const removeCarrier = (id: string) => {
     setSettings((s) => ({
       ...s,
       carriers: s.carriers.filter((c) => c.id !== id),
+    }));
+  };
+
+  const moveCarrierUp = (id: string) => {
+    setSettings((s) => {
+      const index = s.carriers.findIndex((c) => c.id === id);
+      if (index <= 0) return s;
+      const carriers = [...s.carriers];
+      // 配列の要素を直接入れ替え（新しい配列を作成）
+      const newCarriers = [...carriers];
+      [newCarriers[index - 1], newCarriers[index]] = [newCarriers[index], newCarriers[index - 1]];
+      // sortOrderも更新（新しいオブジェクトを作成）
+      const updatedCarriers = newCarriers.map((c, i) => ({
+        ...c,
+        sortOrder: i + 1,
+      }));
+      return {
+        ...s,
+        carriers: updatedCarriers,
+      };
+    });
+  };
+
+  const moveCarrierDown = (id: string) => {
+    setSettings((s) => {
+      const index = s.carriers.findIndex((c) => c.id === id);
+      if (index < 0 || index >= s.carriers.length - 1) return s;
+      const carriers = [...s.carriers];
+      // 配列の要素を直接入れ替え（新しい配列を作成）
+      const newCarriers = [...carriers];
+      [newCarriers[index], newCarriers[index + 1]] = [newCarriers[index + 1], newCarriers[index]];
+      // sortOrderも更新（新しいオブジェクトを作成）
+      const updatedCarriers = newCarriers.map((c, i) => ({
+        ...c,
+        sortOrder: i + 1,
+      }));
+      return {
+        ...s,
+        carriers: updatedCarriers,
+      };
+    });
+  };
+
+  const resetCarriersToDefault = () => {
+    if (
+      !confirm(
+        "配送会社をデフォルト設定に戻しますか？現在の設定は削除されます。"
+      )
+    )
+      return;
+    setSettings((s) => ({
+      ...s,
+      carriers: DEFAULT_CARRIERS_JP.map((c) => ({ ...c })),
     }));
   };
 
@@ -293,199 +456,411 @@ export default function SettingsPage() {
   };
 
   return (
-    <s-page heading="在庫移管（POS）設定">
+    <s-page heading="設定">
       <s-scroll-box padding="base">
         <s-stack gap="base">
-          {saveOk ? <s-text tone="success">保存しました</s-text> : null}
-          {saveErr ? <s-text tone="critical">保存エラー: {saveErr}</s-text> : null}
+          {/* 保存・破棄ボタン（最上部） */}
+          <s-box padding="base">
+            <s-stack direction="inline" gap="base" inlineAlignment="end">
+              <s-button tone="critical" onClick={() => setSettings(initial)} disabled={saving}>
+                破棄
+              </s-button>
+              <s-button tone="success" onClick={save} disabled={saving}>
+                {saving ? "保存中..." : "保存"}
+              </s-button>
+            </s-stack>
+          </s-box>
 
-          <s-section heading="店舗グループ（宛先ロケーションの絞り込み）">
-            <s-text tone="subdued" size="small">
-              POS側ではグループ選択UIは出しません。
-              <br />
-              「現在の店舗（origin）が所属するグループ」を自動判定し、そのグループ内のロケーションだけを宛先候補にします。
-              <br />
-              ✅ ただし origin がどのグループにも入っていない場合は <b>全ロケーション表示（制限なし）</b> にフォールバックします。
-            </s-text>
+          {/* 成功・エラーメッセージ */}
+          {saveOk ? (
+            <s-box padding="base" background="subdued">
+              <s-text tone="success" emphasis="bold">保存しました</s-text>
+            </s-box>
+          ) : null}
+          {saveErr ? (
+            <s-box padding="base" background="subdued">
+              <s-text tone="critical" emphasis="bold">保存エラー: {saveErr}</s-text>
+            </s-box>
+          ) : null}
 
-            <s-divider />
-
-            <s-text-field
-              label="新しいグループ名"
-              value={groupName}
-              onInput={(e: any) => setGroupName(readValue(e))}
-              onChange={(e: any) => setGroupName(readValue(e))}
-            />
-
-            <s-box padding="base">
+          {/* 左右2カラム（項目ごとの区切りは各 section で担保） */}
+          <div style={{ display: "flex", gap: "24px", flexWrap: "wrap", alignItems: "flex-start" }}>
+            {/* 左カラム */}
+            <div style={{ flex: "1 1 360px", minWidth: 0 }}>
               <s-stack gap="base">
-                <s-text emphasis="bold">
-                  グループに含めるロケーション（origin 店舗も必ず含めてください）
-                </s-text>
+                {/* 店舗設定（履歴フィルター同様の選択UI） */}
+                <s-section heading="店舗設定">
+                  <s-text tone="subdued" size="small">
+                    POS側で表示するロケーションを選択します。全て表示のまま＝全ロケーション表示。項目を選ぶとそのロケーションのみ表示されます。
+                  </s-text>
+                  {locations.length === 0 ? (
+                    <s-box padding="base">
+                      <s-text tone="critical">ロケーションが取得できませんでした</s-text>
+                    </s-box>
+                  ) : (
+                    <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px", marginTop: "8px" }}>
+                      <div
+                        onClick={() => setSettings((s) => ({ ...s, visibleLocationIds: [] }))}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: "6px",
+                          cursor: "pointer",
+                          backgroundColor: (settings.visibleLocationIds ?? []).length === 0 ? "#f0f9f7" : "transparent",
+                          border: (settings.visibleLocationIds ?? []).length === 0 ? "1px solid #008060" : "1px solid transparent",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "8px",
+                        }}
+                      >
+                        <input type="checkbox" checked={(settings.visibleLocationIds ?? []).length === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                        <span style={{ fontWeight: (settings.visibleLocationIds ?? []).length === 0 ? 600 : 500 }}>全て表示</span>
+                      </div>
+                      {locations.map((l) => {
+                        const isSelected = (settings.visibleLocationIds ?? []).includes(l.id);
+                        return (
+                          <div
+                            key={l.id}
+                            onClick={() => {
+                              const current = settings.visibleLocationIds ?? [];
+                              const newIds = isSelected ? current.filter((id) => id !== l.id) : [...current, l.id];
+                              setSettings((s) => ({ ...s, visibleLocationIds: newIds }));
+                            }}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: "6px",
+                              cursor: "pointer",
+                              backgroundColor: isSelected ? "#f0f9f7" : "transparent",
+                              border: isSelected ? "1px solid #008060" : "1px solid transparent",
+                              marginTop: "4px",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "8px",
+                            }}
+                          >
+                            <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis" }}>{l.name}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </s-section>
 
-                {locations.length === 0 ? (
-                  <s-text tone="critical">ロケーションが取得できませんでした</s-text>
-                ) : (
-                  <s-stack gap="base">
-                    {locations.map((l) => {
-                      const on = !!groupSelection[l.id];
-                      const belong = groupMembership.get(l.id) ?? [];
-                      const warnMulti = belong.length >= 2;
+                <s-divider />
 
-                      return (
-                        <s-button
-                          key={l.id} // ✅ index は使わない（ReferenceError回避）
-                          tone={warnMulti ? "critical" : on ? "success" : undefined}
-                          onClick={() => toggleSelection(l.id)}
-                        >
-                          {l.name}
-                          {on ? " ✅" : ""}
-                          {warnMulti ? "（※複数グループ所属）" : ""}
-                        </s-button>
-                      );
-                    })}
+                {/* アプリ表示件数（初回読み込み） */}
+                <s-section heading="アプリ表示件数（初回読み込み）">
+                  <s-box padding="base">
+                    <s-stack gap="base">
+                      <s-text-field
+                        type="number"
+                        label="履歴一覧リスト"
+                        value={String(settings.outbound?.historyInitialLimit ?? 100)}
+                        onInput={(e: any) => {
+                          const n = parseInt(readValue(e), 10);
+                          if (!Number.isFinite(n)) return;
+                          setSettings((s) => ({
+                            ...s,
+                            outbound: { ...(s.outbound ?? {}), historyInitialLimit: Math.max(1, Math.min(250, n)) },
+                            inbound: { ...(s.inbound ?? {}), listInitialLimit: Math.max(1, Math.min(250, n)) },
+                          }));
+                        }}
+                        onChange={(e: any) => {
+                          const n = parseInt(readValue(e), 10);
+                          if (!Number.isFinite(n)) return;
+                          setSettings((s) => ({
+                            ...s,
+                            outbound: { ...(s.outbound ?? {}), historyInitialLimit: Math.max(1, Math.min(250, n)) },
+                            inbound: { ...(s.inbound ?? {}), listInitialLimit: Math.max(1, Math.min(250, n)) },
+                          }));
+                        }}
+                      />
+                      <s-text tone="subdued" size="small">アプリの出庫履歴・入庫履歴・ロス履歴の一覧表示に適用（棚卸履歴は全件取得のため対象外）。最大250件、推奨100件</s-text>
+                      <s-text-field
+                        type="number"
+                        label="商品リスト"
+                        value={String(settings.productList?.initialLimit ?? 250)}
+                        onInput={(e: any) => {
+                          const n = parseInt(readValue(e), 10);
+                          if (!Number.isFinite(n)) return;
+                          setSettings((s) => ({ ...s, productList: { ...(s.productList ?? {}), initialLimit: Math.max(1, Math.min(250, n)) } }));
+                        }}
+                        onChange={(e: any) => {
+                          const n = parseInt(readValue(e), 10);
+                          if (!Number.isFinite(n)) return;
+                          setSettings((s) => ({ ...s, productList: { ...(s.productList ?? {}), initialLimit: Math.max(1, Math.min(250, n)) } }));
+                        }}
+                      />
+                      <s-text tone="subdued" size="small">アプリの出庫・入庫・ロス・棚卸の商品リスト表示に適用。最大250件、推奨250件</s-text>
+                      <s-text-field
+                        type="number"
+                        label="検索リスト"
+                        value={String(settings.searchList?.initialLimit ?? 50)}
+                        onInput={(e: any) => {
+                          const n = parseInt(readValue(e), 10);
+                          if (!Number.isFinite(n)) return;
+                          setSettings((s) => ({ ...s, searchList: { ...(s.searchList ?? {}), initialLimit: Math.max(1, Math.min(50, n)) } }));
+                        }}
+                        onChange={(e: any) => {
+                          const n = parseInt(readValue(e), 10);
+                          if (!Number.isFinite(n)) return;
+                          setSettings((s) => ({ ...s, searchList: { ...(s.searchList ?? {}), initialLimit: Math.max(1, Math.min(50, n)) } }));
+                        }}
+                      />
+                      <s-text tone="subdued" size="small">アプリの出庫・入庫・ロス・棚卸の検索結果表示に適用。最大50件、推奨50件</s-text>
+                    </s-stack>
+                  </s-box>
+                </s-section>
+
+                <s-divider />
+
+                {/* 出庫設定 */}
+                <s-section heading="出庫設定">
+            <s-box padding="base" style={{ width: "100%" }}>
+              <s-stack direction="inline" gap="base" inlineAlignment="space-between" style={{ width: "100%" }}>
+                <s-box style={{ flex: "1 1 auto", minWidth: 0, paddingRight: "16px" }}>
+                  <s-stack gap="tight">
+                    <s-text emphasis="bold">強制キャンセル処理許可</s-text>
+                    <s-text tone="subdued" size="small">
+                      出庫処理で強制キャンセル（在庫を戻す処理）を許可するかどうかを設定します。
+                    </s-text>
                   </s-stack>
-                )}
+                </s-box>
+                <s-box style={{ flex: "0 0 auto" }}>
+                  <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="allowForceCancel"
+                        checked={(settings.outbound?.allowForceCancel ?? true) === true}
+                        onChange={() => setSettings((s) => ({ ...s, outbound: { ...(s.outbound ?? {}), allowForceCancel: true } }))}
+                      />
+                      <span>許可</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="allowForceCancel"
+                        checked={(settings.outbound?.allowForceCancel ?? true) === false}
+                        onChange={() => setSettings((s) => ({ ...s, outbound: { ...(s.outbound ?? {}), allowForceCancel: false } }))}
+                      />
+                      <span>不許可</span>
+                    </label>
+                  </div>
+                </s-box>
+              </s-stack>
+            </s-box>
+                </s-section>
 
-                <s-button onClick={addGroup} disabled={!groupName.trim()}>
-                  グループ追加
-                </s-button>
+                <s-divider />
+
+                {/* 入庫設定 */}
+                <s-section heading="入庫設定">
+            <s-box padding="base" style={{ width: "100%" }}>
+              <s-stack direction="inline" gap="base" inlineAlignment="space-between" style={{ width: "100%" }}>
+                <s-box style={{ flex: "1 1 auto", minWidth: 0, paddingRight: "16px" }}>
+                  <s-stack gap="tight">
+                    <s-text emphasis="bold">過剰入庫許可</s-text>
+                    <s-text tone="subdued" size="small">
+                      予定数量を超える入庫を許可するかどうかを設定します。
+                    </s-text>
+                  </s-stack>
+                </s-box>
+                <s-box style={{ flex: "0 0 auto" }}>
+                  <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="allowOverReceive"
+                        checked={(settings.inbound?.allowOverReceive ?? true) === true}
+                        onChange={() => setSettings((s) => ({ ...s, inbound: { ...(s.inbound ?? {}), allowOverReceive: true } }))}
+                      />
+                      <span>許可</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="allowOverReceive"
+                        checked={(settings.inbound?.allowOverReceive ?? true) === false}
+                        onChange={() => setSettings((s) => ({ ...s, inbound: { ...(s.inbound ?? {}), allowOverReceive: false } }))}
+                      />
+                      <span>不許可</span>
+                    </label>
+                  </div>
+                </s-box>
               </s-stack>
             </s-box>
 
-            <s-divider />
-
-            <s-text emphasis="bold">作成済みグループ</s-text>
-            {settings.destinationGroups.length === 0 ? (
-              <s-text tone="subdued">まだありません</s-text>
-            ) : (
-              <s-stack gap="base">
-                {settings.destinationGroups.map((g) => (
-                  <s-box padding="base" key={g.id}>
-                    <s-stack gap="base">
-                      <s-stack direction="inline" gap="base" inlineAlignment="center">
-                        <s-text emphasis="bold">{g.name}</s-text>
-                        <s-button tone="critical" onClick={() => removeGroup(g.id)}>
-                          削除
-                        </s-button>
-                      </s-stack>
-
-                      <s-text tone="subdued" size="small">
-                        {g.locationIds.map((id) => locById.get(id) ?? id).join(" / ") || "（空）"}
-                      </s-text>
-                    </s-stack>
-                  </s-box>
-                ))}
+            <s-box padding="base" style={{ width: "100%" }}>
+              <s-stack direction="inline" gap="base" inlineAlignment="space-between" style={{ width: "100%" }}>
+                <s-box style={{ flex: "1 1 auto", minWidth: 0, paddingRight: "16px" }}>
+                  <s-stack gap="tight">
+                    <s-text emphasis="bold">予定外入庫許可</s-text>
+                    <s-text tone="subdued" size="small">
+                      予定にない商品の入庫を許可するかどうかを設定します。
+                    </s-text>
+                  </s-stack>
+                </s-box>
+                <s-box style={{ flex: "0 0 auto" }}>
+                  <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="allowExtraReceive"
+                        checked={(settings.inbound?.allowExtraReceive ?? true) === true}
+                        onChange={() => setSettings((s) => ({ ...s, inbound: { ...(s.inbound ?? {}), allowExtraReceive: true } }))}
+                      />
+                      <span>許可</span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                      <input
+                        type="radio"
+                        name="allowExtraReceive"
+                        checked={(settings.inbound?.allowExtraReceive ?? true) === false}
+                        onChange={() => setSettings((s) => ({ ...s, inbound: { ...(s.inbound ?? {}), allowExtraReceive: false } }))}
+                      />
+                      <span>不許可</span>
+                    </label>
+                  </div>
+                </s-box>
               </s-stack>
-            )}
-          </s-section>
+            </s-box>
+                </s-section>
+              </s-stack>
+            </div>
 
-          <s-divider />
-
-          <s-section heading="配送会社（選択式：POS側で表記ゆれ防止）">
+            {/* 右カラム */}
+            <div style={{ flex: "1 1 360px", minWidth: 0 }}>
+              <s-stack gap="base">
+                {/* 配送設定 */}
+                <s-section heading="配送設定">
             <s-text tone="subdued" size="small">
-              POS側では “ここで登録した配送会社” を選ぶだけにします。
+              アプリ表示名とShopifyのプリセットcompanyを設定してください。
               <br />
-              company は Shopify が認識できる文字列を入れてください（例：Yamato (JA)）。
+              company は プリセットリストより Shopify が認識できる文字列を入れてください。（例：Yamato (JA)）
               <br />
-              ※「国→配送会社一覧をShopify公式からAPI取得」は、一般公開APIでの取得口が無い想定のため、まずはプリセット＋手動追加方式にします。
+              表示順は矢印で調整をお願いします。
             </s-text>
 
-            <s-divider />
-
-            <s-stack direction="inline" gap="base" inlineAlignment="center">
-              <s-button onClick={() => setShowCarrierPresets((v) => !v)}>
-                {showCarrierPresets ? "プリセットを閉じる" : "プリセットを表示"}
-              </s-button>
-            </s-stack>
-
-            {showCarrierPresets ? (
-              <s-box padding="base">
-                <s-stack gap="base">
-                  <s-text emphasis="bold">グローバル（代表）</s-text>
-                  <s-stack gap="base">
-                    {COMPANY_PRESETS_GLOBAL.map((name) => (
-                      <s-text key={name} tone="subdued" size="small">
-                        {name}
-                      </s-text>
-                    ))}
-                  </s-stack>
-
-                  <s-divider />
-
-                  <s-text emphasis="bold">日本（追加分）</s-text>
-                  <s-stack gap="base">
-                    {COMPANY_PRESETS_JP_EXTRA.map((name) => (
-                      <s-text key={name} tone="subdued" size="small">
-                        {name}
-                      </s-text>
-                    ))}
-                  </s-stack>
-                </s-stack>
-              </s-box>
-            ) : null}
-
-            <s-divider />
-
-            {settings.carriers.length === 0 ? (
-              <s-text tone="subdued">まだありません</s-text>
-            ) : (
+            <s-box padding="base">
               <s-stack gap="base">
-                {settings.carriers.map((c) => (
-                  <s-box padding="base" key={c.id}>
+                <s-button onClick={() => setShowCarrierPresets((v) => !v)}>
+                  {showCarrierPresets ? "プリセットを閉じる" : "プリセットを表示"}
+                </s-button>
+
+                {showCarrierPresets ? (
+                  <s-box padding="base" background="subdued">
                     <s-stack gap="base">
-                      <s-text-field
-                        label="表示名（POSに出す）"
-                        value={c.label}
-                        onInput={(e: any) => updateCarrier(c.id, { label: readValue(e) })}
-                        onChange={(e: any) => updateCarrier(c.id, { label: readValue(e) })}
-                      />
-
-                      <s-text-field
-                        label="company（APIに渡す）"
-                        value={c.company}
-                        onInput={(e: any) => updateCarrier(c.id, { company: readValue(e) })}
-                        onChange={(e: any) => updateCarrier(c.id, { company: readValue(e) })}
-                        helpText="例：Yamato (JA) / Sagawa (JA) / Japan Post (JA)"
-                      />
-
-                      <s-text tone="subdued" size="small">
-                        ワンタップ候補（クリックで上書き）
-                      </s-text>
-                      <s-stack direction="inline" gap="base" inlineAlignment="center">
-                        <s-button onClick={() => updateCarrier(c.id, { company: "Yamato (JA)" })}>
-                          Yamato (JA)
-                        </s-button>
-                        <s-button onClick={() => updateCarrier(c.id, { company: "Sagawa (JA)" })}>
-                          Sagawa (JA)
-                        </s-button>
-                        <s-button onClick={() => updateCarrier(c.id, { company: "Japan Post (JA)" })}>
-                          Japan Post (JA)
-                        </s-button>
+                      <s-text emphasis="bold" size="small">グローバル（代表）</s-text>
+                      <s-stack gap="tight">
+                        {COMPANY_PRESETS_GLOBAL.map((name) => (
+                          <s-text key={name} tone="subdued" size="small">
+                            • {name}
+                          </s-text>
+                        ))}
                       </s-stack>
-
-                      <s-button tone="critical" onClick={() => removeCarrier(c.id)}>
-                        削除
-                      </s-button>
+                      <s-divider />
+                      <s-text emphasis="bold" size="small">日本（追加分）</s-text>
+                      <s-stack gap="tight">
+                        {COMPANY_PRESETS_JP_EXTRA.map((name) => (
+                          <s-text key={name} tone="subdued" size="small">
+                            • {name}
+                          </s-text>
+                        ))}
+                      </s-stack>
                     </s-stack>
                   </s-box>
-                ))}
+                ) : null}
               </s-stack>
+            </s-box>
+
+            {settings.carriers.length === 0 ? (
+              <s-box padding="base">
+                <s-text tone="subdued">配送会社が登録されていません</s-text>
+              </s-box>
+            ) : (
+              <s-box padding="base">
+                <s-stack gap="base">
+                  {settings.carriers.map((c, index) => (
+                    <s-box key={c.id} padding="base" background="subdued">
+                      <s-stack gap="base">
+                        <s-stack direction="inline" gap="base" inlineAlignment="space-between">
+                          <s-text emphasis="bold" size="small">
+                            表示順: {index + 1}
+                          </s-text>
+                        </s-stack>
+                        <s-text-field
+                          label="表示名（POSに出す）"
+                          value={c.label}
+                          onInput={(e: any) => updateCarrier(c.id, { label: readValue(e) })}
+                          onChange={(e: any) => updateCarrier(c.id, { label: readValue(e) })}
+                        />
+                        <s-text-field
+                          label="company（Shopifyプリセット）"
+                          value={c.company}
+                          onInput={(e: any) => updateCarrier(c.id, { company: readValue(e) })}
+                          onChange={(e: any) => updateCarrier(c.id, { company: readValue(e) })}
+                          helpText="例：Yamato (JA) / Sagawa (JA) / Japan Post (JA)"
+                        />
+                        <s-stack direction="inline" gap="base" inlineAlignment="center">
+                          <s-button
+                            size="small"
+                            onClick={() => updateCarrier(c.id, { company: "Yamato (JA)" })}
+                          >
+                            Yamato
+                          </s-button>
+                          <s-button
+                            size="small"
+                            onClick={() => updateCarrier(c.id, { company: "Sagawa (JA)" })}
+                          >
+                            Sagawa
+                          </s-button>
+                          <s-button
+                            size="small"
+                            onClick={() => updateCarrier(c.id, { company: "Japan Post (JA)" })}
+                          >
+                            Japan Post
+                          </s-button>
+                          <s-box inlineSize="fill" />
+                          <s-button tone="critical" size="small" onClick={() => removeCarrier(c.id)}>
+                            削除
+                          </s-button>
+                          <s-stack direction="inline" gap="tight">
+                            <s-button
+                              size="small"
+                              disabled={index === 0}
+                              onClick={() => moveCarrierUp(c.id)}
+                            >
+                              ↑
+                            </s-button>
+                            <s-button
+                              size="small"
+                              disabled={index === settings.carriers.length - 1}
+                              onClick={() => moveCarrierDown(c.id)}
+                            >
+                              ↓
+                            </s-button>
+                          </s-stack>
+                        </s-stack>
+                      </s-stack>
+                    </s-box>
+                  ))}
+                </s-stack>
+              </s-box>
             )}
 
-            <s-button onClick={addCarrier}>配送会社を追加</s-button>
+            <s-box padding="base">
+              <s-stack direction="inline" gap="base" inlineAlignment="start">
+                <s-button onClick={addCarrier}>配送会社を追加</s-button>
+                <s-button onClick={resetCarriersToDefault}>デフォルトに戻す</s-button>
+              </s-stack>
+            </s-box>
           </s-section>
+              </s-stack>
+            </div>
+          </div>
 
           <s-divider />
-
-          <s-stack direction="inline" gap="base" inlineAlignment="center">
-            <s-button tone="critical" onClick={() => setSettings(initial)} disabled={saving}>
-              破棄して戻す
-            </s-button>
-            <s-button tone="success" onClick={save} disabled={saving}>
-              {saving ? "保存中..." : "保存"}
-            </s-button>
-          </s-stack>
         </s-stack>
       </s-scroll-box>
     </s-page>

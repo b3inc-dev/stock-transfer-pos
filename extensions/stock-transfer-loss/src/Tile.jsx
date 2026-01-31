@@ -1,4 +1,3 @@
-// extensions/stock-transfer-tile/src/Tile.jsx
 import { render } from "preact";
 
 export default async () => {
@@ -8,8 +7,8 @@ export default async () => {
 function Extension() {
   return (
     <s-tile
-      heading="在庫処理"
-      subheading="出庫 / 入庫"
+      heading="在庫調整"
+      subheading="ロス / 棚卸"
       onClick={() => shopify.action.presentModal()}
     />
   );

@@ -1,11 +1,11 @@
 api_version = "2025-10"
 
 [[extensions]]
-uid = "5d4fd9c8-9ffe-27f5-b3a1-c7f81186bbf83c90721a"
+uid = "c130fca1-ced8-a1d8-5f88-a909273dd6779df5a0ae"
 type = "ui_extension"
-name = "在庫処理（出庫・入庫）"
-handle = "stock-transfer-tile"
-description = "在庫処理（出庫・入庫）"
+name = "在庫調整（ロス・棚卸）"
+handle = "stock-transfer-loss"
+description = "在庫調整（ロス・棚卸）"
 
 [[extensions.targeting]]
 target = "pos.home.tile.render"
