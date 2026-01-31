@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "906bc9ebbe2a0812df1abfc257e378f1"
-name = "POS Stock"
+name = "POS Stock - Ciara"
 application_url = "https://stock-transfer-pos.onrender.com"
 embedded = true
 
