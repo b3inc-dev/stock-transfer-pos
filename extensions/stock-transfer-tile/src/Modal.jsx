@@ -512,6 +512,25 @@ function Extension() {
     nav.pop();
   }, [nav.pop, clearBars]);
 
+  // 出庫履歴詳細から戻る時：次に別IDを開いたときに前の詳細が残らないよう、履歴選択状態をクリア
+  const goBackFromOutboundHistoryDetail = useCallback(() => {
+    setStateSlice(setAppState, "outbound", (prev) => ({
+      ...(prev || {}),
+      historySelectedTransferId: "",
+      historySelectedTransferName: "",
+      historySelectedOriginName: "",
+      historySelectedDestName: "",
+      historySelectedStatus: "",
+      historySelectedReadOnly: false,
+      historySelectedShipmentId: "",
+      historySelectedOriginLocationId: "",
+      historySelectedDestLocationId: "",
+      historyDraftSourceTransferId: "",
+    }));
+    clearBars();
+    nav.pop();
+  }, [nav.pop, clearBars, setAppState]);
+
   const goOutboundCond = useCallback(() => {
     clearBars();
     nav.push(SCREENS.OUTBOUND_COND);
@@ -634,7 +653,7 @@ function Extension() {
         liteMode={liteMode}
         appState={appState}
         setAppState={setAppState}
-        onBack={goBack}
+        onBack={goBackFromOutboundHistoryDetail}
         dialog={dialog}
         setHeader={setHeader}
         setFooter={setFooter}
@@ -727,10 +746,31 @@ function Extension() {
             if (allReceived) {
               // 全シップメント完了 → 入庫一覧に戻る
               toast("すべてのシップメントの入庫が完了しました");
+              // 次に別IDを開いたときに前の商品リストが表示されないよう、入庫の選択状態をクリア
+              setStateSlice(setAppState, "inbound", {
+                selectedTransferId: "",
+                selectedShipmentId: "",
+                selectedShipmentIds: [],
+                shipmentMode: "single",
+                selectedTransferName: "",
+                selectedOriginName: "",
+                selectedDestinationName: "",
+                selectedTransferStatus: "",
+                selectedTransferTotalQuantity: 0,
+                selectedTransferReceivedQuantity: 0,
+                selectedReadOnly: false,
+              });
               clearBars();
               nav.push(SCREENS.INBOUND_COND);
             } else {
               // 未完了 → シップメント選択画面に戻る
+              // シップメント選択画面では同じTransferの別シップメントを選ぶため、selectedTransferId 等は維持し、selectedShipmentId のみクリアする（必要に応じて選択し直す）
+              setStateSlice(setAppState, "inbound", (prev) => ({
+                ...(prev || {}),
+                selectedShipmentId: "",
+                selectedShipmentIds: [],
+                shipmentMode: "single",
+              }));
               clearBars();
               nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION);
             }
@@ -6190,8 +6230,11 @@ function OutboundList({
         try { setLines([]); } catch (_) {}
         try { setCandidateQtyMap?.({}); } catch (_) {}
 
+        // 次に別IDを開いたときに前の商品リストが残らないよう、appState の outbound をクリア
         setStateSlice(setAppState, "outbound", (prev) => ({
           ...(prev || {}),
+          lines: [],
+          result: null,
           draftTransferId: "",
         }));
 
@@ -6216,8 +6259,11 @@ function OutboundList({
       try { setLines([]); } catch (_) {}
       try { setCandidateQtyMap?.({}); } catch (_) {}
 
+      // 次に別IDを開いたときに前の商品リストが残らないよう、appState の outbound をクリア
       setStateSlice(setAppState, "outbound", (prev) => ({
         ...(prev || {}),
+        lines: [],
+        result: null,
         editingTransferId: "",
         draftTransferId: "",
       }));
