@@ -2126,61 +2126,62 @@ export default function InventoryCountPage() {
     <s-page heading="棚卸">
       <s-scroll-box padding="base">
         <s-stack gap="base">
-          {/* タブ切り替え（選択中のみ背景・角丸） */}
-          <s-box padding="base">
-            <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
-              <button
-                type="button"
-                onClick={() => setActiveTab("groups")}
-                style={{
-                  padding: "8px 16px",
-                  border: "none",
-                  borderRadius: "8px",
-                  background: activeTab === "groups" ? "#e5e7eb" : "transparent",
-                  color: "#202223",
-                  fontSize: "14px",
-                  fontWeight: 500,
-                  cursor: "pointer",
-                }}
-              >
-                商品グループ設定
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab("create")}
-                style={{
-                  padding: "8px 16px",
-                  border: "none",
-                  borderRadius: "8px",
-                  background: activeTab === "create" ? "#e5e7eb" : "transparent",
-                  color: "#202223",
-                  fontSize: "14px",
-                  fontWeight: 500,
-                  cursor: "pointer",
-                }}
-              >
-                棚卸ID発行
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab("history")}
-                style={{
-                  padding: "8px 16px",
-                  border: "none",
-                  borderRadius: "8px",
-                  background: activeTab === "history" ? "#e5e7eb" : "transparent",
-                  color: "#202223",
-                  fontSize: "14px",
-                  fontWeight: 500,
-                  cursor: "pointer",
-                }}
-              >
-                履歴
-              </button>
+          {/* タブ切り替え（選択中のみ背景・角丸）。メニュー下の余白を狭くする */}
+          <div style={{ paddingBottom: "4px" }}>
+            <div style={{ padding: "8px 16px 0 16px" }}>
+              <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("groups")}
+                  style={{
+                    padding: "8px 16px",
+                    border: "none",
+                    borderRadius: "8px",
+                    background: activeTab === "groups" ? "#e5e7eb" : "transparent",
+                    color: "#202223",
+                    fontSize: "14px",
+                    fontWeight: 500,
+                    cursor: "pointer",
+                  }}
+                >
+                  商品グループ設定
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("create")}
+                  style={{
+                    padding: "8px 16px",
+                    border: "none",
+                    borderRadius: "8px",
+                    background: activeTab === "create" ? "#e5e7eb" : "transparent",
+                    color: "#202223",
+                    fontSize: "14px",
+                    fontWeight: 500,
+                    cursor: "pointer",
+                  }}
+                >
+                  棚卸ID発行
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("history")}
+                  style={{
+                    padding: "8px 16px",
+                    border: "none",
+                    borderRadius: "8px",
+                    background: activeTab === "history" ? "#e5e7eb" : "transparent",
+                    color: "#202223",
+                    fontSize: "14px",
+                    fontWeight: 500,
+                    cursor: "pointer",
+                  }}
+                >
+                  履歴
+                </button>
+              </div>
             </div>
-          </s-box>
-
-          <s-divider />
+            <s-divider />
+          </div>
 
           {/* 商品グループ設定 */}
           {activeTab === "groups" && (
@@ -2189,7 +2190,7 @@ export default function InventoryCountPage() {
                 {/* 二分割レイアウト（SP時は右カラムを左下部に回す） */}
                 <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   {/* 左側: 作成方法タブ + 各フォーム */}
-                  <div style={{ flex: "0 1 320px", minWidth: 0 }}>
+                  <div style={{ flex: "1 1 320px", minWidth: 0 }}>
                     <s-stack gap="base">
                       <s-text emphasis="bold" size="large">商品グループ</s-text>
                       <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
@@ -2672,7 +2673,7 @@ export default function InventoryCountPage() {
                   </div>
 
                   {/* 右側: 登録済み商品グループリスト */}
-                  <div style={{ flex: "1 1 400px", minWidth: 0 }}>
+                  <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
                     <s-stack gap="base">
                       <s-stack direction="inline" gap="base" inlineAlignment="space-between">
                         <s-text emphasis="bold" size="large">登録済み商品グループ</s-text>
@@ -2910,7 +2911,7 @@ export default function InventoryCountPage() {
               <s-box padding="base">
                 <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   {/* 左側: 発行フォーム */}
-                  <div style={{ flex: "0 1 320px", minWidth: 0 }}>
+                  <div style={{ flex: "1 1 320px", minWidth: 0 }}>
                     <s-stack gap="base">
                       <s-text emphasis="bold" size="large">棚卸IDを発行</s-text>
                       <s-text tone="subdued" size="small">
@@ -3042,7 +3043,7 @@ export default function InventoryCountPage() {
                   </div>
 
                   {/* 右側: 発行の流れ・直近一覧 */}
-                  <div style={{ flex: "1 1 400px", minWidth: 0 }}>
+                  <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
                     <s-stack gap="base">
                       <s-text emphasis="bold" size="large">発行の流れ</s-text>
                       <s-box padding="base" background="subdued" style={{ borderRadius: "8px" }}>
@@ -3105,7 +3106,7 @@ export default function InventoryCountPage() {
                 <s-box padding="base">
                   <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                     {/* 左: フィルター（リスト選択で絞り込み） */}
-                    <div style={{ flex: "0 1 260px", minWidth: 0 }}>
+                    <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                       <s-stack gap="base">
                         <s-text emphasis="bold" size="large">フィルター</s-text>
                         <s-text tone="subdued" size="small">
@@ -3226,10 +3227,10 @@ export default function InventoryCountPage() {
                     </div>
 
                     {/* 右: 履歴一覧 */}
-                    <div style={{ flex: "1 1 400px", minWidth: 0 }}>
+                    <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
                       <s-stack gap="base">
                         <s-text tone="subdued" size="small">
-                          表示: {filteredCounts.length}件 / 全{inventoryCounts.length}件
+                          表示: {filteredCounts.length}件 / {inventoryCounts.length}件
                         </s-text>
                         {/* 履歴一覧 */}
                         {filteredCounts.length === 0 ? (

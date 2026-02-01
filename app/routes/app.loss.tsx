@@ -262,7 +262,7 @@ export default function LossPage() {
     pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
   };
   const fetcher = useFetcher<typeof action>();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   // ステータスの日本語表記
   const STATUS_LABEL: Record<string, string> = {
@@ -565,7 +565,7 @@ export default function LossPage() {
             <s-box padding="base">
               <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                 {/* 左: フィルター（リスト選択で絞り込み） */}
-                <div style={{ flex: "0 1 260px", minWidth: 0 }}>
+                <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                   <s-stack gap="base">
                     <s-text emphasis="bold" size="large">フィルター</s-text>
                     <s-text tone="subdued" size="small">
@@ -676,21 +676,26 @@ export default function LossPage() {
                 </div>
 
                 {/* 右: 履歴一覧 */}
-                <div style={{ flex: "1 1 400px", minWidth: 0 }}>
+                <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
                   <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
                       <s-text tone="subdued" size="small">
-                        表示: {filteredEntries.length}件 / 全{estimatedTotal}
+                        表示: {filteredEntries.length}件 / {estimatedTotal}
                       </s-text>
                       {(pageInfo.hasPreviousPage || pageInfo.hasNextPage) && (
                         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                           <s-button
                             onClick={() => {
                               if (pageInfo.hasPreviousPage && pageInfo.startCursor) {
-                                const url = new URL(window.location.href);
-                                url.searchParams.set("cursor", pageInfo.startCursor);
-                                url.searchParams.set("direction", "prev");
-                                window.location.href = url.toString();
+                                setSearchParams(
+                                  (prev) => {
+                                    const next = new URLSearchParams(prev);
+                                    next.set("cursor", pageInfo.startCursor!);
+                                    next.set("direction", "prev");
+                                    return next;
+                                  },
+                                  { replace: true }
+                                );
                               }
                             }}
                             disabled={!pageInfo.hasPreviousPage}
@@ -703,10 +708,15 @@ export default function LossPage() {
                           <s-button
                             onClick={() => {
                               if (pageInfo.hasNextPage && pageInfo.endCursor) {
-                                const url = new URL(window.location.href);
-                                url.searchParams.set("cursor", pageInfo.endCursor);
-                                url.searchParams.set("direction", "next");
-                                window.location.href = url.toString();
+                                setSearchParams(
+                                  (prev) => {
+                                    const next = new URLSearchParams(prev);
+                                    next.set("cursor", pageInfo.endCursor!);
+                                    next.set("direction", "next");
+                                    return next;
+                                  },
+                                  { replace: true }
+                                );
                               }
                             }}
                             disabled={!pageInfo.hasNextPage}

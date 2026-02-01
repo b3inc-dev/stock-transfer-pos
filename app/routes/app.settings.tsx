@@ -504,8 +504,8 @@ export default function SettingsPage() {
     <s-page heading="設定">
       <s-scroll-box padding="base">
         <s-stack gap="base">
-          {/* 保存・破棄ボタン（最上部） */}
-          <s-box padding="base">
+          {/* 保存・破棄ボタン（最上部・右寄せ・上下余白を抑えて浮き感を軽減） */}
+          <div style={{ width: "100%", display: "flex", justifyContent: "flex-end", padding: "8px 16px" }}>
             <s-stack direction="inline" gap="base" inlineAlignment="end">
               <s-button tone="critical" onClick={() => setSettings(initial)} disabled={saving}>
                 破棄
@@ -514,7 +514,7 @@ export default function SettingsPage() {
                 {saving ? "保存中..." : "保存"}
               </s-button>
             </s-stack>
-          </s-box>
+          </div>
 
           {/* 成功・エラーメッセージ */}
           {saveOk ? (

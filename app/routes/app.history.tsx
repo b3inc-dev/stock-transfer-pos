@@ -140,6 +140,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 nodes {
                   id
                   status
+                  totalRejectedQuantity
                 }
               }
             }
@@ -181,10 +182,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
         // lineItemsは詳細表示時に取得するため、ここでは空配列
         const lineItems: TransferLineItem[] = [];
 
-        // 予定外入庫の数量をメモから抽出
+        // アプリ（POS）と同一ルール: receivedQuantityDisplay = receivedQuantity - rejectedQuantity + extrasQuantity
+        // 拒否分: マイナス（GraphQL receivedQuantity に含まれているため引く）
+        // 予定外: プラス（メモ/監査ログから取得して加算）
+        // 過剰分: 加算しない（GraphQL receivedQuantity に既に含まれている）
         const extrasQuantity = extractExtrasQuantityFromNote(t.note || "");
-        // receivedQuantityに予定外入庫の数量を加算
-        const receivedQuantityWithExtras = (t.receivedQuantity ?? 0) + extrasQuantity;
+        const rejectedQuantity = (Array.isArray(t?.shipments?.nodes) ? t.shipments.nodes : [])
+          .reduce((sum: number, s: any) => sum + Math.max(0, Number(s?.totalRejectedQuantity ?? 0)), 0);
+        const receivedQuantityDisplay =
+          Number(t.receivedQuantity ?? 0) - Number(rejectedQuantity) + Number(extrasQuantity);
 
         // 出庫履歴（originLocationIdがある場合）
         if (originId) {
@@ -195,7 +201,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
             note: t.note || "",
             dateCreated: t.dateCreated || "",
             totalQuantity: t.totalQuantity ?? 0,
-            receivedQuantity: receivedQuantityWithExtras,
+            receivedQuantity: receivedQuantityDisplay,
             originLocationId: originId,
             originLocationName: t.origin?.location?.name || t.origin?.name || "",
             destinationLocationId: destinationId || "",
@@ -215,7 +221,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
             note: t.note || "",
             dateCreated: t.dateCreated || "",
             totalQuantity: t.totalQuantity ?? 0,
-            receivedQuantity: receivedQuantityWithExtras,
+            receivedQuantity: receivedQuantityDisplay,
             originLocationId: originId || "",
             originLocationName: t?.origin?.location?.name || t?.origin?.name || "",
             destinationLocationId: destinationId,
@@ -235,6 +241,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
         return dateB - dateA; // 新しい順
       });
 
+    // 総数・表示範囲の計算
+    const isPage2OrLater = Boolean(cursor && direction === "next");
+    const totalFromApi =
+      !pageInfo.hasNextPage && isPage2OrLater
+        ? pageSize + allHistories.length
+        : !pageInfo.hasNextPage && !cursor
+          ? allHistories.length
+          : null;
+    const totalFromUrl = url.searchParams.get("total");
+    const total = totalFromApi ?? (totalFromUrl ? parseInt(totalFromUrl, 10) : null);
+    const startIndex = isPage2OrLater ? pageSize + 1 : 1;
+
     return {
       locations,
       histories: allHistories,
@@ -243,6 +261,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
         hasPreviousPage: pageInfo.hasPreviousPage || false,
         startCursor: pageInfo.startCursor || null,
         endCursor: pageInfo.endCursor || null,
+      },
+      pagination: {
+        total: Number.isFinite(total) ? total : null,
+        startIndex,
+        pageSize,
       },
     };
   } catch (error) {
@@ -459,29 +482,58 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function HistoryPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, histories, pageInfo } = loaderData || {
+  const { locations, histories, pageInfo, pagination } = loaderData || {
     locations: [],
     histories: [],
     pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
+    pagination: { total: null, startIndex: 1, pageSize: 100 },
   };
   const fetcher = useFetcher<typeof action>();
-  const [searchParams] = useSearchParams();
-  
-  // 全件数の表示（次ページがある場合は「以上」を表示）
-  const estimatedTotal = pageInfo.hasNextPage 
-    ? `${histories.length}件以上` 
-    : `${histories.length}件`;
-  
-  // ページ番号の計算（簡易版）
-  const currentPageNum = searchParams.get("cursor") 
-    ? (searchParams.get("direction") === "prev" ? 2 : 2) // 簡易的な計算
-    : 1;
-  const pageDisplay = pageInfo.hasPreviousPage || pageInfo.hasNextPage
-    ? pageInfo.hasPreviousPage && !pageInfo.hasNextPage
-      ? "最終ページ"
-      : !pageInfo.hasPreviousPage && pageInfo.hasNextPage
-      ? "1/2+"
-      : "2/3+"
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // 総数をURLに永続化（2ページ目で判明した総数を1ページ目に戻ったときも表示するため）
+  const totalFromLoader = pagination?.total ?? null;
+  const totalFromUrl = searchParams.get("total");
+  const total = totalFromLoader ?? (totalFromUrl ? parseInt(totalFromUrl, 10) : null);
+  const startIndex = pagination?.startIndex ?? 1;
+  const pageSize = pagination?.pageSize ?? 100;
+
+  const isPage2OrLater = Boolean(searchParams.get("cursor") && searchParams.get("direction") === "next");
+  const currentPage = isPage2OrLater ? 2 : 1; // 2ページ構成を前提。3ページ以上は将来対応
+  const totalPages = total && Number.isFinite(total) ? Math.ceil(total / pageSize) : null;
+
+  const hasPagination = pageInfo.hasPreviousPage || pageInfo.hasNextPage;
+
+  useEffect(() => {
+    if (totalFromLoader != null && !searchParams.get("total")) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.set("total", String(totalFromLoader));
+          return next;
+        },
+        { replace: true }
+      );
+    }
+  }, [totalFromLoader, searchParams.get("total"), setSearchParams]);
+
+  // 表示範囲・総数・ページ表示の文字列
+  const endIndex = startIndex + histories.length - 1;
+  const rangeDisplay =
+    histories.length > 0
+      ? startIndex === endIndex
+        ? `表示: ${startIndex}件`
+        : `表示: ${startIndex}-${endIndex}件`
+      : "表示: 0件";
+  const totalDisplay = total != null ? `${total}件` : `${histories.length}件以上`;
+  const pageDisplay = hasPagination
+    ? totalPages != null
+      ? `${currentPage}/${totalPages}`
+      : pageInfo.hasPreviousPage && !pageInfo.hasNextPage
+        ? "最終ページ"
+        : !pageInfo.hasPreviousPage && pageInfo.hasNextPage
+          ? "1/2+"
+          : "2/3+"
     : "";
 
   // ステータスの日本語表記
@@ -928,7 +980,7 @@ export default function HistoryPage() {
           <s-section heading="入出庫履歴">
             <s-box padding="base">
               <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
-                <div style={{ flex: "0 1 260px", minWidth: 0 }}>
+                <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                   <s-stack gap="base">
                     <s-text emphasis="bold" size="large">フィルター</s-text>
                     <s-text tone="subdued" size="small">
@@ -986,21 +1038,27 @@ export default function HistoryPage() {
                     </div>
                   </s-stack>
                 </div>
-                <div style={{ flex: "1 1 400px", minWidth: 0 }}>
+                <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
                   <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
                       <s-text tone="subdued" size="small">
-                        表示: {filteredHistories.length}件 / 全{estimatedTotal}
+                        {rangeDisplay} / {totalDisplay}
                       </s-text>
                       {(pageInfo.hasPreviousPage || pageInfo.hasNextPage) && (
                         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                           <s-button
                             onClick={() => {
                               if (pageInfo.hasPreviousPage && pageInfo.startCursor) {
-                                const url = new URL(window.location.href);
-                                url.searchParams.set("cursor", pageInfo.startCursor);
-                                url.searchParams.set("direction", "prev");
-                                window.location.href = url.toString();
+                                setSearchParams(
+                                  (prev) => {
+                                    const next = new URLSearchParams(prev);
+                                    next.set("cursor", pageInfo.startCursor!);
+                                    next.set("direction", "prev");
+                                    if (total != null) next.set("total", String(total));
+                                    return next;
+                                  },
+                                  { replace: true }
+                                );
                               }
                             }}
                             disabled={!pageInfo.hasPreviousPage}
@@ -1013,10 +1071,16 @@ export default function HistoryPage() {
                           <s-button
                             onClick={() => {
                               if (pageInfo.hasNextPage && pageInfo.endCursor) {
-                                const url = new URL(window.location.href);
-                                url.searchParams.set("cursor", pageInfo.endCursor);
-                                url.searchParams.set("direction", "next");
-                                window.location.href = url.toString();
+                                setSearchParams(
+                                  (prev) => {
+                                    const next = new URLSearchParams(prev);
+                                    next.set("cursor", pageInfo.endCursor!);
+                                    next.set("direction", "next");
+                                    if (total != null) next.set("total", String(total));
+                                    return next;
+                                  },
+                                  { replace: true }
+                                );
                               }
                             }}
                             disabled={!pageInfo.hasNextPage}
