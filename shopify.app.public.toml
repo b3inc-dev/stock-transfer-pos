@@ -2,12 +2,12 @@
 # 同じコードベースを、別の Shopify アプリとして公開するための設定です。
 # 1. パートナーダッシュボードで「新規アプリ」を作成（公開アプリ）
 # 2. ここの client_id と application_url をそのアプリの値に差し替え
-# 3. 公開用のデプロイ先（例: pos-stock-public.onrender.com）を用意し、そのURLを application_url に設定
+# 3. 公開用のデプロイ先（例: pos-stock.onrender.com）を用意し、そのURLを application_url に設定
 # 4. shopify app config use public のあと shopify app deploy で公開用にデプロイ
 
 client_id = "41d31838e05e4154fb75a6ccab558239"
 name = "POS Stock"
-application_url = "https://pos-stock-public.onrender.com"
+application_url = "https://pos-stock.onrender.com"
 embedded = true
 
 [build]
@@ -46,4 +46,4 @@ embedded_app_direct_api_access = true
 scopes = "read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers,read_orders"
 
 [auth]
-redirect_urls = [ "https://pos-stock-public.onrender.com" ]
+redirect_urls = [ "https://pos-stock.onrender.com" ]

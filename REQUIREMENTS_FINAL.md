@@ -1,7 +1,7 @@
 # 管理画面・ロス登録・棚卸 実装要件書
 
-**最終更新日**: 2026年2月6日（在庫変動履歴機能（Phase 5-2）実装完了まで反映済み）  
-**コード確認日**: 2026年2月（4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・POS拡張 description 更新・リスティングガイド・発注機能実装・仕入キャンセルモーダル・発注→仕入名称#P0000・CSVファイル名統一・loadItems JAN/オプション補完・仕入POS拡張（コンディション/商品リスト/履歴・在庫調整・カメラスキャン・自動保存/復元）・ロス区分設定（管理画面CRUD＋POS連動）・「その他」表示制御（ロス/仕入/出庫）・選択中バッジ（info/ブルー）・在庫高表示機能（Phase 5-1完了）・在庫変動履歴機能（Phase 5-2完了）反映済み）
+**最終更新日**: 2026年2月7日（在庫変動履歴の種別振り分け・公開アプリ appUrl 統一まで反映済み）  
+**コード確認日**: 2026年2月（4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・POS拡張 description 更新・リスティングガイド・発注機能実装・仕入キャンセルモーダル・発注→仕入名称#P0000・CSVファイル名統一・loadItems JAN/オプション補完・仕入POS拡張・ロス区分設定・「その他」表示制御・選択中バッジ・在庫高表示（Phase 5-1）・在庫変動履歴（Phase 5-2）・**在庫履歴のアクティビティ種別振り分け（管理/ロス/仕入/入出庫/棚卸/売上/返品）・Webhook二重記録防止・api/log-inventory-change による種別上書き・公開/自社用 appUrl 共通設定（extensions/common/appUrl.js）** 反映済み）
 
 ---
 
@@ -31,6 +31,8 @@
 | 発注機能：発注先編集・原価・販売価格取得・CSV出力拡張 | ✅ 完了（商品リストモーダル内で発注先編集、原価・販売価格の自動取得・保存、CSV出力項目拡張） |
 | 仕入・発注：処理確定文言・CSV名・名称引き継ぎ・JAN/オプション | ✅ 完了（#P0000表示・CSVファイル名統一・発注→仕入名称・loadItemsでJAN/オプション補完）。残りはPOS仕入タイル（#B0000） |
 | 在庫変動履歴機能（Phase 5-2） | ✅ 完了（共通ユーティリティ・Webhook実装・一覧表示・CSV出力・UI調整） |
+| 在庫履歴のアクティビティ種別振り分け | ✅ 完了（管理/ロス/仕入/入出庫/棚卸/売上/返品。Webhook二重防止・api/log-inventory-change で種別記録・上書き） |
+| 公開アプリ用 appUrl 統一・切り替え | ✅ 完了（extensions/common/appUrl.js で public/inhouse 切り替え、全POS拡張で参照） |
 
 **任意で残っているもの**: 履歴タブのCSV案内文言の見直し。
 
@@ -134,6 +136,10 @@
 - **管理画面：ロス区分設定の実装（2026-02-06）**: ①**ロス区分（lossReasons）のCRUD機能**: 管理画面「ロス設定」タブで、ロス理由（破損・紛失など）を登録・編集・削除・並び替え可能に。デフォルトで「破損」「紛失」の2区分を自動設定。②**「その他（理由入力）」の表示制御**: ラジオボタンで「表示する」「表示しない」を選択可能（`loss.allowCustomReason`）。デフォルトは「表示する」。③**POSロス画面との連動**: POSロスコンディション画面で、設定から読み込んだ `lossReasons` を理由ボタンとして表示。「その他」が許可されている場合は「その他」ボタン＋テキスト入力欄を表示。実装: `app.settings.tsx`（ロス設定タブ）、`LossConditions.jsx`（設定読み込み＋動的ボタン生成）。
 - **管理画面：「その他」表示制御の統一（2026-02-06）**: ①**仕入設定**: 「その他（仕入先入力）」の表示/非表示をラジオボタンで制御（`purchase.allowCustomSupplier`）。デフォルトは「表示する」。②**出庫設定**: 「その他（配送会社入力）」の表示/非表示をラジオボタンで制御（`outbound.allowCustomCarrier`、フラグ先行実装）。デフォルトは「表示する」。③**UIトンマナ統一**: すべて「『その他（〇〇入力）』を表示」という見出し＋「表示する」「表示しない」のラジオボタン形式に統一。実装: `app.settings.tsx`（仕入設定タブ・出庫設定タブ）、`PurchaseConditions.jsx`・`OrderConditions.jsx`（設定に応じた「その他」ボタン表示制御）。
 - **POS UI：選択中バッジ・ボタン表記統一（2026-02-06）**: ①**出庫タイル**: 配送業者・時間指定に選択時に「選択中」バッジ（`tone="info"`/ブルー）を表示。未選択時はバッジ非表示。「変更」ボタンは開いている時「閉じる」に変更。「その他」ボタンを最下部に配置し、タップでテキストフィールドを表示。②**仕入・発注タイル**: 仕入先行に選択時に「選択中」バッジ（`tone="info"`/ブルー）、未選択時は「必須」バッジ（`tone="critical"`/赤）を表示。「仕入先を選択してください」エラーテキストを削除。③**下書き復元時のピッカー制御**: 仕入コンディション画面で、選択済みの場合は閉じた状態で復元（発注と同様）。実装: `ModalOutbound.jsx`（配送業者・時間指定）、`PurchaseConditions.jsx`・`OrderConditions.jsx`（仕入先バッジ・ピッカー制御）。
+
+- **在庫変動履歴のアクティビティ種別振り分け・二重記録防止（2026-02-07）**: ①**表示文言**: アクティビティ「管理画面」→**「管理」**、「仕入キャンセル」→**「仕入-」**（`app.inventory-info.tsx`）。②**売上・返品 Webhook**: `shopify.clients` が無い場合の session ベース GraphQL フォールバック追加（`webhooks.orders.updated` / `webhooks.refunds.create`）。③**ロス**: `referenceDocumentUri` 付与＋確定後に `api/log-inventory-change`（`activity: loss_entry`）。管理／ロスでのロケーション ID 表示はロケーション名取得・GID 変換で対応。④**入庫・出庫・棚卸**: 各拡張で確定後に `api/log-inventory-change` 呼び出し（対応する activity で履歴に種別記録）。⑤**仕入**: `purchaseApi.js` に `referenceDocumentUri` 追加。PurchaseProductList / PurchaseHistoryList で確定後に `api/log-inventory-change`（`activity: purchase_entry`）。⑥**inventory_levels/update Webhook**: `inventoryAdjustmentGroups` は API に存在しないためフォールバック削除。同一変動が既に記録されていれば保存スキップ（`knownActivities`: loss_entry, purchase_entry, inbound_transfer, outbound_transfer, inventory_count, order_sales, refund）。売上・返品時の二重「管理」防止。⑦**種別上書き**: `api/log-inventory-change` 呼び出し時に直近の「管理」行（同一 item/location/quantityAfter）があれば activity をロス・仕入等に更新。⑧**二重表示解消**: ロス1個が「4個マイナス」表示になっていた要因（Webhook とアプリの二重記録）をスキップ・上書きで解消。
+
+- **公開アプリ用 appUrl 設定・切り替え（2026-02-07）**: ①**共通設定**: `extensions/common/appUrl.js` を新規作成。`APP_MODE = "public"` で本番 `https://pos-stock.onrender.com`、`"inhouse"` で `https://stock-transfer-pos.onrender.com`。開発用 `DEV_APP_URL` はトンネル利用時に手動変更可。②**全POS拡張で参照**: ロス・仕入・入庫・出庫・棚卸・発注で `/api/log-inventory-change` 等のベース URL を `getAppUrl()` で取得。参照パスは `../../../../common/appUrl.js` 等で統一。③**公開開発**: 本番ビルド時は `getAppUrl()` を使用。Render への push と `shopify app deploy` で公開アプリとして利用可能。
 
 **以前の主な更新**:
 - **SKU/CSVグループの確認・編集**: 編集で「SKU選択から作成」タブに切り替え、選択済みSKUを復元。一覧外のinventoryItemIdは維持。右パネルに「SKU一覧（N件）を確認・編集」を表示。

@@ -11,7 +11,7 @@
 |------|------|
 | **設定ファイル** | `shopify.app.public.toml` |
 | **アプリ名（例）** | POS Stock |
-| **デプロイ先URL（例）** | `https://pos-stock-public.onrender.com` |
+| **デプロイ先URL（例）** | `https://pos-stock.onrender.com` |
 | **コードベース** | カスタムアプリと同一（`stock-transfer-pos`） |
 
 ---
@@ -107,12 +107,12 @@ Render の「New +」→「Web Service」で**同じリポジトリ**を選び�
 |--------|-----|------|
 | `SHOPIFY_API_KEY` | 公開用の **Client ID**（例: `41d31838e05e4154fb75a6ccab558239`） | 必須 |
 | `SHOPIFY_API_SECRET` | 公開用の **Client Secret**（例: `shpss_...`） | 必須。リポジトリに書かない |
-| `SHOPIFY_APP_URL` | このサービスの URL。**作成後に決まる**（例: `https://pos-stock-public.onrender.com`）。サービス名を `pos-stock-public` にすると URL は `https://pos-stock-public.onrender.com`。 | サービス作成後、Dashboard の URL をコピーして設定。最初は仮で `https://pos-stock-public.onrender.com` でも可 |
+| `SHOPIFY_APP_URL` | このサービスの URL（例: `https://pos-stock.onrender.com`）。サービス名を `pos-stock` にすると URL は `https://pos-stock.onrender.com`。 | サービス作成後、Dashboard の URL をコピーして設定。既存の pos-stock サービスを使う場合はその URL を設定。 |
 | `SCOPES` | スコープをカンマ区切りで。未設定でも動く場合あり。設定する場合の例: `read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers` | 任意（`shopify.app.public.toml` の scopes と揃えるとよい） |
 
 **手順の流れ**
 1. 上記のとおり **Environment** を新規作成（例: `pos-stock-public`）し、**Language = Docker**、**Branch = main**、**Root Directory = 空** のまま作成。
-2. サービス名を **pos-stock-public** などにすると、URL が `https://pos-stock-public.onrender.com` になる。
+2. サービス名を **pos-stock** にすると、URL が `https://pos-stock.onrender.com` になる（公開用はこの1サービスで運用する想定）。
 3. **Environment Variables** に `SHOPIFY_API_KEY`・`SHOPIFY_API_SECRET`・`SHOPIFY_APP_URL`（上記URL）を追加して保存。
 4. デプロイが走り、完了したらステップ3で `shopify.app.public.toml` の `application_url` と `redirect_urls` にその URL を書く。
 
@@ -126,7 +126,7 @@ Render の「New +」→「Web Service」で**同じリポジトリ**を選び�
 | 方法 | 内容 |
 |------|------|
 | **A. 今の URL のまま使う** | 画面上に表示されている URL（例: `https://○○○.onrender.com`）をそのまま使う。`shopify.app.public.toml` の `application_url` と `redirect_urls`、環境変数 `SHOPIFY_APP_URL` を**その URL** に合わせる。 |
-| **B. 新しい URL で作り直す** | 今のサービスを**削除**し、**同じリポジトリで新規 Web サービス**を作成する。そのとき **Name** に希望の名前（例: `pos-stock-public`）を**最初から**入れると、URL が `https://pos-stock-public.onrender.com` になる。作成後、環境変数（`SHOPIFY_API_KEY`・`SHOPIFY_API_SECRET`・`SHOPIFY_APP_URL`）を再度設定する。 |
+| **B. 新しい URL で作り直す** | 今のサービスを**削除**し、**同じリポジトリで新規 Web サービス**を作成する。そのとき **Name** に `pos-stock` を入れると、URL が `https://pos-stock.onrender.com` になる。作成後、環境変数（`SHOPIFY_API_KEY`・`SHOPIFY_API_SECRET`・`SHOPIFY_APP_URL`）を再度設定する。 |
 | **C. カスタムドメインを使う** | 自分で持っているドメイン（例: `app.example.com`）を Render の「Custom Domains」で設定する。そのドメインがアプリの URL になる。DNS 設定と Shopify 側の URL 登録が必要。 |
 
 **まとめ**: 名前を変えただけでは URL は変わらないので、**今表示されている URL を使う（A）**か、**作り直して最初から希望の名前で作る（B）**かのどちらかになります。
@@ -141,7 +141,7 @@ Render の「New +」→「Web Service」で**同じリポジトリ**を選び�
 |------|------|------|
 | 公開アプリの作成 | パートナーダッシュボードで「新規アプリ」→ **公開アプリ** として作成 | ⬜ 要実施 |
 | Client ID | 作成したアプリの Client ID を取得 | ⬜ `shopify.app.public.toml` の `client_id` に設定（現在は `YOUR_PUBLIC_APP_CLIENT_ID` のまま） |
-| デプロイ先 | 自社用と**別URL**のホスティング（例: Render で別サービス） | ⬜ 例: `https://pos-stock-public.onrender.com` |
+| デプロイ先 | 自社用と**別URL**のホスティング（例: Render で別サービス） | ⬜ 例: `https://pos-stock.onrender.com` |
 | 環境変数 | 公開用サービスで **`SHOPIFY_API_KEY`（Client ID）** と **`SHOPIFY_API_SECRET`（Client Secret）** を設定 | ⬜ 要実施 |
 
 ### 1.2 Client Secret について（必須）
@@ -161,7 +161,7 @@ Render の「New +」→「Web Service」で**同じリポジトリ**を選び�
 現在の内容で**必ず書き換える箇所**:
 
 - **`client_id`**: パートナーで作成した公開アプリの Client ID（現在はプレースホルダー）
-- **`application_url`**: 公開用の本番URL（例: `https://pos-stock-public.onrender.com`）
+- **`application_url`**: 公開用の本番URL（例: `https://pos-stock.onrender.com`）
 - **`[auth]` の `redirect_urls`**: 上記と同じURL
 
 （Client ID / Client Secret は TOML には書かず、デプロイ先の環境変数 `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` で渡します。TOML の `client_id` は CLI やリンク用です。）
@@ -326,7 +326,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 ## 7. 現在の `shopify.app.public.toml` の状態（要修正箇所）
 
 - **`client_id`**: `YOUR_PUBLIC_APP_CLIENT_ID` → **公開用アプリの実際の Client ID に差し替える**
-- **`application_url`**: `https://pos-stock-public.onrender.com` → 実際の公開用本番URLと一致させる
+- **`application_url`**: `https://pos-stock.onrender.com` → 実際の公開用本番URLと一致させる
 - **`[auth] redirect_urls`**: 上記と同じURLであることを確認
 
 上記を反映したうえで、`shopify app config use public` と `shopify app deploy` を実行し、公開用としてデプロイ・動作確認を行ってから、リスティング作成と審査提出に進むとスムーズです。

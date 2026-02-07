@@ -861,7 +861,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
           const token = await session.getSessionToken();
           if (token) {
             const { getAppUrl } = await import("../../../../common/appUrl.js");
-            const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock-public.onrender.com
+            const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock.onrender.com
             const apiUrl = `${appUrl}/api/log-inventory-change`;
             for (const l of lines) {
               const qty = Math.abs(Number(l.qty) || 0);

@@ -6,7 +6,7 @@
 //
 // 【各環境の URL】
 // - 開発環境（localhost）: http://localhost:3000
-// - 公開アプリ（本番）: https://pos-stock-public.onrender.com
+// - 公開アプリ（本番）: https://pos-stock.onrender.com
 // - 自社用（本番）: https://stock-transfer-pos.onrender.com
 
 // ============================================
@@ -22,7 +22,7 @@ const APP_MODE = "public"; // "public" または "inhouse"
 const DEV_APP_URL = "http://localhost:3000";
 
 // 本番環境用（APP_MODE に応じて自動選択）
-const PROD_APP_URL_PUBLIC = "https://pos-stock-public.onrender.com";
+const PROD_APP_URL_PUBLIC = "https://pos-stock.onrender.com";
 const PROD_APP_URL_INHOUSE = "https://stock-transfer-pos.onrender.com";
 
 // 現在のモードに応じた本番 URL

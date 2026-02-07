@@ -24,7 +24,7 @@ async function logInventoryCountToApi({ locationId, locationName, items, sourceI
     const token = await session.getSessionToken();
     if (!token) return;
     const { getAppUrl } = await import("../../../../common/appUrl.js");
-    const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock-public.onrender.com
+    const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock.onrender.com
     const apiUrl = `${appUrl}/api/log-inventory-change`;
     const timestamp = new Date().toISOString();
     for (const l of items) {

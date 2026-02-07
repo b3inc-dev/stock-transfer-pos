@@ -12,7 +12,7 @@ POS 拡張がアプリの API（`/api/log-inventory-change` など）を呼ぶ�
 
 ### 1. 公開アプリ用（デフォルト）
 
-`APP_MODE = "public"` のままにしておくと、本番環境では `https://pos-stock-public.onrender.com` が使用されます。
+`APP_MODE = "public"` のままにしておくと、本番環境では `https://pos-stock.onrender.com` が使用されます。
 
 ### 2. 自社用カスタムアプリに切り替え
 

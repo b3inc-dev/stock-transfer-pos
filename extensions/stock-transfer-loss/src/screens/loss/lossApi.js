@@ -724,7 +724,7 @@ export async function fetchStaffMembers() {
     const currentSession = session?.currentSession;
     const shopDomain = currentSession?.shopDomain;
     
-    // 公開アプリ本番: getAppUrl() → https://pos-stock-public.onrender.com
+    // 公開アプリ本番: getAppUrl() → https://pos-stock.onrender.com
     const { getAppUrl } = await import("../../../../common/appUrl.js");
     const appUrl = getAppUrl();
     

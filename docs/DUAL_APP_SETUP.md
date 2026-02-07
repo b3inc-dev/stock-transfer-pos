@@ -9,7 +9,7 @@ location-stock-indicator と同様に、**同じアプリのコード**を「自
 | 種類 | 設定ファイル | 用途 | デプロイ先URL例 |
 |------|--------------|------|------------------|
 | **自社用** | `shopify.app.toml` | 自社ストアにインストールするカスタムアプリ | stock-transfer-pos.onrender.com |
-| **公開用** | `shopify.app.public.toml` | App Store で販売する公開アプリ | pos-stock-public.onrender.com |
+| **公開用** | `shopify.app.public.toml` | App Store で販売する公開アプリ | pos-stock.onrender.com |
 
 - コードベースは **1つ** で共通
 - **2つの Shopify アプリ**（パートナーで別々に作成）が、それぞれ別の `client_id` と **別のデプロイ先URL** を持つ形になります
@@ -72,7 +72,7 @@ location-stock-indicator と同様に、**同じアプリのコード**を「自
 - 自社用と **別URL** にします（例: Render で別サービスを1つ作成）
 - 例:
   - 自社用: `https://stock-transfer-pos.onrender.com`
-  - 公開用: `https://pos-stock-public.onrender.com`
+  - 公開用: `https://pos-stock.onrender.com`
 - 公開用のサービスでは、**公開用アプリの Client ID を環境変数 `SHOPIFY_API_KEY` に設定**します（自社用とは別の値）
 
 ---
@@ -83,7 +83,7 @@ location-stock-indicator と同様に、**同じアプリのコード**を「自
 `shopify.app.public.toml` を開き、以下を **公開用アプリの値** に書き換えます。
 
 - `client_id` … 公開用アプリの Client ID（パートナーで確認）
-- `application_url` … 公開用のデプロイ先URL（例: `https://pos-stock-public.onrender.com`）
+- `application_url` … 公開用のデプロイ先URL（例: `https://pos-stock.onrender.com`）
 - `[auth]` 内の `redirect_urls` … 上記と同じURL
 
 **方法B（CLIでリンク）**  

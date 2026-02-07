@@ -835,7 +835,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
           if (token) {
             const currentSession = session?.currentSession;
             const shopDomain = currentSession?.shopDomain;
-            // 公開アプリ本番: getAppUrl() → https://pos-stock-public.onrender.com
+            // 公開アプリ本番: getAppUrl() → https://pos-stock.onrender.com
             const appUrl = getAppUrl();
             
             // 各商品についてログを記録
