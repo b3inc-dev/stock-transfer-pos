@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "preact/hooks";
-import { fetchLocations, readValue } from "./lossApi.js";
+import { fetchLocations, fetchSettings, readValue } from "./lossApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
 const SHOPIFY = globalThis?.shopify ?? {};
@@ -57,13 +57,64 @@ function useOriginLocationGid() {
   }, [raw]);
 }
 
-const REASONS = [
+// デフォルトのロス理由（設定が取得できなかった場合のフォールバック、プリセットのみ）
+const DEFAULT_REASONS = [
   { value: "破損", label: "破損" },
   { value: "紛失", label: "紛失" },
-  { value: "その他", label: "その他" },
 ];
 
-export function LossConditions({ onBack, onStart, onOpenHistory, locations: locationsProp, setLocations, setHeader, setFooter }) {
+// 「その他（自由入力）」用の内部値
+const OTHER_VALUE = "__OTHER__";
+
+const LOSS_LOCATION_MODAL_ID = "loss-location-modal";
+
+/** ロケーション選択モーダル（POSでは command="--show" commandFor={id} で開くため常にレンダー） */
+function LocationSelectModal({ id, title, locations, selectedId, onSelect }) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const list = useMemo(() => {
+    const base = Array.isArray(locations) ? locations : [];
+    const q = String(searchQuery || "").trim().toLowerCase();
+    if (!q) return base;
+    return base.filter((l) => String(l?.name || "").toLowerCase().includes(q));
+  }, [locations, searchQuery]);
+
+  return (
+    <s-modal id={id} heading={title || "ロケーションを選択"} style={{ maxBlockSize: "85vh" }}>
+      <s-box padding="base">
+        <s-stack gap="base">
+          <s-text-field
+            label="検索"
+            placeholder="ロケーション名"
+            value={searchQuery}
+            onInput={(e) => setSearchQuery(readValue(e))}
+            onChange={(e) => setSearchQuery(readValue(e))}
+          />
+          <s-scroll-view style={{ maxBlockSize: "60vh" }}>
+            <s-stack gap="small">
+              {list.length === 0 ? (
+                <s-text tone="subdued">該当するロケーションがありません</s-text>
+              ) : (
+                list.map((l) => (
+                  <s-button
+                    key={l.id}
+                    tone={l.id === selectedId ? "success" : undefined}
+                    command="--hide"
+                    commandFor={id}
+                    onClick={() => onSelect?.(l.id, l.name)}
+                  >
+                    {l.name}
+                  </s-button>
+                ))
+              )}
+            </s-stack>
+          </s-scroll-view>
+        </s-stack>
+      </s-box>
+    </s-modal>
+  );
+}
+
+export function LossConditions({ onBack, onStart, onOpenHistory, locations: locationsProp, setLocations, setHeader, setFooter, liteMode, onToggleLiteMode }) {
   const sessionLocationGid = useOriginLocationGid();
   const [locationId, setLocationId] = useState("");
   const [date, setDate] = useState(() => {
@@ -73,14 +124,21 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
   const [reasonKey, setReasonKey] = useState("破損");
   const [reasonCustom, setReasonCustom] = useState(""); // 「その他」選択時のカスタム入力用
   const [staffName, setStaffName] = useState(""); // スタッフ名（必須）
-  const [showLocationPicker, setShowLocationPicker] = useState(false);
   const [loading, setLoading] = useState(false);
   const [locLoading, setLocLoading] = useState(false);
   const [locError, setLocError] = useState("");
+  const [reasonOptions, setReasonOptions] = useState(DEFAULT_REASONS);
+  const [allowCustomReason, setAllowCustomReason] = useState(true);
 
   const allLocations = useMemo(() => (Array.isArray(locationsProp) ? locationsProp : []), [locationsProp]);
-  const reason = reasonKey === "その他" ? String(reasonCustom || "").trim() : reasonKey;
-  const canStart = !!locationId && !!date && !!reason && !!staffName.trim();
+  const reason =
+    reasonKey === OTHER_VALUE ? String(reasonCustom || "").trim() : reasonKey;
+  const canStart =
+    !!locationId &&
+    !!date &&
+    !!staffName.trim() &&
+    // 「その他（入力）」が選択されている場合はテキストも必須
+    (reasonKey !== OTHER_VALUE ? !!reason : !!String(reasonCustom || "").trim());
 
   const conditionsDraftRestoredRef = useRef(false); // 復元が完了したことを示すフラグ
   
@@ -186,11 +244,11 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
   }, [locationId, allLocations]);
 
   const reasonLabel = useMemo(() => {
-    if (reasonKey === "その他") {
+    if (reasonKey === OTHER_VALUE) {
       return reasonCustom?.trim() || "その他（未入力）";
     }
-    return REASONS.find((r) => r.value === reasonKey)?.label ?? reasonKey;
-  }, [reasonKey, reasonCustom]);
+    return reasonOptions.find((r) => r.value === reasonKey)?.label ?? reasonKey;
+  }, [reasonKey, reasonCustom, reasonOptions]);
 
   const bootstrap = useCallback(async () => {
     setLocLoading(true);
@@ -217,6 +275,52 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
     bootstrap();
   }, [bootstrap]);
 
+  // 設定からロス区分（lossReasons）と「その他（入力）許可フラグ」を読み込む
+  useEffect(() => {
+    (async () => {
+      try {
+        const settings = await fetchSettings();
+        const rawList = Array.isArray(settings?.lossReasons) ? settings.lossReasons : [];
+        const list = rawList
+          .map((r) => {
+            const label = String(r?.label ?? r?.id ?? "").trim();
+            if (!label) return null;
+            return { value: label, label };
+          })
+          .filter(Boolean);
+        const allowOther =
+          settings?.loss && typeof settings.loss.allowCustomReason === "boolean"
+            ? !!settings.loss.allowCustomReason
+            : true;
+        setAllowCustomReason(allowOther);
+        if (list.length > 0) {
+          setReasonOptions(list);
+          // 現在のreasonKeyが存在しなければ先頭をデフォルトにする
+          setReasonKey((prev) => {
+            const exists = list.some((r) => r.value === prev);
+            return exists ? prev : list[0]?.value ?? prev;
+          });
+        } else {
+          // 空の場合はデフォルトに戻す
+          setReasonOptions(DEFAULT_REASONS);
+          setReasonKey((prev) => {
+            const exists = DEFAULT_REASONS.some((r) => r.value === prev);
+            return exists ? prev : DEFAULT_REASONS[0].value;
+          });
+        }
+      } catch (e) {
+        console.error("[LossConditions] failed to load settings:", e);
+        // エラー時はデフォルトのまま
+        setReasonOptions(DEFAULT_REASONS);
+        setReasonKey((prev) => {
+          const exists = DEFAULT_REASONS.some((r) => r.value === prev);
+          return exists ? prev : DEFAULT_REASONS[0].value;
+        });
+        setAllowCustomReason(true);
+      }
+    })();
+  }, []);
+
   const staffDisplayName = useMemo(() => {
     return staffName.trim() || "未入力";
   }, [staffName]);
@@ -240,16 +344,14 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
   
 
   useEffect(() => {
-    const summaryLeft = `ロケーション: ${locationName}`;
-    const summaryCenter = `スタッフ: ${staffDisplayName}`;
-    const summaryRight = `${date} / ${reasonLabel}`;
     setFooter?.(
       <FixedFooterNavBar
-        summaryLeft={summaryLeft}
-        summaryCenter={summaryCenter}
-        summaryRight={summaryRight}
-        leftLabel="戻る"
-        onLeft={onBack}
+        summaryLeft={`ロケーション: ${locationName}`}
+        summaryCenter=""
+        summaryRight=""
+        leftLabel={liteMode ? "画像OFF" : "画像ON"}
+        leftTone={liteMode ? "critical" : "default"}
+        onLeft={typeof onToggleLiteMode === "function" ? onToggleLiteMode : undefined}
         middleLabel="履歴一覧"
         onMiddle={onOpenHistory}
         middleTone="default"
@@ -263,62 +365,33 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
   }, [
     setFooter,
     canStart,
-    locationName,
-    staffDisplayName,
-    date,
-    reasonLabel,
-    onBack,
+    liteMode,
+    onToggleLiteMode,
     onOpenHistory,
     loading,
     handleStart,
   ]);
 
   return (
+    <>
     <s-box padding="base">
       <s-stack gap="base">
-        {/* ロケーション（出庫「出庫元を設定」同様） */}
+        {/* ロケーション（現状はPOSセッションのロケーションのみ利用） */}
         <s-stack gap="small">
-          <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-            <s-box style={{ flex: "1 1 auto", minInlineSize: 0 }}>
-              <s-text>ロケーション: {locationName}</s-text>
-              {!locationId ? (
-                <s-text tone="critical" size="small">
-                  ロケーションを選択してください。下の「ロケーションを設定」から選択してください。
-                </s-text>
-              ) : null}
-              {locError ? (
-                <s-text tone="critical" size="small">取得エラー: {locError}</s-text>
-              ) : null}
-            </s-box>
-            <s-button kind="secondary" onClick={() => setShowLocationPicker((p) => !p)}>
-              ロケーションを設定
-            </s-button>
-          </s-stack>
-          {showLocationPicker ? (
-            <s-stack gap="base">
-              {allLocations.length === 0 ? (
-                <s-text tone="subdued">ロケーション一覧がありません（再取得を試してください）</s-text>
-              ) : (
-                allLocations.map((l) => (
-                  <s-button
-                    key={l.id}
-                    tone={l.id === locationId ? "success" : undefined}
-                    onClick={() => {
-                      setLocationId(l.id);
-                      setShowLocationPicker(false);
-                    }}
-                  >
-                    {l.id === locationId ? "✓ " : ""}{l.name}
-                  </s-button>
-                ))
-              )}
-              <s-stack direction="inline" justifyContent="end" gap="base">
-                <s-button onClick={bootstrap} disabled={locLoading}>
-                  {locLoading ? "取得中..." : "再取得"}
-                </s-button>
-              </s-stack>
-            </s-stack>
-          ) : null}
+          <s-box style={{ flex: "1 1 auto", minInlineSize: 0 }}>
+            <s-text>ロケーション: {locationName}</s-text>
+            {!locationId && locLoading ? (
+              <s-text tone="subdued" size="small">
+                端末のロケーションを取得しています...
+              </s-text>
+            ) : !locationId && locError ? (
+              <s-text tone="critical" size="small">端末のロケーションが取得できません: {locError}</s-text>
+            ) : !locationId ? (
+              <s-text tone="critical" size="small">
+                端末のロケーションが取得できません。POSでロケーションを選択しているか確認してください。
+              </s-text>
+            ) : null}
+          </s-box>
         </s-stack>
 
         <s-divider />
@@ -352,16 +425,19 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
 
         {/* 理由（常に開いておく選択式） */}
         <s-stack gap="base">
-          <s-text emphasis="bold" size="small">理由（必須）</s-text>
+          <s-stack direction="inline" gap="small" alignItems="center">
+            <s-text emphasis="bold" size="small">理由</s-text>
+            <s-badge tone="critical">必須</s-badge>
+          </s-stack>
           <s-stack direction="inline" gap="small" style={{ width: "100%" }}>
-            {REASONS.map((r) => (
+            {[...reasonOptions, ...(allowCustomReason ? [{ value: OTHER_VALUE, label: "その他" }] : [])].map((r) => (
               <s-box key={r.value} style={{ flex: "1 1 0", minWidth: 0, width: "100%" }}>
                 <s-button
                   tone={reasonKey === r.value ? "success" : undefined}
                   onClick={() => {
                     setReasonKey(r.value);
                     // 「その他」以外を選択した場合はカスタム入力をクリア
-                    if (r.value !== "その他") {
+                    if (r.value !== OTHER_VALUE) {
                       setReasonCustom("");
                     }
                   }}
@@ -373,18 +449,26 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
             ))}
           </s-stack>
           {/* 「その他」が選択されている場合は入力欄を表示 */}
-          {reasonKey === "その他" ? (
+          {allowCustomReason && reasonKey === OTHER_VALUE ? (
             <s-text-field
-              label="理由（必須）"
+              label="理由"
               value={reasonCustom}
               onInput={(e) => setReasonCustom(readValue(e))}
               onChange={(e) => setReasonCustom(readValue(e))}
-              helpText="理由を入力してください"
+              helpText="理由を入力してください（必須）"
               placeholder="理由を入力"
             />
           ) : null}
         </s-stack>
       </s-stack>
     </s-box>
+    <LocationSelectModal
+      id={LOSS_LOCATION_MODAL_ID}
+      title="ロケーションを選択"
+      locations={allLocations}
+      selectedId={locationId}
+      onSelect={(id) => setLocationId(id || "")}
+    />
+    </>
   );
 }

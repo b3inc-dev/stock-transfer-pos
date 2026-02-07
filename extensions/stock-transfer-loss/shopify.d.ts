@@ -19,12 +19,6 @@ declare module './src/screens/LossScreen.jsx' {
 }
 
 //@ts-ignore
-declare module './src/screens/StocktakeScreen.jsx' {
-  const shopify: import('@shopify/ui-extensions/pos.home.modal.render').Api;
-  const globalThis: { shopify: typeof shopify };
-}
-
-//@ts-ignore
 declare module './src/screens/loss/LossConditions.jsx' {
   const shopify: import('@shopify/ui-extensions/pos.home.modal.render').Api;
   const globalThis: { shopify: typeof shopify };
@@ -55,25 +49,7 @@ declare module './src/screens/loss/FixedFooterNavBar.jsx' {
 }
 
 //@ts-ignore
-declare module './src/screens/stocktake/InventoryCountConditions.jsx' {
-  const shopify: import('@shopify/ui-extensions/pos.home.modal.render').Api;
-  const globalThis: { shopify: typeof shopify };
-}
-
-//@ts-ignore
-declare module './src/screens/stocktake/InventoryCountProductGroupSelection.jsx' {
-  const shopify: import('@shopify/ui-extensions/pos.home.modal.render').Api;
-  const globalThis: { shopify: typeof shopify };
-}
-
-//@ts-ignore
-declare module './src/screens/stocktake/InventoryCountList.jsx' {
-  const shopify: import('@shopify/ui-extensions/pos.home.modal.render').Api;
-  const globalThis: { shopify: typeof shopify };
-}
-
-//@ts-ignore
-declare module './src/screens/stocktake/stocktakeApi.js' {
+declare module './src/lossHelpers.js' {
   const shopify: import('@shopify/ui-extensions/pos.home.modal.render').Api;
   const globalThis: { shopify: typeof shopify };
 }

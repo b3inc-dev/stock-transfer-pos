@@ -1,11 +1,11 @@
-api_version = "2025-10"
+api_version = "2026-01"
 
 [[extensions]]
 uid = "c130fca1-ced8-a1d8-5f88-a909273dd6779df5a0ae"
 type = "ui_extension"
-name = "在庫調整（ロス・棚卸）"
+name = "ロス / 在庫調整"
 handle = "stock-transfer-loss"
-description = "在庫調整（ロス・棚卸）"
+description = "ロス / 在庫調整"
 
 [[extensions.targeting]]
 target = "pos.home.tile.render"

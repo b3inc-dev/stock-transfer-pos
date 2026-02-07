@@ -10,6 +10,8 @@ import {
 } from "./lossApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
+import { getAppUrl } from "../../../../common/appUrl.js";
+
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 
@@ -341,7 +343,7 @@ function isEan8_(code) {
   return check === (code.charCodeAt(7) - 48);
 }
 
-export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setFooter }) {
+export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setFooter, liteMode: liteModeProp, onToggleLiteMode }) {
   const CONFIRM_LOSS_MODAL_ID = "confirm-loss-modal";
   const CONFIRM_RESET_MODAL_ID = "confirm-reset-modal";
   const confirmLossModalRef = useRef(null);
@@ -385,22 +387,33 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       return false;
     }
   };
-  const [liteMode, setLiteMode] = useState(loadInitialLiteMode);
+  const [liteModeLocal, setLiteModeLocal] = useState(loadInitialLiteMode);
+  // ✅ 親から渡されたliteModeを優先（コンディション画面のON/OFFが反映される）
+  const liteMode = liteModeProp !== undefined && liteModeProp !== null ? !!liteModeProp : liteModeLocal;
   const showImages = !liteMode; // ✅ 軽量モードがOFFの時だけ画像表示
-  
-  // ✅ prefsの変更を監視してliteModeを更新
+
+  const handleToggleLiteMode = useCallback(() => {
+    if (typeof onToggleLiteMode === "function") {
+      onToggleLiteMode();
+    } else {
+      setLiteModeLocal((prev) => !prev);
+    }
+  }, [onToggleLiteMode]);
+
+  // ✅ prefsの変更を監視（親から渡されていない場合のローカル同期）
   useEffect(() => {
+    if (liteModeProp !== undefined && liteModeProp !== null) return;
     const checkPrefs = () => {
       try {
         const raw = localStorage.getItem("stock_transfer_pos_ui_prefs_v1");
         const p = raw ? JSON.parse(raw) : null;
         const newLiteMode = p && typeof p === "object" && p.liteMode === true;
-        setLiteMode(newLiteMode);
+        setLiteModeLocal((prev) => (prev !== newLiteMode ? newLiteMode : prev));
       } catch {}
     };
     const interval = setInterval(checkPrefs, 500);
     return () => clearInterval(interval);
-  }, []);
+  }, [liteModeProp]);
 
   // ✅ 設定を読み込む（マウント時のみ）
   useEffect(() => {
@@ -797,13 +810,87 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     }
     setSubmitting(true);
     try {
+      // ロスエントリIDを先に生成（referenceDocumentUri用）
+      const lossEntryId = generateLossId();
+      
       // inventoryItemIdはadjustInventoryAtLocation内でGID形式に変換される
       const deltas = lines.map((l) => ({
         inventoryItemId: l.inventoryItemId,
         delta: -Math.abs(Number(l.qty) || 0),
       }));
       
-      await adjustInventoryAtLocation({ locationId: conds.locationId, deltas });
+      // referenceDocumentUriを設定して在庫調整を実行
+      const adjustmentGroup = await adjustInventoryAtLocation({ 
+        locationId: conds.locationId, 
+        deltas,
+        referenceDocumentUri: lossEntryId
+      });
+      const adjustmentGroupId = adjustmentGroup?.id || null;
+      
+      // 在庫変動ログを直接記録（webhookが来る前に記録）
+      try {
+        const session = SHOPIFY?.session;
+        if (session?.getSessionToken) {
+          const token = await session.getSessionToken();
+          if (token) {
+            const currentSession = session?.currentSession;
+            const shopDomain = currentSession?.shopDomain;
+            // 公開アプリ本番: getAppUrl() → https://pos-stock-public.onrender.com
+            const appUrl = getAppUrl();
+            
+            // 各商品についてログを記録
+            for (const l of lines) {
+              const qty = Math.abs(Number(l.qty) || 0);
+              if (qty <= 0) continue;
+              
+              // 現在の在庫数を取得（quantityAfter用）
+              let quantityAfter = null;
+              try {
+                const available = await fetchVariantAvailable({
+                  variantGid: l.variantId,
+                  locationGid: conds.locationId,
+                });
+                quantityAfter = available?.available ?? null;
+              } catch (e) {
+                console.warn("[LossProductList] Failed to fetch available quantity:", e);
+              }
+              
+              const logData = {
+                inventoryItemId: l.inventoryItemId,
+                variantId: l.variantId,
+                sku: l.sku || "",
+                locationId: conds.locationId,
+                locationName: conds.locationName || "",
+                activity: "loss_entry",
+                delta: -qty, // ロスはマイナス
+                quantityAfter,
+                sourceId: lossEntryId,
+                adjustmentGroupId,
+                timestamp: new Date().toISOString(),
+              };
+              
+              const apiUrl = `${appUrl}/api/log-inventory-change`;
+              const res = await fetch(apiUrl, {
+                method: "POST",
+                headers: {
+                  "Authorization": `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(logData),
+              });
+              
+              if (!res.ok) {
+                const text = await res.text().catch(() => "");
+                console.warn(`[LossProductList] Failed to log inventory change: HTTP ${res.status}: ${text}`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[LossProductList] Failed to log inventory change:", e);
+        // エラーが発生しても続行（ロス実行は成功）
+      }
+      
       const items = lines.map((l) => {
         // オプション情報を抽出
         const pRaw = String(l.productTitle || "").trim() || "(unknown)";
@@ -834,7 +921,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       const lossName = `#L${String(existingCount + 1).padStart(4, "0")}`;
       
       const entry = {
-        id: generateLossId(),
+        id: lossEntryId,
         lossName, // 連番表示用の名称を追加
         locationId: conds.locationId,
         locationName: conds.locationName ?? "",
@@ -845,6 +932,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         items,
         status: "active",
         createdAt: new Date().toISOString(),
+        adjustmentGroupId, // inventoryAdjustmentGroup.idを保存（webhookマッチング用）
       };
       await writeLossEntries([entry, ...existing]);
       
@@ -880,7 +968,6 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     if (!setHeader) return;
     const q = String(query || "");
     const showCount = q.trim().length > 0;
-    const summary = conds ? `${conds.locationName ?? ""} / ${conds.date ?? ""} / ${conds.reason ?? ""}` : "";
     
     // readText関数をuseEffect内で再定義（クロージャー問題を回避）
     const readTextLocal = (v) => {
@@ -909,28 +996,29 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       <s-box padding="base">
         <s-stack gap="tight">
           <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-            <s-stack gap="none">
-              <s-text emphasis="bold" size="small">ロス</s-text>
-              <s-text size="small">{summary || "—"}</s-text>
+            {/* 左：タイトル＋条件表示 */}
+            <s-stack gap="none" style={{ flex: "1 1 0", minInlineSize: 0 }}>
+              <s-text emphasis="bold" size="small">ロス登録</s-text>
+              <s-text size="small">ロケーション：{conds?.locationName || conds?.locationId || "-"}</s-text>
+              <s-text size="small">日付：{conds?.date || "-"}</s-text>
+              <s-text size="small">理由：{conds?.reason || "-"}</s-text>
             </s-stack>
-
-            <s-stack direction="inline" gap="small" alignItems="center" style={{ flex: "0 0 auto", flexWrap: "nowrap", whiteSpace: "nowrap" }}>
+            {/* 右：画像表示とリセットを右寄せで並べる */}
+            <s-stack direction="inline" gap="base" alignItems="center" justifyContent="end" style={{ flexShrink: 0 }}>
               <s-button
                 kind="secondary"
                 tone={liteMode ? "critical" : undefined}
-                onClick={() => setLiteMode((prev) => !prev)}
+                onClick={handleToggleLiteMode}
                 style={{ paddingInline: 8, whiteSpace: "nowrap" }}
               >
-                軽量 {liteMode ? "ON" : "OFF"}
+                {liteMode ? "画像OFF" : "画像ON"}
               </s-button>
-              <s-button 
-                kind="secondary" 
-                tone="critical" 
+              <s-button
+                kind="secondary"
+                tone="critical"
                 command="--show"
                 commandFor={CONFIRM_RESET_MODAL_ID}
-                {...bindPressLocal(() => {
-                  // command="--show"でモーダルを表示
-                })}
+                {...bindPressLocal(() => {})}
                 style={{ paddingInline: 8, whiteSpace: "nowrap" }}
               >
                 リセット
@@ -963,12 +1051,12 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
             </s-text>
           ) : null}
 
-          {loading ? <s-text tone="subdued" size="small">検索中...</s-text> : null}
+          {loading ? <s-text tone="subdued" size="small">読み込み中...</s-text> : null}
         </s-stack>
       </s-box>
     );
     return () => setHeader?.(null);
-  }, [setHeader, conds?.locationName, conds?.date, conds?.reason, query, candidates.length, loading, searchMountKey, liteMode]);
+  }, [setHeader, conds?.locationName, conds?.date, conds?.reason, query, candidates.length, loading, searchMountKey, liteMode, handleToggleLiteMode]);
 
   useEffect(() => {
     if (!setFooter) return;
@@ -1253,7 +1341,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
               ロケーション: {conds?.locationName || conds?.locationId || "-"}
             </s-text>
             <s-text size="small" tone="subdued">
-              明細: {totalLines} / 合計ロス: {totalQty}
+              明細: {totalLines} / 合計: {totalQty}
             </s-text>
             <s-text size="small" tone="subdued">
               日付: {conds?.date || "-"}

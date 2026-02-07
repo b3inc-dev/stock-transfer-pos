@@ -4,6 +4,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher, useSearchParams } from "react-router";
 import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
+import { getDateInShopTimezone, extractDateFromISO, getShopTimezone } from "../utils/timezone";
 
 const LOSS_NS = "stock_transfer_pos";
 const LOSS_KEY = "loss_entries_v1";
@@ -40,6 +41,9 @@ export type LossEntry = {
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin } = await authenticate.admin(request);
+
+  // ショップのタイムゾーンを取得
+  const shopTimezone = await getShopTimezone(admin);
 
   const [locResp, appResp] = await Promise.all([
     admin.graphql(
@@ -168,11 +172,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
+  // サーバー側で「今日の日付」を計算
+  const todayInShopTimezone = getDateInShopTimezone(new Date(), shopTimezone);
+
   // ページネーション用の情報（metafieldは全件取得のため、クライアント側でページネーション）
   // 入出庫履歴と同じ形式で返す（ただし、metafieldは全件取得のため、pageInfoは常にfalse）
   return {
     locations,
     entries: needsUpdate ? entriesWithLossName : entries,
+    shopTimezone,
+    todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
     pageInfo: {
       hasNextPage: false,
       hasPreviousPage: false,
@@ -256,10 +265,23 @@ function formatLossName(entry: LossEntry, allEntries: LossEntry[], index: number
 
 export default function LossPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, entries, pageInfo } = loaderData || {
+  const {
+    locations,
+    entries,
+    shopTimezone,
+    todayInShopTimezone,
+    pageInfo,
+  } = loaderData || {
     locations: [],
     entries: [],
-    pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
+    shopTimezone: "UTC",
+    todayInShopTimezone: getDateInShopTimezone(new Date(), "UTC"),
+    pageInfo: {
+      hasNextPage: false,
+      hasPreviousPage: false,
+      startCursor: null,
+      endCursor: null,
+    },
   };
   const fetcher = useFetcher<typeof action>();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -268,6 +290,13 @@ export default function LossPage() {
   const STATUS_LABEL: Record<string, string> = {
     active: "登録済み",
     cancelled: "キャンセル済み",
+  };
+
+  // ステータスバッジ用スタイル（アプリと同様のバッチ表示）
+  const getStatusBadgeStyle = (status: string): React.CSSProperties => {
+    const base = { display: "inline-block" as const, padding: "2px 8px", borderRadius: "9999px", fontSize: "12px", fontWeight: 600 };
+    if (status === "active") return { ...base, backgroundColor: "#d4edda", color: "#155724" };
+    return { ...base, backgroundColor: "#e2e3e5", color: "#383d41" }; // cancelled
   };
 
   // フィルター状態（複数選択対応、入出庫履歴と同じ）
@@ -339,7 +368,7 @@ export default function LossPage() {
     setCsvExportProgress({ current: 0, total: selectedEntries.length });
 
     try {
-      // CSVヘッダー（商品明細まで含める）
+      // CSVヘッダー（モーダルCSVと同一：オプション1〜3を含む）
       const headers = [
         "履歴ID",
         "名称",
@@ -351,6 +380,9 @@ export default function LossPage() {
         "商品名",
         "SKU",
         "JAN",
+        "オプション1",
+        "オプション2",
+        "オプション3",
         "数量",
       ];
 
@@ -362,13 +394,12 @@ export default function LossPage() {
         setCsvExportProgress({ current: i + 1, total: selectedEntries.length });
 
         const locationName = e.locationName || locations.find((l) => l.id === e.locationId)?.name || e.locationId;
-        const date = e.date || (e.createdAt ? new Date(e.createdAt).toISOString().split("T")[0] : "");
+        const date = e.date || extractDateFromISO(e.createdAt, shopTimezone);
         const statusLabel = STATUS_LABEL[e.status] || e.status;
         const staff = e.staffName || (e.staffMemberId ? `ID:${e.staffMemberId}` : "") || "";
         const lossName = e.lossName || formatLossName(e, entries, entries.findIndex((entry) => entry.id === e.id));
 
         if (e.items.length === 0) {
-          // 商品明細がない場合は履歴情報のみ
           rows.push([
             e.id,
             lossName,
@@ -381,9 +412,11 @@ export default function LossPage() {
             "",
             "",
             "",
+            "",
+            "",
+            "",
           ]);
         } else {
-          // 商品明細を展開
           e.items.forEach((item) => {
             rows.push([
               e.id,
@@ -396,6 +429,9 @@ export default function LossPage() {
               item.title || "",
               item.sku || "",
               item.barcode || "",
+              item.option1 || "",
+              item.option2 || "",
+              item.option3 || "",
               String(item.quantity || 0),
             ]);
           });
@@ -412,7 +448,7 @@ export default function LossPage() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `ロス履歴_${new Date().toISOString().split("T")[0]}.csv`;
+      link.download = `ロス履歴_${todayInShopTimezone}.csv`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
@@ -452,7 +488,6 @@ export default function LossPage() {
     setModalItems([]);
 
     const entryId = entry.id;
-    console.log(`[検証] 商品リスト取得開始 - entryId: ${entryId}`);
 
     const formData = new FormData();
     formData.set("entryId", entryId);
@@ -463,18 +498,13 @@ export default function LossPage() {
   // fetcherのデータが更新されたら商品リストを更新
   useEffect(() => {
     if (fetcher.data && modalEntry) {
-      console.log(`[検証] fetcher.data受信:`, fetcher.data);
-
       if ("error" in fetcher.data) {
-        console.error(`[検証] エラーレスポンス:`, fetcher.data.error);
         alert(`商品リストの取得に失敗しました: ${fetcher.data.error}`);
         setModalItems([]);
       } else if ("items" in fetcher.data) {
         const items: LossEntryItem[] = Array.isArray(fetcher.data.items) ? fetcher.data.items : [];
-        console.log(`[検証] 最終的なitemsの長さ: ${items.length}`);
         setModalItems(items);
       } else {
-        console.warn(`[検証] 予期しないレスポンス形式:`, fetcher.data);
         setModalItems([]);
       }
     }
@@ -515,7 +545,7 @@ export default function LossPage() {
     const rows: string[][] = [];
     const locationName =
       modalEntry.locationName || locations.find((l) => l.id === modalEntry.locationId)?.name || modalEntry.locationId;
-    const date = modalEntry.date || (modalEntry.createdAt ? new Date(modalEntry.createdAt).toISOString().split("T")[0] : "");
+    const date = modalEntry.date || extractDateFromISO(modalEntry.createdAt, shopTimezone);
     const statusLabel = STATUS_LABEL[modalEntry.status] || modalEntry.status;
     const staff = modalEntry.staffName || (modalEntry.staffMemberId ? `ID:${modalEntry.staffMemberId}` : "") || "";
     const lossName =
@@ -550,9 +580,9 @@ export default function LossPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    // ファイル名用に特殊文字を置換
-    const safeFileName = lossName.replace(/[^a-zA-Z0-9]/g, "_");
-    link.download = `ロス履歴_${safeFileName}_${new Date().toISOString().split("T")[0]}.csv`;
+    // ファイル名用：表示名（#L0001など）を優先し、ファイル名に使えない文字のみ置換
+    const safeFileName = String(lossName).replace(/[\\/:*?"<>|\s]/g, "_").trim() || "item";
+    link.download = `ロス履歴_${safeFileName}_${todayInShopTimezone}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -561,122 +591,157 @@ export default function LossPage() {
     <s-page heading="ロス履歴">
       <s-scroll-box padding="base">
         <s-stack gap="base">
-          <s-section heading="ロス履歴">
-            <s-box padding="base">
+          <s-box padding="base">
               <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
-                {/* 左: フィルター（リスト選択で絞り込み） */}
+                {/* 左: タイトル＋説明 ＋ フィルター（カード内を白背景に） */}
                 <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                   <s-stack gap="base">
-                    <s-text emphasis="bold" size="large">フィルター</s-text>
-                    <s-text tone="subdued" size="small">
-                      ロケーション・ステータスを選ぶと一覧が絞り込まれます。未選択＝全て表示。
-                    </s-text>
-                    <s-divider />
-                    <s-text emphasis="bold" size="small">ロケーション</s-text>
-                    <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                    {/* 画面タイトル（太字）＋説明テキスト */}
+                    <div>
                       <div
-                        onClick={() => setLocationFilters(new Set())}
                         style={{
-                          padding: "10px 12px",
-                          borderRadius: "6px",
-                          cursor: "pointer",
-                          backgroundColor: locationFilters.size === 0 ? "#f0f9f7" : "transparent",
-                          border: locationFilters.size === 0 ? "1px solid #008060" : "1px solid transparent",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "8px",
+                          fontWeight: 600,
+                          fontSize: 14,
+                          marginBottom: 4,
                         }}
                       >
-                        <input type="checkbox" checked={locationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                        <span style={{ fontWeight: locationFilters.size === 0 ? 600 : 500 }}>全て</span>
+                        ロス履歴
                       </div>
-                      {locations.map((loc) => {
-                        const isSelected = locationFilters.has(loc.id);
-                        return (
-                          <div
-                            key={loc.id}
-                            onClick={() => {
-                              const newFilters = new Set(locationFilters);
-                              if (isSelected) {
-                                newFilters.delete(loc.id);
-                              } else {
-                                newFilters.add(loc.id);
-                              }
-                              setLocationFilters(newFilters);
-                            }}
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: "6px",
-                              cursor: "pointer",
-                              backgroundColor: isSelected ? "#f0f9f7" : "transparent",
-                              border: isSelected ? "1px solid #008060" : "1px solid transparent",
-                              marginTop: "4px",
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "8px",
-                            }}
-                          >
-                            <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
-                          </div>
-                        );
-                      })}
+                      <s-text tone="subdued" size="small">
+                        条件で絞り込みを行い、ロス履歴を表示します。
+                      </s-text>
                     </div>
-                    <s-text emphasis="bold" size="small">ステータス</s-text>
-                    <div style={{ maxHeight: "180px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                      <div
-                        onClick={() => setStatusFilters(new Set())}
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: "6px",
-                          cursor: "pointer",
-                          backgroundColor: statusFilters.size === 0 ? "#f0f9f7" : "transparent",
-                          border: statusFilters.size === 0 ? "1px solid #008060" : "1px solid transparent",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "8px",
-                        }}
-                      >
-                        <input type="checkbox" checked={statusFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                        <span style={{ fontWeight: statusFilters.size === 0 ? 600 : 500 }}>全て</span>
-                      </div>
-                      {Object.entries(STATUS_LABEL).map(([status, label]) => {
-                        const isSelected = statusFilters.has(status);
-                        return (
+
+                    {/* フィルター領域（ここだけ白背景カード） */}
+                    <div
+                      style={{
+                        background: "#ffffff",
+                        borderRadius: 12,
+                        boxShadow: "0 0 0 1px #e1e3e5",
+                        padding: 16,
+                      }}
+                    >
+                      <s-stack gap="base">
+                        <s-text emphasis="bold" size="large">フィルター</s-text>
+                        <s-text tone="subdued" size="small">
+                          ロケーション・ステータスを選ぶと一覧が絞り込まれます。
+                        </s-text>
+                        <s-divider />
+                        <s-text emphasis="bold" size="small">ロケーション</s-text>
+                        <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                           <div
-                            key={status}
-                            onClick={() => {
-                              const newFilters = new Set(statusFilters);
-                              if (isSelected) {
-                                newFilters.delete(status);
-                              } else {
-                                newFilters.add(status);
-                              }
-                              setStatusFilters(newFilters);
-                            }}
+                            onClick={() => setLocationFilters(new Set())}
                             style={{
                               padding: "10px 12px",
                               borderRadius: "6px",
                               cursor: "pointer",
-                              backgroundColor: isSelected ? "#f0f9f7" : "transparent",
-                              border: isSelected ? "1px solid #008060" : "1px solid transparent",
-                              marginTop: "4px",
+                              backgroundColor: locationFilters.size === 0 ? "#eff6ff" : "transparent",
+                              border: locationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent",
                               display: "flex",
                               alignItems: "center",
                               gap: "8px",
                             }}
                           >
-                            <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: isSelected ? 600 : 500 }}>{label}</span>
+                            <input type="checkbox" checked={locationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: locationFilters.size === 0 ? 600 : 500 }}>全て</span>
                           </div>
-                        );
-                      })}
+                          {locations.map((loc) => {
+                            const isSelected = locationFilters.has(loc.id);
+                            return (
+                              <div
+                                key={loc.id}
+                                onClick={() => {
+                                  const newFilters = new Set(locationFilters);
+                                  if (isSelected) {
+                                    newFilters.delete(loc.id);
+                                  } else {
+                                    newFilters.add(loc.id);
+                                  }
+                                  setLocationFilters(newFilters);
+                                }}
+                                style={{
+                                  padding: "10px 12px",
+                                  borderRadius: "6px",
+                                  cursor: "pointer",
+                                  backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                  border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
+                                  marginTop: "4px",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "8px",
+                                }}
+                              >
+                                <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                                <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <s-text emphasis="bold" size="small">ステータス</s-text>
+                        <div style={{ maxHeight: "180px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                          <div
+                            onClick={() => setStatusFilters(new Set())}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: "6px",
+                              cursor: "pointer",
+                              backgroundColor: statusFilters.size === 0 ? "#eff6ff" : "transparent",
+                              border: statusFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "8px",
+                            }}
+                          >
+                            <input type="checkbox" checked={statusFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: statusFilters.size === 0 ? 600 : 500 }}>全て</span>
+                          </div>
+                          {Object.entries(STATUS_LABEL).map(([status, label]) => {
+                            const isSelected = statusFilters.has(status);
+                            return (
+                              <div
+                                key={status}
+                                onClick={() => {
+                                  const newFilters = new Set(statusFilters);
+                                  if (isSelected) {
+                                    newFilters.delete(status);
+                                  } else {
+                                    newFilters.add(status);
+                                  }
+                                  setStatusFilters(newFilters);
+                                }}
+                                style={{
+                                  padding: "10px 12px",
+                                  borderRadius: "6px",
+                                  cursor: "pointer",
+                                  backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                  border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
+                                  marginTop: "4px",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "8px",
+                                }}
+                              >
+                                <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                                <span style={{ fontWeight: isSelected ? 600 : 500 }}>{label}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </s-stack>
                     </div>
                   </s-stack>
                 </div>
 
-                {/* 右: 履歴一覧 */}
+                {/* 右: 履歴一覧（白カードで囲む） */}
                 <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
+                  <div
+                    style={{
+                      background: "#ffffff",
+                      borderRadius: 12,
+                      boxShadow: "0 0 0 1px #e1e3e5",
+                      padding: 16,
+                    }}
+                  >
                   <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
                       <s-text tone="subdued" size="small">
@@ -736,7 +801,7 @@ export default function LossPage() {
                 const isSelected = selectedIds.has(entry.id);
                 const locationName =
                   entry.locationName || locations.find((l) => l.id === entry.locationId)?.name || entry.locationId;
-                const date = entry.date || (entry.createdAt ? new Date(entry.createdAt).toISOString().split("T")[0] : "");
+                const date = entry.date || extractDateFromISO(entry.createdAt, shopTimezone);
                 const itemCount = entry.items?.length ?? 0;
                 const totalQty = (entry.items ?? []).reduce((s, it) => s + (it.quantity || 0), 0);
                 const lossName = entry.lossName || formatLossName(entry, entries, entries.findIndex((e) => e.id === entry.id));
@@ -825,7 +890,7 @@ export default function LossPage() {
                           }}
                         >
                           <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
-                            状態: {STATUS_LABEL[entry.status] || entry.status}
+                            <span style={getStatusBadgeStyle(entry.status)}>{STATUS_LABEL[entry.status] || entry.status}</span>
                             {entry.cancelledAt && (
                               <span style={{ marginLeft: "8px" }}>
                                 （キャンセル日時: {new Date(entry.cancelledAt).toISOString().split("T")[0]}）
@@ -843,13 +908,12 @@ export default function LossPage() {
                 );
               })}
             </s-stack>
-          )}
-                      </s-stack>
-                    </div>
+                    )}
+                  </s-stack>
                   </div>
-                </s-box>
-              </s-section>
-
+                </div>
+              </div>
+            </s-box>
         </s-stack>
       </s-scroll-box>
 
@@ -996,7 +1060,8 @@ export default function LossPage() {
                   {modalEntry.staffName || (modalEntry.staffMemberId ? `ID:${modalEntry.staffMemberId}` : "") || "-"}
                 </div>
                 <div style={{ fontSize: "14px", marginBottom: "4px" }}>
-                  <strong>ステータス:</strong> {STATUS_LABEL[modalEntry.status] || modalEntry.status}
+                  <strong>ステータス:</strong>{" "}
+                  <span style={getStatusBadgeStyle(modalEntry.status)}>{STATUS_LABEL[modalEntry.status] || modalEntry.status}</span>
                 </div>
                 {modalEntry.cancelledAt && (
                   <div style={{ fontSize: "14px", marginBottom: "4px" }}>

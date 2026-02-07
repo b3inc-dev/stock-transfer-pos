@@ -14,6 +14,7 @@ declare namespace JSX {
     "s-text": any;
     "s-text-field": any;
     "s-button": any;
+    "s-badge": any;
 
     // Modal / Media
     "s-modal": any;

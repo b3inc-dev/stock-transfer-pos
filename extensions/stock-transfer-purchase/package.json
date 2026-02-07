@@ -1,0 +1,8 @@
+{
+  "name": "stock-transfer-purchase",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "preact": "^10.19.3"
+  }
+}

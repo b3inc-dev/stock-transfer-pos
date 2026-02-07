@@ -14,21 +14,51 @@ datasource db {
 }
 
 model Session {
-  id            String    @id
-  shop          String
-  state         String
-  isOnline      Boolean   @default(false)
-  scope         String?
-  expires       DateTime?
-  accessToken   String
-  userId        BigInt?
-  firstName     String?
-  lastName      String?
-  email         String?
-  accountOwner  Boolean   @default(false)
-  locale        String?
-  collaborator  Boolean?  @default(false)
-  emailVerified Boolean?  @default(false)
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+// 在庫変動履歴ログ（Phase 5-2）
+model InventoryChangeLog {
+  id                String   @id @default(cuid())
+  shop              String // ショップ識別子（shop.myshopify.com）
+  timestamp         DateTime @default(now()) // 発生日時（ISO）
+  date              String // 日付（YYYY-MM-DD、検索・集計用）
+  inventoryItemId   String // InventoryItem ID（GID形式）
+  variantId         String? // ProductVariant ID（取れる場合）
+  sku               String // SKU
+  locationId        String // Location ID（GID形式）
+  locationName      String // ロケーション名
+  activity          String // アクティビティ種別（inbound_transfer, outbound_transfer, loss_entry, inventory_count, purchase_entry, purchase_cancel, order_sales, refund, admin_webhook）
+  delta             Int? // 変動量（+/-、nullの場合は直前値が取れなかった）
+  quantityAfter     Int? // 変動後数量（取れない場合はnull）
+  sourceType        String // 変動の原因種別（activityと同じ値）
+  sourceId          String? // 参照元ID（Transfer ID、loss_...、count_...、purchase_...、order_...等）
+  adjustmentGroupId String? // InventoryAdjustmentGroup ID（取れる場合）
+  idempotencyKey    String // 二重登録防止用キー
+  note              String? // 備考（アプリ実行分で取れる場合のみ）
+
+  createdAt DateTime @default(now())
+
+  @@unique([shop, idempotencyKey])
+  @@index([shop, date])
+  @@index([shop, locationId])
+  @@index([shop, inventoryItemId])
+  @@index([shop, activity])
+  @@index([shop, timestamp])
 }

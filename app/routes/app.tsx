@@ -29,7 +29,7 @@ export default function App() {
             left: 0,
             right: 0,
             padding: "12px 16px",
-            background: "#008060",
+            background: "#2563eb",
             color: "#fff",
             fontSize: "14px",
             fontWeight: 500,
@@ -41,13 +41,16 @@ export default function App() {
           読み込み中…
         </div>
       )}
-      {/* App Bridge ナビゲーション（location-stock-indicator と同じ s-app-nav / s-link） */}
+      {/* App Bridge ナビゲーション（在庫情報・入出庫・仕入・ロス・発注・棚卸） */}
       {/* @ts-expect-error s-app-nav は App Bridge の Web コンポーネント */}
       <s-app-nav>
         {/* @ts-expect-error s-link は App Bridge の Web コンポーネント */}
         <s-link href="/app" rel="home">設定</s-link>
-        <s-link href="/app/history">入出庫履歴</s-link>
-        <s-link href="/app/loss">ロス履歴</s-link>
+        <s-link href="/app/inventory-info">在庫情報</s-link>
+        <s-link href="/app/history">入出庫</s-link>
+        <s-link href="/app/purchase">仕入</s-link>
+        <s-link href="/app/loss">ロス</s-link>
+        <s-link href="/app/order">発注</s-link>
         <s-link href="/app/inventory-count">棚卸</s-link>
       {/* @ts-expect-error s-app-nav 閉じタグ */}
       </s-app-nav>

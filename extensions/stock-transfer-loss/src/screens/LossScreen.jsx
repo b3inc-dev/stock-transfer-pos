@@ -1,15 +1,82 @@
-import { useState, useCallback, useEffect } from "preact/hooks";
+import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
 import { LossConditions } from "./loss/LossConditions.jsx";
 import { LossProductList } from "./loss/LossProductList.jsx";
 import { LossHistoryList } from "./loss/LossHistoryList.jsx";
+const SHOPIFY = globalThis?.shopify ?? {};
+
+function useSessionLocationId() {
+  const [rawId, setRawId] = useState(() => SHOPIFY?.session?.currentSession?.locationId ?? null);
+
+  useEffect(() => {
+    let alive = true;
+    let tickCount = 0;
+
+    const tick = () => {
+      if (!alive) return;
+      const next = SHOPIFY?.session?.currentSession?.locationId ?? null;
+      setRawId((prev) => {
+        const p = prev == null ? "" : String(prev);
+        const n = next == null ? "" : String(next);
+        return p === n ? prev : next;
+      });
+      tickCount += 1;
+      if (next) return;
+      if (tickCount >= 50) {
+        clearInterval(iv);
+      }
+    };
+
+    const iv = setInterval(tick, 100);
+    tick();
+
+    return () => {
+      alive = false;
+      clearInterval(iv);
+    };
+  }, []);
+
+  return rawId;
+}
+
+function useOriginLocationGidForScreen() {
+  const raw = useSessionLocationId();
+  return useMemo(() => {
+    if (!raw) return null;
+    const s = String(raw);
+    if (s.startsWith("gid://shopify/Location/")) return s;
+    if (/^\d+$/.test(s)) return `gid://shopify/Location/${s}`;
+    const m = s.match(/Location\/(\d+)/);
+    if (m?.[1]) return `gid://shopify/Location/${m[1]}`;
+    return null;
+  }, [raw]);
+}
 
 const VIEW = { CONDITIONS: "conditions", PRODUCT_LIST: "productList", HISTORY: "history" };
 
-export function LossScreen({ onBack, setHeader, setFooter, onViewChange }) {
+export function LossScreen({ onBack, setHeader, setFooter, onViewChange, liteMode, onToggleLiteMode }) {
   const [view, setView] = useState(VIEW.CONDITIONS);
   const [conds, setConds] = useState(null);
   const [locations, setLocations] = useState([]);
   const [conditionsKey, setConditionsKey] = useState(0); // ✅ コンディション画面の再マウント用キー
+  const [selectedLocationId, setSelectedLocationId] = useState(null);
+  const [selectedLocationName, setSelectedLocationName] = useState("");
+  const sessionLocationGid = useOriginLocationGidForScreen();
+  const didSetDefaultLocationRef = useRef(false);
+
+  useEffect(() => {
+    if (didSetDefaultLocationRef.current) return;
+    if (!sessionLocationGid) return;
+    didSetDefaultLocationRef.current = true;
+    setSelectedLocationId(sessionLocationGid);
+  }, [sessionLocationGid]);
+
+  useEffect(() => {
+    if (!selectedLocationId) return;
+    const loc = locations.find((l) => l.id === selectedLocationId);
+    if (loc) {
+      setSelectedLocationName(loc.name || "");
+    }
+  }, [selectedLocationId, locations]);
 
   // ✅ 親コンポーネントにviewの変更を通知
   useEffect(() => {
@@ -47,6 +114,8 @@ export function LossScreen({ onBack, setHeader, setFooter, onViewChange }) {
         onAfterConfirm={handleAfterConfirm}
         setHeader={setHeader}
         setFooter={setFooter}
+        liteMode={liteMode}
+        onToggleLiteMode={onToggleLiteMode}
       />
     );
   }
@@ -58,6 +127,8 @@ export function LossScreen({ onBack, setHeader, setFooter, onViewChange }) {
         setLocations={setLocations}
         setHeader={setHeader}
         setFooter={setFooter}
+        liteMode={liteMode}
+        onToggleLiteMode={onToggleLiteMode}
       />
     );
   }
@@ -71,6 +142,8 @@ export function LossScreen({ onBack, setHeader, setFooter, onViewChange }) {
       setLocations={setLocations}
       setHeader={setHeader}
       setFooter={setFooter}
+      liteMode={liteMode}
+      onToggleLiteMode={onToggleLiteMode}
     />
   );
 }

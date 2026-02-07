@@ -8,8 +8,8 @@ export default async () => {
 function Extension() {
   return (
     <s-tile
-      heading="在庫処理"
-      subheading="出庫 / 入庫"
+      heading="出庫"
+      subheading="在庫処理"
       onClick={() => shopify.action.presentModal()}
     />
   );

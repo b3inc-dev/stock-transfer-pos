@@ -1,0 +1,398 @@
+// app/routes/webhooks.inventory_levels.update.tsx
+// 在庫レベル更新Webhookハンドラー（管理画面での在庫変動検知）
+import type { ActionFunctionArgs } from "react-router";
+import { authenticate } from "../shopify.server";
+import shopify from "../shopify.server";
+import db from "../db.server";
+import { getDateInShopTimezone } from "../utils/timezone";
+
+// APIバージョン（shopify.server.tsと同じ値を使用）
+const API_VERSION = "2025-10";
+
+export const action = async ({ request }: ActionFunctionArgs) => {
+  // デバッグ: webhookが到達したかどうかを確認
+  console.log(`[inventory_levels/update] Webhook endpoint called: method=${request.method}, url=${request.url}`);
+  
+  try {
+    const { payload, shop, topic, session } = await authenticate.webhook(request);
+
+    console.log(`[inventory_levels/update] Webhook received: shop=${shop}, topic=${topic}`);
+
+    // topicの形式を正規化（大文字小文字、スラッシュ/アンダースコアの違いに対応）
+    // INVENTORY_LEVELS_UPDATE → inventory_levels/update
+    const topicStr = String(topic || "").toLowerCase();
+    // アンダースコア区切りの形式をスラッシュ区切りに変換
+    let normalizedTopic = topicStr;
+    if (topicStr === "inventory_levels_update") {
+      normalizedTopic = "inventory_levels/update";
+    } else if (topicStr.includes("_")) {
+      // 最後のアンダースコアをスラッシュに変換（例: inventory_levels_update → inventory_levels/update）
+      normalizedTopic = topicStr.replace(/_([^_]+)$/, "/$1");
+    }
+    
+    if (normalizedTopic !== "inventory_levels/update") {
+      console.log(`[inventory_levels/update] Invalid topic: ${topic} (normalized: ${normalizedTopic})`);
+      return new Response("Invalid topic", { status: 400 });
+    }
+
+    // Webhookのペイロード全体をログ出力（デバッグ用）
+    console.log(`[inventory_levels/update] Full webhook payload:`, JSON.stringify(payload, null, 2));
+
+    // Webhookのペイロードから在庫情報を取得
+    const inventoryLevel = payload as {
+      inventory_item_id?: string;
+      location_id?: string;
+      available?: number;
+      updated_at?: string;
+      inventory_adjustment_group_id?: string; // 在庫調整グループID（存在する場合）
+    };
+
+    if (!inventoryLevel.inventory_item_id || !inventoryLevel.location_id) {
+      console.error("Missing required fields in inventory_levels/update webhook:", inventoryLevel);
+      return new Response("Missing required fields", { status: 400 });
+    }
+
+    // inventory_adjustment_group_idが含まれている場合はログ出力
+    if (inventoryLevel.inventory_adjustment_group_id) {
+      console.log(`[inventory_levels/update] Found inventory_adjustment_group_id: ${inventoryLevel.inventory_adjustment_group_id}`);
+    }
+
+    // 元の形式を保持（データベース保存用）
+    const inventoryItemIdRaw = String(inventoryLevel.inventory_item_id);
+    const locationIdRaw = String(inventoryLevel.location_id);
+    const available = Number(inventoryLevel.available ?? 0);
+    const updatedAt = inventoryLevel.updated_at ? new Date(inventoryLevel.updated_at) : new Date();
+    
+    // locationIdをGID形式に変換（数値形式の場合はGID形式に変換、GraphQLクエリ用）
+    const locationId = locationIdRaw.startsWith("gid://") 
+      ? locationIdRaw 
+      : `gid://shopify/Location/${locationIdRaw}`;
+    
+    // inventoryItemIdもGID形式に変換（数値形式の場合はGID形式に変換、GraphQLクエリ用）
+    const inventoryItemId = inventoryItemIdRaw.startsWith("gid://")
+      ? inventoryItemIdRaw
+      : `gid://shopify/InventoryItem/${inventoryItemIdRaw}`;
+
+    // セッションからadminクライアントを作成
+    if (!session) {
+      console.error("No session found for webhook");
+      return new Response("No session", { status: 401 });
+    }
+
+    // adminクライアントを作成
+    // shopify.clientsが存在しない場合、sessionから直接GraphQLクライアントを作成
+    let admin: { request: (options: { data: string; variables?: any }) => Promise<any> };
+    
+    if (shopify?.clients?.Graphql) {
+      admin = shopify.clients.Graphql({ session });
+    } else {
+      // shopify.clientsが存在しない場合、sessionから直接GraphQLクライアントを作成
+      console.log(`[inventory_levels/update] shopify.clients not available, creating GraphQL client from session`);
+      const shopDomain = session.shop;
+      const accessToken = session.accessToken;
+      
+      // GraphQLクライアントを直接作成
+      admin = {
+        request: async (options: { data: string; variables?: any }) => {
+          const response = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": accessToken,
+            },
+            body: JSON.stringify({
+              query: options.data.replace(/^#graphql\s*/m, "").trim(),
+              variables: options.variables || {},
+            }),
+          });
+          return response;
+        },
+      };
+    }
+
+    const shopTimezoneResp = await admin.request({
+      data: `
+        #graphql
+        query GetShopTimezone {
+          shop {
+            ianaTimezone
+          }
+        }
+      `,
+    });
+    const shopTimezoneData = await shopTimezoneResp.json();
+    const shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
+
+    // 日付を取得（YYYY-MM-DD形式）
+    const date = getDateInShopTimezone(updatedAt, shopTimezone);
+
+    // 直前の在庫値を取得（delta計算用）
+    let prevAvailable: number | null = null;
+    let delta: number | null = null;
+    let idempotencyKey = "";
+    let existingLog = null;
+
+    try {
+      if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+        const prevLog = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop,
+            inventoryItemId: inventoryItemIdRaw, // 元の形式を使用
+            locationId: locationIdRaw, // 元の形式を使用
+          },
+          orderBy: {
+            timestamp: "desc",
+          },
+        });
+
+        prevAvailable = prevLog?.quantityAfter ?? null;
+        delta = prevAvailable !== null ? available - prevAvailable : null;
+
+        // idempotencyKeyを生成（重複防止、元の形式を使用）
+        idempotencyKey = `${shop}:${inventoryItemIdRaw}:${locationIdRaw}:${updatedAt.toISOString()}:${available}`;
+
+        // 既に同じidempotencyKeyのログが存在する場合はスキップ（二重登録防止）
+        existingLog = await (db as any).inventoryChangeLog.findUnique({
+          where: {
+            shop_idempotencyKey: {
+              shop,
+              idempotencyKey,
+            },
+          },
+        });
+
+        if (existingLog) {
+          console.log(`Skipping duplicate webhook: ${idempotencyKey}`);
+          return new Response("OK", { status: 200 });
+        }
+      } else {
+        console.warn("InventoryChangeLog model not found in Prisma client. Please restart the dev server.");
+        return new Response("OK", { status: 200 }); // Webhookは成功として返す（ログは保存されない）
+      }
+    } catch (error) {
+      console.error("Error checking previous log:", error);
+      // エラーが発生しても続行（deltaはnullのまま）
+    }
+
+    // ロケーション名を取得（GraphQLクエリ）
+    const locationResp = await admin.request({
+      data: `
+        #graphql
+        query GetLocation($id: ID!) {
+          location(id: $id) {
+            id
+            name
+          }
+        }
+      `,
+      variables: { id: locationId },
+    });
+    const locationData = await locationResp.json();
+    // ロケーション名が取得できない場合は、元の形式（数値）を使用
+    const locationName = locationData?.data?.location?.name || locationIdRaw;
+
+    // SKUを取得（InventoryItemから）
+    const itemResp = await admin.request({
+      data: `
+        #graphql
+        query GetInventoryItem($id: ID!) {
+          inventoryItem(id: $id) {
+            id
+            variant {
+              id
+              sku
+            }
+          }
+        }
+      `,
+      variables: { id: inventoryItemId },
+    });
+    const itemData = await itemResp.json();
+    const sku = itemData?.data?.inventoryItem?.variant?.sku || "";
+    const variantId = itemData?.data?.inventoryItem?.variant?.id || null;
+
+    // InventoryAdjustmentGroupを検索して、POSアプリからの操作を区別する
+    let activity: "inbound_transfer" | "outbound_transfer" | "loss_entry" | "inventory_count" | "admin_webhook" = "admin_webhook";
+    let adjustmentGroupId: string | null = inventoryLevel.inventory_adjustment_group_id || null;
+    let sourceId: string | null = null;
+
+    console.log(`[inventory_levels/update] Starting activity determination: adjustmentGroupId=${adjustmentGroupId}`);
+
+    try {
+      // inventory_adjustment_group_idが含まれている場合、直接InventoryAdjustmentGroupを取得
+      if (adjustmentGroupId) {
+        console.log(`[inventory_levels/update] Attempting to fetch adjustment group: ${adjustmentGroupId}`);
+        try {
+          const groupResp = await admin.request({
+            data: `
+              #graphql
+              query GetInventoryAdjustmentGroup($id: ID!) {
+                inventoryAdjustmentGroup(id: $id) {
+                  id
+                  createdAt
+                  reason
+                  referenceDocumentUri
+                  app {
+                    id
+                    handle
+                  }
+                }
+              }
+            `,
+            variables: { id: adjustmentGroupId },
+          });
+          const groupData = await groupResp.json();
+          
+          console.log(`[inventory_levels/update] Adjustment group query response:`, JSON.stringify(groupData, null, 2));
+          
+          if (!groupData?.errors && groupData?.data?.inventoryAdjustmentGroup) {
+            const group = groupData.data.inventoryAdjustmentGroup;
+            const referenceUri = group.referenceDocumentUri || "";
+            const appHandle = group.app?.handle || "";
+            
+            console.log(`[inventory_levels/update] Found adjustment group from webhook: id=${group.id}, referenceUri=${referenceUri}, appHandle=${appHandle}`);
+            
+            // 現在のアプリのハンドルを取得して比較
+            const appInfoResp = await admin.request({
+              data: `
+                #graphql
+                query GetAppInfo {
+                  currentAppInstallation {
+                    app {
+                      id
+                      handle
+                    }
+                  }
+                }
+              `,
+            });
+            const appInfoData = await appInfoResp.json();
+            const currentAppHandle = appInfoData?.data?.currentAppInstallation?.app?.handle || "";
+            
+            console.log(`[inventory_levels/update] App handle comparison: appHandle=${appHandle}, currentAppHandle=${currentAppHandle}, referenceUri=${referenceUri}`);
+            
+            // app.handleが現在のアプリと一致し、referenceDocumentUriが存在する場合、POSアプリからの操作と判定
+            if (appHandle === currentAppHandle && referenceUri) {
+              // referenceDocumentUriから操作種別を判定
+              if (referenceUri.includes("InboundTransfer") || referenceUri.includes("inbound") || referenceUri.includes("入庫")) {
+                activity = "inbound_transfer";
+              } else if (referenceUri.includes("OutboundTransfer") || referenceUri.includes("outbound") || referenceUri.includes("出庫")) {
+                activity = "outbound_transfer";
+              } else if (referenceUri.includes("LossEntry") || referenceUri.includes("loss") || referenceUri.includes("ロス")) {
+                activity = "loss_entry";
+              } else if (referenceUri.includes("InventoryCount") || referenceUri.includes("stocktake") || referenceUri.includes("inventory_count") || referenceUri.includes("棚卸")) {
+                activity = "inventory_count";
+              }
+              
+              // sourceIdを設定（referenceDocumentUriから抽出）
+              if (referenceUri) {
+                const idMatch = referenceUri.match(/\/([^/]+)$/);
+                if (idMatch) {
+                  sourceId = idMatch[1];
+                }
+              }
+              
+              console.log(`[inventory_levels/update] Determined activity from adjustment group: activity=${activity}, sourceId=${sourceId}`);
+            } else {
+              console.log(`[inventory_levels/update] Adjustment group found but conditions not met: appHandle=${appHandle} !== ${currentAppHandle} or referenceUri=${referenceUri} is empty`);
+            }
+          } else {
+            console.log(`[inventory_levels/update] Failed to fetch adjustment group: ${groupData?.errors?.map((e: any) => e.message).join(", ") || "Unknown error"}`);
+            console.log(`[inventory_levels/update] Full error response:`, JSON.stringify(groupData, null, 2));
+          }
+        } catch (groupError: any) {
+          console.log(`[inventory_levels/update] Error fetching adjustment group: ${groupError?.message || String(groupError)}`);
+          console.log(`[inventory_levels/update] Error stack:`, groupError?.stack);
+          // エラーが発生しても続行（activityはadmin_webhookのまま）
+        }
+      } else {
+        console.log(`[inventory_levels/update] No inventory_adjustment_group_id in webhook payload, will try fallback search`);
+      }
+      
+      // ペイロードに inventory_adjustment_group_id が無い場合、Shopify の GraphQL では
+      // QueryRoot に inventoryAdjustmentGroups が存在しないため、webhook 単体では種別を判定できない。
+      // POS/アプリ由来の操作は api/log-inventory-change で正しい activity が記録されている。
+      if (activity === "admin_webhook") {
+        console.log(`[inventory_levels/update] No adjustment group in payload; recording as admin_webhook (management). POS/app changes are logged via api/log-inventory-change.`);
+      }
+    } catch (error) {
+      console.error("[inventory_levels/update] Error searching InventoryAdjustmentGroup:", error);
+      console.error("[inventory_levels/update] Error stack:", (error as any)?.stack);
+      console.log(`[inventory_levels/update] Treating as admin_webhook due to error`);
+      // エラーが発生しても続行（activityはadmin_webhookのまま）
+    }
+    
+    console.log(`[inventory_levels/update] Final activity determination: activity=${activity}, sourceId=${sourceId}, adjustmentGroupId=${adjustmentGroupId}`);
+
+    // 同一の在庫変動がすでに別の経路で記録されていたら webhook では保存しない。
+    // （POS/アプリの api/log-inventory-change、売上 orders.updated、返品 refunds.create で正しい種別が付いている）
+    // そうしないと二重に「管理」で保存され、売上・返品・ロス等が「管理」で上書きされたように見える。
+    if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+      const knownActivities = [
+        "loss_entry", "purchase_entry", "inbound_transfer", "outbound_transfer", "inventory_count",
+        "order_sales", "refund", // 売上・返品（orders.updated / refunds.create で記録済み）
+      ];
+      const recentThreshold = new Date(updatedAt.getTime() - 2 * 60 * 1000); // 2分前
+      const duplicateLog = await (db as any).inventoryChangeLog.findFirst({
+        where: {
+          shop,
+          inventoryItemId: inventoryItemIdRaw,
+          locationId: locationIdRaw,
+          quantityAfter: available,
+          activity: { in: knownActivities },
+          timestamp: { gte: recentThreshold },
+        },
+        orderBy: { timestamp: "desc" },
+      });
+      if (duplicateLog) {
+        console.log(`[inventory_levels/update] Skipping webhook log: same change already recorded (activity=${duplicateLog.activity}, id=${duplicateLog.id})`);
+        return new Response("OK", { status: 200 });
+      }
+    }
+
+    // 在庫変動ログを保存（deltaがnullでも記録する）
+    try {
+      if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+        console.log(`[inventory_levels/update] Saving log: shop=${shop}, item=${inventoryItemIdRaw}, location=${locationIdRaw}, locationName=${locationName}, delta=${delta}, quantityAfter=${available}, date=${date}, activity=${activity}`);
+        
+        // deltaがnullの場合でも記録する（管理画面からの操作の場合、直前の値が取れないことがある）
+        if (delta === null) {
+          console.log(`[inventory_levels/update] Warning: delta is null, but saving log anyway`);
+        }
+        
+        await (db as any).inventoryChangeLog.create({
+          data: {
+            shop,
+            timestamp: updatedAt,
+            date,
+            inventoryItemId: inventoryItemIdRaw, // 元の形式を使用
+            variantId,
+            sku,
+            locationId: locationIdRaw, // 元の形式を使用
+            locationName, // ロケーション名は取得済み
+            activity,
+            delta,
+            quantityAfter: available,
+            sourceType: activity,
+            sourceId,
+            adjustmentGroupId,
+            idempotencyKey,
+            note: null,
+          },
+        });
+        
+        console.log(`[inventory_levels/update] Log saved successfully`);
+      } else {
+        console.warn(`[inventory_levels/update] InventoryChangeLog model not found in Prisma client. Please restart the dev server.`);
+      }
+    } catch (error) {
+      console.error("[inventory_levels/update] Error saving inventory change log:", error);
+      // エラーが発生してもWebhookは成功として返す
+    }
+
+    return new Response("OK", { status: 200 });
+  } catch (error) {
+    console.error("inventory_levels/update webhook error:", error);
+    return new Response("Internal Server Error", { status: 500 });
+  }
+};

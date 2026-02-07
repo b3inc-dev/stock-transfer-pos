@@ -1,0 +1,16 @@
+api_version = "2026-01"
+
+[[extensions]]
+uid = "d240adc2-dfe9-b2e9-6a99-b919384ee7880ef6b1b0bf"
+type = "ui_extension"
+name = "棚卸 / 在庫調整"
+handle = "stock-transfer-stocktake"
+description = "棚卸 / 在庫調整"
+
+[[extensions.targeting]]
+target = "pos.home.tile.render"
+module = "./src/Tile.jsx"
+
+[[extensions.targeting]]
+target = "pos.home.modal.render"
+module = "./src/Modal.jsx"

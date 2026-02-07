@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "preact/hooks";
 import { readLossEntries, writeLossEntries, adjustInventoryAtLocation, fetchLocations, fetchVariantImage } from "./lossApi.js";
+import { getStatusBadgeTone } from "../../lossHelpers.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
 const SHOPIFY = globalThis?.shopify ?? {};
@@ -156,7 +157,7 @@ function formatLossName(entry, allEntries, index) {
   return `#L${String(num).padStart(4, "0")}`;
 }
 
-export function LossHistoryList({ onBack, locations: locationsProp = [], setLocations, setHeader, setFooter }) {
+export function LossHistoryList({ onBack, locations: locationsProp = [], setLocations, setHeader, setFooter, liteMode, onToggleLiteMode }) {
   const sessionLocationGid = useOriginLocationGid();
   const [entries, setEntries] = useState([]);
   const [historyMode, setHistoryMode] = useState("active"); // "active" | "cancelled"
@@ -244,7 +245,12 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
           inventoryItemId: it.inventoryItemId,
           delta: +(it.quantity || 0),
         }));
-        await adjustInventoryAtLocation({ locationId: entry.locationId, deltas });
+        // キャンセル時もreferenceDocumentUriを設定（ロスエントリIDを使用）
+        await adjustInventoryAtLocation({ 
+          locationId: entry.locationId, 
+          deltas,
+          referenceDocumentUri: entry.id
+        });
         const cancelledAt = new Date().toISOString();
         const updated = entries.map((e) =>
           e.id === entry.id
@@ -316,6 +322,19 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
                 )}
               </s-stack>
             </s-box>
+            {/* ✅ 右：画像表示ボタン（商品リストヘッダーと同様） */}
+            <s-stack direction="inline" gap="base" alignItems="center" justifyContent="end" style={{ flexShrink: 0 }}>
+              {typeof onToggleLiteMode === "function" ? (
+                <s-button
+                  kind="secondary"
+                  tone={liteMode ? "critical" : undefined}
+                  onClick={onToggleLiteMode}
+                  style={{ paddingInline: 8, whiteSpace: "nowrap" }}
+                >
+                  {liteMode ? "画像OFF" : "画像ON"}
+                </s-button>
+              ) : null}
+            </s-stack>
           </s-stack>
         </s-box>
       );
@@ -328,7 +347,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
             <s-stack direction="inline" gap="none" inlineSize="100%">
               <s-box inlineSize="50%">
                 <s-button
-                  kind={historyMode === "active" ? "primary" : "secondary"}
+                  variant={historyMode === "active" ? "primary" : "secondary"}
                   onClick={() => setHistoryMode("active")}
                 >
                   登録済み {activeCount}件
@@ -336,7 +355,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
               </s-box>
               <s-box inlineSize="50%">
                 <s-button
-                  kind={historyMode === "cancelled" ? "primary" : "secondary"}
+                  variant={historyMode === "cancelled" ? "primary" : "secondary"}
                   onClick={() => setHistoryMode("cancelled")}
                 >
                   キャンセル済み {cancelledCount}件
@@ -378,7 +397,9 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     listToShow,
     sessionLocationGid,
     getLocationName,
-  ]); // setHeaderを依存配列から除外（無限ループ防止）
+    liteMode,
+    onToggleLiteMode,
+  ]);
 
   useEffect(() => {
     if (detailId) {
@@ -393,10 +414,14 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
       const currentFilteredByLoc = sessionLocationGid ? entries.filter((e) => e.locationId === sessionLocationGid) : [];
       const lossName = formatLossName(entry, currentFilteredByLoc, entryIndex >= 0 ? entryIndex : 0);
       const CANCEL_CONFIRM_MODAL_ID = `cancel-confirm-${entry.id}`;
+      // 履歴商品リスト：左＝ステータス（バッジ）、右＝合計（商品リストの数量合計）
+      const statusJa = entry.status === "cancelled" ? "キャンセル済み" : "登録済み";
+      const statusBadgeTone = getStatusBadgeTone(statusJa);
+      const totalQty = (entry.items ?? []).reduce((s, it) => s + (it.quantity || 0), 0);
       setFooter?.(
         <FixedFooterNavBar
-          summaryLeft={`${lossName} / ${locName}`}
-          summaryRight={entry.status === "cancelled" ? "キャンセル済み" : "登録済み"}
+          summaryLeft={<s-badge tone={statusBadgeTone}>{statusJa}</s-badge>}
+          summaryRight={`合計：${totalQty}`}
           leftLabel="戻る"
           onLeft={() => setDetailId("")}
           rightLabel={cancelling ? "処理中..." : "キャンセル"}
@@ -423,7 +448,11 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
         summaryRight={summaryRight}
         leftLabel="戻る"
         onLeft={onBack}
-        rightLabel={loading ? "取得中..." : "再取得"}
+        middleLabel={liteMode ? "画像OFF" : "画像ON"}
+        middleTone={liteMode ? "critical" : "default"}
+        onMiddle={onToggleLiteMode}
+        middleDisabled={typeof onToggleLiteMode !== "function"}
+        rightLabel={loading ? "読込中..." : "再読込"}
         onRight={refreshLossHistory}
         rightTone="secondary"
         rightDisabled={loading}
@@ -442,6 +471,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     refreshLossHistory,
     handleCancel,
     getLocationName,
+    liteMode,
+    onToggleLiteMode,
     sessionLocationGid,
   ]); // setFooter, filteredByLocを依存配列から除外（無限ループ防止）
 
@@ -458,8 +489,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     const currentFilteredByLoc = sessionLocationGid ? entries.filter((e) => e.locationId === sessionLocationGid) : [];
     const lossName = formatLossName(e, currentFilteredByLoc, entryIndex >= 0 ? entryIndex : 0);
     
-    // ✅ 出庫履歴詳細と同じデザインで商品リストを表示
-    const showImages = true; // 画像を常に表示（出庫履歴詳細と同じ）
+    // ✅ 出庫履歴詳細と同じデザインで商品リストを表示（画像表示ON/OFFはロス内で連動）
+    const showImages = !liteMode;
     
     const CANCEL_CONFIRM_MODAL_ID = `cancel-confirm-${e.id}`;
     
@@ -630,11 +661,11 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
 
         {!sessionLocationGid ? (
           <s-text tone="subdued" size="small">
-            ロケーション情報を取得中...
+            読み込み中...
           </s-text>
         ) : loading ? (
           <s-text tone="subdued" size="small">
-            取得中...
+            読み込み中...
           </s-text>
         ) : listToShow.length === 0 ? (
           <s-text tone="subdued" size="small">
@@ -651,6 +682,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
               const itemCount = e.items?.length ?? 0;
               const totalQty = (e.items ?? []).reduce((s, it) => s + (it.quantity || 0), 0);
               const statusJa = e.status === "cancelled" ? "キャンセル済み" : "登録済み";
+              const statusBadgeTone = getStatusBadgeTone(statusJa);
 
               return (
                 <s-clickable key={e.id} onClick={() => onTapHistoryEntry(e)}>
@@ -665,18 +697,24 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
                         </s-text>
                       </s-stack>
 
-                      <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <s-text
+                        tone="subdued"
+                        size="small"
+                        style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                      >
                         ロケーション: {location}
                       </s-text>
 
-                      <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        理由: {e.reason || "-"}
+                      <s-text
+                        tone="subdued"
+                        size="small"
+                        style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                      >
+                        スタッフ: {e.staffName || "-"}
                       </s-text>
 
                       <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
-                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                          状態: {statusJa}
-                        </s-text>
+                        <s-badge tone={statusBadgeTone}>{statusJa}</s-badge>
                         <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
                           {itemCount}件・合計{totalQty}
                         </s-text>

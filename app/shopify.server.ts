@@ -24,6 +24,10 @@ const shopify = shopifyApp({
     : {}),
 });
 
+// shopifyオブジェクトの構造を確認（デバッグ用）
+console.log("[shopify.server] shopify object keys:", Object.keys(shopify));
+console.log("[shopify.server] shopify.clients:", typeof shopify.clients, !!shopify.clients);
+
 export default shopify;
 export const apiVersion = ApiVersion.October25;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;

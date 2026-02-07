@@ -8,24 +8,13 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 export async function loader({ request, params }: LoaderFunctionArgs) {
   try {
     const { admin } = await authenticate.admin(request);
-    // React Router v7では、paramsはオブジェクトとして渡される
-    // デバッグ用: paramsの内容を確認
-    console.log("History detail loader - params:", params);
-    console.log("History detail loader - params.id:", params?.id);
-    console.log("History detail loader - params keys:", params ? Object.keys(params) : []);
-    
-    // React Router v7では、動的ルートのパラメータ名が$idの場合、params.idで取得できる
-    // URLデコードして取得
+
     const rawId = params?.id || params?.$id || "";
     const transferId = rawId ? decodeURIComponent(rawId) : "";
 
     if (!transferId) {
-      console.error("History detail loader - transferId is empty, params:", params);
       throw new Response("Transfer ID is required", { status: 400 });
     }
-    
-    console.log("History detail loader - rawId:", rawId);
-    console.log("History detail loader - transferId (decoded):", transferId);
 
     // Transfer IDから商品明細を取得
     // shipments経由でlineItemsを取得（既存の動作コードに準拠）
@@ -90,27 +79,16 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     const data = await resp.json();
     const transfer = data?.data?.inventoryTransfer;
 
-    // デバッグログ: レスポンス構造を確認
-    console.log("Detail loader - GraphQL response data:", JSON.stringify(data, null, 2));
-    console.log("Detail loader - transfer:", transfer);
-    console.log("Detail loader - transfer.shipments:", transfer?.shipments);
-    console.log("Detail loader - transfer.shipments.nodes:", transfer?.shipments?.nodes);
-
     if (!transfer) {
-      console.error("Detail loader - Transfer not found for ID:", transferId);
       throw new Response("Transfer not found", { status: 404 });
     }
 
     // lineItemsを集約（shipments経由で取得 - 既存の動作コードに準拠）
     const lineItems: TransferLineItem[] = [];
     if (Array.isArray(transfer?.shipments?.nodes)) {
-      console.log(`Detail loader - Found ${transfer.shipments.nodes.length} shipments`);
       transfer.shipments.nodes.forEach((shipment: any, shipmentIdx: number) => {
-        console.log(`Detail loader - Shipment ${shipmentIdx}:`, shipment);
         if (Array.isArray(shipment?.lineItems?.nodes)) {
-          console.log(`Detail loader - Shipment ${shipmentIdx} has ${shipment.lineItems.nodes.length} lineItems`);
           shipment.lineItems.nodes.forEach((li: any, liIdx: number) => {
-            console.log(`Detail loader - LineItem ${shipmentIdx}-${liIdx}:`, li);
             const inventoryItem = li?.inventoryItem;
             const variant = inventoryItem?.variant;
             const product = variant?.product;
@@ -144,18 +122,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
               quantity: li.quantity ?? 0,
             });
           });
-        } else {
-          console.warn(`Detail loader - Shipment ${shipmentIdx} has no lineItems.nodes or it's not an array`);
         }
       });
-    } else {
-      console.warn("Detail loader - No shipments found or shipments.nodes is not an array");
-      console.warn("Detail loader - transfer.shipments:", transfer?.shipments);
-      console.warn("Detail loader - transfer structure:", Object.keys(transfer || {}));
     }
-
-    console.log(`Detail loader - Total lineItems collected: ${lineItems.length}`);
-    console.log("Detail loader - Final lineItems:", lineItems);
 
     const type = transfer.origin?.location?.id ? "outbound" : "inbound";
     const locationName = type === "outbound" 

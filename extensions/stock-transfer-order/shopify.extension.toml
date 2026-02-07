@@ -1,0 +1,18 @@
+api_version = "2026-01"
+
+[[extensions]]
+type = "ui_extension"
+name = "発注 / 在庫調整"
+uid = "3442a3e2-c0cf-5888-eef4-8ebb325334304cbf805b"
+handle = "stock-transfer-order"
+description = "発注 / 在庫調整"
+
+# module: file that contains your extension’s source code
+# target: location where your extension appears in POS
+[[extensions.targeting]]
+module = "./src/Tile.jsx"
+target = "pos.home.tile.render"
+
+[[extensions.targeting]]
+module = "./src/Modal.jsx"
+target = "pos.home.modal.render"

@@ -3,6 +3,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher, useSearchParams } from "react-router";
 import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
+import { getDateInShopTimezone } from "../utils/timezone";
 
 // メモ（note）から予定外入庫の数量合計を抽出する関数
 function extractExtrasQuantityFromNote(note: string): number {
@@ -55,6 +56,17 @@ export type TransferLineItem = {
   quantity: number; // 予定数
   receivedQuantity?: number; // 入庫数（取得可能な場合）
   isExtra?: boolean; // 予定外入庫フラグ
+  /** 複数シップメント時にどの配送に属するか（棚卸の商品グループ列と同様） */
+  shipmentId?: string;
+  shipmentDisplayId?: string; // 表示用 e.g. #T0127-1, #T0127-L
+  /** 配送ごとのステータス（棚卸の商品グループごとの完了済み/未完了と同様） */
+  shipmentStatus?: string; // DRAFT, READY_TO_SHIP, RECEIVED, TRANSFERRED, CANCELED 等
+};
+
+/** 配送単位でグループ化した明細（棚卸の groupItems と同様） */
+export type GroupedLineItemsEntry = {
+  shipmentMetadata: { id: string; displayId: string; status: string };
+  items: TransferLineItem[];
 };
 
 export type TransferHistory = {
@@ -253,9 +265,27 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const total = totalFromApi ?? (totalFromUrl ? parseInt(totalFromUrl, 10) : null);
     const startIndex = isPage2OrLater ? pageSize + 1 : 1;
 
+    // ショップのタイムゾーンを取得
+    const shopTimezoneResp = await admin.graphql(
+      `#graphql
+        query GetShopTimezone {
+          shop {
+            ianaTimezone
+          }
+        }
+      `
+    );
+    const shopTimezoneData = await shopTimezoneResp.json();
+    const shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
+
+    // サーバー側で「今日の日付」を計算
+    const todayInShopTimezone = getDateInShopTimezone(new Date(), shopTimezone);
+
     return {
       locations,
       histories: allHistories,
+      shopTimezone,
+      todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
       pageInfo: {
         hasNextPage: pageInfo.hasNextPage || false,
         hasPreviousPage: pageInfo.hasPreviousPage || false,
@@ -285,18 +315,41 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Transfer IDから商品明細を取得
-    // 既存の動作コード（Modal.jsx）を参考に、inventoryTransfer.lineItemsから取得
-    // ただし、variant情報は取得できないため、shipments経由で取得する必要がある可能性がある
-    // まずはinventoryTransfer.lineItemsから取得を試みる
+    // 複数シップメント時は配送ID（shipmentDisplayId）を付与。単一シップメントで下書き・キャンセル時は Transfer の lineItems をフォールバックで使用
     const resp = await admin.graphql(
       `#graphql
         query TransferLineItems($id: ID!) {
           inventoryTransfer(id: $id) {
             id
+            name
             note
+            lineItems(first: 250) {
+              nodes {
+                id
+                totalQuantity
+                inventoryItem {
+                  id
+                  sku
+                  variant {
+                    id
+                    title
+                    barcode
+                    selectedOptions {
+                      name
+                      value
+                    }
+                    product {
+                      title
+                    }
+                  }
+                }
+              }
+            }
             shipments(first: 50) {
               nodes {
                 id
+                status
+                tracking { trackingNumber company trackingUrl arrivesAt }
                 lineItems(first: 250) {
                   nodes {
                     id
@@ -338,86 +391,110 @@ export async function action({ request }: ActionFunctionArgs) {
     
     const transfer = data?.data?.inventoryTransfer;
 
-    // デバッグログ: レスポンス構造を確認
-    console.log("Action - GraphQL response data:", JSON.stringify(data, null, 2));
-    console.log("Action - transfer:", transfer);
-    console.log("Action - transfer.shipments:", transfer?.shipments);
-    console.log("Action - transfer.shipments.nodes:", transfer?.shipments?.nodes);
-
     if (!transfer) {
       return { error: "Transfer not found" };
     }
 
-    // lineItemsを集約（shipments経由で取得 - 既存の動作コードに準拠）
+    // 配送表示IDを生成（#T0127-1, #T0127-2, #T0127-L の形式。アプリ・管理画面と統一）
+    const transferName = (transfer.name || "").trim();
+    const transferIdNum = transferId.replace(/^.*\/(\d+)$/, "$1") || transferId;
+    const transferPrefix = transferName
+      ? (transferName.startsWith("#") ? transferName : "#" + transferName.replace(/^T?/i, "T"))
+      : "#T" + transferIdNum;
+    const formatShipmentDisplayId = (index: number) => `${transferPrefix}-${index + 1}`;
+    const transferLineDisplayId = `${transferPrefix}-L`;
+
     const lineItems: TransferLineItem[] = [];
-    
-    if (Array.isArray(transfer?.shipments?.nodes)) {
-      console.log(`Action - Found ${transfer.shipments.nodes.length} shipments`);
-      transfer.shipments.nodes.forEach((shipment: any, shipmentIdx: number) => {
-        console.log(`Action - Shipment ${shipmentIdx}:`, shipment);
-        
-        if (Array.isArray(shipment?.lineItems?.nodes)) {
-          console.log(`Action - Shipment ${shipmentIdx} has ${shipment.lineItems.nodes.length} lineItems`);
-          shipment.lineItems.nodes.forEach((li: any, liIdx: number) => {
-            console.log(`Action - LineItem ${shipmentIdx}-${liIdx}:`, li);
-            const inventoryItem = li?.inventoryItem;
-            const variant = inventoryItem?.variant;
-            const product = variant?.product;
+    const shipmentNodes = Array.isArray(transfer?.shipments?.nodes) ? transfer.shipments.nodes : [];
 
-            // オプションを取得（selectedOptionsから正しく取得）
-            const selectedOptions = Array.isArray(variant?.selectedOptions) ? variant.selectedOptions : [];
-            const option1 = selectedOptions[0]?.value || "";
-            const option2 = selectedOptions[1]?.value || "";
-            const option3 = selectedOptions[2]?.value || "";
+    // 1) まず shipments の lineItems を集約（各明細に shipmentId / shipmentDisplayId を付与）
+    for (let shipmentIdx = 0; shipmentIdx < shipmentNodes.length; shipmentIdx++) {
+      const shipment = shipmentNodes[shipmentIdx];
+      const shipmentId = shipment?.id || "";
+      const shipmentDisplayId = formatShipmentDisplayId(shipmentIdx);
+      const shipmentStatus = shipment?.status || "";
+      const nodes = Array.isArray(shipment?.lineItems?.nodes) ? shipment.lineItems.nodes : [];
+      for (const li of nodes) {
+        const inventoryItem = li?.inventoryItem;
+        const variant = inventoryItem?.variant;
+        const product = variant?.product;
+        const selectedOptions = Array.isArray(variant?.selectedOptions) ? variant.selectedOptions : [];
+        const option1 = selectedOptions[0]?.value || "";
+        const option2 = selectedOptions[1]?.value || "";
+        const option3 = selectedOptions[2]?.value || "";
+        const productTitle = String(product?.title || "").trim();
+        const variantTitle = String(variant?.title || "").trim();
+        const title = productTitle && variantTitle
+          ? `${productTitle} / ${variantTitle}`
+          : (variantTitle || productTitle || variant?.sku || inventoryItem?.id || "(unknown)");
+        const sku = variant?.sku || inventoryItem?.sku || "";
+        lineItems.push({
+          id: li.id || "",
+          inventoryItemId: inventoryItem?.id || "",
+          variantId: variant?.id || "",
+          sku,
+          barcode: variant?.barcode || "",
+          title,
+          option1,
+          option2,
+          option3,
+          quantity: li.quantity ?? 0,
+          receivedQuantity: li.acceptedQuantity ?? li.quantity ?? 0,
+          shipmentId,
+          shipmentDisplayId,
+          shipmentStatus,
+        });
+      }
+    }
 
-            // titleはvariantから取得（既存の動作コードに準拠）
-            const productTitle = String(product?.title || "").trim();
-            const variantTitle = String(variant?.title || "").trim();
-            const title = productTitle && variantTitle
-              ? `${productTitle} / ${variantTitle}`
-              : (variantTitle || productTitle || variant?.sku || inventoryItem?.id || "(unknown)");
-
-            // skuはvariant.skuを優先、なければinventoryItem.skuを使用
-            const sku = variant?.sku || inventoryItem?.sku || "";
-
-            lineItems.push({
-              id: li.id || "",
-              inventoryItemId: inventoryItem?.id || "",
-              variantId: variant?.id || "",
-              sku,
-              barcode: variant?.barcode || "",
-              title,
-              option1,
-              option2,
-              option3,
-              quantity: li.quantity ?? 0, // 予定数
-              receivedQuantity: li.acceptedQuantity ?? li.quantity ?? 0, // 実際の入庫数（acceptedQuantity、なければquantity）
-            });
-          });
-        } else {
-          console.warn(`Action - Shipment ${shipmentIdx} has no lineItems.nodes or it's not an array`);
-        }
-      });
-    } else {
-      console.warn("Action - No shipments found or shipments.nodes is not an array");
-      console.warn("Action - transfer.shipments:", transfer?.shipments);
-      console.warn("Action - transfer structure:", Object.keys(transfer || {}));
+    // 2) 単一シップメントで下書き・キャンセル時など、shipment に lineItems が無い場合は Transfer の lineItems をフォールバック
+    if (lineItems.length === 0 && Array.isArray(transfer?.lineItems?.nodes) && transfer.lineItems.nodes.length > 0) {
+      const firstShipment = shipmentNodes[0];
+      const firstShipmentId = firstShipment?.id || "";
+      const displayId = shipmentNodes.length === 1 ? formatShipmentDisplayId(0) : transferLineDisplayId;
+      const fallbackStatus = firstShipment?.status || (transfer as any)?.status || "";
+      for (const li of transfer.lineItems.nodes) {
+        const inventoryItem = li?.inventoryItem;
+        const variant = inventoryItem?.variant;
+        const product = variant?.product;
+        const selectedOptions = Array.isArray(variant?.selectedOptions) ? variant.selectedOptions : [];
+        const option1 = selectedOptions[0]?.value || "";
+        const option2 = selectedOptions[1]?.value || "";
+        const option3 = selectedOptions[2]?.value || "";
+        const productTitle = String(product?.title || "").trim();
+        const variantTitle = String(variant?.title || "").trim();
+        const title = productTitle && variantTitle
+          ? `${productTitle} / ${variantTitle}`
+          : (variantTitle || productTitle || variant?.sku || inventoryItem?.id || "(unknown)");
+        const sku = variant?.sku || inventoryItem?.sku || "";
+        lineItems.push({
+          id: li.id || "",
+          inventoryItemId: inventoryItem?.id || "",
+          variantId: variant?.id || "",
+          sku,
+          barcode: variant?.barcode || "",
+          title,
+          option1,
+          option2,
+          option3,
+          quantity: li.totalQuantity ?? 0,
+          receivedQuantity: li.totalQuantity ?? 0,
+          shipmentId: firstShipmentId || undefined,
+          shipmentDisplayId: displayId,
+          shipmentStatus: fallbackStatus,
+        });
+      }
     }
     
     // 予定外入庫をメモ（note）から抽出
     const extrasItems: TransferLineItem[] = [];
     const note = transfer?.note || "";
     if (note) {
-      console.log("Action - Parsing note for extras:", note);
-      
       // メモから「予定外入庫: X件」のセクションを抽出
       // パターン: "予定外入庫: X件" の後に続く行（"  - "で始まる行）を取得
       const extrasSectionMatch = note.match(/予定外入庫:\s*(\d+)件\s*\n((?:  - .+(?:\n|$))+)/);
       if (extrasSectionMatch) {
-        const extrasCount = parseInt(extrasSectionMatch[1] || "0", 10);
         const extrasLines = extrasSectionMatch[2] || "";
-        
-        console.log(`Action - Found ${extrasCount} extras in note`);
         
         // 各行をパース（"  - "で始まる行のみ）
         const lines = extrasLines.split(/\n/).filter(line => line.trim().startsWith("-"));
@@ -450,28 +527,49 @@ export async function action({ request }: ActionFunctionArgs) {
                 receivedQuantity: qty, // 実際の入庫数
                 isExtra: true,
               });
-              
-              console.log(`Action - Parsed extra item ${idx}:`, { title, sku, barcode, qty, options });
             }
-          } else {
-            console.warn(`Action - Failed to parse extra line: ${line}`);
           }
         });
-      } else {
-        console.log("Action - No extras section found in note");
       }
     }
     
-    console.log(`Action - Found ${extrasItems.length} extras from note`);
-    console.log(`Action - Total lineItems collected: ${lineItems.length}`);
-    
+    // 配送単位でグループ化（棚卸UI用・進捗表示用）
+    const groupedLineItems: GroupedLineItemsEntry[] = [];
+    for (let i = 0; i < shipmentNodes.length; i++) {
+      const s = shipmentNodes[i];
+      const items = lineItems.filter((li) => !li.isExtra && li.shipmentId === s?.id);
+      groupedLineItems.push({
+        shipmentMetadata: {
+          id: s?.id || "",
+          displayId: formatShipmentDisplayId(i),
+          status: s?.status || "",
+        },
+        items,
+      });
+    }
+    if (extrasItems.length > 0) {
+      groupedLineItems.push({
+        shipmentMetadata: { id: "extras", displayId: "予定外入庫", status: "" },
+        items: extrasItems,
+      });
+    }
+
     // 予定外入庫をlineItemsに追加
     lineItems.push(...extrasItems);
-    
-    console.log("Action - Final lineItems:", lineItems);
+
+    // 配送情報（先頭シップメントの tracking）
+    const firstShipment = shipmentNodes[0];
+    const tr = firstShipment?.tracking;
+    const transferTracking = tr
+      ? {
+          company: String(tr?.company ?? "").trim(),
+          trackingNumber: String(tr?.trackingNumber ?? "").trim(),
+          arrivesAt: tr?.arrivesAt ? String(tr.arrivesAt).trim() : "",
+        }
+      : null;
 
     // React Router v7では、オブジェクトを直接返すと自動的にJSONレスポンスに変換される
-    return { transferId, lineItems };
+    return { transferId, lineItems, groupedLineItems, transferTracking };
   } catch (error) {
     console.error("Line items action error:", error);
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -482,9 +580,11 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function HistoryPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, histories, pageInfo, pagination } = loaderData || {
+  const { locations, histories, shopTimezone, todayInShopTimezone, pageInfo, pagination } = loaderData || {
     locations: [],
     histories: [],
+    shopTimezone: "UTC",
+    todayInShopTimezone: getDateInShopTimezone(new Date(), "UTC"),
     pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
     pagination: { total: null, startIndex: 1, pageSize: 100 },
   };
@@ -547,16 +647,26 @@ export default function HistoryPage() {
     CANCELED: "キャンセル",
   };
 
+  // ステータスバッジ用スタイル（アプリと同様のバッチ表示）
+  const getStatusBadgeStyle = (status: string): React.CSSProperties => {
+    const base = { display: "inline-block" as const, padding: "2px 8px", borderRadius: "9999px", fontSize: "12px", fontWeight: 600 };
+    if (status === "RECEIVED" || status === "TRANSFERRED") return { ...base, backgroundColor: "#d4edda", color: "#155724" };
+    if (status === "CANCELED") return { ...base, backgroundColor: "#f8d7da", color: "#721c24" };
+    if (status === "DRAFT") return { ...base, backgroundColor: "#e2e3e5", color: "#383d41" };
+    return { ...base, backgroundColor: "#cce5ff", color: "#004085" }; // READY_TO_SHIP, IN_PROGRESS, IN_TRANSIT 等
+  };
+
   // フィルター状態（複数選択対応）
   const [outboundLocationFilters, setOutboundLocationFilters] = useState<Set<string>>(new Set());
   const [inboundLocationFilters, setInboundLocationFilters] = useState<Set<string>>(new Set());
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  // 商品リストモーダル状態
+  // 商品リストモーダル状態（lineItems は CSV 用、grouped は UI 表示用）
   const [modalOpen, setModalOpen] = useState(false);
   const [modalHistory, setModalHistory] = useState<TransferHistory | null>(null);
   const [modalLineItems, setModalLineItems] = useState<TransferLineItem[]>([]);
+  const [modalGroupedLineItems, setModalGroupedLineItems] = useState<GroupedLineItemsEntry[]>([]);
 
   // CSV出力処理中状態
   const [csvExporting, setCsvExporting] = useState(false);
@@ -628,7 +738,7 @@ export default function HistoryPage() {
     setCsvExportProgress({ current: 0, total: selectedHistories.length });
 
     try {
-      // CSVヘッダー（商品明細まで含める）
+      // CSVヘッダー（モーダルCSVと同一。配送ID・配送ステータス・予定数・入庫数・種別を含む）
       const headers = [
         "履歴ID",
         "名称",
@@ -636,13 +746,17 @@ export default function HistoryPage() {
         "出庫元",
         "入庫先",
         "ステータス",
+        "配送ID",
+        "配送ステータス",
         "商品名",
         "SKU",
         "JAN",
         "オプション1",
         "オプション2",
         "オプション3",
-        "数量",
+        "予定数",
+        "入庫数",
+        "種別",
       ];
 
       // CSVデータ（商品明細を展開）
@@ -664,8 +778,7 @@ export default function HistoryPage() {
       try {
         const formData = new FormData();
         formData.set("transferId", h.id);
-        console.log(`CSV export - Fetching line items for transferId: ${h.id}`);
-        
+
         // fetcherが使用中でないことを確認
         let waitCount = 0;
         while ((fetcher.state === "submitting" || fetcher.state === "loading") && waitCount < 50) {
@@ -717,46 +830,22 @@ export default function HistoryPage() {
         }
         
         if (fetcher.data && dataReceived) {
-          console.log(`CSV export - line items response for ${h.id}:`, fetcher.data);
-          console.log(`CSV export - line items response type:`, typeof fetcher.data);
-          console.log(`CSV export - line items response keys:`, Object.keys(fetcher.data || {}));
-          console.log(`CSV export - fetcher.data.transferId:`, (fetcher.data as any)?.transferId);
-          console.log(`CSV export - expected transferId:`, h.id);
-          
           // transferIdが一致することを確認（transferIdがある場合のみ）
           // ただし、transferIdがない場合は、lineItemsの存在を確認（モーダルと同じ方法）
           const currentTransferId = (fetcher.data as any)?.transferId;
           if (currentTransferId && currentTransferId !== h.id) {
-            console.error(`CSV export - TransferId mismatch! Expected: ${h.id}, Got: ${currentTransferId}`);
-            console.error(`CSV export - This may be data from a previous request. Skipping...`);
-            // transferIdが一致しない場合は、空のlineItemsを使用
             lineItems = [];
           } else if ('error' in fetcher.data) {
-            console.error(`CSV export - Error response for ${h.id}:`, fetcher.data.error);
-            // エラー時も続行（商品明細なしで履歴情報のみ出力）
             lineItems = [];
           } else if ('lineItems' in fetcher.data) {
             lineItems = Array.isArray(fetcher.data.lineItems) ? fetcher.data.lineItems : [];
-            console.log(`CSV export - Final lineItems length for ${h.id}:`, lineItems.length);
-            
-            if (lineItems.length === 0) {
-              console.warn(`CSV export - No line items found for ${h.id}`);
-              console.warn(`CSV export - Full response data:`, JSON.stringify(fetcher.data, null, 2));
-            }
           } else {
-            console.warn(`CSV export - Unexpected response format for ${h.id}:`, fetcher.data);
             lineItems = [];
           }
         } else {
-          console.warn(`CSV export - No data received for ${h.id} (timeout or no response)`);
-          console.warn(`CSV export - fetcher.state:`, fetcher.state);
-          console.warn(`CSV export - fetcher.data:`, fetcher.data);
-          console.warn(`CSV export - previousTransferId:`, previousTransferId);
           lineItems = [];
         }
-      } catch (error) {
-        console.error(`CSV export - Error fetching line items for ${h.id}:`, error);
-        console.error(`CSV export - Error details:`, error instanceof Error ? error.message : String(error));
+      } catch {
         // エラー時も続行（商品明細なしで履歴情報のみ出力）
       }
 
@@ -765,7 +854,7 @@ export default function HistoryPage() {
       const historyName = h.name || h.id;
 
       if (lineItems.length === 0) {
-        // 商品明細がない場合は履歴情報のみ
+        // 商品明細がない場合は履歴情報のみ（列数はモーダルCSVと同一）
         rows.push([
           h.id,
           historyName,
@@ -780,10 +869,16 @@ export default function HistoryPage() {
           "",
           "",
           "",
+          "",
+          "",
+          "",
+          "",
+          "",
         ]);
       } else {
-        // 商品明細を展開
+        // 商品明細を展開（モーダルCSVと同一：配送ID・配送ステータス・予定数・入庫数・種別）
         lineItems.forEach((item) => {
+          const shipmentStatusLabel = item.shipmentStatus ? (STATUS_LABEL[item.shipmentStatus] || item.shipmentStatus) : "";
           rows.push([
             h.id,
             historyName,
@@ -791,6 +886,8 @@ export default function HistoryPage() {
             originName,
             destName,
             statusLabel,
+            item.shipmentDisplayId || "",
+            shipmentStatusLabel,
             item.title || "",
             item.sku || "",
             item.barcode || "",
@@ -798,6 +895,8 @@ export default function HistoryPage() {
             item.option2 || "",
             item.option3 || "",
             String(item.quantity),
+            String(item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity),
+            item.isExtra ? "予定外入庫" : "通常",
           ]);
         });
       }
@@ -813,11 +912,10 @@ export default function HistoryPage() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `入出庫履歴_${new Date().toISOString().split("T")[0]}.csv`;
+      link.download = `入出庫履歴_${todayInShopTimezone}.csv`;
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
-      console.error("CSV export error:", error);
       alert(`CSV出力中にエラーが発生しました: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       // 処理完了：モーダルを閉じる
@@ -855,8 +953,7 @@ export default function HistoryPage() {
     setModalLineItems([]);
 
     const historyId = history.id;
-    console.log(`[検証] 商品リスト取得開始 - transferId: ${historyId}`);
-    
+
     const formData = new FormData();
     formData.set("transferId", historyId);
     
@@ -866,29 +963,50 @@ export default function HistoryPage() {
   // fetcherのデータが更新されたら商品リストを更新
   useEffect(() => {
     if (fetcher.data && modalHistory) {
-      console.log(`[検証] fetcher.data受信:`, fetcher.data);
-      console.log(`[検証] fetcher.dataの型:`, typeof fetcher.data);
-      console.log(`[検証] fetcher.dataのキー:`, Object.keys(fetcher.data || {}));
-      
       if ('error' in fetcher.data) {
-        console.error(`[検証] エラーレスポンス:`, fetcher.data.error);
         alert(`商品リストの取得に失敗しました: ${fetcher.data.error}`);
         setModalLineItems([]);
+        setModalGroupedLineItems([]);
       } else if ('lineItems' in fetcher.data) {
         const lineItems: TransferLineItem[] = Array.isArray(fetcher.data.lineItems) ? fetcher.data.lineItems : [];
-        console.log(`[検証] 最終的なlineItemsの長さ: ${lineItems.length}`);
-        console.log(`[検証] 最終的なlineItems:`, lineItems);
         setModalLineItems(lineItems);
-        
-        if (lineItems.length > 0) {
-          console.log(`[検証] 商品リストを表示します - ${lineItems.length}件`);
+        // 配送単位グループ：API が groupedLineItems を返していればそれを使い、なければ lineItems から生成
+        if (Array.isArray((fetcher.data as any).groupedLineItems) && (fetcher.data as any).groupedLineItems.length > 0) {
+          setModalGroupedLineItems((fetcher.data as any).groupedLineItems);
         } else {
-          console.warn(`[検証] 商品リストが空です`);
-          console.warn(`[検証] 完全なレスポンスデータ:`, JSON.stringify(fetcher.data, null, 2));
+          const grouped: GroupedLineItemsEntry[] = [];
+          const seen = new Set<string>();
+          const order: { id: string; displayId: string; status: string }[] = [];
+          for (const li of lineItems) {
+            if (li.isExtra) continue;
+            const key = li.shipmentId || li.shipmentDisplayId || "";
+            if (key && !seen.has(key)) {
+              seen.add(key);
+              order.push({
+                id: li.shipmentId || "",
+                displayId: li.shipmentDisplayId || key,
+                status: li.shipmentStatus || "",
+              });
+            }
+          }
+          for (const meta of order) {
+            const items = lineItems.filter(
+              (li) => !li.isExtra && (li.shipmentId === meta.id || li.shipmentDisplayId === meta.displayId)
+            );
+            grouped.push({ shipmentMetadata: meta, items });
+          }
+          const extras = lineItems.filter((li) => li.isExtra);
+          if (extras.length > 0) {
+            grouped.push({
+              shipmentMetadata: { id: "extras", displayId: "予定外入庫", status: "" },
+              items: extras,
+            });
+          }
+          setModalGroupedLineItems(grouped);
         }
       } else {
-        console.warn(`[検証] 予期しないレスポンス形式:`, fetcher.data);
         setModalLineItems([]);
+        setModalGroupedLineItems([]);
       }
     }
   }, [fetcher.data, modalHistory]);
@@ -897,6 +1015,7 @@ export default function HistoryPage() {
     setModalOpen(false);
     setModalHistory(null);
     setModalLineItems([]);
+    setModalGroupedLineItems([]);
   };
 
   // モーダル内の商品リストをCSV出力
@@ -906,7 +1025,7 @@ export default function HistoryPage() {
       return;
     }
 
-    // CSVヘッダー
+    // CSVヘッダー（複数シップメント時は配送ID・配送ステータス列を含む・棚卸の商品グループ列と同様）
     const headers = [
       "履歴ID",
       "名称",
@@ -914,6 +1033,8 @@ export default function HistoryPage() {
       "出庫元",
       "入庫先",
       "ステータス",
+      "配送ID",
+      "配送ステータス",
       "商品名",
       "SKU",
       "JAN",
@@ -936,6 +1057,7 @@ export default function HistoryPage() {
     const historyName = modalHistory.name || modalHistory.id;
 
     modalLineItems.forEach((item) => {
+      const shipmentStatusLabel = item.shipmentStatus ? (STATUS_LABEL[item.shipmentStatus] || item.shipmentStatus) : "";
       rows.push([
         modalHistory.id,
         historyName,
@@ -943,6 +1065,8 @@ export default function HistoryPage() {
         originName,
         destName,
         statusLabel,
+        item.shipmentDisplayId || "",
+        shipmentStatusLabel,
         item.title || "",
         item.sku || "",
         item.barcode || "",
@@ -965,9 +1089,9 @@ export default function HistoryPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    // ファイル名用に特殊文字を置換
-    const safeFileName = historyName.replace(/[^a-zA-Z0-9]/g, "_");
-    link.download = `入出庫履歴_${safeFileName}_${new Date().toISOString().split("T")[0]}.csv`;
+    // ファイル名用：表示名（#T0000など）を優先し、ファイル名に使えない文字のみ置換
+    const safeFileName = String(historyName).replace(/[\\/:*?"<>|\s]/g, "_").trim() || "item";
+    link.download = `入出庫履歴_${safeFileName}_${todayInShopTimezone}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -977,69 +1101,138 @@ export default function HistoryPage() {
     <s-page heading="入出庫履歴">
       <s-scroll-box padding="base">
         <s-stack gap="base">
-          <s-section heading="入出庫履歴">
             <s-box padding="base">
               <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
+                {/* 左：タイトル＋説明 ＋ フィルター（カード内を白背景に） */}
                 <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                   <s-stack gap="base">
-                    <s-text emphasis="bold" size="large">フィルター</s-text>
-                    <s-text tone="subdued" size="small">
-                      ロケーション・ステータスを選ぶと一覧が絞り込まれます。未選択＝全て表示。
-                    </s-text>
-                    <s-divider />
-                    <s-text emphasis="bold" size="small">出庫ロケーション</s-text>
-                    <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                      <div onClick={() => setOutboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: outboundLocationFilters.size === 0 ? "#f0f9f7" : "transparent", border: outboundLocationFilters.size === 0 ? "1px solid #008060" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
-                        <input type="checkbox" checked={outboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                        <span style={{ fontWeight: outboundLocationFilters.size === 0 ? 600 : 500 }}>全て</span>
+                    {/* 画面タイトル（太字）＋説明テキスト */}
+                    <div>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 14,
+                          marginBottom: 4,
+                        }}
+                      >
+                        入出庫履歴
                       </div>
-                      {locations.map((loc) => {
-                        const isSelected = outboundLocationFilters.has(loc.id);
-                        return (
-                          <div key={loc.id} onClick={() => { const newFilters = new Set(outboundLocationFilters); if (isSelected) newFilters.delete(loc.id); else newFilters.add(loc.id); setOutboundLocationFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#f0f9f7" : "transparent", border: isSelected ? "1px solid #008060" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
-                          </div>
-                        );
-                      })}
+                      <s-text tone="subdued" size="small">
+                        条件で絞り込みを行い、入出庫履歴を表示します。
+                      </s-text>
                     </div>
-                    <s-text emphasis="bold" size="small">入庫ロケーション</s-text>
-                    <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                      <div onClick={() => setInboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: inboundLocationFilters.size === 0 ? "#f0f9f7" : "transparent", border: inboundLocationFilters.size === 0 ? "1px solid #008060" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
-                        <input type="checkbox" checked={inboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                        <span style={{ fontWeight: inboundLocationFilters.size === 0 ? 600 : 500 }}>全て</span>
-                      </div>
-                      {locations.map((loc) => {
-                        const isSelected = inboundLocationFilters.has(loc.id);
-                        return (
-                          <div key={loc.id} onClick={() => { const newFilters = new Set(inboundLocationFilters); if (isSelected) newFilters.delete(loc.id); else newFilters.add(loc.id); setInboundLocationFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#f0f9f7" : "transparent", border: isSelected ? "1px solid #008060" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
+
+                    {/* フィルター領域（ここだけ白背景カード） */}
+                    <div
+                      style={{
+                        background: "#ffffff",
+                        borderRadius: 12,
+                        boxShadow: "0 0 0 1px #e1e3e5",
+                        padding: 16,
+                      }}
+                    >
+                      <s-stack gap="base">
+                        <s-text emphasis="bold" size="large">フィルター</s-text>
+                        <s-text tone="subdued" size="small">
+                          ロケーション・ステータスを選ぶと一覧が絞り込まれます。
+                        </s-text>
+                        <s-divider />
+                        <s-text emphasis="bold" size="small">出庫ロケーション</s-text>
+                        <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                          <div onClick={() => setOutboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: outboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: outboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <input type="checkbox" checked={outboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: outboundLocationFilters.size === 0 ? 600 : 500 }}>全て</span>
                           </div>
-                        );
-                      })}
-                    </div>
-                    <s-text emphasis="bold" size="small">ステータス</s-text>
-                    <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                      <div onClick={() => setStatusFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: statusFilters.size === 0 ? "#f0f9f7" : "transparent", border: statusFilters.size === 0 ? "1px solid #008060" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
-                        <input type="checkbox" checked={statusFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                        <span style={{ fontWeight: statusFilters.size === 0 ? 600 : 500 }}>全て</span>
-                      </div>
-                      {statuses.map((status) => {
-                        const statusLabel = STATUS_LABEL[status] || status;
-                        const isSelected = statusFilters.has(status);
-                        return (
-                          <div key={status} onClick={() => { const newFilters = new Set(statusFilters); if (isSelected) newFilters.delete(status); else newFilters.add(status); setStatusFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#f0f9f7" : "transparent", border: isSelected ? "1px solid #008060" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: isSelected ? 600 : 500 }}>{statusLabel}</span>
+                          {locations.map((loc) => {
+                            const isSelected = outboundLocationFilters.has(loc.id);
+                            return (
+                              <div
+                                key={loc.id}
+                                onClick={() => {
+                                  const newFilters = new Set(outboundLocationFilters);
+                                  if (isSelected) newFilters.delete(loc.id);
+                                  else newFilters.add(loc.id);
+                                  setOutboundLocationFilters(newFilters);
+                                }}
+                                style={{
+                                  padding: "10px 12px",
+                                  borderRadius: "6px",
+                                  cursor: "pointer",
+                                  backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                  border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
+                                  marginTop: "4px",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "8px",
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  readOnly
+                                  style={{ width: "16px", height: "16px", flexShrink: 0 }}
+                                />
+                                <span
+                                  style={{
+                                    fontWeight: isSelected ? 600 : 500,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                  }}
+                                >
+                                  {loc.name}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <s-text emphasis="bold" size="small">入庫ロケーション</s-text>
+                        <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                          <div onClick={() => setInboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: inboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: inboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <input type="checkbox" checked={inboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: inboundLocationFilters.size === 0 ? 600 : 500 }}>全て</span>
                           </div>
-                        );
-                      })}
+                          {locations.map((loc) => {
+                            const isSelected = inboundLocationFilters.has(loc.id);
+                            return (
+                              <div key={loc.id} onClick={() => { const newFilters = new Set(inboundLocationFilters); if (isSelected) newFilters.delete(loc.id); else newFilters.add(loc.id); setInboundLocationFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#eff6ff" : "transparent", border: isSelected ? "1px solid #2563eb" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
+                                <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                                <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <s-text emphasis="bold" size="small">ステータス</s-text>
+                        <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                          <div onClick={() => setStatusFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: statusFilters.size === 0 ? "#eff6ff" : "transparent", border: statusFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <input type="checkbox" checked={statusFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: statusFilters.size === 0 ? 600 : 500 }}>全て</span>
+                          </div>
+                          {statuses.map((status) => {
+                            const statusLabel = STATUS_LABEL[status] || status;
+                            const isSelected = statusFilters.has(status);
+                            return (
+                              <div key={status} onClick={() => { const newFilters = new Set(statusFilters); if (isSelected) newFilters.delete(status); else newFilters.add(status); setStatusFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#eff6ff" : "transparent", border: isSelected ? "1px solid #2563eb" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
+                                <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                                <span style={{ fontWeight: isSelected ? 600 : 500 }}>{statusLabel}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </s-stack>
                     </div>
                   </s-stack>
                 </div>
+                {/* 右：履歴リスト（白カードで囲む） */}
                 <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
-                  <s-stack gap="base">
+                  <div
+                    style={{
+                      background: "#ffffff",
+                      borderRadius: 12,
+                      boxShadow: "0 0 0 1px #e1e3e5",
+                      padding: 16,
+                    }}
+                  >
+                    <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
                       <s-text tone="subdued" size="small">
                         {rangeDisplay} / {totalDisplay}
@@ -1157,7 +1350,7 @@ export default function HistoryPage() {
                         </div>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
                           <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
-                            状態: {STATUS_LABEL[history.status] || history.status}
+                            <span style={getStatusBadgeStyle(history.status)}>{STATUS_LABEL[history.status] || history.status}</span>
                             {(() => {
                               const extrasCount = extractExtrasCountFromNote(history.note || "");
                               if (extrasCount > 0) {
@@ -1182,15 +1375,14 @@ export default function HistoryPage() {
               })}
             </s-stack>
           )}
-                  </s-stack>
+                    </s-stack>
+                  </div>
                 </div>
               </div>
             </s-box>
-          </s-section>
 
         </s-stack>
       </s-scroll-box>
-
       {/* CSV出力処理中モーダル */}
       {csvExporting && (
         <div
@@ -1315,12 +1507,70 @@ export default function HistoryPage() {
                 <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                   <strong>入庫先:</strong> {modalHistory.destinationLocationName || "-"}
                 </div>
+                {(() => {
+                  const fd = fetcher.data as { transferId?: string; transferTracking?: { company?: string; trackingNumber?: string; arrivesAt?: string } } | undefined;
+                  const tr = fd?.transferId === modalHistory.id ? fd?.transferTracking : null;
+                  return (
+                    <>
+                      <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                        <strong>配送業者:</strong> {tr?.company || "-"}
+                      </div>
+                      <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                        <strong>配送番号:</strong> {tr?.trackingNumber || "-"}
+                      </div>
+                      <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                        <strong>予定日:</strong>{" "}
+                        {tr?.arrivesAt ? new Date(tr.arrivesAt).toISOString().split("T")[0] : "-"}
+                      </div>
+                    </>
+                  );
+                })()}
                 <div style={{ fontSize: "14px", marginBottom: "4px" }}>
-                  <strong>ステータス:</strong> {STATUS_LABEL[modalHistory.status] || modalHistory.status}
+                  <strong>ステータス:</strong>{" "}
+                  <span style={getStatusBadgeStyle(modalHistory.status)}>{STATUS_LABEL[modalHistory.status] || modalHistory.status}</span>
                 </div>
-                <div style={{ fontSize: "14px" }}>
+                <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                   <strong>数量:</strong> {modalHistory.receivedQuantity}/{modalHistory.totalQuantity}
                 </div>
+                {modalGroupedLineItems.length > 0 && (
+                  <div style={{ fontSize: "14px", marginTop: "8px" }}>
+                    <strong>進捗状況:</strong>
+                    <div style={{ marginTop: "4px", marginLeft: "16px" }}>
+                      {modalGroupedLineItems.map((grp) => {
+                        if (grp.shipmentMetadata.id === "extras") {
+                          return (
+                            <div key="extras" style={{ fontSize: "13px", color: "#666" }}>
+                              {grp.shipmentMetadata.displayId}: {grp.items.length}件
+                            </div>
+                          );
+                        }
+                        const isReceived =
+                          grp.shipmentMetadata.status === "RECEIVED" ||
+                          grp.shipmentMetadata.status === "TRANSFERRED";
+                        const statusLabel = STATUS_LABEL[grp.shipmentMetadata.status] || grp.shipmentMetadata.status || "未入庫";
+                        const displayStatus = isReceived ? "入庫済み" : statusLabel;
+                        const totalQty = grp.items.reduce((s, it) => s + (it.quantity ?? 0), 0);
+                        const receivedQty = grp.items.reduce((s, it) => s + (it.receivedQuantity ?? 0), 0);
+                        return (
+                          <div
+                            key={grp.shipmentMetadata.id}
+                            style={{
+                              fontSize: "13px",
+                              color: isReceived ? "#28a745" : "#ffc107",
+                            }}
+                          >
+                            {grp.shipmentMetadata.displayId}: {displayStatus}
+                            {(totalQty > 0 || receivedQty > 0) && (
+                              <span style={{ marginLeft: "8px", color: "#666" }}>
+                                （{receivedQty}/{totalQty > 0 ? totalQty : "-"}）
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1328,56 +1578,161 @@ export default function HistoryPage() {
               <div style={{ padding: "24px", textAlign: "center" }}>
                 <div>商品リストを取得中...</div>
               </div>
-            ) : modalLineItems.length > 0 ? (
+            ) : modalGroupedLineItems.length > 0 || modalLineItems.length > 0 ? (
               <div>
                 <div style={{ marginBottom: "12px", fontSize: "14px", color: "#666" }}>
                   合計: {modalLineItems.length}件
+                  {modalGroupedLineItems.length > 1 && (
+                    <span style={{ marginLeft: "8px" }}>
+                      配送: {modalGroupedLineItems.filter((g) => g.shipmentMetadata.id !== "extras").length}件
+                    </span>
+                  )}
                 </div>
                 <div style={{ maxHeight: "400px", overflowY: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
-                    <thead>
-                      <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
-                        <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>予定数</th>
-                        <th style={{ padding: "8px", textAlign: "right" }}>入庫数</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {modalLineItems.map((item, idx) => (
-                        <tr key={item.id || idx} style={{ borderBottom: "1px solid #eee", backgroundColor: item.isExtra ? "#ffe6e6" : "transparent" }}>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.title || "（商品名なし）"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.sku || "（SKUなし）"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.barcode || "（JANなし）"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.option1 || "-"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.option2 || "-"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.option3 || "-"}
-                          </td>
-                          <td style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #eee" }}>
-                            {item.quantity || "-"}
-                          </td>
-                          <td style={{ padding: "8px", textAlign: "right" }}>
-                            {item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity}
-                          </td>
+                  {modalGroupedLineItems.length > 0 ? (
+                    modalGroupedLineItems.map((grp) => {
+                      const isExtras = grp.shipmentMetadata.id === "extras";
+                      const isReceived =
+                        !isExtras &&
+                        (grp.shipmentMetadata.status === "RECEIVED" ||
+                          grp.shipmentMetadata.status === "TRANSFERRED");
+                      const statusLabel = STATUS_LABEL[grp.shipmentMetadata.status] || grp.shipmentMetadata.status || "";
+                      const titleLabel = isExtras
+                        ? grp.shipmentMetadata.displayId
+                        : `${grp.shipmentMetadata.displayId}（${statusLabel || "未入庫"}）`;
+                      const totalQty = grp.items.reduce((s, it) => s + (it.quantity ?? 0), 0);
+                      const receivedQty = grp.items.reduce((s, it) => s + (it.receivedQuantity ?? 0), 0);
+                      const blockBg = isExtras ? "#fff5f5" : isReceived ? "#f0f8f0" : "#fff8f0";
+                      const titleColor = isExtras ? "#666" : isReceived ? "#28a745" : "#ffc107";
+                      return (
+                        <div
+                          key={grp.shipmentMetadata.id || grp.shipmentMetadata.displayId}
+                          style={{
+                            marginBottom: "24px",
+                            padding: "12px",
+                            backgroundColor: blockBg,
+                            borderRadius: "4px",
+                          }}
+                        >
+                          <div
+                            style={{
+                              marginBottom: "8px",
+                              fontSize: "14px",
+                              fontWeight: "bold",
+                              color: titleColor,
+                            }}
+                          >
+                            {titleLabel}
+                            {grp.items.length > 0 && !isExtras && (
+                              <span style={{ fontSize: "12px", fontWeight: "normal", marginLeft: "8px", color: "#666" }}>
+                                （{receivedQty}/{totalQty > 0 ? totalQty : "-"}）
+                              </span>
+                            )}
+                          </div>
+                          {grp.items.length > 0 ? (
+                            <table
+                              style={{
+                                width: "100%",
+                                borderCollapse: "collapse",
+                                fontSize: "14px",
+                                backgroundColor: "transparent",
+                              }}
+                            >
+                              <thead>
+                                <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
+                                  <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
+                                  <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
+                                  <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
+                                  <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
+                                  <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
+                                  <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
+                                  <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>予定数</th>
+                                  <th style={{ padding: "8px", textAlign: "right" }}>入庫数</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {grp.items.map((item, idx) => (
+                                  <tr
+                                    key={item.id || idx}
+                                    style={{
+                                      borderBottom: "1px solid #eee",
+                                      backgroundColor: item.isExtra ? "#ffe6e6" : "transparent",
+                                    }}
+                                  >
+                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                      {item.title || "（商品名なし）"}
+                                    </td>
+                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                      {item.sku || "（SKUなし）"}
+                                    </td>
+                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                      {item.barcode || "（JANなし）"}
+                                    </td>
+                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                      {item.option1 || "-"}
+                                    </td>
+                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                      {item.option2 || "-"}
+                                    </td>
+                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                      {item.option3 || "-"}
+                                    </td>
+                                    <td style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #eee" }}>
+                                      {item.quantity ?? "-"}
+                                    </td>
+                                    <td style={{ padding: "8px", textAlign: "right" }}>
+                                      {item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          ) : (
+                            <div style={{ padding: "12px", color: "#666", fontSize: "14px" }}>
+                              この配送には商品がありません
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
+                      <thead>
+                        <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
+                          <th style={{ padding: "8px", textAlign: "left" }}>配送ID</th>
+                          <th style={{ padding: "8px", textAlign: "left" }}>配送ステータス</th>
+                          <th style={{ padding: "8px", textAlign: "left" }}>商品名</th>
+                          <th style={{ padding: "8px", textAlign: "left" }}>SKU</th>
+                          <th style={{ padding: "8px", textAlign: "left" }}>JAN</th>
+                          <th style={{ padding: "8px", textAlign: "left" }}>オプション1</th>
+                          <th style={{ padding: "8px", textAlign: "left" }}>オプション2</th>
+                          <th style={{ padding: "8px", textAlign: "left" }}>オプション3</th>
+                          <th style={{ padding: "8px", textAlign: "right" }}>予定数</th>
+                          <th style={{ padding: "8px", textAlign: "right" }}>入庫数</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {modalLineItems.map((item, idx) => (
+                          <tr key={item.id || idx} style={{ borderBottom: "1px solid #eee" }}>
+                            <td style={{ padding: "8px" }}>{item.shipmentDisplayId || "-"}</td>
+                            <td style={{ padding: "8px" }}>
+                              {item.shipmentStatus ? (STATUS_LABEL[item.shipmentStatus] || item.shipmentStatus) : "-"}
+                            </td>
+                            <td style={{ padding: "8px" }}>{item.title || "（商品名なし）"}</td>
+                            <td style={{ padding: "8px" }}>{item.sku || "（SKUなし）"}</td>
+                            <td style={{ padding: "8px" }}>{item.barcode || "（JANなし）"}</td>
+                            <td style={{ padding: "8px" }}>{item.option1 || "-"}</td>
+                            <td style={{ padding: "8px" }}>{item.option2 || "-"}</td>
+                            <td style={{ padding: "8px" }}>{item.option3 || "-"}</td>
+                            <td style={{ padding: "8px", textAlign: "right" }}>{item.quantity ?? "-"}</td>
+                            <td style={{ padding: "8px", textAlign: "right" }}>
+                              {item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </div>
             ) : (

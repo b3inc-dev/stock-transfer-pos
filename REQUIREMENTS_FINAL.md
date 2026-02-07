@@ -1,7 +1,7 @@
 # 管理画面・ロス登録・棚卸 実装要件書
 
-**最終更新日**: 2026年2月（要件ほぼ完了・再度まとめ反映）  
-**コード確認日**: 2026年2月1日（未完了項目の実装有無をコード上で確認済み）
+**最終更新日**: 2026年2月6日（在庫変動履歴機能（Phase 5-2）実装完了まで反映済み）  
+**コード確認日**: 2026年2月（4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・POS拡張 description 更新・リスティングガイド・発注機能実装・仕入キャンセルモーダル・発注→仕入名称#P0000・CSVファイル名統一・loadItems JAN/オプション補完・仕入POS拡張（コンディション/商品リスト/履歴・在庫調整・カメラスキャン・自動保存/復元）・ロス区分設定（管理画面CRUD＋POS連動）・「その他」表示制御（ロス/仕入/出庫）・選択中バッジ（info/ブルー）・在庫高表示機能（Phase 5-1完了）・在庫変動履歴機能（Phase 5-2完了）反映済み）
 
 ---
 
@@ -14,11 +14,36 @@
 | 履歴のページネーション | ✅ 完了（表示件数・前へ・次へで統一） |
 | CSV1行目・コレクション/SKU検索 | ✅ 現時点で不具合なし |
 | 一覧でのCSVまとめてダウンロード | ⏭️ 実装なしで進行 |
-| 未完了グループの商品リスト読込 | ✅ 改善レベルで完了（許容範囲） |
+| 未完了グループの商品リスト読込 / POS棚卸読み込み速度 | ✅ 完了（入庫並みに最適化済み） |
 | 棚卸ページ上部メニュー下の余白 | ✅ 微調整済み（狭くした） |
 | 設定の「破棄」「保存」ボタン | ✅ 微調整済み（右寄せ・余白で浮き感軽減） |
+| 入出庫履歴モーダルを棚卸UIに寄せた表示 | ✅ 完了（配送単位ブロック・進捗状況・予定外別ブロック） |
+| 棚卸モーダル進捗状況の表示位置 | ✅ 情報欄最下部に変更（入出庫と同様） |
+| 棚卸単一グループ時のブロック背景 | ✅ 完了（複数と同じ背景色・角丸で統一） |
+| 棚卸の予定外を別ブロック表示 | ✅ 完了（入出庫の「予定外入庫」ブロックと同様） |
+| 管理画面のステータスをバッジ表示 | ✅ 完了（入出庫・ロス・棚卸の一覧・モーダル） |
+| 出庫ロケーション選択のインライン展開 | ✅ 完了（モーダル→ボタン押下で同一画面内展開、変更/閉じるトグル） |
+| 出庫到着時刻ラベル「時間指定」化 | ✅ 完了 |
+| 履歴モーダルに配送情報（配送業者・配送番号・予定日）追加 | ✅ 完了（入庫先とステータスの間に表示） |
+| 本番前の `console.log` 整理 | ✅ 完了（app/ のルート・API・Webhook および 全POS拡張のデバッグ用を削除。loader/action の catch 内 console.error は本番追跡のため残置） |
+| 公開アプリ向け・リスティング準備 | ✅ ガイド整備済み（RELEASE_REQUIREMENTS_PUBLIC_APP.md、docs/LISTING_ASSETS_GUIDE.md） |
+| POS表記・UI微調整（画像ON/OFF統一・明細/SKU件数・フッター配置等） | ✅ 完了（本文「直近の主な更新」に記載） |
+| 発注機能：発注先編集・原価・販売価格取得・CSV出力拡張 | ✅ 完了（商品リストモーダル内で発注先編集、原価・販売価格の自動取得・保存、CSV出力項目拡張） |
+| 仕入・発注：処理確定文言・CSV名・名称引き継ぎ・JAN/オプション | ✅ 完了（#P0000表示・CSVファイル名統一・発注→仕入名称・loadItemsでJAN/オプション補完）。残りはPOS仕入タイル（#B0000） |
+| 在庫変動履歴機能（Phase 5-2） | ✅ 完了（共通ユーティリティ・Webhook実装・一覧表示・CSV出力・UI調整） |
 
-**任意で残っているもの**: 履歴タブのCSV案内文言の見直し、本番前の `console.log` 整理。
+**任意で残っているもの**: 履歴タブのCSV案内文言の見直し。
+
+**文言・UIトンマナの統一（必須）**  
+新規・既存を問わず、**文言（ラベル・ボタン・メッセージ・モーダル見出し等）およびUIのトーン＆マナー（レイアウト・表記・コンポーネントの使い方）は、同一機能や他画面（入出庫・ロス・棚卸・仕入・発注など）と必ず統一すること。** 例：商品リストモーダルの見出しは「商品リスト」に統一（機能名を冠しない）。ボタン表記・読み込み表示・ステータスバッジ・フッター配置などは、既存の直近の統一実装に合わせる。実装・修正時は他画面との整合を確認すること。
+
+**POS：タイルモーダル・タイトルバー内のカメラスキャン（2026-02 実装・仕様まとめ）**  
+- **タイトルバー内ボタン**: **s-page** の **slot="secondary-actions"** で、×と同じ1本のアクションバーに「カメラスキャン」を設置可能。**出庫・入庫・ロス・棚卸の全タイル**で実装済み。  
+- **カメラの起動・終了**: ホストから渡される **api**（posModalApi）の `api.scanner.showCameraScanner()` / `hideCameraScanner()` を使用（globalThis.shopify は未設定のことがあるため渡された api を優先）。**api_version は 2026-01**（showCameraScanner は 2026-01 で追加）。  
+- **カメラを閉じる**: カメラ表示中は同じスロットのボタンを「**カメラを閉じる**」に切り替え、タップで `hideCameraScanner()` を呼ぶ。モーダルを閉じずにカメラだけ終了可能。  
+- **連続スキャン**: カメラを開いたまま複数回スキャンし、終了したいときだけ「カメラを閉じる」をタップする運用（スキャンごとにカメラは閉じない）。  
+- **表示領域**: **showCameraScanner()** では**指定不可**（API は引数なし、表示はホスト任せ）。表示領域を制御したい場合は **CameraScanner コンポーネント**（React POS API）をレイアウト内に配置する方式が必要（当プロジェクトは Polaris + Preact のため該当画面の React 化が必要）。  
+- 詳細・要因・対応履歴は `docs/POS_HEADER_CAMERA_SCAN_FEASIBILITY.md` を参照。
 
 ---
 
@@ -31,11 +56,18 @@
 | **完了** | 棚卸ID発行UI（レイアウト・説明）、履歴モーダルのデバッグ情報削除、履歴のページネーション表示 |
 | **不具合なし** | CSV1行目、コレクション/SKU検索（現時点で問題なし） |
 | **実装なしで進行** | 一覧でのCSVまとめてダウンロード（入出庫履歴の一括CSVは未実装のまま） |
-| **改善レベルで完了** | 未完了グループの商品リスト読込（多少時間はかかるが許容範囲と判断） |
+| **完了** | POS棚卸アプリの読み込み速度を入庫並みに最適化（一覧の数量表示・商品リスト表示の遅延を解消） |
 | **微調整済み** | 棚卸ページ：上部メニュー下の余白を狭く（タブ＋区切り線を1ブロックにまとめて余白削減）。設定ページ：「破棄」「保存」ボタンを右寄せし、上下余白を抑えて浮き感を軽減 |
 
 **直近の主な更新（2026-02）**:
-- **2カラムレイアウトのSP対応**: 入出庫履歴・ロス履歴・棚卸（商品グループ設定、棚卸ID発行、履歴）で、SP時は右カラムを左カラム下部に回す。flexWrap + flex-basis で折り返し。
+- **出庫マルチシップメント挙動の定義**: `docs/OUTBOUND_MULTI_SHIPMENT_BEHAVIOR.md` を作成。出庫リストの「確定する」「下書き保存」「配送準備完了にする」の挙動を明確化。Shopify Admin API 検証に基づき、既存 Transfer へのシップメント追加は `inventoryShipmentCreate`（下書き）または `inventoryShipmentCreateInTransit`（確定）で `movementId` に Transfer ID を渡すことで可能であることを確認。`READY_TO_SHIP` な Transfer の lineItems 更新は `inventoryTransferSetItems` で可能だが、`READY_TO_SHIP` から `DRAFT` への戻しは API がサポートしていないことを明記。UI では「編集」モーダルから「シップメントを確定」を削除し、出庫リストの「確定する」で Transfer またはシップメント全体の確定が行われるように簡素化。
+- **POS拡張の4分割**: 出庫・入庫・ロス・棚卸を各1拡張に分割（stock-transfer-tile=出庫のみ `ModalOutbound.jsx`、stock-transfer-inbound=入庫のみ、stock-transfer-loss=ロスのみ・棚卸関連ファイル削除、stock-transfer-stocktake=棚卸のみ・新規作成）。ビルドサイズ対策・単一機能化。4分割後の検証結果は `docs/EXTENSION_VERIFICATION_4SPLIT.md` に記載。
+- **出庫メニュー廃止**: タイルを開くと直接「出庫コンディション」画面を表示（MenuScreen を経由しない）。
+- **4モーダル コンディション画面フッター**: 左下の「閉じる」「戻る」（機能しない）を「軽量モード」ボタンに変更。ロス・棚卸には `liteMode` / `onToggleLiteMode` のサポートと UI 設定の永続化を追加。出庫はフッター中央に「履歴一覧」ボタンを配置し、スクロール内の履歴ブロックを削除（ロスと同様の構成）。
+- **出庫フッターが消える問題の解消**: 履歴一覧・商品リストからコンディションに戻った際にフッターが消えていた要因（Extension の useEffect が screen===OUTBOUND_COND のときに setFooter(null) していた）を削除して解消。
+- **タイル名の統一**: 各タイルの heading/subheading を「メイン / サブ」に統一（出庫/在庫処理、入庫/在庫処理、ロス/在庫調整、棚卸/在庫調整）。モーダル内 s-page heading は短い表記（出庫、入庫、ロス、棚卸）。
+- **管理画面「POSのアプリ追加」のアプリ名**: 各拡張の shopify.extension.toml の `name` を「出庫 / 在庫処理」「入庫 / 在庫処理」「ロス / 在庫調整」「棚卸 / 在庫調整」に変更。管理画面で古いアプリ名が表示される問題に対し、**`description` も同表記に更新**（stock-transfer-tile / inbound / loss / stocktake の各 shopify.extension.toml）。デプロイ後も表示が変わらない場合は、ダッシュボードのキャッシュや読み取り専用表示の可能性あり。
+- **2カラムレイアウトのSP対応**: 入出庫履歴・ロス履歴・棚卸（商品グループ設定、棚卸ID発行、履歴）・設定画面全タブで、PC時は**左：タイトル＋説明 / 右：白カード（フィルターや一覧・フォーム）**の2カラム構成、SP時は右カラムを左カラム下部に回す。flexWrap + flex-basis で折り返し。
 - **コレクション全件読み込み**: 250件以上のコレクションを持つショップに対応。ページネーションで全件取得。
 - **商品SKU全件読み込み**: 650件以上のSKUを持つショップに対応。商品・バリアントをページネーションで全件取得（250商品/ページ、250バリアント/商品）。
 - **アプリ表示件数の入力検証**: 半角数字以外（全角数字・スペース等）の検証と対処。範囲外・不正入力時は「値を確認してください。半角数字で入力をお願いします。」を入力欄下に表示。バックエンドでもサニタイズ。
@@ -43,6 +75,65 @@
 - **棚卸リストのページネーション**: コレクション一覧・SKU一覧を1000件/ページで表示。検索・絞り込み結果の先頭1000件を表示し、リスト下部に「前へ」「1-1000 / 全X件」「次へ」を配置。大量データ時のタブ切り替え遅延を解消。
 - **コレクション・SKUリストの下線追加**: 各項目の下に1pxの区切り線を追加し、視認性を向上。選択時は緑枠を優先。
 - **コレクション商品選択モーダル強化**: 10000SKU超のコレクション対応。API全件取得（ページネーション）、モーダル内に検索枠・選択済みボタン・1000件/ページのページネーションを追加。
+- **出庫履歴一覧のレイアウト統一（入庫リストと同型）**: 出庫の「未出庫/出庫済み」履歴カードを入庫の「未入庫/入庫済み」と同じ行単位レイアウトに変更。1行目：出庫ID｜日付、5行目：状態｜数量（`justifyContent="space-between"`）。配送準備完了時は右端に「編集」ボタン。差の説明は `docs/INBOUND_VS_OUTBOUND_LIST_LAYOUT.md` に記載。
+- **出庫履歴の「状態｜数量」行の改行防止**: 状態と数量の行に `flexWrap: "nowrap"` を指定し、数量を `s-box`（`flexShrink: 0`）で囲んで改行しないように修正。ModalOutbound.jsx と OutboundHistoryScreens.jsx の両方に適用。
+- **出庫履歴の「未確定：1」表示対応**: API が `shipments` を配列・nodes・edges・単体オブジェクトのいずれで返すか正規化し、処理済みでない配送が1件だけのときも「（未確定：1）」が表示されるように修正。
+- **配送リストの「キャンセル」ボタン**: タップで確認モーダル（「この出庫（Transfer）をキャンセルします。よろしいですか？」）を表示し、モーダル内の「キャンセルする」で実行。商品リスト（OutboundHistoryDetail）のキャンセルと同様のフローに統一。
+- **出庫履歴一覧から詳細を開いたときのフッター**: 履歴一覧で Transfer をタップして詳細を開く際に `historyFromShipmentSelection: false` を設定。これにより詳細フッターに「戻る」「編集」「キャンセル」が表示され、左に戻るボタンがなくなる問題を解消。
+- **Transfer の lineItems を仮想行として表示（2026-02）**: Transfer が READY_TO_SHIP かつ lineItems を持つ場合、シップメントリストの**先頭**に「発送準備完了」相当の仮想行を追加。管理画面の「発送準備完了」ブロック（Shipment ID なし）と同一表示にする。仮想行のラベルは **#T0127-L**（L = Line items）、実 Shipment は **#T0127-1, #T0127-2...** とし、管理画面のシップメント ID と重複しない形式に統一。
+- **仮想行タップ時の商品リスト（2026-02）**: 仮想行をタップしたときは **Transfer の lineItems のみ**を表示（Shipment ID が付与されていない商品リストのみ）。下書き・処理中の Shipment の商品は含めず、`loadDetail_` で仮想行選択時は `d.lineItems`（fetchInventoryTransferDetailForHistory の Transfer lineItems）のみで items を構築。
+- **複数シップメント追加・編集時の確定モーダル（2026-02）**: ③複数シップメント「追加」および ②④複数シップメント「編集」時は、確定モーダルを**「確定する」「下書き保存」の2種のみ**に変更。「配送準備完了にする」は非表示。詳細は `docs/OUTBOUND_CONFIRM_FLOWS.md` を参照。
+- **出庫リストに「配送情報」ボタン・モーダル（2026-02）**: OutboundList ヘッダーに「軽量」「在庫更新」に続けて**「配送情報」**ボタンを追加。タップでモーダルを開き、コンディション画面と同様の入力（配送業者・配送番号・到着予定日、1日後/2日後/クリア）が可能。複数シップメント追加時など、2つ目以降の配送情報をアプリ内で入力できる。
+- **「在庫再取得」→「在庫更新」に名称変更（2026-02）**: 出庫・入庫・ロス・棚卸の各リスト画面で、ヘッダーボタン表記を「在庫再取得」から**「在庫更新」**に統一。対象: ModalOutbound.jsx, OutboundListScreen.jsx, Modal.jsx, Screens.jsx, Screens_part2.jsx, Modal_tmp.jsx, InventoryCountList.jsx。
+- **入庫の REFERENCE 整合（2026-02）**: 入庫専用拡張（stock-transfer-inbound）を Modal_REFERENCE.jsx の入庫部分と揃える対応を実施。**表示・UI**: 商品画像を inboundApi の fetchInventoryShipmentEnriched で includeImages に応じたクエリに変更し画像表示を有効化。InboundList ヘッダーの配送情報（配送業者・配送番号・予定日）を REFERENCE と同様に常時3行表示に変更。**確定処理・状態**: InboundShipmentSelection で selectedOriginLocationId 設定、確定前メモの overForLog に sku、receiveConfirm の readOnly/二重送信防止・複数シップメント・予定外出庫元マイナス・capped 超過の extraDeltasMerged・確定後メモ（在庫調整履歴）・onAfterReceive 条件を REFERENCE と同一に実装。**遷移・表示**: 確定後の振り分け（完了時 INBOUND_COND＋inbound クリア、未完了時 INBOUND_SHIPMENT_SELECTION＋シップメントのみクリア）、transferForShipment の算出（pendingTransfers から readOnly/originLocationId/ヘッダー表示を優先）、listLimit を appState?.outbound?.settings?.inbound?.listInitialLimit に統一、appendInventoryTransferNote_ に processLogCallback を渡す。**モーダル**: 確定モーダルの「一部入庫」「確定する」に onPress を追加（REFERENCE 互換）。警告エリアの「確認しました」は現行の理由＋メモ＋一方向 ack を維持（意図的）。**監査ログ**: appendInboundAuditLog の extras を確定後実際に反映した extraDeltasMerged から組み立てるよう変更。差分一覧・方針は `docs/INBOUND_REFERENCE_DIFF_ITEMS.md` に記載。
+- **商品リストヘッダー・再読込統一・配送一覧フッター（2026-02）**: **① 商品リストヘッダー**: 検索枠以外のボタン（画像表示・全入庫・リセット等）を上下中央配置に変更。入庫 InboundListScreen のヘッダー行を `alignItems="center"` に変更（出庫履歴商品リストは既に中央配置）。**② ボタン表記統一**: 「再取得」と「再読込」の混在を解消し、全拡張で**「再読込」**に統一。ローディング表記は「取得中...」→**「読込中...」**に統一。対象：出庫（ModalOutbound.jsx）、入庫（InboundListScreen.jsx, InboundShipmentSelection.jsx, Modal.jsx）、ロス（LossConditions.jsx, LossHistoryList.jsx）、棚卸（InventoryCountConditions.jsx, InventoryCountProductGroupSelection.jsx）。**③ 配送一覧フッター**: 出庫の配送一覧（OutboundShipmentSelection）のフッターを**左：戻る、中央：キャンセル、右：再読込**に変更。キャンセル不可（TRANSFERRED/CANCELED）時はキャンセルボタンを無効化（グレーアウト）。キャンセル可時はタップで確認モーダル（「この出庫をキャンセルします。よろしいですか？」＋戻る／キャンセルする）を表示し、履歴商品リストのキャンセルモーダルと同じフローでキャンセル処理（inventoryTransferCancelSafe＋在庫を出庫元に戻す＋メモ追記）を実行。
+- **入庫：確定済み時の検索・数量グレーアウト・画像表示は有効（2026-02）**: 確定済み（readOnly）の InboundList で、検索枠と数量ボタン（−／数値／＋）をグレーアウト（disabled＋tone="subdued"）。画像表示トグルは確定済みでも**グレーアウトせず機能させる**（readOnly の影響から除外）。InboundUiParts.jsx の QtyControlCompact_3Buttons に disabled 対応、renderInboundShipmentItems_／InboundAddedLineRow に readOnly を渡して数量コントロールを無効化。
+- **出庫履歴商品リスト：ヘッダーボタン並び・表記（2026-02）**: ヘッダー右側のボタン並びを**画像表示 → 在庫更新 → 複製**に統一。画像表示ボタンは「画像表示」のみ表示（ON/OFF表記なし）。下書き複製ボタンは**「複製」**のみ表示。
+- **ロス・入庫・読み込み表示のUI統一（2026-02）**:
+  - **ロス**: ①コンディション画面のフッターで、ボタン上のロケーション・スタッフ・日付/理由のサマリー行を非表示。②商品リストのヘッダーを「ロス登録」「ロケーション：」「日付：」「理由：」に変更。③履歴商品リストのフッター（ボタン上）を**左：ステータス（バッジ）／右：合計：N（商品リストの数量合計）**に変更。④画像表示ON/OFFが商品リストに反映されていなかった問題を修正：LossScreen から LossProductList に `liteMode` / `onToggleLiteMode` を渡し、親の設定を優先。⑤ロス商品リストのヘッダーで、左のステータス文領域の**右寄せ上下中央**に「画像表示」ボタンを設置（リセットは右端に分離）。
+  - **入庫**: ①商品リストのフッターにステータスバッジを追加（履歴含む）。②バッジはボタン上ではなく、中央の「予定0/入庫3」の**左**に表示。③商品リストのステータスがトランスファー一覧のステータスを引き継ぐよう修正：`inbound.selectedTransferStatus` および `transferForShipment?.status` を一覧と同じ `STATUS_LABEL`（下書き・配送準備完了・処理中・進行中・入庫・入庫済み・キャンセル・その他）で表示。
+  - **読み込み表示の統一**: 画面上の「取込中...」「読込中...」「商品を読み込み中...」「検索中...」「取得中...」等を全て**「読み込み中...」**に統一。ボタン**内**のラベル（再読込ボタン・読込ボタン等のローディング時）は**「読込中...」**に統一。
+  - **出庫の商品リスト「読み込み中...」**: 出庫履歴詳細（OutboundHistoryDetail）の商品リストで、読み込み中が領域左上に空白なしで表示され直下に下線が出ていた問題を修正。他商品リストと同様、`detailLoading` 時は早期 return で `<s-box padding="base">読み込み中...</s-box>` のみ表示（下線なし）。
+- **入庫・棚卸のまとめて表示UI改善・棚卸下書き修正（2026-02）**:
+  - **入庫複数シップメント・まとめて表示**: ①処理済みシップメントの商品リストの数量ボタンをグレーアウト（per-shipment readOnly）。②シップメントタイトル行を右寄せにステータスバッジ（入庫済み/未入庫）を表示。③ステータスバッジの横に件数（〇件）を表示。
+  - **入庫複数シップメント・シップメントごと表示**: 処理済みの商品リストで検索枠と数量ボタン（全入庫・リセット・検索候補の数量/追加）をグレーアウト。検索枠に `opacity: 0.6`、InboundCandidateRow に `readOnly` を渡して disabled＋tone="subdued"。
+  - **棚卸複数商品グループ・まとめて表示**: ①商品グループタイトル右のステータスを `s-badge` 化（完了済み/未完了）。②件数の括弧を削除（`(3/5)` → `3/5`、`(5件)` → `5件`）。
+  - **棚卸自動下書き・復元の不具合修正**: 複数商品グループ・単一商品グループともに下書きが動作しなかった要因を解消。①Storage API 戻り値のハンドリング（`got?.[key] ?? got` で wrapped 形式に対応、入庫と同様）。②countId/locationId の GID 形式差異に対応（正規化して比較）。③`currentGroupId` の重複宣言を削除。
+  - **棚卸複数商品グループの下書きを商品グループIDごとに連動（2026-02）**: 商品グループリストから1つだけ表示して自動保存すると全グループが同じリストで復元されていた不具合を修正。下書きキー判定を「表示中のグループ数」ではなく「棚卸IDが持つグループ数」（`count.productGroupIds.length > 1`）に変更。複数グループの棚卸IDは常にグループIDごとのキーで保存・復元し、まとめて表示とグループごと表示が連動。単一商品グループの棚卸IDは従来どおりレガシーキーのみで影響なし。
+  - **ロス商品リストヘッダー**: 画像表示とリセットボタンを2つとも右寄せに調整（`justifyContent="end"`）。
+  - **検索からの商品追加トースト**: 棚卸・入庫のトースト文言を出庫ベースに統一（「〇〇 を追加しました（+N）」形式）。
+- **POS画像表示ON/OFFの設置箇所一覧・棚卸連動・ロス履歴（2026-02）**:
+  - **設置箇所ドキュメント**: 出庫・入庫・ロス・棚卸で画像表示を設置している画面・箇所を一覧化。`docs/POS_IMAGE_DISPLAY_PLACEMENT.md` に記載。各機能のコンディション（フッター左／中央）、商品リスト（ヘッダー右）、履歴一覧・履歴詳細の設置箇所を表で整理。
+  - **棚卸の画像表示引き継ぎ**: コンディション画面と商品リストで画像表示ON/OFFが引き継がれていなかった問題を修正。StocktakeScreen から InventoryCountList に `liteMode` / `onToggleLiteMode` を渡し、商品リストでは親の設定を優先（ロスと同様）。単一拡張内で連動。
+  - **ロス履歴の画像表示**: 履歴一覧のフッター中央に「画像表示:ON/OFF」ボタンを追加（出庫履歴一覧と同様）。履歴詳細のヘッダー右に「画像表示」ボタンを追加（商品リストヘッダーと同様）。LossScreen から LossHistoryList に `liteMode` / `onToggleLiteMode` を渡し、ロス内で連動。
+- **管理画面：入出庫履歴モーダルを棚卸UIに寄せた表示（2026-02）**: Action の戻り値に `groupedLineItems`（配送単位のグループ配列）を追加。モーダル上部に進捗状況を情報欄最下部で表示（各配送の入庫済み/未入庫・予定外入庫件数）。モーダル本文は配送ごとのブロック表示（各ブロックにタイトル＋明細テーブル、商品0件は「この配送には商品がありません」）。CSVは従来どおり `lineItems` のフラット形式を維持。
+- **管理画面：棚卸モーダルの進捗・ブロック・予定外（2026-02）**: 進捗状況を情報欄の最下部に移動（入出庫と同様）。単一グループ時も複数と同じブロック＋背景色で表示。予定外は各グループのテーブルから分離し、一覧最後に「予定外（N件）」ブロックとして表示（入出庫の予定外入庫ブロックと同様）。
+- **管理画面：ステータスをバッジ表示に統一（2026-02）**: 入出庫・ロス・棚卸の一覧およびモーダルで、ステータスをピル型バッジ（完了系=緑、キャンセル系=グレー/赤、進行中=青等）で表示。管理画面でもアプリと同様のバッチ表示を実装。
+- **POS 棚卸アプリの読み込み速度を入庫並みに最適化（2026-02）**: 棚卸タイルの「一覧の数量表示」と「商品リスト表示」が遅かった要因に対応。①商品リストの在庫取得をバッチ並列化（15件ずつ Promise.all）し、返り値に `currentQuantity` を付与。②商品リスト画面で在庫の二重取得を廃止（fetch 1回で表示まで完結）。③商品グループ名の取得で `readProductGroups` を 60秒 TTL でキャッシュ。④一覧の未完了グループ取得を最大3並列で実行。詳細・要因分析は `docs/POS_STOCKTAKE_SLOWNESS_ANALYSIS.md` に記載。実装: stocktakeApi.js, InventoryCountList.jsx, InventoryCountConditions.jsx。
+- **ロケーション切り替え（出庫のみ実装済み・他機能は将来対応）**: 2026-02時点で **出庫** のみ画面上部「出庫元」「宛先」の右に「変更」ボタンを設置し、ロケーション切り替えが可能（`ModalOutbound.jsx`）。**2026-02追記**: モーダルから **インライン展開** に変更。ボタン押下で同一画面内に検索窓とロケーションリストを展開（到着時刻・配送業者変更と同様）。「変更」ボタンは展開中「閉じる」に切り替わる。ロス・入庫・棚卸については、POSセッションロケーションを利用する従来仕様を維持しつつ **将来的な実装候補として管理**（タイル上部のボタンは非表示に戻す）。必要となる追加作業（管理画面のロケーション設定との連携、各処理フローでのロケーション ID 受け渡しの再設計）は `docs/FUTURE_LOCATION_SWITCH_NOTES.md` にまとめた。
+- **出庫UI：ロケーション選択・到着時刻のボタン統一（2026-02）**: ①ロケーション選択をモーダルから **インライン展開** に変更。「変更」ボタン押下で検索窓＋スクロール可能なリストを同一画面内に表示。②「閉じる」ボタンを廃止し、「変更」「時間を選択」ボタンを展開中は「閉じる」に切り替えてトグルで開閉。③到着時刻の表示ラベルを「到着時刻」→**「時間指定」**に変更（`ModalOutbound.jsx`）。
+- **管理画面：入出庫履歴の商品リストモーダルに配送情報を追加（2026-02）**: 商品リストモーダルの情報欄で、入庫先とステータスの間に **配送業者**・**配送番号**・**予定日** の3行を追加。Action で `shipments` に `tracking { trackingNumber company trackingUrl arrivesAt }` を取得し、先頭シップメントの `transferTracking` を返却。出庫アプリで登録した配送情報が管理画面でも確認可能（`app.history.tsx`）。
+- **仕入・発注の進捗（2026-02-06）**:  
+  ①処理確定モーダルで「仕入予定（#P0000）が作成されました。」と表示（`purchaseName` 使用）。  
+  ②CSVファイル名を統一（一覧: 機能_日付、単一: 機能_名称_日付。発注は orderName、仕入は purchaseName をサニタイズ）。  
+  ③発注→仕入の名称引き継ぎ（#P0000 / #P0000-1）は既存実装で完了。  
+  ④発注・仕入の `loadItems` で JAN（barcode）・オプション（selectedOptions）を API から補完し、キャンセル時・CSV出力でも利用。  
+  ⑤POS 仕入拡張 `extensions/stock-transfer-purchase` を実装：  
+  　- コンディション: ロケーション＋仕入先（**選択時は「選択中」バッジ（info/ブルー）、未選択時は「必須」バッジ（critical/赤）**・サプライヤーマスタ＋「その他（仕入先入力）」は設定の `purchase.allowCustomSupplier` で表示制御）、備考、履歴一覧ボタン。仕入先未選択時はピッカー初期展開（**「仕入先を選択してください」エラーテキストは削除**）。下書き復元時に選択済みの場合はピッカーを閉じた状態で復元（発注と同様）。  
+  　- 仕入商品リスト: 出庫商品リストUIをベースに、数量ボタン幅・予定/仕入表示・検索リスト・在庫表示・予定外仕入セクションを入庫と同じ仕様で実装。下書き自動保存/復元あり。  
+  　- 仕入履歴一覧＋商品リスト: 入庫コンディション/商品リストUIをベースに、ステータスバッジ・予定/仕入/超過/不足/予定外サマリ、検索からの追加（予定行加算 or 予定外行追加）、確定時の在庫加算＋`purchase_entries_v1` 更新（#P→#B 採番）、履歴ごとの下書き自動保存/復元を実装。  
+  　- カメラスキャン: 発注/ロス/棚卸と同じく、`api.scanner.showCameraScanner()` / `hideCameraScanner()` を利用（`api_version = "2026-01"`）。スキャン値はストレージキュー経由で商品リストに連携し、トースト「スキャン: 値」を表示。  
+  ⑥POS 発注コンディションの仕入先UIを仕入と統一：ロケーション直下に仕入先ブロックを配置し、**選択時は「選択中」バッジ（info/ブルー）、未選択時は「必須」バッジ（critical/赤）**を表示（「仕入先を選択してください」エラーテキストは削除）、未選択時はピッカー初期展開、「その他（仕入先入力）」は設定の `purchase.allowCustomSupplier` で表示制御（ラベル・説明文なしのテキストフィールド）。  
+  ⑦POS 発注/ロスコンディションのフッター summaryLeft に「ロケーション: {locationName}」を表示し、全拡張でロケーション表示と画像ON/OFFボタンの配置を統一。
+- **公開アプリリリース向け・本番前整理（2026-02）**: ①**本番前コード整理**: server 側（app/routes、api、webhooks）および **全POS拡張**（出庫・入庫・ロス・棚卸）のデバッグ用 `console.log` / `console.warn`（`[検証]` や詳細ダンプ系含む）を削除。loader/action の catch 内の `console.error` は本番時の障害追跡のため残置。②**リスティング用ガイド**: `docs/LISTING_ASSETS_GUIDE.md` を新規作成。フィーチャー画像・スクリーンショットの内容、紹介文・詳細文の案、プライバシーポリシーURL・価格帯の目安（月額単一プラン 1,980〜2,980円、プラン分け時ベーシック 980〜1,480円・プロ 2,480〜3,980円）、デモ用ストアの必要性、チェックリストを記載。③**SKU数・明細の表現一覧**: `docs/POS_SKU_MEMORY_LIST.md` を新規作成。POS 各画面で「明細」「SKU数」「〇件」を表示している箇所を一覧化し、表記統一の参照用に整理。
+- **POS 微調整・表記統一（2026-02）**:
+  - **入庫**: 商品リストヘッダーのリセットボタンをロスと同様に赤（`tone="critical"`）に変更。
+  - **出庫**: ①履歴商品リストフッターを**左：戻る、中央：キャンセル、右：編集**に変更。②コンディションの時間帯選択（午前中・12:00等）を**横並び・左寄せ**に変更。③配送情報モーダルから「戻る」ボタンとその上の区切り線を削除（閉じるで閉じる想定）。④**棚卸画像ON/OFF**: 画像切替時に商品リストを再読込しないよう変更（常に includeImages: true で初回取得し、表示切替のみ。ロス・入庫・出庫と同様）。⑤画像ボタン表記を全拡張で**「画像ON」「画像OFF」**に統一（コンディション・一覧・商品リストの全ページ）。⑥複数配送の配送リスト（OutboundShipmentSelection）フッターを**中央：キャンセル、右：再読込**に変更。⑦出庫商品リストフッター中央の画像ON/OFF表記を削除し、「明細 X / 合計 Y」のみ表示・中央寄せ（入庫の商品リストフッターと合わせる）。
+  - **ロス**: 商品リスト内サマリーの「合計ロス」を**「合計」**に変更（他機能と表記統一）。
+  - **棚卸**: 一覧カードの「N SKU」表記を**「N件」**に変更（InventoryCountConditions.jsx の2箇所、InventoryCountProductGroupSelection.jsx の1箇所）。数量（qtyText）の表示は従来どおり。
+- **管理画面：ロス区分設定の実装（2026-02-06）**: ①**ロス区分（lossReasons）のCRUD機能**: 管理画面「ロス設定」タブで、ロス理由（破損・紛失など）を登録・編集・削除・並び替え可能に。デフォルトで「破損」「紛失」の2区分を自動設定。②**「その他（理由入力）」の表示制御**: ラジオボタンで「表示する」「表示しない」を選択可能（`loss.allowCustomReason`）。デフォルトは「表示する」。③**POSロス画面との連動**: POSロスコンディション画面で、設定から読み込んだ `lossReasons` を理由ボタンとして表示。「その他」が許可されている場合は「その他」ボタン＋テキスト入力欄を表示。実装: `app.settings.tsx`（ロス設定タブ）、`LossConditions.jsx`（設定読み込み＋動的ボタン生成）。
+- **管理画面：「その他」表示制御の統一（2026-02-06）**: ①**仕入設定**: 「その他（仕入先入力）」の表示/非表示をラジオボタンで制御（`purchase.allowCustomSupplier`）。デフォルトは「表示する」。②**出庫設定**: 「その他（配送会社入力）」の表示/非表示をラジオボタンで制御（`outbound.allowCustomCarrier`、フラグ先行実装）。デフォルトは「表示する」。③**UIトンマナ統一**: すべて「『その他（〇〇入力）』を表示」という見出し＋「表示する」「表示しない」のラジオボタン形式に統一。実装: `app.settings.tsx`（仕入設定タブ・出庫設定タブ）、`PurchaseConditions.jsx`・`OrderConditions.jsx`（設定に応じた「その他」ボタン表示制御）。
+- **POS UI：選択中バッジ・ボタン表記統一（2026-02-06）**: ①**出庫タイル**: 配送業者・時間指定に選択時に「選択中」バッジ（`tone="info"`/ブルー）を表示。未選択時はバッジ非表示。「変更」ボタンは開いている時「閉じる」に変更。「その他」ボタンを最下部に配置し、タップでテキストフィールドを表示。②**仕入・発注タイル**: 仕入先行に選択時に「選択中」バッジ（`tone="info"`/ブルー）、未選択時は「必須」バッジ（`tone="critical"`/赤）を表示。「仕入先を選択してください」エラーテキストを削除。③**下書き復元時のピッカー制御**: 仕入コンディション画面で、選択済みの場合は閉じた状態で復元（発注と同様）。実装: `ModalOutbound.jsx`（配送業者・時間指定）、`PurchaseConditions.jsx`・`OrderConditions.jsx`（仕入先バッジ・ピッカー制御）。
 
 **以前の主な更新**:
 - **SKU/CSVグループの確認・編集**: 編集で「SKU選択から作成」タブに切り替え、選択済みSKUを復元。一覧外のinventoryItemIdは維持。右パネルに「SKU一覧（N件）を確認・編集」を表示。
@@ -91,6 +182,11 @@
 | 入出庫履歴の件数表示 | 管理画面の表示ロジックをアプリ（POS）と一致させたい | 拒否分はマイナス、予定外はプラス。`receivedQuantityDisplay = receivedQuantity - rejectedQuantity + extrasQuantity` で統一。loader で shipments.totalRejectedQuantity を取得して反映 |
 | 棚卸メニュー下の余白 | 上部タブ下の領域が広く感じる | タブと s-divider を1つのブロックでラップし、タブ下パディングを0に。ブロック下のみ4pxにしてメニュー下の余白を狭くした |
 | 設定の破棄・保存ボタン | 少し浮いているので右寄せにしたい | `width: 100%` と `justifyContent: flex-end` で右寄せ。上下パディングを 16px→8px に変更し浮き感を軽減 |
+| 入出庫履歴モーダルを棚卸UIに寄せた表示 | 複数配送時も棚卸のようにブロック分けで表示したい | Action で `groupedLineItems` を返す。モーダル上部に進捗状況（配送ごと・予定外件数）を最下部に表示。本文は配送ごとのブロック＋各ブロック内テーブル。予定外は「予定外入庫」ブロックで表示 |
+| 棚卸モーダルの進捗状況の表示位置 | 入出庫と同様に情報欄の最下部にしたい | ステータス・作成日時・完了日時の後に「進捗状況」を配置。予定外がある場合は「予定外: N件」を追加 |
+| 棚卸単一グループ時のブロック背景 | 単一の場合も背景色をつけたい | 単一グループ時も複数と同じブロック（padding・角丸・背景色：完了=緑系・未完了=黄系）とタイトル行で表示 |
+| 棚卸の予定外を別ブロックで表示 | 入出庫と同様に予定外だけ分けて表示したい | 各グループのテーブルには通常商品のみ。全予定外を集め、一覧最後に「予定外（N件）」ブロックを追加。進捗状況にも「予定外: N件」を表示 |
+| 管理画面のステータスをバッジ表示に | 入出庫・ロス・棚卸のステータスをアプリと同様バッチ表示にしたい | 一覧・モーダルでステータスをピル型バッジ（padding・角丸・ステータス別の背景色）で表示。app.history / app.loss / app.inventory-count に getStatusBadgeStyle を追加 |
 
 ### コード確認結果（2026-02-01）
 
@@ -124,7 +220,7 @@
 | 要件 | 内容・希望 | 備考 |
 |------|------------|------|
 | 履歴タブのCSV案内 | 「履歴タブで結果を確認・CSV出力できます」の文言・配置の見直し | 必要に応じて修正 |
-| 本番前のデバッグログ | server 側の `console.log` 削除・整理 | 本番リリース前に実施推奨 |
+| 本番前のデバッグログ | server 側の `console.log` 削除・整理 | ✅ 実施済み（2026-02） |
 
 ### 残りの進行の整理（2026-02 最終）
 
@@ -135,19 +231,25 @@
 
 **今後のアクション（任意）**
 1. 履歴タブのCSV案内文言・配置の見直し（必要に応じて）
-2. 本番リリース前のデバッグ用 `console.log` の整理
+2. **公開アプリリリースに向けて**: ① 更新されたコードのデプロイ ② リスティング用アセットの準備（`docs/LISTING_ASSETS_GUIDE.md` 参照） ③ アプリの審査提出。手順は RELEASE_REQUIREMENTS_PUBLIC_APP.md および docs/LISTING_ASSETS_GUIDE.md を参照。
 
 ---
 
 ## 1. 管理画面構成
 
 ### 管理画面の構造
-管理画面は以下の4つのページに分割します：
+管理画面は以下の **6つのページ** に分割します（2026-02 追記）：
 
-1. **TOP（設定）**: `/app/settings` - 基本的な設定項目
-2. **入出庫**: `/app/history` - 入出庫の履歴管理
-3. **ロス登録**: `/app/loss` - ロス登録の履歴管理
-4. **棚卸**: `/app/inventory-count` - 棚卸の設定と履歴管理
+1. **在庫情報**: `/app/inventory-info` - 在庫高 / 在庫変動履歴（※詳細は別紙）
+2. **入出庫**: `/app/history` - 入出庫の履歴管理（従来: 入出庫履歴）
+3. **仕入**: `/app/purchase` - 仕入の履歴管理（新規）
+4. **ロス**: `/app/loss` - ロス履歴管理（従来: ロス履歴）
+5. **発注**: `/app/order` - 発注の履歴管理（新規）
+6. **棚卸**: `/app/inventory-count` - 棚卸（商品グループ設定 / 棚卸ID発行 / 履歴）
+
+**別紙（新規・検討中の要件）**:
+- 在庫情報（在庫高/在庫変動履歴）: `docs/REQUIREMENTS_INVENTORY_INFO_AND_SETTINGS.md`
+- 仕入/発注（POS/管理画面）: `docs/REQUIREMENTS_PURCHASE_AND_ORDER.md`
 
 ---
 
@@ -164,6 +266,29 @@
   - ✅ **履歴一覧リスト**: 出庫履歴・入庫履歴・ロス履歴に適用（`outbound.historyInitialLimit`、`inbound.listInitialLimit`）
   - ✅ **商品リスト**: 出庫・入庫・ロス登録に適用（`productList.initialLimit`）
   - ✅ **検索リスト**: 出庫・入庫・ロス登録に適用（`searchList.initialLimit`）
+
+#### 設定画面のタブ化（2026-02 実装）
+設定は棚卸画面と同じように **タブで分ける**（見つけやすくするため）。  
+2026-02 時点で `/app/settings` に実装済み（`app.routes/app.settings.tsx`）。
+
+| タブ | 内容 |
+|------|------|
+| ① アプリ設定 | 店舗設定（表示ロケーション等）/ アプリ表示件数設定 |
+| ② 出庫設定 | 出庫設定 / 配送設定（carriers） |
+| ③ 入庫設定 | 入庫設定（過剰入庫・予定外入庫の許可など） |
+| ④ 仕入設定 | 仕入設定 |
+| ⑤ ロス設定 | ロス区分設定（ロス理由の登録・「その他（理由入力）」表示制御） |
+
+- **レイアウト共通ルール（PC）**: 各タブ内の設定セクションは、**左カラムにタイトル＋説明テキスト（グレー背景） / 右カラムに設定フォームを収めた白いカード**の2カラム構成に統一。
+- **SPレイアウト**: 画面幅が狭い場合は `flexWrap` により、右カラム（白カード）が左カラム（タイトル＋説明）の**下**に縦積みされる。
+- **適用範囲**: この「左説明 / 右白カード」パターンは、設定画面全タブに加え、入出庫履歴（`/app/history`）、ロス履歴（`/app/loss`）、棚卸（商品グループ設定 / 棚卸ID発行 / 履歴）のフィルター＋一覧レイアウトにも適用済み。
+- **保存・破棄ボタンの挙動**: `/app/settings` 上部の「破棄」「保存」ボタンは、**設定値に変更がない場合はグレーアウト**し（クリック不可）、何か1つでも変更が入ったときにのみ有効化される。表示件数入力にバリデーションエラーがある場合は「保存」のみグレーアウトされ、「破棄」は常に変更前の状態へ戻せる。
+
+**新規追加する設定（検討中）**:
+- **サプライヤー設定**（仕入で選べるようにする）: `docs/REQUIREMENTS_PURCHASE_AND_ORDER.md`
+
+**実装済み設定（2026-02-06追加）**:
+- ✅ **ロス区分設定**（破損/紛失…を設定から登録）: 管理画面「ロス設定」タブで実装済み。詳細は下記「⑥ ロス区分設定」を参照。
 
 #### 実装済み設定項目の詳細
 
@@ -260,6 +385,66 @@
   - 検索リスト: 出庫・入庫・ロス登録の検索結果表示
 - **実装ファイル**: `/app/routes/app.settings.tsx`
 
+##### ⑦ ロス区分設定 ✅ 実装済み（2026-02-06）
+- **目的**: POSロス登録画面で選択できるロス理由（破損・紛失など）を管理画面から登録・編集可能にする
+- **データ構造**:
+  ```typescript
+  {
+    lossReasons?: LossReasonOption[]; // ロス区分設定（破損/紛失 など）
+    loss?: {
+      allowCustomReason?: boolean; // 「その他（理由入力）」を表示するかどうか（デフォルト: true）
+    };
+  }
+  type LossReasonOption = {
+    id: string;
+    label: string; // ロス区分名（例：破損、紛失）
+    sortOrder?: number; // 表示順（小さい順、デフォルト: 999）
+  };
+  ```
+- **UI**: 
+  - ロス設定タブ右カードで、ロス区分の一覧・追加・編集・削除・並び替えが可能
+  - デフォルトで「破損」「紛失」の2区分を自動設定
+  - 「その他（理由入力）」の表示/非表示をラジオボタンで制御（見出し：「その他（理由入力）」を表示、選択肢：「表示する」「表示しない」）
+- **デフォルト**: 
+  - `lossReasons`: `[{ id: "damage", label: "破損" }, { id: "lost", label: "紛失" }]`
+  - `loss.allowCustomReason`: `true`（表示する）
+- **影響範囲**: 
+  - POSロスコンディション画面（`LossConditions.jsx`）で、設定から読み込んだ `lossReasons` を理由ボタンとして表示
+  - 「その他」が許可されている場合は「その他」ボタン＋テキスト入力欄を表示
+- **実装ファイル**: `/app/routes/app.settings.tsx`（ロス設定タブ）、`extensions/stock-transfer-loss/src/screens/loss/LossConditions.jsx`（設定読み込み＋動的ボタン生成）
+
+##### ⑧ 仕入設定：「その他（仕入先入力）」表示制御 ✅ 実装済み（2026-02-06）
+- **目的**: POS仕入・発注画面で「その他（仕入先入力）」ボタンと入力欄を表示するかどうかを制御
+- **データ構造**:
+  ```typescript
+  {
+    purchase?: {
+      allowCustomSupplier?: boolean; // 「その他（仕入先入力）」を表示するかどうか（デフォルト: true）
+    };
+  }
+  ```
+- **UI**: 仕入設定タブ右カードの先頭に、「その他（仕入先入力）」の表示/非表示をラジオボタンで制御（見出し：「その他（仕入先入力）」の表示、選択肢：「表示する」「表示しない」）
+- **デフォルト**: `true`（表示する）
+- **影響範囲**: 
+  - POS仕入コンディション画面（`PurchaseConditions.jsx`）で、設定に応じて「その他」ボタンと入力欄を表示/非表示
+  - POS発注コンディション画面（`OrderConditions.jsx`）でも同じ設定を参照
+- **実装ファイル**: `/app/routes/app.settings.tsx`（仕入設定タブ）、`extensions/stock-transfer-purchase/src/screens/purchase/PurchaseConditions.jsx`・`extensions/stock-transfer-order/src/screens/order/OrderConditions.jsx`（設定に応じた表示制御）
+
+##### ⑨ 出庫設定：「その他（配送会社入力）」表示制御 ✅ 実装済み（2026-02-06、フラグ先行）
+- **目的**: POS出庫画面で「その他（配送会社入力）」ボタンと入力欄を表示するかどうかを制御（将来の実装に向けたフラグ先行）
+- **データ構造**:
+  ```typescript
+  {
+    outbound?: {
+      allowCustomCarrier?: boolean; // 「その他（配送会社入力）」を表示するかどうか（デフォルト: true）
+    };
+  }
+  ```
+- **UI**: 出庫設定タブ「配送設定」右カードの先頭に、「その他（配送会社入力）」の表示/非表示をラジオボタンで制御（見出し：「その他（配送会社入力）」の表示、選択肢：「表示する」「表示しない」）
+- **デフォルト**: `true`（表示する）
+- **影響範囲**: 将来のPOS出庫画面での「その他（配送会社入力）」実装時に使用予定
+- **実装ファイル**: `/app/routes/app.settings.tsx`（出庫設定タブ）
+
 #### 設定データの保存先
 - **現在**: `currentAppInstallation.metafield` (namespace: `stock_transfer_pos`, key: `settings_v1`)
 - **拡張**: 既存の `SettingsV1` 型を拡張して保存
@@ -314,12 +499,12 @@
 
 ##### ② 商品リストモーダル
 - **表示項目**:
-  - 履歴情報（履歴ID、名称、日付、出庫元、入庫先、ステータス、数量）
-  - 商品リスト（商品名、SKU、JAN、オプション1-3、予定数、入庫数）
-  - 予定外入庫は薄い赤背景で表示
+  - 履歴情報（履歴ID、名称、日付、出庫元、入庫先、**配送業者**、**配送番号**、**予定日**（2026-02追加・入庫先とステータスの間）、ステータス【バッジ表示】、数量、**進捗状況**（情報欄最下部・各配送の入庫済み/未入庫・予定外入庫件数））
+  - 商品リストは**配送ごとのブロック**表示（棚卸の商品グループブロックと同様）。各ブロックにタイトル行（配送ID＋ステータス）＋その配送の明細テーブル（配送ID・配送ステータス列は省略）。予定外は「予定外入庫」ブロックで最後に表示。
+  - 予定外入庫は薄い赤背景で表示（ブロック全体も薄い赤系）
 - **CSV出力機能**:
-  - 表示している商品リストをCSVでダウンロード
-  - CSV形式: 履歴ID, 名称, 日付, 出庫元, 入庫先, ステータス, 商品名, SKU, JAN, オプション1-3, 予定数, 入庫数, 種別
+  - 表示している商品リストをCSVでダウンロード（従来どおりフラット形式・配送ID・配送ステータス列あり）
+  - CSV形式: 履歴ID, 名称, 日付, 出庫元, 入庫先, ステータス, 配送ID, 配送ステータス, 商品名, SKU, JAN, オプション1-3, 予定数, 入庫数, 種別
 
 #### データ取得方法
 - **出庫履歴**: `inventoryTransfers` GraphQLクエリ（出庫元ロケーションでフィルター）
@@ -411,8 +596,11 @@
 - **入力項目**:
   - ✅ ロケーション選択（必須、セッションのロケーションをデフォルト選択）
   - ✅ 日付選択（必須、デフォルト: 今日）
-  - ✅ 理由選択（必須、選択肢: 破損 / 紛失 / その他、横3列で均等に表示）
-  - ✅ 「その他」選択時はカスタム入力欄を表示
+  - ✅ 理由選択（必須、**管理画面のロス設定から読み込んだ区分を動的に表示**）
+    - ✅ デフォルトで「破損」「紛失」の2区分を設定から取得
+    - ✅ 設定で追加した区分もボタンとして表示（横並びで均等に表示）
+    - ✅ 「その他（理由入力）」は設定の `loss.allowCustomReason` が `true` のときのみ表示
+    - ✅ 「その他」選択時はテキスト入力欄を表示（必須）
   - ✅ スタッフ名入力（必須、手入力）
 - **機能**:
   - ✅ 「次へ」ボタンで商品リスト画面へ遷移
@@ -421,7 +609,8 @@
   - ✅ 下書き復元機能: マウント時に下書きを復元、復元時に「下書きを復元しました」トーストを表示
   - ✅ 商品リストに進む時点では下書きをクリアしない（確定時のみクリア）
   - ✅ 商品リストから戻った時に下書きを復元（コンポーネント再マウント）
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/loss/LossConditions.jsx`
+  - ✅ **設定読み込み**: `fetchSettings()` で `lossReasons` と `loss.allowCustomReason` を取得し、理由ボタンを動的生成（2026-02-06追加）
+- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/loss/LossConditions.jsx`、`lossApi.js`（`fetchSettings()`）
 
 #### ② 商品リスト画面 ✅ 実装完了（機能検証完了）
 - **表示**: 出庫商品リストと完全に同じUI/UX
@@ -685,7 +874,7 @@ type LossEntry = {
   - ✅ 選択時にステータスを`in_progress`に更新（`draft`の場合のみ）
 - **UI**: 入庫のコンディション画面（入庫ID一覧）と同じUI/UX
   - ✅ 棚卸ID表示形式: `#C0000`形式（既存データにも自動付与）
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountConditions.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountConditions.jsx`
 
 #### ② 商品グループ選択画面（シップメント選択画面相当）✅ 実装完了（2026-01-27更新）
 - **表示条件**: 棚卸IDに紐づく商品グループが複数の場合のみ表示
@@ -701,7 +890,7 @@ type LossEntry = {
   - 商品グループが複数の場合のデフォルト動作を設定可能に
   - 選択肢: 「リスト選択（個別選択）」「まとめて表示（全グループの商品を1画面で表示）」
   - 入庫処理にも同様の設定を追加（シップメントが複数の場合のデフォルト動作）
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountProductGroupSelection.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountProductGroupSelection.jsx`
 
 #### ③ 商品リスト画面（入庫商品リスト相当）✅ 実装完了
 - **表示**: 
@@ -723,7 +912,7 @@ type LossEntry = {
   - ✅ 例: 現在5個、実数10個 → 在庫を10個に設定
 - **UI**: 入庫商品リスト画面と完全に同じUI/UX
   - ✅ 軽量モードボタン（ヘッダー右側、「軽量」のみ表示、色でON/OFF表現）
-  - ✅ ヘッダーに「在庫再取得」「全数量反映」「リセット」ボタン
+  - ✅ ヘッダーに「在庫更新」「全数量反映」「リセット」ボタン
   - ✅ フッターに「在庫 / 実数」表示（ボタンと上下中央揃え）
   - ✅ フッターに「超過 / 不足」表示（差分がある場合は赤色表示）
   - ✅ 予定外リスト表示（初期リストにない商品を最下部に別表示、数量1の場合は×ボタンで削除可能）
@@ -731,7 +920,7 @@ type LossEntry = {
   - ✅ 下書きの自動保存（lines変更時に300msデバウンスで保存）
   - ✅ 下書きの復元（マウント時に下書きを確認、条件一致時のみ復元）
   - ✅ 確定時に下書きをクリア
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
 
 #### ④ 棚卸完了処理 ✅ 実装完了（2026-01-27更新）
 - **機能**: 全ての商品の実数入力が完了したら「確定」ボタンで確認モーダルを表示
@@ -749,7 +938,7 @@ type LossEntry = {
   - ✅ 下書きをクリア
 - **完了済み商品リストの編集不可対応** ✅ 実装完了（2026-01-27）
   - ✅ `readOnly`モード: `count.status === "completed"`または`groupItems[productGroupId]`が存在する場合、編集不可
-  - ✅ 編集不可時の挙動: 商品追加・数量変更・削除を禁止、在庫再取得・全数量反映・リセット・確定ボタンを無効化
+  - ✅ 編集不可時の挙動: 商品追加・数量変更・削除を禁止、在庫更新・全数量反映・リセット・確定ボタンを無効化
   - ✅ 完了済みグループタップ時のフリーズ修正: `groupItems`から直接読み込み、API取得をスキップ
 
 ### 3.4 データ保存
@@ -760,14 +949,14 @@ type LossEntry = {
 
 ### 3.5 実装ファイル ✅ 実装完了
 - ✅ **管理画面**: `/app/routes/app.inventory-count.tsx`（設定・履歴・CSV出力を含む）
-- ✅ **POS UI**: `/extensions/stock-transfer-loss/src/screens/stocktake/` に実装
+- ✅ **POS UI**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/` に実装
   - `InventoryCountConditions.jsx`: 棚卸ID入力画面
   - `InventoryCountProductGroupSelection.jsx`: 商品グループ選択画面
   - `InventoryCountList.jsx`: 商品リスト画面
   - `stocktakeApi.js`: API関数（商品検索、在庫調整、データ保存、VariantCache）
   - `StocktakeScreen.jsx`: 画面ルーター
-- ✅ **メニュー画面**: `/extensions/stock-transfer-loss/src/Modal.jsx`に「棚卸」ボタンを追加
-  - ✅ 軽量モードボタンを追加（メニュー画面、商品リスト画面）
+- ✅ **エントリポイント**: 4分割後は棚卸は独立拡張（stock-transfer-stocktake）。`/extensions/stock-transfer-stocktake/src/Modal.jsx` がタイルのモーダル。タイルを開くと棚卸ID入力（コンディション相当）画面を表示。
+  - ✅ 軽量モードボタンを追加（コンディション画面、商品リスト画面）
   - ✅ スキャナー処理を実装（出庫/入庫と同じ方式）
 
 ### 3.7 入庫処理UIの流用（実装時の参考）
@@ -794,7 +983,7 @@ type LossEntry = {
 - `fetchTransfersForDestinationAll` → 棚卸ID取得API
 - `onTapTransfer` → `onTapInventoryCount`（商品グループが1つの場合は直接商品リストへ、複数の場合は商品グループ選択画面へ）
 
-**実装箇所**: `/extensions/stock-transfer-tile/src/Modal.jsx` に `InventoryCountConditions` 関数を追加
+**実装箇所**: 4分割後は `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountConditions.jsx` に実装
 
 #### ② InventoryCountProductGroupSelection（商品グループ選択画面）
 
@@ -807,7 +996,7 @@ type LossEntry = {
 - `onSelectShipment` → `onSelectProductGroup`
 - シップメントの数量情報 → 商品グループの対象SKU数（オプション）
 
-**実装箇所**: `/extensions/stock-transfer-tile/src/Modal.jsx` に `InventoryCountProductGroupSelection` 関数を追加
+**実装箇所**: 4分割後は `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountProductGroupSelection.jsx` に実装
 
 **表示条件**: 棚卸IDに紐づく商品グループが複数の場合のみ表示（1つの場合は自動で商品リストへ）
 
@@ -824,7 +1013,7 @@ type LossEntry = {
 - ヘッダーの「出庫元/入庫先」→「ロケーション/商品グループ」
 - フッターの「予定/受領」→「現在在庫/実数」
 
-**実装箇所**: `/extensions/stock-transfer-tile/src/Modal.jsx` に `InventoryCountList` 関数を追加
+**実装箇所**: 4分割後は `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx` に実装
 
 **重要な違い**:
 - **在庫調整処理**: 入庫は差分調整、棚卸は絶対値調整
@@ -920,6 +1109,26 @@ type LossEntry = {
 - **Phase 1**: Metafield方式で実装（迅速な実装）
 - **Phase 2**: 必要に応じてPrismaデータベースに移行（データ量・パフォーマンス問題が発生した場合）
 
+#### 確定事項（在庫情報実装方針 - 2026-02-06更新）
+
+**Phase 1: 在庫高表示（合計のみ） - Metafieldベース実装**
+- **在庫高（過去日付）の日次スナップショット** は、**Metafieldに保存**する（合計小売価値・合計原価のみをロケーション別に日次で集計）。
+  - 理由: 合計値のみであればデータ量が少なく、Metafieldの250KB制限内に収まる見込み。
+  - データ構造: `namespace: "inventory_info", key: "daily_snapshots"` に日付別のスナップショットを保存。
+  - 実装確認済み: Webhook（`inventory_levels/update`）とOrders API（売上時の変動検知）の実装可能性を確認済み。
+
+**Phase 2以降: 在庫変動履歴 - ✅ 完了（2026-02-06）**
+- **在庫変動履歴（Change Log）** は、データ量と検索要件を考慮して**Prisma DB**で実装（`InventoryChangeLog`モデル）。
+- **実装方式**：
+  - アプリ実行分（仕入確定・キャンセル）は、在庫調整成功後に直接ログ記録
+  - 入庫・出庫・ロス・棚卸は、既存の`inventory_levels/update` Webhookで検知（`admin_webhook`として記録）
+  - 売上時の変動は、`orders/updated` Webhookで検知（`order_sales`として記録）
+- **データ保存**：Prisma DB（SQLite開発環境 / Supabase PostgreSQL本番環境予定）
+- **検索・フィルター**：期間・ロケーション・商品（InventoryItem ID）・アクティビティ種別でフィルター可能
+- **表示件数**：最大1000件まで表示
+  - 変動履歴には「どの操作が原因か」を必ず追えるように、参照IDを保存する。
+  - 例: `sourceType`（inbound/outbound/loss/stocktake/purchase/admin_webhook など） + `sourceId`（Transfer IDやMetafieldエントリーID）
+
 ### 4.3 データ構造の統一
 
 #### SettingsV1 の実装（2026-01-27更新）
@@ -928,6 +1137,18 @@ type SettingsV1 = {
   version: 1;
   destinationGroups?: DestinationGroup[]; // 非推奨（後方互換性のため残す）
   carriers: CarrierOption[];
+  // 2026-02 追加予定（仕入・ロス）
+  suppliers?: Array<{
+    id: string;
+    name: string; // サプライヤー名
+    code?: string; // 任意
+    sortOrder?: number;
+  }>;
+  lossReasons?: Array<{
+    id: string;
+    label: string; // ロス区分（例: 破損、紛失）
+    sortOrder?: number;
+  }>;
   // 実装済み設定項目
   visibleLocationIds?: string[]; // 表示ロケーション選択設定（空配列=全ロケーション表示）
   outbound?: {
@@ -1005,9 +1226,91 @@ type SettingsV1 = {
    - ✅ POS UIでの棚卸処理（実装済み・コード確認済み）
      - ✅ 棚卸ID入力画面（`InventoryCountConditions.jsx`）
      - ✅ 商品グループ選択画面（`InventoryCountProductGroupSelection.jsx`、商品グループが複数の場合のみ）
-     - ✅ 商品リスト画面（`InventoryCountList.jsx`、入庫商品リスト相当）
-     - ✅ 在庫絶対値調整処理（`inventorySetQuantities`）
-     - ✅ 在庫レベルがないSKUの扱い（スキャン/検索で追加可能）
+
+### Phase 5: 在庫情報（在庫高表示・変動履歴）✅ 完了（2026-02-06完了）
+5. 🔄 在庫情報機能の実装
+   - ✅ **Phase 5-1: 在庫高表示（合計のみ）** - Metafieldベース実装（2026-02-06完了）
+     - ✅ 日次スナップショット保存機能（Metafieldに合計小売価値・合計原価をロケーション別に保存）
+       - ✅ 日次バッチAPI（`/api/inventory-snapshot-daily`）の実装（Cronジョブから呼び出し可能）
+       - ✅ ショップのタイムゾーンに基づく日付計算
+       - ✅ 前日のスナップショットを自動保存（日付変更時に実行）
+     - ✅ 在庫高表示画面（`/app/inventory-info`）の作成
+       - ✅ 日付選択（今日はリアルタイム、過去日付はスナップショット）
+       - ✅ ロケーション選択（複数選択対応）
+       - ✅ 最初のスナップショット日付以降の日付選択制限
+       - ✅ 履歴確認可能日付の可視化（YYYY/MM/DD形式で表示）
+     - ✅ 日付指定での過去在庫高表示（Metafieldから取得）
+     - ✅ ロケーション別サマリー表示
+       - ✅ ロケーション名
+       - ✅ 合計数量
+       - ✅ 販売価格合計（上代合計）
+       - ✅ 割引前価格合計
+       - ✅ 原価合計
+       - ✅ 全ロケーション合計のサマリー表示
+     - ✅ CSV出力機能
+       - ✅ ロケーション別サマリーのCSV出力
+       - ✅ 日本語ヘッダー（日付、モード、ショップ、ロケーションID、ロケーション名、合計数量、販売価格合計、割引前価格合計、原価合計）
+       - ✅ モード列（「現在」= リアルタイム、「確定」= スナップショット）
+       - ✅ 合計行を含むCSV出力
+       - ✅ CSV出力ボタンを合計タイトル行に配置
+   - ✅ **Phase 5-2: 在庫変動履歴** - 完了（2026-02-06完了）
+     - ✅ **在庫変動履歴記録の共通ユーティリティ関数**
+       - ✅ `app/utils/inventory-change-log.ts` に共通関数を実装
+       - ✅ `logInventoryChange`: 単一の在庫変動を記録
+       - ✅ `logInventoryChangesFromAdjustment`: 在庫調整の結果から複数商品の変動を記録
+       - ✅ `getShopTimezoneAndDate`: ショップタイムゾーンと日付を取得
+       - ✅ `getInventoryItemInfo`: InventoryItemからSKUとvariantIdを取得
+       - ✅ `getLocationName`: Locationからロケーション名を取得
+       - ✅ `getVariantInfo`: ProductVariantからInventoryItem IDとSKUを取得
+     - ✅ **アプリ実行分からの変動履歴記録**
+       - ✅ 仕入確定時（`executePurchaseReceive`）にログ記録（`purchase_entry`）
+       - ✅ 仕入キャンセル時（`executePurchaseCancel`）にログ記録（`purchase_cancel`）
+       - ✅ 入庫・出庫・ロス・棚卸は既存の`inventory_levels/update` Webhookで検知（`admin_webhook`として記録）
+     - ✅ **Webhook実装**
+       - ✅ `inventory_levels/update` Webhook（既存実装を活用、`admin_webhook`として記録）
+       - ✅ `orders/updated` Webhook（売上時の変動検知、`order_sales`として記録）
+       - ✅ 注文履行時の在庫変動を検知し、履行された商品ごとにログ記録
+       - ✅ idempotencyKeyによる二重登録防止
+     - ✅ **変動履歴一覧表示**
+       - ✅ タブUI実装（設定画面と同じスタイル、在庫高/在庫変動履歴を切り替え）
+       - ✅ フィルターUI（左にフィルター、右にリスト、他の管理画面と統一）
+       - ✅ 期間フィルター（開始日・終了日、縦並び表示）
+       - ✅ ロケーション選択（チェックボックス形式、複数選択対応）
+       - ✅ 商品検索（SKU・商品名・JANで検索、複数選択対応）
+       - ✅ 選択済み商品の表示（検索結果エリア内にインライン表示）
+       - ✅ 選択解除ボタン（選択済み商品を一括解除）
+       - ✅ アクティビティ種別フィルター（チェックボックス形式、複数選択対応）
+       - ✅ 並び順選択（新しい順/古い順）
+       - ✅ フィルター適用ボタン（URLパラメータ更新）
+       - ✅ 最大1000件まで表示
+     - ✅ **日付選択の制限**
+       - ✅ ログの最初の日付より前は選択不可（`firstChangeHistoryDate`を取得）
+       - ✅ ログが1件もない場合は、今日の日付より前は選択不可
+       - ✅ 開始日の初期値：ログがある場合は直近30日（ログ最初の日付より前の場合はログ最初の日付）、ログが無い場合は今日
+       - ✅ 終了日の初期値：今日
+     - ✅ **CSV出力機能**
+       - ✅ 発生日時、SKU、ロケーション、アクティビティ、変動量、変動後数量、参照ID、備考を含むCSV出力
+       - ✅ 日本語ヘッダー
+       - ✅ BOM付きUTF-8形式
+       - ✅ ファイル名に期間を含む（`在庫変動履歴_YYYY-MM-DD.csv` または `在庫変動履歴_YYYY-MM-DD_YYYY-MM-DD.csv`）
+     - ✅ **UI/UX調整**
+       - ✅ 日付入力の縦並び表示（開始日と終了日を縦に配置）
+       - ✅ 日付入力の幅100%（ラベルは固定幅、入力欄は残り幅いっぱい）
+       - ✅ 商品検索UIの改善（仕入画面と同じUIに統一）
+       - ✅ 商品検索ボタンのサイズ調整（小さく）
+       - ✅ 選択済み/選択解除ボタンの追加
+       - ✅ 商品リストの間隔調整（ロケーション選択と同じ間隔に統一）
+       - ✅ フィルター適用ボタンのUI統一（他の管理画面と統一）
+     - ✅ **バグ修正**
+       - ✅ ロス画面の`pageInfo`エラー修正（loaderから`pageInfo`を取得するように修正）
+       - ✅ 日付初期値の調整（ログが無い場合の処理を追加）
+       - ✅ カレンダーのmin属性の調整（在庫変動履歴の最初の日付のみを使用）
+     - ✅ **データベーススキーマ**
+       - ✅ `InventoryChangeLog`モデル（Prisma）
+       - ✅ フィールド：shop, timestamp, date, inventoryItemId, variantId, sku, locationId, locationName, activity, delta, quantityAfter, sourceType, sourceId, adjustmentGroupId, idempotencyKey, note
+       - ✅ アクティビティ種別：`inbound_transfer`, `outbound_transfer`, `loss_entry`, `inventory_count`, `purchase_entry`, `purchase_cancel`, `order_sales`, `refund`, `admin_webhook`
+       - ✅ ユニーク制約：`shop_idempotencyKey`（二重登録防止）
+       - ✅ インデックス：shop, date, inventoryItemId, locationId, activity
 
 ---
 
@@ -1029,6 +1332,7 @@ type SettingsV1 = {
 - Shopify Polarisデザインガイドラインに準拠
 - POS UI Extensionの制約を遵守
 - タッチ操作に最適化
+- **文言・UIトンマナの統一**: 本文冒頭「文言・UIトンマナの統一（必須）」に従い、他画面・同一機能内で文言およびUIのトーン＆マナーを必ず統一する。
 
 ---
 
@@ -1127,7 +1431,7 @@ type SettingsV1 = {
 - **データ保存**: 
   - ✅ 商品グループ: `currentAppInstallation.metafield` (key: `product_groups_v1`)
   - ✅ 棚卸ID: `currentAppInstallation.metafield` (key: `inventory_counts_v1`)
-- **POS UI**: ✅ `/extensions/stock-transfer-loss/src/screens/stocktake/` に実装完了
+- **POS UI**: ✅ `/extensions/stock-transfer-stocktake/src/screens/stocktake/` に実装完了
   - ✅ 棚卸ID入力画面（コンディション画面相当）
   - ✅ 商品グループ選択画面（シップメント選択相当、商品グループが複数の場合のみ）
   - ✅ 商品リスト画面（入庫商品リスト相当）
@@ -1189,14 +1493,26 @@ type SettingsV1 = {
 ### 11.1 現状コードの主要な実装箇所
 - **設定管理**: `/app/routes/app.settings.tsx`
 - **ナビゲーション**: `/app/routes/app.tsx`（ナビゲーションメニューの更新が必要）
-- **出庫処理**: `/extensions/stock-transfer-tile/src/Modal.jsx` (OutboundHistoryConditions, OutboundHistoryDetail等)
+- **出庫処理**: `/extensions/stock-transfer-tile/src/ModalOutbound.jsx`（4分割後は出庫専用。OutboundHistoryConditions, OutboundHistoryDetail, OutboundShipmentSelection 等）
   - ✅ 出庫コンディション画面: 自動保存・復元機能実装済み（2026-01-27）
   - ✅ 配送番号のスキャン機能実装済み（出庫コンディション画面、確定モーダル内）
-- **入庫処理**: `/extensions/stock-transfer-tile/src/Modal.jsx` (InboundList, InboundReceive等)
-- **監査ログ**: `/extensions/stock-transfer-tile/src/Modal.jsx` (readInboundAuditLog, appendInboundAuditLog等)
-- **ロス登録**: `/extensions/stock-transfer-loss/src/screens/loss/` (LossConditions, LossProductList, LossHistoryList等)
+  - ✅ 出庫マルチシップメント挙動: `docs/OUTBOUND_MULTI_SHIPMENT_BEHAVIOR.md` に定義。編集モーダルから「シップメントを確定」削除、リストの「確定する」で統一。
+  - ✅ 出庫履歴一覧: 入庫リストと同型の行単位レイアウト（`docs/INBOUND_VS_OUTBOUND_LIST_LAYOUT.md`）。状態｜数量行の改行防止、未確定：1 表示（shipments 正規化）、履歴一覧から詳細を開くときのフッター（historyFromShipmentSelection: false）。
+  - ✅ 仮想行・配送情報・確定2種（2026-02）: Transfer lineItems を仮想行（#T0127-L）で表示、仮想行タップ時は lineItems のみ表示。OutboundList に「配送情報」ボタン・モーダル。複数シップメント追加・編集時は確定モーダルを「確定」「下書き」の2種に。「在庫再取得」→「在庫更新」に名称変更。`docs/OUTBOUND_CONFIRM_FLOWS.md`、`docs/OUTBOUND_TRANSFER_VS_SHIPMENT_STATUS.md` 参照。
+  - ✅ 配送一覧フッター（2026-02）: 左＝戻る、中央＝再読込、右＝キャンセル。キャンセル不可（TRANSFERRED/CANCELED）時はキャンセルボタンをグレーアウト。キャンセル可時はタップで確認モーダル（履歴商品リストと同じ）表示後、キャンセル処理を実行。
+  - ✅ 全拡張でボタン表記「再取得」→「再読込」に統一（「取得中...」→「読込中...」含む）。商品リストヘッダーは検索枠以外のボタンを上下中央配置。
+- **入庫処理**: `/extensions/stock-transfer-inbound/src/Modal.jsx`（4分割後は入庫専用。InboundConditions, InboundShipmentSelection, InboundListScreen 等）
+  - ✅ **REFERENCE 整合（2026-02）**: Modal_REFERENCE.jsx の入庫部分との差分を `docs/INBOUND_REFERENCE_DIFF_ITEMS.md` に整理。確定処理・確定後遷移・transferForShipment・listLimit・processLogCallback・モーダル（onPress・警告「確認しました」は現行維持）・監査ログの extras を REFERENCE に合わせて反映済み。
+  - ✅ 入庫リストの Jt/Ot 等 TDZ 対策は InboundListScreen.jsx でモジュールレベル関数化・dialog 宣言順等を反映済み（`docs/INBOUND_LIST_SCREEN_COMPLETE_CHECK.md` 参照）。
+  - ✅ **確定済み時の検索・数量グレーアウト・画像表示は有効（2026-02）**: 確定済み（readOnly）の InboundList で検索枠と数量ボタン（−／数値／＋）をグレーアウト。画像表示トグルは確定済みでも有効のまま（readOnly の影響から除外）。InboundUiParts.jsx の QtyControlCompact_3Buttons に disabled 対応、renderInboundShipmentItems_／InboundAddedLineRow に readOnly を渡す。
+- **監査ログ**: 入庫拡張内（readInboundAuditLog, appendInboundAuditLog 等）
+- **ロス登録**: `/extensions/stock-transfer-loss/src/screens/loss/`（4分割後はロス専用。LossConditions, LossProductList, LossHistoryList 等）
   - ✅ 自動保存・復元機能実装済み（2026-01-27）
-  - ✅ スキャナー処理を`Modal.jsx`に移動、出庫/入庫と同じ実装に統一
+  - ✅ スキャナー処理を Modal に統一。棚卸関連ファイルは削除済み。
+  - ✅ 画像表示の連動（2026-02）: 履歴一覧フッター中央・履歴詳細ヘッダー右に画像表示ボタンを追加。LossScreen から LossHistoryList に liteMode/onToggleLiteMode を渡し、ロス内で連動。
+- **棚卸**: `/extensions/stock-transfer-stocktake/src/`（4分割後は棚卸専用。StocktakeScreen, InventoryCountConditions 等）
+  - ✅ 画像表示ON/OFFをコンディションと商品リストで連動（2026-02）: StocktakeScreen から InventoryCountList に liteMode/onToggleLiteMode を渡し、親の設定を優先。
+- **POS画像表示の設置箇所一覧**: 出庫・入庫・ロス・棚卸で画像表示を設置している画面・箇所の一覧は `docs/POS_IMAGE_DISPLAY_PLACEMENT.md` に記載。
 
 ### 11.4 ナビゲーションメニューの更新
 `/app/routes/app.tsx` のナビゲーションメニューを以下のように更新する必要があります：
@@ -1204,8 +1520,11 @@ type SettingsV1 = {
 ```tsx
 <s-app-nav>
   <s-link href="/app">設定</s-link>
-  <s-link href="/app/history">入出庫履歴</s-link>
-  <s-link href="/app/loss">ロス履歴</s-link>
+  <s-link href="/app/inventory-info">在庫情報</s-link>
+  <s-link href="/app/history">入出庫</s-link>
+  <s-link href="/app/purchase">仕入</s-link>
+  <s-link href="/app/loss">ロス</s-link>
+  <s-link href="/app/order">発注</s-link>
   <s-link href="/app/inventory-count">棚卸</s-link>
 </s-app-nav>
 ```
@@ -1242,30 +1561,30 @@ type SettingsV1 = {
 
 #### ③ 棚卸商品グループリストの改善 ✅ 完了
 - **棚卸ID表示**: ID数値→名称（#C0000形式）で表示
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountProductGroupSelection.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountProductGroupSelection.jsx`
 
 #### ④ 棚卸商品リストの改善 ✅ 完了
 - **フッター表示**: 「現在在庫」→「在庫」に変更、差分を改行して赤色表示
-- **ヘッダーボタン**: 「軽量ON/OFF」→「軽量」のみ表示（色でON/OFF表現）、「在庫再取得」ボタンを追加
+- **ヘッダーボタン**: 「軽量ON/OFF」→「軽量」のみ表示（色でON/OFF表現）、「在庫更新」ボタンを追加（旧「在庫再取得」、2026-02 名称変更）
 - **予定外リスト**: 初期リストにない商品を最下部に別表示、数量1の場合は×ボタンで削除可能
 - **検索リストの数量ボタン**: -数字+形式に変更（直接数字入力可能）
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
 
-#### ⑤ 在庫再取得機能の改善 ✅ 完了
-- **問題**: 在庫再取得時に商品リストが消えてしまう、在庫数が更新されない
+#### ⑤ 在庫更新機能の改善 ✅ 完了（ボタン名称は 2026-02 に「在庫再取得」→「在庫更新」に変更）
+- **問題**: 在庫更新時に商品リストが消えてしまう、在庫数が更新されない
 - **修正内容**:
   - `refreshing`状態を追加（出庫リストと同じ方式）
   - `stockLoading`フラグを使用して在庫数部分だけ「…」を表示
   - キャッシュを無効化するオプション（`noCache: true`）を追加
-  - 在庫再取得時に数量（actualQuantity）を保持し、在庫数（currentQuantity）だけを更新
+  - 在庫更新時に数量（actualQuantity）を保持し、在庫数（currentQuantity）だけを更新
 - **実装ファイル**: 
-  - `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
-  - `/extensions/stock-transfer-loss/src/screens/stocktake/stocktakeApi.js`
+  - `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
+  - `/extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js`
 
 #### ⑥ 確定モーダルの改善 ✅ 完了
 - **調整対象リスト**: 最大10件→1件のみ表示（「…他X件」形式）
 - **空白ボタン問題**: `slot="footer"`を明示的に空にして解決
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
 
 #### ⑦ 確定処理のエラーハンドリング改善 ✅ 完了
 - **問題**: HTTP 400エラーが発生しても在庫調整が実行されてしまう
@@ -1273,7 +1592,7 @@ type SettingsV1 = {
   - 在庫調整（`adjustInventoryToActual`）と履歴更新（`writeInventoryCounts`）を分離
   - 在庫調整が失敗した場合は処理を中断
   - 在庫調整が成功しても履歴更新が失敗した場合は警告を表示
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
 
 #### ⑧ 数量モーダルのレイアウト改善 ✅ 完了
 - **問題**: 削除ボタンと戻るボタンの順序が不自然、幅が統一されていない
@@ -1282,7 +1601,7 @@ type SettingsV1 = {
   - 削除ボタンと戻るボタンの幅を統一（`padding="none"`を設定）
   - `slot="footer"`を明示的に空にして空白ボタンを防止
 - **実装ファイル**: 
-  - `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+  - `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
   - `/extensions/stock-transfer-loss/src/screens/loss/LossProductList.jsx`
 
 #### ⑨ 管理画面UI改善（2026-01-27）✅ 完了
@@ -1325,8 +1644,8 @@ type SettingsV1 = {
   - **新規生成の棚卸ID**: 編集後の商品グループの状態を使用
 - **実装ファイル**: 
   - `/app/routes/app.inventory-count.tsx`
-  - `/extensions/stock-transfer-loss/src/screens/stocktake/stocktakeApi.js`
-  - `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+  - `/extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js`
+  - `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
 
 #### ⑩ 複数グループ対応・完了判定修正（2026-01-27）✅ 完了
 - **問題1**: 2つ以上の商品グループを持っていて片方だけ処理済みで他が未処理のものが完了済みに振り分けられている
@@ -1339,8 +1658,8 @@ type SettingsV1 = {
     - `InventoryCountProductGroupSelection`でも`count.status === "completed"`を考慮
     - 完了済みグループタップ時のフリーズ修正: `groupItems`から直接読み込み、API取得をスキップ
 - **実装ファイル**: 
-  - `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
-  - `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountProductGroupSelection.jsx`
+  - `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
+  - `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountProductGroupSelection.jsx`
 
 #### ⑪ 棚卸機能のバグ修正・データ保存改善（2026-01-27）⏸️ 修正中
 - **問題1**: 管理画面で完了しているグループが未完了と表示される
@@ -1372,7 +1691,7 @@ type SettingsV1 = {
   - **原因**: `if (itemsToAdjust.length === 0)`のブロック内で`else`ブロックが重複していた
   - **修正内容**: 重複した`else`ブロックを削除
 - **実装ファイル**: 
-  - `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+  - `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
   - `/app/routes/app.inventory-count.tsx`
 - **修正状況**: ✅ 修正完了（2026-01-27）
 
@@ -1458,6 +1777,173 @@ type SettingsV1 = {
 
 - **実装ファイル**: `/app/routes/app.inventory-count.tsx`
 
+### 12.21 出庫マルチシップメント挙動定義・拡張4分割検証（2026-02）✅ 完了
+
+#### 1. 出庫マルチシップメント挙動の定義
+- **ドキュメント**: `docs/OUTBOUND_MULTI_SHIPMENT_BEHAVIOR.md` を作成。
+- **内容**: 出庫リストの「確定する」「下書き保存」「配送準備完了にする」の挙動を明確化。
+- **API検証**: 既存 Transfer へのシップメント追加は `inventoryShipmentCreate`（下書き）または `inventoryShipmentCreateInTransit`（確定）で `movementId` に Transfer ID を渡すことで可能。`READY_TO_SHIP` な Transfer の lineItems 更新は `inventoryTransferSetItems` で可能。`READY_TO_SHIP` から `DRAFT` への戻しは API がサポートしていないことを明記。
+- **UI簡素化**: 「編集」モーダルから「シップメントを確定」を削除。出庫リストの「確定する」で Transfer またはシップメント全体の確定が行われるように統一。
+
+#### 2. 拡張4分割後の検証
+- **ドキュメント**: `docs/EXTENSION_VERIFICATION_4SPLIT.md` に検証結果を記載。
+- **stock-transfer-tile（出庫）**: ModalOutbound.jsx のスキャナー購読にあった SCREENS.INBOUND_LIST へのデッドコード分岐を削除。
+- **stock-transfer-loss（ロス）**: 棚卸関連ファイル（StocktakeScreen.jsx、src/screens/stocktake/）を削除しデッドコードを解消。
+- **stock-transfer-stocktake（棚卸）**: FixedFooterNavBar.jsx を common にコピー、fetchSettings を stocktakeApi.js に移植し、loss 拡張への参照を解消。ビルド成功を確認。
+
+### 12.22 出庫履歴一覧・配送リストのUI修正（2026-02）✅ 完了
+
+#### 1. 出庫履歴一覧のレイアウトを入庫リストと統一
+- **対応内容**: 出庫の「未出庫/出庫済み」履歴カードを、入庫の「未入庫/入庫済み」と同じ**行単位**レイアウトに変更。
+- **レイアウト**: 1行目＝出庫ID（左）｜日付（右）、2行目＝出庫元、3行目＝入庫先、4行目＝配送数、5行目＝状態（左）｜数量 received/total（右）。配送準備完了時はカード右端に「編集」ボタン。
+- **ドキュメント**: 入庫リストと出庫履歴リストの差の説明は `docs/INBOUND_VS_OUTBOUND_LIST_LAYOUT.md` に記載。
+- **実装ファイル**: `/extensions/stock-transfer-tile/src/ModalOutbound.jsx`、`/extensions/stock-transfer-tile/src/screens/OutboundHistoryScreens.jsx`
+
+#### 2. 「状態｜数量」行の改行防止
+- **問題**: 履歴カードの5行目（状態と数量）で、数量だけが次の行に改行されてしまうことがあった。
+- **対応内容**: 5行目の `s-stack` に `flexWrap: "nowrap"` を指定。左の「状態」に `minWidth: 0`, `flex: "1 1 0"` を付与し、右の数量を `<s-box style={{ flexShrink: 0 }}>` で囲み、数量が改行されないように修正。
+- **実装ファイル**: 上記と同じ。
+
+#### 3. 「未確定：1」の表示対応
+- **問題**: 処理済みでない配送が1件だけのときに「（未確定：1）」が表示されない。2件以上のときは表示されていた。
+- **原因**: API が `shipments` を配列以外（`nodes`・`edges`・単体オブジェクト）で返す場合に正規化が不足しており、`unconfirmedCount` が 0 になっていた。
+- **対応内容**: `shipments` の正規化を追加。配列・`t.shipments.nodes`・`t.shipments.edges`（`edges.map(e => e.node)`）・単体オブジェクト（id または status を持つ場合は `[t.shipments]`）のいずれにも対応。
+- **実装ファイル**: 上記と同じ。
+
+#### 4. 配送リストの「キャンセル」ボタンに確認モーダルを追加
+- **対応内容**: 配送リスト（OutboundShipmentSelection）のフッター「キャンセル」をタップしたとき、即実行せず確認モーダル（「この出庫（Transfer）をキャンセルします。よろしいですか？」）を表示。モーダル内の「戻る」で閉じる、「キャンセルする」で実行。商品リスト（OutboundHistoryDetail）のキャンセルと同様のフローに統一。
+- **実装ファイル**: `/extensions/stock-transfer-tile/src/ModalOutbound.jsx`（SHIPMENT_LIST_CANCEL_CONFIRM_MODAL_ID、s-modal、フッターの rightCommand/rightCommandFor）
+
+#### 5. 履歴一覧から詳細を開いたときのフッター（戻るが表示されない問題）の修正
+- **問題**: 履歴一覧で Transfer をタップして詳細（商品リスト表示）を開くと、フッターが「キャンセル」「編集」のみとなり、左に「戻る」が表示されない。商品リストが表示されずフリーズする報告もあった。
+- **原因**: 履歴一覧から詳細を開く際に `historyFromShipmentSelection` を false にしていなかったため、前回の「配送リストから開いた」状態が残り、詳細画面が「配送リスト経由」用のフッター（キャンセル・編集）を表示していた。
+- **対応内容**: `onTapHistoryTransfer` 内で詳細を開く直前に `historyFromShipmentSelection: false` を `setStateSlice` に含める。これにより、履歴一覧から開いた場合は詳細フッターに「戻る」「編集」「キャンセル」が表示される。
+- **実装ファイル**: `/extensions/stock-transfer-tile/src/ModalOutbound.jsx`（onTapHistoryTransfer）
+
+### 12.26 ロス・入庫・読み込み表示のUI統一（2026-02）✅ 完了
+
+本チャットで実施したロス・入庫・読み込み表示まわりの統一と修正。
+
+#### 1. ロス：コンディション・商品リスト・履歴のUI
+- **コンディション画面フッター**: ボタン上のサマリー行（ロケーション・スタッフ・日付/理由）を非表示。FixedFooterNavBar で summaryLeft/Center/Right がすべて空のときはサマリー行を描画しないように変更。LossConditions からは空で渡す。
+- **商品リストヘッダー**: 「ロス登録」「ロケーション：」「日付：」「理由：」の形式に変更（LossProductList.jsx）。
+- **履歴商品リストのフッター**: ボタン上の表示を**左：ステータス（バッジ）／右：合計：N（商品リストの数量合計）**に変更。FixedFooterNavBar で summaryLeft/summaryRight に React ノード（バッジ等）を渡せるように拡張。LossHistoryList で getStatusBadgeTone を用いてバッジ表示、合計は items の quantity 合計。
+- **画像表示ON/OFFの反映**: コンディション画面で切り替えた画像表示モードが商品リストに反映されていなかった問題を修正。LossScreen から LossProductList に `liteMode` と `onToggleLiteMode` を渡す。LossProductList では親から渡された `liteMode` を優先し、ボタン押下時は `onToggleLiteMode` を呼ぶ。
+- **ロス商品リストヘッダーに「画像表示」ボタン**: ヘッダー左のステータス文領域（ロス＋サマリー）の**右寄せ上下中央**に「画像表示」ボタンを設置。右端は「リセット」ボタンのみ。ラベルは「画像表示」のみ（ON/OFF表記なし、tone で状態表現）。
+
+#### 2. 入庫：商品リストのステータスバッジ・一覧ステータス引き継ぎ
+- **商品リストフッターにステータスバッジ**: フッター中央の「予定0/入庫3」の**左**にステータスバッジを表示（ボタン上ではなく中央行内）。下書き／未入庫／入庫済み等。
+- **一覧のステータスを引き継ぐ**: 商品リストのステータスがトランスファー一覧の表示ステータスと一致するよう修正。一覧では `STATUS_LABEL`（DRAFT→下書き、READY_TO_SHIP→配送準備完了、IN_PROGRESS→処理中、IN_TRANSIT→進行中、RECEIVED→入庫、TRANSFERRED→入庫済み、CANCELED→キャンセル、その他）で表示。タップ時に `selectedTransferStatus` を保存しているため、InboundListScreen で `inbound.selectedTransferStatus` および `transferForShipment?.status` を同じ STATUS_LABEL で日本語化してフッターバッジに表示。inbound の getStateSlice 初期値に `selectedTransferStatus: ""` を追加。
+
+#### 3. 読み込み表示の統一
+- **画面上の表示**: 「取込中...」「読込中...」「商品を読み込み中...」「検索中...」「取得中...」「履歴を読み込み中...」「配送 読み込み中...」等を全て**「読み込み中...」**に統一。対象：ModalOutbound、InboundListScreen、Modal（入庫）、InboundUiParts、LossHistoryList、LossProductList、InventoryCountConditions、InventoryCountList、Modal_REFERENCE 等。
+- **ボタン内のラベル**: 再読込・読込・入庫予定一覧等のボタンでローディング時に表示する文言は**「読込中...」**に統一（ユーザー要望で「読み込み中...」から変更）。
+- **出庫の商品リスト「読み込み中...」の表示位置**: OutboundHistoryDetail の商品リストで、`detailLoading` 時に「読み込み中…」が領域左上に余白なく表示され直下に下線が出ていた問題を修正。他商品リスト（入庫・履歴等）と同様、`detailLoading` 時は早期 return で `<s-box padding="base">読み込み中...</s-box>` のみを返すようにし、下線は表示しない。
+
+- **実装ファイル**:  
+  - ロス: `/extensions/stock-transfer-loss/src/screens/LossScreen.jsx`, `/extensions/stock-transfer-loss/src/screens/loss/LossProductList.jsx`, `/extensions/stock-transfer-loss/src/screens/loss/LossConditions.jsx`, `/extensions/stock-transfer-loss/src/screens/loss/LossHistoryList.jsx`, `/extensions/stock-transfer-loss/src/screens/loss/FixedFooterNavBar.jsx`  
+  - 入庫: `/extensions/stock-transfer-inbound/src/screens/InboundListScreen.jsx`  
+  - 出庫: `/extensions/stock-transfer-tile/src/ModalOutbound.jsx`  
+  - その他: 各拡張の Modal、InboundUiParts、InventoryCountConditions、InventoryCountList 等
+
+### 12.27 入庫・棚卸まとめて表示UI・棚卸下書き修正（2026-02）✅ 完了
+
+#### 1. 入庫複数シップメント・まとめて表示
+- **処理済みシップメントの編集制御**: 処理済み（RECEIVED/TRANSFERRED）のシップメントの商品リストで数量ボタンをグレーアウト。`shipmentIdToReadOnly` Map で各シップメントの状態を判定し、`renderInboundShipmentItems_` に `readOnly` を渡す。編集試行時は `denyEdit_` でトースト表示。
+- **ステータスバッジ・件数表示**: シップメントタイトル行（タイトル＋右寄せ）にステータスバッジ（入庫済み/未入庫）と件数（〇件）を表示。`s-stack direction="inline" justifyContent="space-between"` でレイアウト。
+
+#### 2. 入庫複数シップメント・シップメントごと表示
+- **処理済み時のグレーアウト**: 確定済み（readOnly）の InboundList で、検索枠（disabled＋opacity: 0.6）と InboundCandidateRow の数量ボタン・追加ボタン（disabled＋tone="subdued"）をグレーアウト。`readOnly` を InboundCandidateRow に渡す。
+
+#### 3. 棚卸複数商品グループ・まとめて表示
+- **ステータスバッジ化**: 商品グループタイトル右のステータスを `s-text` から `s-badge` に変更（完了済み/未完了）。
+- **件数の括弧削除**: `(3/5)` → `3/5`、`(5件)` → `5件`、`(0件)` → `0件` に変更。
+
+#### 4. 棚卸自動下書き・復元の不具合修正
+- **要因**: ①Storage API が `{ [key]: value }` 形式で返す環境があり、直接オブジェクトとして扱うと countId 等が取得できなかった。②count.id / locationId が GID 形式と数値形式で揺れ、比較に失敗していた。
+- **修正内容**:
+  - Storage 取得時に `got?.[key] ?? got` パターンを適用（入庫と同様）。単一・複数グループ両方の draft 読み込みに適用。
+  - countId / locationId の比較で `norm(id)`（GID 末尾抽出）を使った正規化比較を追加。
+  - `currentGroupId` の重複宣言を削除（316行目と327行目で二重定義されていた問題）。
+
+#### 5. 棚卸複数商品グループの下書きを商品グループIDごとに連動（2026-02）✅ 完了
+- **現象**: ①複数商品グループの棚卸IDで、商品グループリストから「1つだけ選んで表示」して自動保存すると、別のグループを開いても同じ商品リストが復元されてしまう。②まとめて表示で編集した内容と、グループごとに表示して保存した内容が連動せず独立してしまう。
+- **要因**: 商品グループを1つ選んで表示するとき、親は `productGroupIds: [選んだ1つ]` しか渡すため、`targetProductGroupIds.length === 1` となり、複数グループ用の per-group キーではなくレガシーキー（単一キー）で保存・復元していた。その結果、どのグループを開いても同じレガシーキーを読むため「全て同じ商品リストで復元」されていた。
+- **修正内容**:
+  - 下書きのキー判定を「表示中のグループ数」（`targetProductGroupIds.length > 1`）ではなく「棚卸IDが複数グループを持っているか」（`count.productGroupIds.length > 1`）に変更。変数 `countHasMultipleGroups` を追加。
+  - **読み込み**: 単一グループモード時、`countHasMultipleGroups` が true の場合は常に「現在表示中の商品グループID」の per-group キーからのみ復元。これにより商品グループリストから1つだけ選んで表示している場合も、そのグループ用キーから正しく復元される。
+  - **保存**: `countHasMultipleGroups` が true のときは、表示方法（グループごと／まとめて）に関係なく、常にグループIDごとのキーに分割して保存。まとめて表示とグループごと表示で同じキーを参照するため連動する。
+  - **単一商品グループの棚卸ID**: `count.productGroupIds` が無い、または長さ1の場合は従来どおりレガシーキーのみを使用。既存の単一グループ棚卸の自動保存・復元には影響なし。
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
+
+#### 6. ロス商品リストヘッダー・検索追加トースト
+- **ロス**: ヘッダーの画像表示とリセットボタンを2つとも右寄せ（`justifyContent="end"`）。
+- **トースト**: 棚卸・入庫の検索追加トーストを出庫ベースに統一（「〇〇 を追加しました（+N）」形式）。
+
+- **実装ファイル**:  
+  - 入庫: `/extensions/stock-transfer-inbound/src/screens/InboundListScreen.jsx`, `/extensions/stock-transfer-inbound/src/InboundUiParts.jsx`  
+  - 棚卸: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`  
+  - ロス: `/extensions/stock-transfer-loss/src/screens/loss/LossProductList.jsx`
+
+### 12.25 商品リストヘッダー・再読込統一・配送一覧フッター（2026-02）✅ 完了
+
+#### 1. 商品リストヘッダーの検索枠以外のボタンを上下中央配置
+- **対応内容**: 商品リストのヘッダーで、検索枠以外のボタン（画像表示・全入庫・リセット等）を縦方向で中央揃えに変更。
+- **実装**: 入庫 InboundListScreen.jsx のヘッダー行（左：テキストブロック、右：ボタン群）の `alignItems="flex-start"` を **`alignItems="center"`** に変更。出庫履歴商品リストのヘッダーは既に `alignItems="center"` のため変更なし。
+- **実装ファイル**: `/extensions/stock-transfer-inbound/src/screens/InboundListScreen.jsx`
+
+#### 2. ボタン「再取得」を全て「再読込」に統一
+- **対応内容**: ボタンラベル「再取得」と「再読込」の混在を解消し、全拡張で**「再読込」**に統一。ローディング中の表記は「取得中...」→**「読込中...」**に統一。
+- **対象ファイル**: 出庫（ModalOutbound.jsx）、入庫（InboundListScreen.jsx, InboundShipmentSelection.jsx, Modal.jsx）、ロス（LossConditions.jsx, LossHistoryList.jsx）、棚卸（InventoryCountConditions.jsx, InventoryCountProductGroupSelection.jsx）。メッセージ「再取得を試してください」→「再読込を試してください」（LossConditions.jsx）も統一。
+
+#### 3. 配送一覧のページフッター（左：戻る、中央：再読込、右：キャンセル）
+- **対応内容**: 出庫の配送一覧（OutboundShipmentSelection）のフッターを**左：戻る、中央：再読込、右：キャンセル**の3構成に変更。中央ボタンは loadTransfer（ローディング時「読込中...」）、右ボタンはキャンセル。
+- **実装**: FixedFooterNavBar に leftLabel="戻る", middleLabel="再読込"（loading 時は「読込中...」）, rightLabel="キャンセル" を渡す形に変更。
+- **実装ファイル**: `/extensions/stock-transfer-tile/src/ModalOutbound.jsx`
+
+#### 4. 配送一覧のキャンセルボタン（グレーアウト・確認モーダル）
+- **キャンセル不可時**: トランスファーのステータスが TRANSFERRED または CANCELED の場合はキャンセル不可。キャンセルボタンを **rightDisabled={true}** で無効化（グレーアウト）。
+- **キャンセル可時**: キャンセルボタンタップで確認モーダル（「この出庫をキャンセルします。よろしいですか？」＋戻る／キャンセルする）を表示。履歴商品リストのキャンセルモーダルと同じ文言・フロー。モーダル内「キャンセルする」で executeCancelFromShipmentList を実行（inventoryTransferCancelSafe → 在庫を出庫元に戻す detail.lineItems の processableQuantity で deltas 構築 → ensureInventoryActivatedAtLocation → adjustInventoryAtLocationWithFallback → appendInventoryTransferNote_ → トースト「キャンセルしました」→ モーダル閉じる → loadTransfer）。
+- **実装ファイル**: `/extensions/stock-transfer-tile/src/ModalOutbound.jsx`（OutboundShipmentSelection 内の canCancelFromShipmentList, CONFIRM_CANCEL_SHIPMENT_LIST_MODAL_ID, executeCancelFromShipmentList, s-modal）
+
+### 12.23 出庫：仮想行・配送情報モーダル・確定/下書き2種・在庫更新・シップメントID（2026-02）✅ 完了
+
+#### 1. Transfer の lineItems を仮想行として表示
+- **目的**: 管理画面の「発送準備完了」ブロック（Shipment ID なし）をアプリのシップメントリストでも表示し、表示と管理画面を一致させる。
+- **対応内容**: Transfer が READY_TO_SHIP かつ lineItems を持つ場合、シップメントリストの**先頭**に仮想行を追加。仮想行の ID は `__transfer__${transferId}`、ラベルは **#T0127-L**（L = Line items）。実 Shipment は **#T0127-1, #T0127-2...** とし、管理画面のシップメント ID と重複しない形式に統一。
+- **参照**: `docs/OUTBOUND_TRANSFER_VS_SHIPMENT_STATUS.md`
+
+#### 2. 仮想行タップ時の商品リスト（lineItems のみ表示）
+- **問題**: 仮想行をタップすると、発送準備完了以外の下書き・処理中の Shipment の商品までまとめて表示されてしまう。
+- **対応内容**: 仮想行選択時は **Transfer の lineItems のみ**を表示。`loadDetail_` で `selectedShipmentId` が `__transfer__` で始まる場合は、`fetchInventoryShipmentEnriched` をスキップし、`d.lineItems`（fetchInventoryTransferDetailForHistory の Transfer lineItems）のみで items を構築。Shipment ID が付与されていない商品リストのみ表示。
+
+#### 3. 複数シップメント追加・編集時の確定モーダルを「確定」「下書き」の2種に
+- **対応内容**: ③複数シップメント「追加」および ②④複数シップメント「編集」時は、「配送準備完了にする」を非表示とし、**「確定する」「下書き保存」の2種のみ**表示。③の下書き保存は `createInventoryShipmentDraft`、②④の下書き保存は `inventoryTransferSetItems`（仮想行/Transfer lineItems の更新）。
+- **参照**: `docs/OUTBOUND_CONFIRM_FLOWS.md`
+
+#### 4. 出庫リストに「配送情報」ボタン・モーダル
+- **目的**: 複数シップメントをアプリだけで作成する際、2つ目以降の配送情報（配送業者・追跡番号・到着予定日）を入力できるようにする。
+- **対応内容**: OutboundList ヘッダーに「軽量」「在庫更新」の横に**「配送情報」**ボタンを追加。タップでモーダルを開き、コンディション画面と同様の入力（配送業者・配送番号・到着予定日、1日後/2日後/クリア）が可能。モーダル内の閉じるボタンは1つのみ（標準の閉じるで統一）。
+
+#### 5. 「在庫再取得」→「在庫更新」に名称変更
+- **対応内容**: 出庫・入庫・ロス・棚卸の各リスト画面で、ヘッダーボタン表記を「在庫再取得」から**「在庫更新」**に統一。
+- **対象ファイル**: ModalOutbound.jsx, OutboundListScreen.jsx, Modal.jsx, Screens.jsx, Screens_part2.jsx, Modal_tmp.jsx, InventoryCountList.jsx
+
+- **実装ファイル**: `/extensions/stock-transfer-tile/src/ModalOutbound.jsx`
+
+### 12.24 POS入庫リストの Jt TDZ エラー対策（2026-02）✅ 完了
+
+#### 問題
+- **現象**: 本番ビルド（minify）で「Cannot access 'Jt' before initialization」が発生。
+- **原因**: 入庫リスト画面（`InboundListScreen.jsx`）内で定義した `incRow` / `setRowQty` / `setExtraQty` / `incExtra` が minify で短い変数名（Jt 等）に圧縮され、参照順で Temporal Dead Zone (TDZ) になっていた。
+
+#### 対応内容
+- **モジュールレベルへ移動**: 上記4関数を `incRow_` / `setRowQty_` / `setExtraQty_` / `incExtra_` としてモジュールレベルに定義。必要な ref・setter・toast は引数で渡す。
+- **呼び出し側**: `addOrIncrementByResolved` 内では `incRow_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, existing.key, delta)` を直接呼び出し。JSX では `setRowQty` / `setExtraQty` をコンポーネント内の const にせず、`(key, qty) => setRowQty_(readOnlyRef, ...)` のようにインラインで渡す。
+- **参照**: `docs/INBOUND_LIST_SCREEN_COMPLETE_CHECK.md` の「0. Minify 時の TDZ エラー対策」に Jt 対応を追記済み。
+
+- **実装ファイル**: `/extensions/stock-transfer-inbound/src/screens/InboundListScreen.jsx`
+
 ### 12.20 コレクション・SKUリストの下線追加＆コレクション商品選択モーダル強化（2026-02）✅ 完了
 
 #### 1. コレクション・SKUリストの下線追加
@@ -1480,6 +1966,48 @@ type SettingsV1 = {
 - **モーダルオープン時**: 検索・選択済み表示・ページ番号を初期化
 
 - **実装ファイル**: `/app/routes/app.inventory-count.tsx`
+
+### 12.28 管理画面：入出庫モーダル棚卸UI寄せ・進捗最下部・予定外別ブロック・ステータスバッジ（2026-02）✅ 完了
+
+#### 1. 入出庫履歴モーダルを棚卸UIに寄せた表示
+- **Action**: 戻り値に `groupedLineItems`（`GroupedLineItemsEntry[]`）を追加。配送ごとに `shipmentMetadata`（id, displayId, status）と `items` をまとめ、予定外入庫は最後に「予定外入庫」ブロックとして追加。従来の `lineItems` はCSV用に維持。
+- **モーダル上部**: 数量に加え**進捗状況**を情報欄の最下部に表示。各配送は「表示ID: 入庫済み/未入庫（入庫数/予定数）」を緑/黄で色分け。予定外は「予定外入庫: N件」。
+- **モーダル本文**: 1テーブルではなく**配送ごとのブロック**。各ブロックはタイトル行（配送ID＋ステータス）＋その配送の明細テーブル（配送ID・配送ステータス列は省略）。商品0件の配送は「この配送には商品がありません」。背景は入庫済み `#f0f8f0`、未入庫 `#fff8f0`、予定外 `#fff5f5`。
+- **実装ファイル**: `/app/routes/app.history.tsx`
+
+#### 2. 棚卸モーダルの進捗状況・単一ブロック・予定外別ブロック
+- **進捗状況の表示位置**: 情報欄内を「棚卸ID・ロケーション・商品グループ・ステータス・作成日時・完了日時」の後にし、**進捗状況**を最下部に配置。予定外がある場合は「予定外: N件」を進捗の最後に追加。
+- **単一グループ時もブロック＋背景**: 単一商品グループの場合も、複数と同じブロック（padding・角丸・背景色：完了 `#f0f8f0`、未完了 `#fff8f0`）とタイトル行で表示。
+- **予定外を別ブロックで表示**: 各グループのテーブルには通常商品のみ表示。全グループの予定外を集め、一覧の**最後**に「予定外（N件）」ブロック（背景 `#fff5f5`、行は `#ffe6e6`）を追加。
+- **実装ファイル**: `/app/routes/app.inventory-count.tsx`
+
+#### 3. 入出庫・ロス・棚卸のステータスをバッジ表示に統一
+- **対象**: 入出庫履歴（app.history）、ロス（app.loss）、棚卸（app.inventory-count）の一覧およびモーダル内のステータス表示。
+- **実装**: 各ファイルに `getStatusBadgeStyle(status)` を追加。ピル型（`padding: 2px 8px`、`borderRadius: 9999px`、`fontSize: 12px`、`fontWeight: 600`）。完了系=緑、キャンセル系=グレー/赤系、進行中・下書き=青/グレーなどステータス別に背景・文字色を設定。「状態: 〇〇」をバッジのみの表示に変更。モーダル内の「ステータス: 〇〇」もバッジ表示に変更。
+- **実装ファイル**: `/app/routes/app.history.tsx`、`/app/routes/app.loss.tsx`、`/app/routes/app.inventory-count.tsx`
+
+### 12.29 POS 棚卸アプリの読み込み速度（入庫並み対応）（2026-02）✅ 完了
+
+**対象**: 棚卸タイル（stock-transfer-stocktake）の **POS アプリ**側のみ。管理画面（`/app/inventory-count`）は対象外。
+
+#### 背景
+- 入庫は「1クエリで配送＋明細（数量含む）」を取得するため表示が速い一方、棚卸は「商品リスト取得＋在庫を商品ごとに取得」していたため、一覧の数量表示と商品リスト表示に遅延が発生していた。
+- 要因の詳細は `docs/POS_STOCKTAKE_SLOWNESS_ANALYSIS.md` に記載。
+
+#### 対応内容（表示は省略せず、入庫並みの体感速度に）
+1. **商品リストの在庫取得をバッチ並列化し currentQuantity を返す**（stocktakeApi.js）  
+   - `filterByInventoryLevel: true` 時、在庫取得を「1件ずつ直列」→「15件ずつ Promise.all で並列」に変更。返すオブジェクトに `currentQuantity` を付与。
+2. **商品リストの二重取得を廃止**（InventoryCountList.jsx）  
+   - `fetchProductsByGroups` の返り値の `currentQuantity` をそのまま使用し、表示用の再取得（getCurrentQuantity 全件）を削除。
+3. **商品グループ名のキャッシュ**（stocktakeApi.js）  
+   - `getProductGroupName` 内で `readProductGroups()` を 60秒 TTL のメモリキャッシュで再利用。一覧の名前表示時の API 呼び出しを削減。
+4. **一覧の未完了グループ取得を並列化**（InventoryCountConditions.jsx）  
+   - 未完了グループごとの「商品リスト取得→在庫合計」を、最大 3 グループ同時実行に変更。
+
+#### 実装ファイル
+- `/extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js`
+- `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
+- `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountConditions.jsx`
 
 ### 12.12 本チャット時点での棚卸不具合の整理（2026-01-27）
 
@@ -1511,7 +2039,7 @@ type SettingsV1 = {
     - `isReadOnly && storedItems && !isMultipleMode`の条件に変更し、まとめて表示モードの場合は最初の処理ブロックをスキップするように修正。
     - `filterByInventoryLevel: false`に変更し、在庫レベルが0でも商品を表示するように修正。
     - まとめて表示モードの処理完了後、未完了グループがある場合は`isReadOnlyState`を`false`に設定するように修正。
-  - **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+  - **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
 
 - **状態C: アプリ側の完了判定と管理画面の完了判定の思想の違い**
   - **POS側**:
@@ -1529,7 +2057,7 @@ type SettingsV1 = {
 - **原因**: `setLines`内の`map`処理で、`isReadOnly: true`の商品も含めて全ての商品を更新していた。
 - **修正内容**: 
   - 「全数量反映」ボタンと「リセット」ボタンの処理で、`isReadOnly: true`の商品は元のデータをそのまま返すように条件を追加。
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`（1608-1636行目）
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`（1608-1636行目）
 
 #### 修正2: まとめて表示モードで確定ボタンを押した際、カウントしていないグループも確定されてしまう問題 ✅ 解決
 - **現象**: まとめて表示モードで、グループ1（確定済み）、グループ2（未確定でカウント済み）、グループ3（まだカウントしていなくて全て0）の状態で確定ボタンを押すと、グループ3も確定されてしまう。
@@ -1537,7 +2065,7 @@ type SettingsV1 = {
 - **修正内容**: 
   - `hasCountedItems`の判定条件を`actualQty > 0 || (actualQty !== 0 && currentQty !== actualQty)`に変更。
   - `actualQuantity === 0`の場合は、カウントしていないと判断し、確定しないように修正。
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`（1011-1015行目、1132-1136行目、1243-1247行目、1430-1434行目）
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`（1011-1015行目、1132-1136行目、1243-1247行目、1430-1434行目）
 
 #### 修正3: まとめて表示モードでの自動保存と復元機能の追加 ✅ 追加完了
 - **現象**: まとめて表示モードでは、自動保存は機能していたが、下書きの復元が機能していなかった。
@@ -1546,11 +2074,11 @@ type SettingsV1 = {
   - まとめて表示モードの処理開始時に、下書きを読み込む処理を追加。
   - 下書きがあれば優先的に復元し、`productGroupId`と`isReadOnly`も正しく復元するように修正。
   - まとめて表示モードでも下書き復元時に`isReadOnlyState`を適切に設定するように修正。
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`（372-420行目）
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`（372-420行目）
 
 #### 修正4: デバッグ用トーストメッセージの削除 ✅ 完了
 - **内容**: まとめて表示モードのデバッグ用トーストメッセージ（`[DEBUG]`で始まるもの）と画面表示のデバッグ情報を削除。
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
 
 #### 修正5: まとめて表示モードでの自動保存・復元機能の修正 ✅ 完了（2026-01-27）
 - **問題**: まとめて表示モードで一度棚卸リストに戻って再度まとめて表示を表示した際、自動保存が空の`lines`で上書き保存され、下書きが0件になって復元されない。
@@ -1563,7 +2091,7 @@ type SettingsV1 = {
   - 自動保存時に`isReadOnly`も保存するように修正。
   - まとめて表示モードでは、`draftLoadedRef`のチェックを行わず、毎回下書きを読み込むように修正。
   - `count.id`や`locationId`が変わったときに`draftLoadedRef`をリセットする処理を追加。
-- **実装ファイル**: `/extensions/stock-transfer-loss/src/screens/stocktake/InventoryCountList.jsx`
+- **実装ファイル**: `/extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
 
 #### 修正6: 入庫処理のまとめて表示モードでの自動保存・復元機能の追加 ✅ 完了（2026-01-27）
 - **問題**: 入庫処理のまとめて表示モードでは、自動保存・復元機能が実装されていなかった。
@@ -1652,3 +2180,73 @@ type SettingsV1 = {
 - **定数**: `SKU_BATCH_SIZE = 25`、`SKU_BATCH_CONCURRENCY = 10`（必要に応じて調整可能）。
 
 - **実装ファイル**: `/app/routes/app.inventory-count.tsx`
+
+### 12.30 発注機能：発注先編集・原価・販売価格取得・CSV出力拡張（2026-02-05）✅ 完了
+
+#### 1. 発注先編集機能（商品リストモーダル内）
+- **実装内容**: 管理画面の発注商品リストモーダル内で、発注先を編集できる機能を追加。
+- **UI**: 
+  - 発注先表示の横に「編集」ボタンを配置
+  - 編集モードでは検索・入力フィールドと発注先リスト（発注先マスタから選択）を表示
+  - 発注先マスタから選択、または自由入力で設定可能
+  - 「保存」「キャンセル」ボタンで編集を確定または取り消し
+- **動作**: 
+  - 発注先を選択または保存すると、発注データに反映され、商品リストの再読み込みを防ぐ実装
+  - 編集モードの状態管理と、`useEffect`の最適化により、不要な再レンダリングを防止
+- **実装ファイル**: `/app/routes/app.order.tsx`（1851-2027行目）
+
+#### 2. 原価と販売価格の取得・保存
+- **実装内容**: 商品リスト取得時（`loadItems` intent）に、variantの原価（`inventoryItem.unitCost.amount`）と販売価格（`variant.price`）を取得し、発注データに保存。
+- **データ構造**: 
+  - `OrderRequestItem`型に`cost?: number`（原価）と`price?: number`（販売価格）フィールドを追加
+  - 既存データとの互換性を保つため、オプショナルフィールドとして定義
+- **取得処理**: 
+  - variantIdがある商品について、GraphQLで一括取得（`nodes(ids: [...])`）
+  - 取得した原価・販売価格を`items`に付与し、発注データに保存
+  - 既存の値があれば保持、なければ新規取得
+- **実装ファイル**: `/app/routes/app.order.tsx`（16-27行目：型定義、630-732行目：取得処理）
+
+#### 3. CSV出力項目に販売価格を追加
+- **実装内容**: CSV出力項目に「販売価格」を追加し、設定画面で選択・並び替え可能に。
+- **CSV列定義**: 
+  - `OrderCsvColumn`型に`"price"`を追加（`app.settings.tsx`）
+  - `ALL_CSV_COLUMNS`に`"price"`を追加
+  - CSV列名マッピングに`price: "販売価格"`を追加
+- **CSV出力処理**: 
+  - CSV出力時に`cost`と`price`を出力（保存された値を使用）
+  - 値が未設定の場合は空文字を出力
+- **実装ファイル**: 
+  - `/app/routes/app.order.tsx`（1331行目：列名マッピング、1419-1422行目：CSV出力）
+  - `/app/routes/app.settings.tsx`（57行目：型定義、249行目：validColumns、906行目：列名マッピング）
+
+#### 4. 不具合修正
+- **発注先選択時に承認モーダルが表示される問題**: 
+  - `useEffect`の条件分岐を修正し、発注先更新の処理を先にチェックするように変更
+  - `"destination" in fetcher.data`を先に評価することで、承認処理と混同しないように修正
+- **発注先選択・保存時に商品リストが再読み込みされる問題**: 
+  - `useEffect`の依存配列から`modalEntry`を削除し、`modalEntryRef`を使用して最新値を参照
+  - `modalEntry`の更新を`setTimeout`で遅延実行することで、`useEffect`の再実行を防止
+- **承認取り消し後のモーダル挙動**: 
+  - 承認取り消し後、モーダルを閉じてページを再読み込みする処理を削除
+  - `entries`の状態を直接更新することで、リロードなしで状態を反映
+
+#### 実装ファイル
+- `/app/routes/app.order.tsx`（発注先編集UI、原価・販売価格取得処理、CSV出力処理）
+- `/app/routes/app.settings.tsx`（CSV出力項目設定に販売価格を追加）
+
+#### 進捗状況
+- ✅ **発注先編集機能**: 完了（商品リストモーダル内で編集可能）
+- ✅ **原価・販売価格の取得・保存**: 完了（商品リスト取得時に自動取得・保存）
+- ✅ **CSV出力項目拡張**: 完了（原価・販売価格を出力可能）
+- ✅ **不具合修正**: 完了（発注先選択時の挙動、商品リスト再読み込み防止）
+- ✅ **処理確定モーダル文言**: 完了（「仕入予定（#P0000）が作成されました。」と表示。`createPurchaseFromOrder` の `purchaseName` を使用）
+- ✅ **CSVファイル名の統一**: 完了（一覧: `機能_日付`、単一: `機能_名称（#P0000等）_日付`。発注単一は `orderName`、仕入一覧/単一は `仕入履歴_日付` / `仕入履歴_${purchaseName}_日付`）
+- ✅ **発注→仕入の名称引き継ぎ**: 完了（#P0000 / #P0000-1 の採番と `purchaseName` 保存。`app.order.tsx` の `createPurchaseFromOrder`）
+- ✅ **発注・仕入の JAN・オプション補完**: 完了（`loadItems` で variant の `barcode` と `selectedOptions` を API 取得し items に付与。キャンセル時やCSV出力でも利用）
+
+#### 残りのタスク
+- ✅ **仕入予定一覧画面**: 発注から作成した #P0000 は既に `/app/purchase` の一覧に表示済み。#B0000 は POS 仕入アプリ実装後に同一一覧に表示される想定。
+- ⏸️ **POSアプリからの仕入機能（#B0000）**: **5を進めるには仕入のPOSアプリの開発が必要。**  
+  - 新規拡張 `extensions/stock-transfer-purchase` の作成（Phase C）。  
+  - コンディション画面・商品リスト・確定で在庫プラス＋`purchase_entries_v1` に #B0000 で保存。  
+  - 詳細は `docs/PURCHASE_IMPLEMENTATION_PLAN.md` の「Phase C: POS 拡張「仕入」」および `docs/REQUIREMENTS_PURCHASE_AND_ORDER.md` を参照。

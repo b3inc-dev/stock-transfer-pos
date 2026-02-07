@@ -553,7 +553,7 @@ function toInventoryItemGid(s) {
   return null;
 }
 
-export async function adjustInventoryAtLocation({ locationId, deltas }) {
+export async function adjustInventoryAtLocation({ locationId, deltas, referenceDocumentUri }) {
   // inventoryItemIdをGID形式に変換してから処理
   const changes = (deltas ?? [])
     .map((x) => {
@@ -576,6 +576,9 @@ export async function adjustInventoryAtLocation({ locationId, deltas }) {
     throw new Error(`無効なロケーションID: ${locationId}`);
   }
   
+  // referenceDocumentUriを生成（ロスエントリIDが指定されている場合）
+  const uri = referenceDocumentUri ? `gid://stock-transfer-pos/LossEntry/${referenceDocumentUri}` : null;
+  
   try {
     const m1 = `#graphql
       mutation Adjust($input: InventoryAdjustQuantitiesInput!) {
@@ -585,16 +588,23 @@ export async function adjustInventoryAtLocation({ locationId, deltas }) {
         }
       }`;
     
+    const input = {
+      reason: "correction",
+      name: "available",
+      changes: changes.map((c) => ({
+        inventoryItemId: c.inventoryItemId,
+        locationId: locationGid,
+        delta: c.delta,
+      })),
+    };
+    
+    // referenceDocumentUriが指定されている場合は追加
+    if (uri) {
+      input.referenceDocumentUri = uri;
+    }
+    
     const d1 = await graphql(m1, {
-      input: {
-        reason: "correction",
-        name: "available",
-        changes: changes.map((c) => ({
-          inventoryItemId: c.inventoryItemId,
-          locationId: locationGid,
-          delta: c.delta,
-        })),
-      },
+      input,
     });
     
     // レスポンスが空の場合はエラー
@@ -710,30 +720,15 @@ export async function fetchStaffMembers() {
       return [];
     }
 
-    // アプリURLを取得
-    // 開発環境: shopify app dev を使用している場合、通常は localhost:3000
-    // 本番環境: https://stock-transfer-pos.onrender.com
-    // 注意: 開発環境で動作させる場合は、localhost:3000 を優先的に試行
+    // アプリURLを取得（共通設定から読み込み）
     const currentSession = session?.currentSession;
     const shopDomain = currentSession?.shopDomain;
     
-    // 開発環境と本番環境のURL候補
-    const devUrl = "http://localhost:3000";
-    const prodUrl = "https://stock-transfer-pos.onrender.com";
+    // 公開アプリ本番: getAppUrl() → https://pos-stock-public.onrender.com
+    const { getAppUrl } = await import("../../../../common/appUrl.js");
+    const appUrl = getAppUrl();
     
-    // 開発環境の判定: shopify app dev を使用している場合
-    // 開発環境では通常 localhost で動作するため、まず localhost を試行
-    // 本番環境では application_url を使用
-    // 注意: 開発環境で動作している場合は、localhost:3000 を優先
-    // 本番環境で動作している場合は、prodUrl を使用
-    // ここでは、開発環境を優先的に試行する（失敗した場合は本番環境を試行するロジックは後で追加可能）
-    let appUrl = devUrl; // 開発環境を優先（本番環境で動作する場合は prodUrl に変更）
-    
-    // デバッグ情報
-    console.log("[fetchStaffMembers] shopDomain:", shopDomain, "appUrl:", appUrl);
-
     const apiUrl = `${appUrl}/api/staff-members`;
-    console.log("[fetchStaffMembers] Calling API:", apiUrl);
 
     const res = await fetch(apiUrl, {
       method: "GET",
@@ -743,28 +738,20 @@ export async function fetchStaffMembers() {
       },
     });
 
-    console.log("[fetchStaffMembers] Response status:", res.status);
-
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error("[fetchStaffMembers] HTTP error:", res.status, text);
       throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
     }
 
     const json = await res.json();
-    console.log("[fetchStaffMembers] Response JSON:", json);
 
     if (!json.ok) {
-      console.error("[fetchStaffMembers] API error:", json.error, json.details);
       throw new Error(json.error || "Failed to fetch staff members");
     }
 
     const staffList = Array.isArray(json.staffMembers) ? json.staffMembers : [];
-    console.log("[fetchStaffMembers] Staff list length:", staffList.length);
     return staffList;
-  } catch (e) {
-    // エラー時は空配列を返す（APIが利用できない可能性）
-    console.error("[fetchStaffMembers] Exception:", e?.message ?? e, e);
+  } catch {
     return [];
   }
 }
@@ -800,12 +787,46 @@ export async function fetchSettings() {
     const data = await graphql(gql);
     const raw = data?.currentAppInstallation?.metafield?.value ?? null;
     const parsed = safeParseJson(raw, null);
-    if (parsed && parsed.version === 1) {
-      return parsed;
-    }
-    return { version: 1, carriers: [] };
+    const base = parsed && parsed.version === 1 ? parsed : {};
+
+    // ✅ デフォルトのロス区分（破損・紛失）
+    const defaultLossReasons = [
+      { id: "damage", label: "破損", sortOrder: 1 },
+      { id: "lost", label: "紛失", sortOrder: 2 },
+    ];
+
+    const lossReasonsRaw = Array.isArray(base.lossReasons) ? base.lossReasons : [];
+    const lossReasons =
+      lossReasonsRaw.length > 0
+        ? lossReasonsRaw
+        : defaultLossReasons;
+
+    const allowCustomReason =
+      base.loss && typeof base.loss.allowCustomReason === "boolean"
+        ? !!base.loss.allowCustomReason
+        : true;
+
+    return {
+      version: 1,
+      carriers: Array.isArray(base.carriers) ? base.carriers : [],
+      lossReasons,
+      loss: {
+        allowCustomReason,
+      },
+    };
   } catch (e) {
     console.error("[fetchSettings] error:", e);
-    return { version: 1, carriers: [] };
+    // エラー時も、ロス区分と「その他」許可フラグはデフォルトを返す
+    return {
+      version: 1,
+      carriers: [],
+      lossReasons: [
+        { id: "damage", label: "破損", sortOrder: 1 },
+        { id: "lost", label: "紛失", sortOrder: 2 },
+      ],
+      loss: {
+        allowCustomReason: true,
+      },
+    };
   }
 }

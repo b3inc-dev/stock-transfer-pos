@@ -4,6 +4,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
+import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -73,6 +74,9 @@ export type InventoryCount = {
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin } = await authenticate.admin(request);
+
+  // ショップのタイムゾーンを取得
+  const shopTimezone = await getShopTimezone(admin);
 
   // ロケーション・メタフィールドは単発取得。コレクション・商品はページネーションで全件取得
   const [locResp, appResp] = await Promise.all([
@@ -290,7 +294,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     // skuVariantList は空のまま
   }
 
-  return { locations, collections, productGroups, inventoryCounts, skuVariantList };
+  // サーバー側で「今日の日付」を計算
+  const todayInShopTimezone = getDateInShopTimezone(new Date(), shopTimezone);
+
+  return { locations, collections, productGroups, inventoryCounts, skuVariantList, shopTimezone, todayInShopTimezone };
 }
 
 function generateId(prefix: string): string {
@@ -337,8 +344,8 @@ async function resolveSkusToInventoryItemIds(
             ids.push(node.inventoryItem.id);
           }
         }
-      } catch (e) {
-        console.warn(`SKU resolve failed for "${sku}":`, e);
+      } catch {
+        // SKU resolve failed for this row; skip
       }
     }
     return ids;
@@ -457,8 +464,7 @@ export async function action({ request }: ActionFunctionArgs) {
         title: (n.product?.title ?? "") + (n.title && n.title !== "Default Title" ? ` / ${n.title}` : ""),
       })).filter((v: { inventoryItemId?: string }) => v.inventoryItemId);
       return { ok: true, variants };
-    } catch (e) {
-      console.warn("search_variants_by_sku failed:", e);
+    } catch {
       return { ok: true, variants: [] };
     }
   }
@@ -1351,12 +1357,16 @@ export type SkuSearchVariant = {
 
 export default function InventoryCountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const locations = loaderData?.locations ?? [];
-  const collections = loaderData?.collections ?? [];
-  const productGroups = loaderData?.productGroups ?? [];
-  const inventoryCounts = loaderData?.inventoryCounts ?? [];
+  const { locations, collections, productGroups, inventoryCounts, skuVariantList, shopTimezone, todayInShopTimezone } = loaderData || {
+    locations: [],
+    collections: [],
+    productGroups: [],
+    inventoryCounts: [],
+    skuVariantList: [],
+    shopTimezone: "UTC",
+  };
   const fetcher = useFetcher<typeof action>();
-  const allSkuVariants: SkuSearchVariant[] = Array.isArray(loaderData?.skuVariantList) ? loaderData.skuVariantList : [];
+  const allSkuVariants: SkuSearchVariant[] = Array.isArray(skuVariantList) ? skuVariantList : [];
   const [skuSearchQuery, setSkuSearchQuery] = useState("");
   const [showOnlySelectedSku, setShowOnlySelectedSku] = useState(false);
   const [selectedSkuVariants, setSelectedSkuVariants] = useState<SkuSearchVariant[]>([]);
@@ -1833,6 +1843,15 @@ export default function InventoryCountPage() {
     return labels[status] || status;
   };
 
+  // ステータスバッジ用スタイル（アプリと同様のバッチ表示）
+  const getStatusBadgeStyle = (status: string): React.CSSProperties => {
+    const base = { display: "inline-block" as const, padding: "2px 8px", borderRadius: "9999px", fontSize: "12px", fontWeight: 600 };
+    if (status === "completed") return { ...base, backgroundColor: "#d4edda", color: "#155724" };
+    if (status === "cancelled") return { ...base, backgroundColor: "#e2e3e5", color: "#383d41" };
+    if (status === "draft") return { ...base, backgroundColor: "#e2e3e5", color: "#383d41" };
+    return { ...base, backgroundColor: "#cce5ff", color: "#004085" }; // in_progress
+  };
+
   // ロケーション検索結果
   const filteredLocations = useMemo(() => {
     if (!createLocationSearchQuery.trim()) {
@@ -2026,31 +2045,35 @@ export default function InventoryCountPage() {
 
     const selectedCounts = filteredCounts.filter((c) => selectedIds.has(c.id));
 
+    const dateOnly = (iso?: string) => (iso ? new Date(iso).toISOString().split("T")[0] : "");
     const headers = detail
       ? [
           "棚卸ID",
           "名称",
+          "日付",
+          "完了日",
           "ロケーション",
           "商品グループ",
           "ステータス",
-          "商品名/SKU",
+          "商品名",
+          "SKU",
+          "JAN",
           "オプション1",
           "オプション2",
           "オプション3",
-          "現在在庫",
+          "在庫",
           "実数",
           "差分",
-          "作成日時",
-          "完了日時",
+          "種別",
         ]
       : [
           "棚卸ID",
           "名称",
+          "日付",
+          "完了日",
           "ロケーション",
           "商品グループ",
           "ステータス",
-          "作成日時",
-          "完了日時",
         ];
 
     const rows: string[][] = [];
@@ -2059,7 +2082,6 @@ export default function InventoryCountPage() {
       const statusLabel = getStatusLabel(c.status);
       const countName = c.countName || c.id;
 
-      // 複数商品グループ対応
       const groupNames = Array.isArray(c.productGroupNames) && c.productGroupNames.length > 0
         ? c.productGroupNames.join(", ")
         : Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
@@ -2068,41 +2090,46 @@ export default function InventoryCountPage() {
 
       if (detail && c.items?.length) {
         c.items.forEach((it) => {
-          // ✅ 商品名とオプションを分離（入出庫と同じ実装）
           const titleRaw = String(it.title || "").trim();
           const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-          const productName = parts[0] || titleRaw || it.sku || "-";
+          const productName = parts[0] || titleRaw || (it as any).sku || "-";
           const optionParts = parts.length >= 2 ? parts.slice(1) : [];
           const option1 = optionParts[0] || "";
           const option2 = optionParts[1] || "";
           const option3 = optionParts[2] || "";
+          const sku = String((it as any).sku ?? "").trim();
+          const jan = String((it as any).barcode ?? "").trim();
+          const kindLabel = (it as any).isExtra ? "予定外" : "";
 
           rows.push([
             c.id,
             countName,
+            dateOnly(c.createdAt),
+            dateOnly(c.completedAt),
             locName,
             groupNames,
             statusLabel,
             productName,
+            sku,
+            jan,
             option1,
             option2,
             option3,
             String(it.currentQuantity ?? ""),
             String(it.actualQuantity ?? ""),
             String(it.delta ?? ""),
-            c.createdAt,
-            c.completedAt || "",
+            kindLabel,
           ]);
         });
       } else {
         rows.push([
           c.id,
           countName,
+          dateOnly(c.createdAt),
+          dateOnly(c.completedAt),
           locName,
           groupNames,
           statusLabel,
-          c.createdAt,
-          c.completedAt || "",
         ]);
       }
     });
@@ -2116,7 +2143,7 @@ export default function InventoryCountPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `棚卸履歴_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `棚卸履歴_${todayInShopTimezone}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -2126,74 +2153,80 @@ export default function InventoryCountPage() {
     <s-page heading="棚卸">
       <s-scroll-box padding="base">
         <s-stack gap="base">
-          {/* タブ切り替え（選択中のみ背景・角丸）。メニュー下の余白を狭くする */}
-          <div style={{ paddingBottom: "4px" }}>
-            <div style={{ padding: "8px 16px 0 16px" }}>
-              <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("groups")}
-                  style={{
-                    padding: "8px 16px",
-                    border: "none",
-                    borderRadius: "8px",
-                    background: activeTab === "groups" ? "#e5e7eb" : "transparent",
-                    color: "#202223",
-                    fontSize: "14px",
-                    fontWeight: 500,
-                    cursor: "pointer",
-                  }}
-                >
-                  商品グループ設定
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("create")}
-                  style={{
-                    padding: "8px 16px",
-                    border: "none",
-                    borderRadius: "8px",
-                    background: activeTab === "create" ? "#e5e7eb" : "transparent",
-                    color: "#202223",
-                    fontSize: "14px",
-                    fontWeight: 500,
-                    cursor: "pointer",
-                  }}
-                >
-                  棚卸ID発行
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("history")}
-                  style={{
-                    padding: "8px 16px",
-                    border: "none",
-                    borderRadius: "8px",
-                    background: activeTab === "history" ? "#e5e7eb" : "transparent",
-                    color: "#202223",
-                    fontSize: "14px",
-                    fontWeight: 500,
-                    cursor: "pointer",
-                  }}
-                >
-                  履歴
-                </button>
-              </div>
+          {/* 上部タブナビゲーション（設定画面とトンマナを揃える） */}
+          <s-box padding="none">
+            <div
+              style={{
+                display: "flex",
+                gap: "8px",
+                padding: "0 16px 8px",
+                borderBottom: "1px solid #e1e3e5",
+                flexWrap: "wrap",
+              }}
+            >
+              {[
+                { id: "groups" as const, label: "商品グループ設定" },
+                { id: "create" as const, label: "棚卸ID発行" },
+                { id: "history" as const, label: "履歴" },
+              ].map((tab) => {
+                const selected = activeTab === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveTab(tab.id)}
+                    style={{
+                      border: "none",
+                      backgroundColor: selected ? "#e5e7eb" : "transparent",
+                      borderRadius: 8,
+                      padding: "6px 12px",
+                      cursor: "pointer",
+                      fontSize: 14,
+                      fontWeight: selected ? 600 : 500,
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
             </div>
-            <s-divider />
-          </div>
+          </s-box>
 
           {/* 商品グループ設定 */}
           {activeTab === "groups" && (
-            <s-section heading="商品グループ設定">
-              <s-box padding="base">
-                {/* 二分割レイアウト（SP時は右カラムを左下部に回す） */}
-                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
-                  {/* 左側: 作成方法タブ + 各フォーム */}
-                  <div style={{ flex: "1 1 320px", minWidth: 0 }}>
-                    <s-stack gap="base">
-                      <s-text emphasis="bold" size="large">商品グループ</s-text>
-                      <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
+            <s-box padding="base">
+              <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
+                {/* 左側: タイトル＋説明 ＋ 作成フォーム（フォーム領域を白カードに） */}
+                <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+                  <s-stack gap="base">
+                    {/* タイトル＋説明 */}
+                    <div>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 14,
+                          marginBottom: 4,
+                        }}
+                      >
+                        商品グループ設定
+                      </div>
+                      <s-text tone="subdued" size="small">
+                        棚卸で使う商品グループを作成・編集します。作成方法を選び、グループ内容を設定してください。
+                      </s-text>
+                    </div>
+
+                    {/* 作成フォーム（白カード） */}
+                    <div
+                      style={{
+                        background: "#ffffff",
+                        borderRadius: 12,
+                        boxShadow: "0 0 0 1px #e1e3e5",
+                        padding: 16,
+                      }}
+                    >
+                      <s-stack gap="base">
+                        <s-text emphasis="bold" size="large">商品グループ</s-text>
+                        <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
                         <button
                           type="button"
                           onClick={() => setGroupCreateMethod("collection")}
@@ -2208,7 +2241,7 @@ export default function InventoryCountPage() {
                             cursor: "pointer",
                           }}
                         >
-                          コレクションから作成
+                          コレクション検索
                         </button>
                         <button
                           type="button"
@@ -2224,7 +2257,7 @@ export default function InventoryCountPage() {
                             cursor: "pointer",
                           }}
                         >
-                          SKU選択から作成
+                          商品検索
                         </button>
                         <button
                           type="button"
@@ -2240,12 +2273,12 @@ export default function InventoryCountPage() {
                             cursor: "pointer",
                           }}
                         >
-                          CSVで一括登録
+                          CSVアップロード
                         </button>
                       </div>
                       <s-divider />
 
-                      {/* 1. コレクションから作成（レイアウト・背景・ボタン位置をSKU選択から作成と同じに） */}
+                      {/* 1. コレクション検索（レイアウト・背景・ボタン位置を商品検索と同じに） */}
                       {groupCreateMethod === "collection" && (
                         <s-stack gap="base">
                           {editingGroupId && editingGroup && (
@@ -2253,7 +2286,7 @@ export default function InventoryCountPage() {
                               <span style={{ fontWeight: 600, fontSize: "14px", whiteSpace: "normal" }}>「{editingGroup.name}」編集中</span>
                             </div>
                           )}
-                          <s-text emphasis="bold" size="small">コレクションから作成</s-text>
+                          <s-text emphasis="bold" size="small">コレクション検索</s-text>
                           <s-text tone="subdued" size="small">
                             グループ名を入力し、コレクションを選択してグループを作成します。初回からコレクションを選択できます。
                           </s-text>
@@ -2312,8 +2345,8 @@ export default function InventoryCountPage() {
                                         padding: "10px 12px",
                                         borderRadius: "6px",
                                         cursor: "pointer",
-                                        backgroundColor: isSelected ? "#f0f9f7" : "transparent",
-                                        border: isSelected ? "1px solid #008060" : "1px solid transparent",
+                                        backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                        border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
                                         borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
                                         marginTop: "4px",
                                         display: "flex",
@@ -2429,7 +2462,7 @@ export default function InventoryCountPage() {
                         </s-stack>
                       )}
 
-                      {/* 2. SKU選択から作成 */}
+                      {/* 2. 商品検索 */}
                       {groupCreateMethod === "sku" && (
                         <s-stack gap="base">
                           {editingGroupId && editingGroup && (
@@ -2437,7 +2470,7 @@ export default function InventoryCountPage() {
                               <span style={{ fontWeight: 600, fontSize: "14px", whiteSpace: "normal" }}>「{editingGroup.name}」編集中</span>
                             </div>
                           )}
-                          <s-text emphasis="bold" size="small">SKU選択から作成</s-text>
+                          <s-text emphasis="bold" size="small">商品検索</s-text>
                           <s-text tone="subdued" size="small">
                             グループ名を入力し、一覧から商品を選択してグループを作成します。全商品・全バリアントを読み込み（多数の場合は初回ロードに時間がかかります）。入力で絞り込み。
                           </s-text>
@@ -2485,8 +2518,8 @@ export default function InventoryCountPage() {
                                       padding: "10px 12px",
                                       borderRadius: "6px",
                                       cursor: "pointer",
-                                      backgroundColor: isSelected ? "#f0f9f7" : "transparent",
-                                      border: isSelected ? "1px solid #008060" : "1px solid transparent",
+                                      backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                      border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
                                       borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
                                       marginTop: "4px",
                                       display: "flex",
@@ -2593,10 +2626,10 @@ export default function InventoryCountPage() {
                         </s-stack>
                       )}
 
-                      {/* 3. CSVで一括登録 */}
+                      {/* 3. CSVアップロード */}
                       {groupCreateMethod === "csv" && (
                         <s-stack gap="base">
-                          <s-text emphasis="bold" size="small">CSVで一括登録（グループ名＋SKU）</s-text>
+                          <s-text emphasis="bold" size="small">CSVアップロード（グループ名＋SKU）</s-text>
                           <s-text tone="subdued" size="small">
                             1行目: グループ名,SKU（ヘッダー可）。同じグループ名の行は1グループにまとまります。1ファイル: グループ数は無制限、SKU行数は最大10000行です。
                           </s-text>
@@ -2641,7 +2674,7 @@ export default function InventoryCountPage() {
                           />
                           <s-stack direction="inline" gap="base">
                             <s-button onClick={handleCsvImportClick} disabled={fetcher.state !== "idle"} tone="secondary">
-                              CSVでインポート
+                              CSVアップロード
                             </s-button>
                             <s-button onClick={handleCsvTemplateDownload} tone="secondary">
                               テンプレートダウンロード
@@ -2669,11 +2702,21 @@ export default function InventoryCountPage() {
                           )}
                         </s-stack>
                       )}
-                    </s-stack>
-                  </div>
+                      </s-stack>
+                    </div>
+                  </s-stack>
+                </div>
 
-                  {/* 右側: 登録済み商品グループリスト */}
-                  <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
+                {/* 右側: 登録済み商品グループリスト（白カードで囲む） */}
+                <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
+                  <div
+                    style={{
+                      background: "#ffffff",
+                      borderRadius: 12,
+                      boxShadow: "0 0 0 1px #e1e3e5",
+                      padding: 16,
+                    }}
+                  >
                     <s-stack gap="base">
                       <s-stack direction="inline" gap="base" inlineAlignment="space-between">
                         <s-text emphasis="bold" size="large">登録済み商品グループ</s-text>
@@ -2782,7 +2825,7 @@ export default function InventoryCountPage() {
                                               gap: "10px",
                                             }}
                                             onMouseEnter={(e) => {
-                                              e.currentTarget.style.borderColor = "#008060";
+                                              e.currentTarget.style.borderColor = "#2563eb";
                                               e.currentTarget.style.backgroundColor = "#f9fafb";
                                             }}
                                             onMouseLeave={(e) => {
@@ -2874,7 +2917,7 @@ export default function InventoryCountPage() {
                                         width: "100%",
                                       }}
                                       onMouseEnter={(e) => {
-                                        e.currentTarget.style.borderColor = "#008060";
+                                        e.currentTarget.style.borderColor = "#2563eb";
                                         e.currentTarget.style.backgroundColor = "#f9fafb";
                                       }}
                                       onMouseLeave={(e) => {
@@ -2886,7 +2929,7 @@ export default function InventoryCountPage() {
                                         SKU一覧（{skuCount}件）を確認・編集
                                       </s-text>
                                       <s-text tone="subdued" size="small">
-                                        クリックで左側の「SKU選択から作成」で一覧を表示
+                                        クリックで「商品検索」で一覧を表示
                                       </s-text>
                                     </div>
                                   ) : (
@@ -2901,163 +2944,192 @@ export default function InventoryCountPage() {
                     </s-stack>
                   </div>
                 </div>
-              </s-box>
-            </s-section>
+              </div>
+            </s-box>
           )}
 
           {/* 棚卸ID発行 */}
           {activeTab === "create" && (
-            <s-section heading="棚卸ID発行">
-              <s-box padding="base">
-                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
-                  {/* 左側: 発行フォーム */}
-                  <div style={{ flex: "1 1 320px", minWidth: 0 }}>
-                    <s-stack gap="base">
-                      <s-text emphasis="bold" size="large">棚卸IDを発行</s-text>
-                      <s-text tone="subdued" size="small">
-                        ロケーションと商品グループを選んで発行します。発行後はPOSで棚卸ができます。
-                      </s-text>
-                      <s-divider />
-
-                      {/* Step 1: ロケーション選択 */}
-                      <s-stack gap="base">
-                        <s-text emphasis="bold" size="small">1. ロケーション選択</s-text>
-                        <s-text tone="subdued" size="small">
-                          棚卸を行うロケーションを1つ選びます。
-                        </s-text>
-                        <s-text-field
-                          label="ロケーション検索"
-                          value={createLocationSearchQuery}
-                          onInput={(e: any) => setCreateLocationSearchQuery(readValue(e))}
-                          onChange={(e: any) => setCreateLocationSearchQuery(readValue(e))}
-                          placeholder="ロケーション名で検索..."
-                        />
-                        <div style={{ maxHeight: "220px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
-                          {filteredLocations.length === 0 ? (
-                            <s-text tone="subdued" size="small">ロケーションが見つかりません</s-text>
-                          ) : (
-                            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                              {filteredLocations.map((loc) => {
-                                const isSelected = createLocationId === loc.id;
-                                return (
-                                  <div
-                                    key={loc.id}
-                                    onClick={() => setCreateLocationId(isSelected ? "" : loc.id)}
-                                    style={{
-                                      cursor: "pointer",
-                                      padding: "10px 12px",
-                                      borderRadius: "8px",
-                                      border: isSelected ? "2px solid #008060" : "1px solid #e1e3e5",
-                                      backgroundColor: isSelected ? "#f0f9f7" : "#ffffff",
-                                    }}
-                                  >
-                                    <span style={{ fontWeight: isSelected ? 600 : 500 }}>{isSelected ? "✓ " : ""}{loc.name}</span>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                        {createLocationId && (
-                          <s-text tone="subdued" size="small">
-                            選択中: {locations.find((l) => l.id === createLocationId)?.name || createLocationId}
-                          </s-text>
-                        )}
-                      </s-stack>
-                      <s-divider />
-
-                      {/* Step 2: 商品グループ選択 */}
-                      <s-stack gap="base">
-                        <s-text emphasis="bold" size="small">2. 商品グループ選択（複数可）</s-text>
-                        <s-text tone="subdued" size="small">
-                          対象の商品グループを1つ以上選びます。
-                        </s-text>
-                        <div style={{ maxHeight: "240px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
-                          {productGroups.length === 0 ? (
-                            <s-text tone="subdued" size="small">商品グループがありません。先に「商品グループ設定」で作成してください。</s-text>
-                          ) : (
-                            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                              {productGroups.map((g) => {
-                                const isSelected = createProductGroupIds.includes(g.id);
-                                const skuCount = g.skus?.length ?? g.inventoryItemIds?.length ?? 0;
-                                const isSkuOnly = (g.collectionIds?.length ?? 0) === 0 && skuCount > 0;
-                                const subLabel = isSkuOnly ? `SKU指定: ${skuCount}件` : `コレクション: ${g.collectionIds?.length ?? 0}件`;
-                                return (
-                                  <div
-                                    key={g.id}
-                                    onClick={() => toggleProductGroup(g.id)}
-                                    style={{
-                                      cursor: "pointer",
-                                      padding: "10px 12px",
-                                      borderRadius: "8px",
-                                      border: isSelected ? "2px solid #008060" : "1px solid #e1e3e5",
-                                      backgroundColor: isSelected ? "#f0f9f7" : "#ffffff",
-                                      display: "flex",
-                                      alignItems: "center",
-                                      gap: "10px",
-                                    }}
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={isSelected}
-                                      onChange={() => toggleProductGroup(g.id)}
-                                      onClick={(e) => e.stopPropagation()}
-                                      style={{ width: "18px", height: "18px", flexShrink: 0 }}
-                                    />
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                      <div style={{ fontWeight: isSelected ? 600 : 500 }}>{g.name}</div>
-                                      <div style={{ fontSize: "12px", color: "#6d7175" }}>{subLabel}</div>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                        {createProductGroupIds.length > 0 && (
-                          <s-text tone="subdued" size="small">
-                            選択中: {createProductGroupIds.length}グループ
-                          </s-text>
-                        )}
-                      </s-stack>
-                      <s-divider />
-
-                      <s-button
-                        onClick={handleCreateCount}
-                        disabled={fetcher.state !== "idle" || !createLocationId || createProductGroupIds.length === 0}
-                        tone="success"
+            <s-box padding="base">
+              <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
+                {/* 左側: タイトル＋説明 ＋ 発行フォーム（フォーム領域を白カードに） */}
+                <div style={{ flex: "1 1 320px", minWidth: 0 }}>
+                  <s-stack gap="base">
+                    {/* タイトル＋説明 */}
+                    <div>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 14,
+                          marginBottom: 4,
+                        }}
                       >
-                        棚卸IDを発行
-                      </s-button>
-                      {fetcher.data?.ok && fetcher.data.inventoryCountId && (
-                        <s-box padding="base" background="subdued">
-                          <s-text emphasis="bold" tone="success">
-                            発行完了: {fetcher.data.countName ?? fetcher.data.inventoryCountId}
-                          </s-text>
-                          <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
-                            履歴タブで確認・CSV出力できます。
-                          </s-text>
-                        </s-box>
-                      )}
-                    </s-stack>
-                  </div>
+                        棚卸ID発行
+                      </div>
+                      <s-text tone="subdued" size="small">
+                        ロケーションと商品グループを選んで棚卸IDを発行します。発行後はPOS側で棚卸を行えます。
+                      </s-text>
+                    </div>
 
-                  {/* 右側: 発行の流れ・直近一覧 */}
+                    {/* 発行フォーム（白カード） */}
+                    <div
+                      style={{
+                        background: "#ffffff",
+                        borderRadius: 12,
+                        boxShadow: "0 0 0 1px #e1e3e5",
+                        padding: 16,
+                      }}
+                    >
+                      <s-stack gap="base">
+                        {/* Step 1: ロケーション選択 */}
+                        <s-stack gap="base">
+                          <s-text emphasis="bold" size="small">1. ロケーション選択</s-text>
+                          <s-text tone="subdued" size="small">
+                            棚卸を行うロケーションを1つ選びます。
+                          </s-text>
+                          <s-text-field
+                            label="ロケーション検索"
+                            value={createLocationSearchQuery}
+                            onInput={(e: any) => setCreateLocationSearchQuery(readValue(e))}
+                            onChange={(e: any) => setCreateLocationSearchQuery(readValue(e))}
+                            placeholder="ロケーション名で検索..."
+                          />
+                          <div style={{ maxHeight: "220px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
+                            {filteredLocations.length === 0 ? (
+                              <s-text tone="subdued" size="small">ロケーションが見つかりません</s-text>
+                            ) : (
+                              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                                {filteredLocations.map((loc) => {
+                                  const isSelected = createLocationId === loc.id;
+                                  return (
+                                    <div
+                                      key={loc.id}
+                                      onClick={() => setCreateLocationId(isSelected ? "" : loc.id)}
+                                      style={{
+                                        cursor: "pointer",
+                                        padding: "10px 12px",
+                                        borderRadius: "8px",
+                                        border: isSelected ? "2px solid #2563eb" : "1px solid #e1e3e5",
+                                        backgroundColor: isSelected ? "#eff6ff" : "#ffffff",
+                                      }}
+                                    >
+                                      <span style={{ fontWeight: isSelected ? 600 : 500 }}>{isSelected ? "✓ " : ""}{loc.name}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                          {createLocationId && (
+                            <s-text tone="subdued" size="small">
+                              選択中: {locations.find((l) => l.id === createLocationId)?.name || createLocationId}
+                            </s-text>
+                          )}
+                        </s-stack>
+                        <s-divider />
+
+                        {/* Step 2: 商品グループ選択 */}
+                        <s-stack gap="base">
+                          <s-text emphasis="bold" size="small">2. 商品グループ選択（複数可）</s-text>
+                          <s-text tone="subdued" size="small">
+                            対象の商品グループを1つ以上選びます。
+                          </s-text>
+                          <div style={{ maxHeight: "240px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
+                            {productGroups.length === 0 ? (
+                              <s-text tone="subdued" size="small">商品グループがありません。先に「商品グループ設定」で作成してください。</s-text>
+                            ) : (
+                              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                                {productGroups.map((g) => {
+                                  const isSelected = createProductGroupIds.includes(g.id);
+                                  const skuCount = g.skus?.length ?? g.inventoryItemIds?.length ?? 0;
+                                  const isSkuOnly = (g.collectionIds?.length ?? 0) === 0 && skuCount > 0;
+                                  const subLabel = isSkuOnly ? `SKU指定: ${skuCount}件` : `コレクション: ${g.collectionIds?.length ?? 0}件`;
+                                  return (
+                                    <div
+                                      key={g.id}
+                                      onClick={() => toggleProductGroup(g.id)}
+                                      style={{
+                                        cursor: "pointer",
+                                        padding: "10px 12px",
+                                        borderRadius: "8px",
+                                        border: isSelected ? "2px solid #2563eb" : "1px solid #e1e3e5",
+                                        backgroundColor: isSelected ? "#eff6ff" : "#ffffff",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "10px",
+                                      }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        onChange={() => toggleProductGroup(g.id)}
+                                        onClick={(e) => e.stopPropagation()}
+                                        style={{ width: "18px", height: "18px", flexShrink: 0 }}
+                                      />
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ fontWeight: isSelected ? 600 : 500 }}>{g.name}</div>
+                                        <div style={{ fontSize: "12px", color: "#6d7175" }}>{subLabel}</div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                          {createProductGroupIds.length > 0 && (
+                            <s-text tone="subdued" size="small">
+                              選択中: {createProductGroupIds.length}グループ
+                            </s-text>
+                          )}
+                        </s-stack>
+                        <s-divider />
+
+                        <s-button
+                          onClick={handleCreateCount}
+                          disabled={fetcher.state !== "idle" || !createLocationId || createProductGroupIds.length === 0}
+                          tone="success"
+                        >
+                          棚卸IDを発行
+                        </s-button>
+                        {fetcher.data?.ok && fetcher.data.inventoryCountId && (
+                          <s-box padding="base" background="subdued">
+                            <s-text emphasis="bold" tone="success">
+                              発行完了: {fetcher.data.countName ?? fetcher.data.inventoryCountId}
+                            </s-text>
+                            <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
+                              履歴タブで確認・CSV出力できます。
+                            </s-text>
+                          </s-box>
+                        )}
+                      </s-stack>
+                    </div>
+                  </s-stack>
+                </div>
+
+                  {/* 右側: 発行の流れ・直近一覧（白カードで囲む） */}
                   <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
+                    <div
+                      style={{
+                        background: "#ffffff",
+                        borderRadius: 12,
+                        boxShadow: "0 0 0 1px #e1e3e5",
+                        padding: 16,
+                      }}
+                    >
                     <s-stack gap="base">
                       <s-text emphasis="bold" size="large">発行の流れ</s-text>
                       <s-box padding="base" background="subdued" style={{ borderRadius: "8px" }}>
                         <s-stack gap="base">
                           <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
-                            <span style={{ fontWeight: 700, color: "#008060", minWidth: "20px" }}>1</span>
-                            <span>左でロケーションと商品グループを選び「棚卸IDを発行」を押します。</span>
+                            <span style={{ fontWeight: 700, color: "#2563eb", minWidth: "20px" }}>1</span>
+                            <span>ロケーションと商品グループを選び「棚卸IDを発行」を押します。</span>
                           </div>
                           <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
-                            <span style={{ fontWeight: 700, color: "#008060", minWidth: "20px" }}>2</span>
+                            <span style={{ fontWeight: 700, color: "#2563eb", minWidth: "20px" }}>2</span>
                             <span>発行された棚卸IDがPOSに表示されます。</span>
                           </div>
                           <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
-                            <span style={{ fontWeight: 700, color: "#008060", minWidth: "20px" }}>3</span>
+                            <span style={{ fontWeight: 700, color: "#2563eb", minWidth: "20px" }}>3</span>
                             <span>POSで棚卸IDを選び、実数入力して完了させます。</span>
                           </div>
                         </s-stack>
@@ -3082,7 +3154,7 @@ export default function InventoryCountPage() {
                               >
                                 <div style={{ fontWeight: 600 }}>{c.countName ?? c.id}</div>
                                 <div style={{ color: "#6d7175", fontSize: "12px", marginTop: "2px" }}>
-                                  {locations.find((l) => l.id === c.locationId)?.name ?? c.locationId} · {getStatusLabel(c.status)} · {new Date(c.createdAt).toLocaleString("ja-JP")}
+                                  {locations.find((l) => l.id === c.locationId)?.name ?? c.locationId} · {getStatusLabel(c.status)} · {formatDateTimeInShopTimezone(c.createdAt, shopTimezone)}
                                 </div>
                               </div>
                             ))}
@@ -3093,24 +3165,46 @@ export default function InventoryCountPage() {
                         </div>
                       )}
                     </s-stack>
+                    </div>
                   </div>
                 </div>
               </s-box>
-            </s-section>
           )}
 
           {/* 履歴 */}
           {activeTab === "history" && (
-            <>
-              <s-section heading="履歴">
-                <s-box padding="base">
-                  <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
-                    {/* 左: フィルター（リスト選択で絞り込み） */}
-                    <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+            <s-box padding="base">
+              <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
+                {/* 左: タイトル＋説明 ＋ フィルター（白カード） */}
+                <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                  <s-stack gap="base">
+                    <div>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 14,
+                          marginBottom: 4,
+                        }}
+                      >
+                        棚卸履歴
+                      </div>
+                      <s-text tone="subdued" size="small">
+                        条件で絞り込みを行い、棚卸履歴を表示します。
+                      </s-text>
+                    </div>
+
+                    <div
+                      style={{
+                        background: "#ffffff",
+                        borderRadius: 12,
+                        boxShadow: "0 0 0 1px #e1e3e5",
+                        padding: 16,
+                      }}
+                    >
                       <s-stack gap="base">
                         <s-text emphasis="bold" size="large">フィルター</s-text>
                         <s-text tone="subdued" size="small">
-                          ロケーション・ステータスを選ぶと一覧が絞り込まれます。未選択＝全て表示。
+                          ロケーション・ステータスを選ぶと一覧が絞り込まれます。
                         </s-text>
                         <s-divider />
                         <s-text emphasis="bold" size="small">ロケーション</s-text>
@@ -3121,8 +3215,8 @@ export default function InventoryCountPage() {
                               padding: "10px 12px",
                               borderRadius: "6px",
                               cursor: "pointer",
-                              backgroundColor: locationFilters.size === 0 ? "#f0f9f7" : "transparent",
-                              border: locationFilters.size === 0 ? "1px solid #008060" : "1px solid transparent",
+                              backgroundColor: locationFilters.size === 0 ? "#eff6ff" : "transparent",
+                              border: locationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent",
                               display: "flex",
                               alignItems: "center",
                               gap: "8px",
@@ -3149,8 +3243,8 @@ export default function InventoryCountPage() {
                                   padding: "10px 12px",
                                   borderRadius: "6px",
                                   cursor: "pointer",
-                                  backgroundColor: isSelected ? "#f0f9f7" : "transparent",
-                                  border: isSelected ? "1px solid #008060" : "1px solid transparent",
+                                  backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                  border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
                                   marginTop: "4px",
                                   display: "flex",
                                   alignItems: "center",
@@ -3176,8 +3270,8 @@ export default function InventoryCountPage() {
                               padding: "10px 12px",
                               borderRadius: "6px",
                               cursor: "pointer",
-                              backgroundColor: statusFilters.size === 0 ? "#f0f9f7" : "transparent",
-                              border: statusFilters.size === 0 ? "1px solid #008060" : "1px solid transparent",
+                              backgroundColor: statusFilters.size === 0 ? "#eff6ff" : "transparent",
+                              border: statusFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent",
                               display: "flex",
                               alignItems: "center",
                               gap: "8px",
@@ -3204,8 +3298,8 @@ export default function InventoryCountPage() {
                                   padding: "10px 12px",
                                   borderRadius: "6px",
                                   cursor: "pointer",
-                                  backgroundColor: isSelected ? "#f0f9f7" : "transparent",
-                                  border: isSelected ? "1px solid #008060" : "1px solid transparent",
+                                  backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                  border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
                                   marginTop: "4px",
                                   display: "flex",
                                   alignItems: "center",
@@ -3225,26 +3319,35 @@ export default function InventoryCountPage() {
                         </div>
                       </s-stack>
                     </div>
+                  </s-stack>
+                </div>
 
-                    {/* 右: 履歴一覧 */}
-                    <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
-                      <s-stack gap="base">
-                        <s-text tone="subdued" size="small">
-                          表示: {filteredCounts.length}件 / {inventoryCounts.length}件
-                        </s-text>
-                        {/* 履歴一覧 */}
-                        {filteredCounts.length === 0 ? (
-                <s-box padding="base">
-                  <s-text tone="subdued">履歴がありません</s-text>
-                </s-box>
-              ) : (
-                <s-stack gap="none">
+                {/* 右: 履歴一覧（白カード） */}
+                <div style={{ flex: "1 1 400px", minWidth: 0, width: "100%" }}>
+                  <div
+                    style={{
+                      background: "#ffffff",
+                      borderRadius: 12,
+                      boxShadow: "0 0 0 1px #e1e3e5",
+                      padding: 16,
+                    }}
+                  >
+                    <s-stack gap="base">
+                      <s-text tone="subdued" size="small">
+                        表示: {filteredCounts.length}件 / {inventoryCounts.length}件
+                      </s-text>
+                      {filteredCounts.length === 0 ? (
+                        <s-box padding="base">
+                          <s-text tone="subdued">履歴がありません</s-text>
+                        </s-box>
+                      ) : (
+                        <s-stack gap="none">
                   {filteredCounts.map((c) => {
                     const isSelected = selectedIds.has(c.id);
                     const locName = getLocationName(c.locationId);
                     const statusLabel = getStatusLabel(c.status);
                     const countName = c.countName || c.id;
-                    const date = c.createdAt ? new Date(c.createdAt).toISOString().split("T")[0] : "";
+                    const date = extractDateFromISO(c.createdAt, shopTimezone);
                     // ✅ 複数商品グループがある場合はgroupItemsを優先、単一グループの場合はitemsフィールドを後方互換性として使用
                     const groupItemsMap = (c as any)?.groupItems && typeof (c as any).groupItems === "object" ? (c as any).groupItems : {};
                     const hasMultipleGroups = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 1;
@@ -3398,7 +3501,7 @@ export default function InventoryCountPage() {
                               }}
                             >
                               <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
-                                状態: {statusLabel}
+                                <span style={getStatusBadgeStyle(c.status)}>{statusLabel}</span>
                               </s-text>
                               <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
                                 {itemCount}件・実数{totalQty}{currentQty > 0 ? `/${currentQty}` : "/-"}
@@ -3412,17 +3515,11 @@ export default function InventoryCountPage() {
                   })}
                 </s-stack>
               )}
-                      </s-stack>
-                    </div>
+                    </s-stack>
                   </div>
-                </s-box>
-              </s-section>
-
-              {/* ページネーション（入出庫履歴と同じ形式、metafieldは全件取得のため常に非表示） */}
-              {/* 注意: 棚卸はmetafieldから全件取得しているため、実際にはページネーションは不要 */}
-              {/* ただし、UIの一貫性のため、入出庫履歴と同じ形式でページネーションを追加 */}
-              {/* pageInfoは常にfalseのため、ページネーションは表示されない */}
-            </>
+                </div>
+              </div>
+            </s-box>
           )}
 
           {fetcher.data?.error && (
@@ -3506,8 +3603,20 @@ export default function InventoryCountPage() {
                           : modalCount.productGroupName || modalCount.productGroupId || "-"
                       }
                     </div>
+                    <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                      <strong>ステータス:</strong>{" "}
+                      <span style={getStatusBadgeStyle(modalCount.status)}>{getStatusLabel(modalCount.status)}</span>
+                    </div>
+                    <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                      <strong>作成日時:</strong> {extractDateFromISO(modalCount.createdAt, shopTimezone)}
+                    </div>
+                    {modalCount.completedAt && (
+                      <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                        <strong>完了日時:</strong> {extractDateFromISO(modalCount.completedAt, shopTimezone)}
+                      </div>
+                    )}
                     {(() => {
-                      // ✅ 商品グループがある場合：各グループの進捗状況を表示（単一グループ・複数グループ両方に対応）
+                      // ✅ 商品グループがある場合：各グループの進捗状況を表示（情報欄の最下部・入出庫と同様）
                       const allGroupIds = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
                         ? modalCount.productGroupIds
                         : modalCount.productGroupId ? [modalCount.productGroupId] : [];
@@ -3553,9 +3662,13 @@ export default function InventoryCountPage() {
                           const groupActualQty = displayItems.reduce((sum, it) => sum + (Number(it?.actualQuantity || 0)), 0);
                           return { groupId, groupName, isCompleted, totalQty: groupTotalQty, actualQty: groupActualQty };
                         });
+                        const extraCount = allGroupIds.reduce((sum, id) => {
+                          const arr = Array.isArray(groupItemsMap[id]) ? groupItemsMap[id] : (Array.isArray(groupItemsMap[String(id)]) ? groupItemsMap[String(id)] : []);
+                          return sum + (arr || []).filter((it: any) => it?.isExtra).length;
+                        }, 0);
                         
                         return (
-                          <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                          <div style={{ fontSize: "14px" }}>
                             <strong>進捗状況:</strong>
                             <div style={{ marginTop: "4px", marginLeft: "16px" }}>
                               {progressInfo.map((info) => (
@@ -3568,23 +3681,17 @@ export default function InventoryCountPage() {
                                   ) : null}
                                 </div>
                               ))}
+                              {extraCount > 0 && (
+                                <div style={{ fontSize: "13px", color: "#666" }}>
+                                  予定外: {extraCount}件
+                                </div>
+                              )}
                             </div>
                           </div>
                         );
                       }
                       return null;
                     })()}
-                    <div style={{ fontSize: "14px", marginBottom: "4px" }}>
-                      <strong>ステータス:</strong> {getStatusLabel(modalCount.status)}
-                    </div>
-                    <div style={{ fontSize: "14px", marginBottom: "4px" }}>
-                      <strong>作成日時:</strong> {modalCount.createdAt ? new Date(modalCount.createdAt).toISOString().split("T")[0] : ""}
-                    </div>
-                    {modalCount.completedAt && (
-                      <div style={{ fontSize: "14px" }}>
-                        <strong>完了日時:</strong> {new Date(modalCount.completedAt).toISOString().split("T")[0]}
-                      </div>
-                    )}
                   </div>
                 )}
 
@@ -3749,21 +3856,22 @@ export default function InventoryCountPage() {
                                 ? modalCount.productGroupNames[allGroupIds.indexOf(groupId)] || groupId
                                 : productGroups.find((g) => g.id === groupId)?.name || groupId;
                               
-                              // ✅ グループごとの進捗数を計算
-                              const groupTotalQty = groupItems.reduce((sum, it) => sum + (Number(it?.currentQuantity || 0)), 0);
-                              const groupActualQty = groupItems.reduce((sum, it) => sum + (Number(it?.actualQuantity || 0)), 0);
+                              // ✅ グループ内は通常商品のみ表示（予定外は別ブロックで表示・入出庫と同様）
+                              const normalItems = groupItems.filter((it) => !(it as any).isExtra);
+                              const groupTotalQty = normalItems.reduce((sum, it) => sum + (Number(it?.currentQuantity || 0)), 0);
+                              const groupActualQty = normalItems.reduce((sum, it) => sum + (Number(it?.actualQuantity || 0)), 0);
                               
                               return (
                                 <div key={groupId} style={{ marginBottom: "24px", padding: "12px", backgroundColor: isGroupCompleted ? "#f0f8f0" : "#fff8f0", borderRadius: "4px" }}>
                                   <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: isGroupCompleted ? "#28a745" : "#ffc107" }}>
                                     {groupName} {isGroupCompleted ? "（完了済み）" : "（未完了）"}
-                                    {groupItems.length > 0 && (
+                                    {normalItems.length > 0 && (
                                       <span style={{ fontSize: "12px", fontWeight: "normal", marginLeft: "8px", color: "#666" }}>
                                         （{groupActualQty}/{groupTotalQty > 0 ? groupTotalQty : "-"}）
                                       </span>
                                     )}
                                   </div>
-                                  {groupItems.length > 0 ? (
+                                  {normalItems.length > 0 ? (
                                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
                                       <thead>
                                         <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
@@ -3780,77 +3888,37 @@ export default function InventoryCountPage() {
                                         </tr>
                                       </thead>
                                       <tbody>
-                                        {(() => {
-                                          // ✅ 予定外商品を分離（isExtraフラグで判定）
-                                          const normalItems = groupItems.filter((it) => !(it as any).isExtra);
-                                          const extraItems = groupItems.filter((it) => !!(it as any).isExtra);
-                                          // ✅ 通常商品を先に表示し、予定外商品を最後に表示
-                                          const sortedItems = [...normalItems, ...extraItems];
-                                          
-                                          
-                                          return sortedItems.map((it, idx) => {
-                                            const titleRaw = String(it.title || "").trim();
-                                            const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-                                            const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
-                                            const optionParts = parts.length >= 2 ? parts.slice(1) : [];
-                                            const option1 = optionParts[0] || "";
-                                            const option2 = optionParts[1] || "";
-                                            const option3 = optionParts[2] || "";
-                                            // ✅ SKUとJANを分離（it.skuとit.barcodeから取得）
-                                            const sku = String(it.sku || "").trim();
-                                            const jan = String((it as any).barcode || "").trim();
-                                            // ✅ 予定外商品かどうかを判定
-                                            const isExtra = !!(it as any).isExtra;
-                                            
-                                            // ✅ 背景色を明示的に設定（入庫履歴のモーダルと同じ実装：app.history.tsx 1346行目を参照）
-                                            // ✅ 入庫履歴ではインラインスタイルを直接設定しているため、同じ方法を使用
-                                            const cellStyle: React.CSSProperties = {
-                                              padding: "8px",
-                                              borderRight: "1px solid #eee",
-                                            };
-                                            
-                                            // ✅ 入庫履歴と同じ実装：インラインスタイルを直接設定
-                                            const rowStyleInline = { borderBottom: "1px solid #eee", backgroundColor: isExtra ? "#ffe6e6" : "transparent" };
-                                            
-                                            return (
-                                              <tr key={`${groupId}-${it.inventoryItemId}-${idx}`} style={rowStyleInline}>
+                                        {normalItems.map((it, idx) => {
+                                          const titleRaw = String(it.title || "").trim();
+                                          const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
+                                          const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
+                                          const optionParts = parts.length >= 2 ? parts.slice(1) : [];
+                                          const option1 = optionParts[0] || "";
+                                          const option2 = optionParts[1] || "";
+                                          const option3 = optionParts[2] || "";
+                                          const sku = String(it.sku || "").trim();
+                                          const jan = String((it as any).barcode || "").trim();
+                                          const cellStyle: React.CSSProperties = { padding: "8px", borderRight: "1px solid #eee" };
+                                          return (
+                                            <tr key={`${groupId}-${it.inventoryItemId}-${idx}`} style={{ borderBottom: "1px solid #eee" }}>
                                               <td style={{ ...cellStyle, fontWeight: "bold", color: isGroupCompleted ? "#28a745" : "#ffc107" }}>
                                                 {groupName}
                                                 <div style={{ fontSize: "11px", color: "#666", marginTop: "2px" }}>
                                                   {isGroupCompleted ? "✓ 完了" : "未完了"}
                                                 </div>
                                               </td>
-                                              <td style={cellStyle}>
-                                                {productName}
-                                              </td>
-                                              <td style={cellStyle}>
-                                                {sku || "-"}
-                                              </td>
-                                              <td style={cellStyle}>
-                                                {jan || "-"}
-                                              </td>
-                                              <td style={cellStyle}>
-                                                {option1 || "-"}
-                                              </td>
-                                              <td style={cellStyle}>
-                                                {option2 || "-"}
-                                              </td>
-                                              <td style={cellStyle}>
-                                                {option3 || "-"}
-                                              </td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>
-                                                {it.currentQuantity ?? "-"}
-                                              </td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>
-                                                {it.actualQuantity ?? "-"}
-                                              </td>
-                                              <td style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>
-                                                {it.delta ?? "-"}
-                                              </td>
+                                              <td style={cellStyle}>{productName}</td>
+                                              <td style={cellStyle}>{sku || "-"}</td>
+                                              <td style={cellStyle}>{jan || "-"}</td>
+                                              <td style={cellStyle}>{option1 || "-"}</td>
+                                              <td style={cellStyle}>{option2 || "-"}</td>
+                                              <td style={cellStyle}>{option3 || "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>{it.delta ?? "-"}</td>
                                             </tr>
-                                            );
-                                          });
-                                        })()}
+                                          );
+                                        })}
                                       </tbody>
                                     </table>
                                   ) : (
@@ -3861,85 +3929,189 @@ export default function InventoryCountPage() {
                                 </div>
                               );
                             })}
+                            {(() => {
+                              // ✅ 予定外を別ブロックで表示（入出庫の「予定外入庫」ブロックと同様）
+                              const extraItemsAll = displayItems.filter((it) => !!(it as any).isExtra);
+                              if (extraItemsAll.length === 0) return null;
+                              const cellStyle: React.CSSProperties = { padding: "8px", borderRight: "1px solid #eee" };
+                              return (
+                                <div key="extras" style={{ marginBottom: "24px", padding: "12px", backgroundColor: "#fff5f5", borderRadius: "4px" }}>
+                                  <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: "#666" }}>
+                                    予定外（{extraItemsAll.length}件）
+                                  </div>
+                                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
+                                    <thead>
+                                      <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
+                                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
+                                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
+                                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
+                                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
+                                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
+                                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
+                                        <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>在庫</th>
+                                        <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>実数</th>
+                                        <th style={{ padding: "8px", textAlign: "right" }}>差分</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {extraItemsAll.map((it, idx) => {
+                                        const titleRaw = String(it.title || "").trim();
+                                        const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
+                                        const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
+                                        const optionParts = parts.length >= 2 ? parts.slice(1) : [];
+                                        const option1 = optionParts[0] || "";
+                                        const option2 = optionParts[1] || "";
+                                        const option3 = optionParts[2] || "";
+                                        const sku = String(it.sku || "").trim();
+                                        const jan = String((it as any).barcode || "").trim();
+                                        return (
+                                          <tr key={`extra-${idx}`} style={{ borderBottom: "1px solid #eee", backgroundColor: "#ffe6e6" }}>
+                                            <td style={cellStyle}>{productName}</td>
+                                            <td style={cellStyle}>{sku || "-"}</td>
+                                            <td style={cellStyle}>{jan || "-"}</td>
+                                            <td style={cellStyle}>{option1 || "-"}</td>
+                                            <td style={cellStyle}>{option2 || "-"}</td>
+                                            <td style={cellStyle}>{option3 || "-"}</td>
+                                            <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
+                                            <td style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
+                                            <td style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>{it.delta ?? "-"}</td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              );
+                            })()}
                           </div>
                         ) : (
-                          // ✅ 単一商品グループまたはitemsフィールドを使用する場合：列を統一
-                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
-                            <thead>
-                              <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
-                                <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品グループ</th>
-                                <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
-                                <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
-                                <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
-                                <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
-                                <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
-                                <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
-                                <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>在庫</th>
-                                <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>実数</th>
-                                <th style={{ padding: "8px", textAlign: "right" }}>差分</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {displayItems.map((it, idx) => {
-                                const titleRaw = String(it.title || "").trim();
-                                const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-                                const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
-                                const optionParts = parts.length >= 2 ? parts.slice(1) : [];
-                                const option1 = optionParts[0] || "";
-                                const option2 = optionParts[1] || "";
-                                const option3 = optionParts[2] || "";
-                                // ✅ SKUとJANを分離
-                                const sku = String(it.sku || "").trim();
-                                const jan = String((it as any).barcode || "").trim();
-                                // ✅ 予定外商品かどうかを判定（入庫履歴のモーダルと同じ実装）
-                                const isExtra = !!(it as any).isExtra;
-                                // ✅ 商品グループ名を取得（単一グループの場合）
-                                const groupName = Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
-                                  ? modalCount.productGroupNames[0]
-                                  : Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
-                                  ? productGroups.find((g) => g.id === modalCount.productGroupIds[0])?.name || modalCount.productGroupIds[0]
-                                  : modalCount.productGroupName || modalCount.productGroupId || "-";
-                                
-                                // ✅ 入庫履歴のモーダルと同じ実装：予定外商品に赤背景を設定（app.history.tsx 1346行目を参照）
-                                const rowStyleInline = { borderBottom: "1px solid #eee", backgroundColor: isExtra ? "#ffe6e6" : "transparent" };
-                                
-                                return (
-                                  <tr key={idx} style={rowStyleInline}>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee", fontWeight: "bold" }}>
-                                      {groupName}
-                                    </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                                      {productName}
-                                    </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                                      {sku || "-"}
-                                    </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                                      {jan || "-"}
-                                    </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                                      {option1 || "-"}
-                                    </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                                      {option2 || "-"}
-                                    </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                                      {option3 || "-"}
-                                    </td>
-                                    <td style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #eee" }}>
-                                      {it.currentQuantity ?? "-"}
-                                    </td>
-                                    <td style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #eee" }}>
-                                      {it.actualQuantity ?? "-"}
-                                    </td>
-                                    <td style={{ padding: "8px", textAlign: "right" }}>
-                                      {it.delta ?? "-"}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
+                          // ✅ 単一商品グループ：通常のみブロック＋予定外は別ブロック（入出庫と同様）
+                          (() => {
+                            const singleGroupId = allGroupIds.length > 0 ? allGroupIds[0] : "";
+                            const singleGroupItems = singleGroupId ? (itemsByGroup.get(singleGroupId) || []) : displayItems;
+                            const normalItems = singleGroupItems.filter((it) => !(it as any).isExtra);
+                            const extraItems = singleGroupItems.filter((it) => !!(it as any).isExtra);
+                            const isGroupCompleted = normalItems.length > 0;
+                            const groupName = Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
+                              ? modalCount.productGroupNames[0]
+                              : singleGroupId
+                              ? (productGroups.find((g) => g.id === singleGroupId)?.name || singleGroupId)
+                              : (modalCount.productGroupName || modalCount.productGroupId || "-");
+                            const groupTotalQty = normalItems.reduce((sum, it) => sum + (Number((it as any)?.currentQuantity || 0)), 0);
+                            const groupActualQty = normalItems.reduce((sum, it) => sum + (Number((it as any)?.actualQuantity || 0)), 0);
+                            const cellStyle: React.CSSProperties = { padding: "8px", borderRight: "1px solid #eee" };
+                            return (
+                              <>
+                                <div style={{ marginBottom: "24px", padding: "12px", backgroundColor: isGroupCompleted ? "#f0f8f0" : "#fff8f0", borderRadius: "4px" }}>
+                                  <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: isGroupCompleted ? "#28a745" : "#ffc107" }}>
+                                    {groupName} {isGroupCompleted ? "（完了済み）" : "（未完了）"}
+                                    {normalItems.length > 0 && (
+                                      <span style={{ fontSize: "12px", fontWeight: "normal", marginLeft: "8px", color: "#666" }}>
+                                        （{groupActualQty}/{groupTotalQty > 0 ? groupTotalQty : "-"}）
+                                      </span>
+                                    )}
+                                  </div>
+                                  {normalItems.length > 0 ? (
+                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
+                                      <thead>
+                                        <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品グループ</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
+                                          <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>在庫</th>
+                                          <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>実数</th>
+                                          <th style={{ padding: "8px", textAlign: "right" }}>差分</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {normalItems.map((it, idx) => {
+                                          const titleRaw = String(it.title || "").trim();
+                                          const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
+                                          const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
+                                          const optionParts = parts.length >= 2 ? parts.slice(1) : [];
+                                          const option1 = optionParts[0] || "";
+                                          const option2 = optionParts[1] || "";
+                                          const option3 = optionParts[2] || "";
+                                          const sku = String(it.sku || "").trim();
+                                          const jan = String((it as any).barcode || "").trim();
+                                          return (
+                                            <tr key={idx} style={{ borderBottom: "1px solid #eee" }}>
+                                              <td style={{ ...cellStyle, fontWeight: "bold" }}>{groupName}</td>
+                                              <td style={cellStyle}>{productName}</td>
+                                              <td style={cellStyle}>{sku || "-"}</td>
+                                              <td style={cellStyle}>{jan || "-"}</td>
+                                              <td style={cellStyle}>{option1 || "-"}</td>
+                                              <td style={cellStyle}>{option2 || "-"}</td>
+                                              <td style={cellStyle}>{option3 || "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.delta ?? "-"}</td>
+                                            </tr>
+                                          );
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  ) : (
+                                    <div style={{ padding: "8px", fontSize: "14px", color: "#666" }}>
+                                      この商品グループはまだ処理されていません
+                                    </div>
+                                  )}
+                                </div>
+                                {extraItems.length > 0 && (
+                                  <div style={{ marginBottom: "24px", padding: "12px", backgroundColor: "#fff5f5", borderRadius: "4px" }}>
+                                    <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: "#666" }}>
+                                      予定外（{extraItems.length}件）
+                                    </div>
+                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
+                                      <thead>
+                                        <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
+                                          <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
+                                          <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>在庫</th>
+                                          <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>実数</th>
+                                          <th style={{ padding: "8px", textAlign: "right" }}>差分</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {extraItems.map((it, idx) => {
+                                          const titleRaw = String(it.title || "").trim();
+                                          const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
+                                          const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
+                                          const optionParts = parts.length >= 2 ? parts.slice(1) : [];
+                                          const option1 = optionParts[0] || "";
+                                          const option2 = optionParts[1] || "";
+                                          const option3 = optionParts[2] || "";
+                                          const sku = String(it.sku || "").trim();
+                                          const jan = String((it as any).barcode || "").trim();
+                                          return (
+                                            <tr key={idx} style={{ borderBottom: "1px solid #eee", backgroundColor: "#ffe6e6" }}>
+                                              <td style={cellStyle}>{productName}</td>
+                                              <td style={cellStyle}>{sku || "-"}</td>
+                                              <td style={cellStyle}>{jan || "-"}</td>
+                                              <td style={cellStyle}>{option1 || "-"}</td>
+                                              <td style={cellStyle}>{option2 || "-"}</td>
+                                              <td style={cellStyle}>{option3 || "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.delta ?? "-"}</td>
+                                            </tr>
+                                          );
+                                        })}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()
                         )}
                       </div>
                     </div>
@@ -4109,60 +4281,63 @@ export default function InventoryCountPage() {
                       const headers = [
                         "棚卸ID",
                         "名称",
+                        "日付",
+                        "完了日",
                         "ロケーション",
                         "商品グループ",
                         "ステータス",
-                        "商品名/SKU",
+                        "商品名",
+                        "SKU",
+                        "JAN",
                         "オプション1",
                         "オプション2",
                         "オプション3",
-                        "現在在庫",
+                        "在庫",
                         "実数",
                         "差分",
-                        "予定外",
-                        "作成日時",
-                        "完了日時",
+                        "種別",
                       ];
 
+                      const dateOnly = (iso?: string) => extractDateFromISO(iso, shopTimezone);
                       const rows: string[][] = [];
                       displayItemsWithGroupInfo.forEach((it) => {
                         const locName = getLocationName(modalCount.locationId);
                         const countName = modalCount.countName || modalCount.id;
                         
-                        // ✅ 商品が属するグループの名前とステータスを使用
                         const groupName = (it as any).groupName || "-";
                         const isGroupCompleted = (it as any).isGroupCompleted || false;
                         const statusLabel = isGroupCompleted ? "完了" : "進行中";
 
-                        // ✅ 商品名とオプションを分離（入出庫と同じ実装）
                         const titleRaw = String(it.title || "").trim();
                         const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-                        const productName = parts[0] || titleRaw || it.sku || "-";
+                        const productName = parts[0] || titleRaw || (it as any).sku || "-";
                         const optionParts = parts.length >= 2 ? parts.slice(1) : [];
                         const option1 = optionParts[0] || "";
                         const option2 = optionParts[1] || "";
                         const option3 = optionParts[2] || "";
-                        
-                        // ✅ 予定外商品かどうかを判定
+                        const sku = String((it as any).sku ?? "").trim();
+                        const jan = String((it as any).barcode ?? "").trim();
                         const isExtra = !!(it as any).isExtra;
-                        const extraLabel = isExtra ? "予定外" : "";
+                        const kindLabel = isExtra ? "予定外" : "";
 
                         rows.push([
                           modalCount.id,
                           countName,
+                          dateOnly(modalCount.createdAt),
+                          dateOnly(modalCount.completedAt),
                           locName,
                           groupName,
                           statusLabel,
                           productName,
+                          sku,
+                          jan,
                           option1,
                           option2,
                           option3,
                           String(it.currentQuantity ?? ""),
                           String(it.actualQuantity ?? ""),
                           String(it.delta ?? ""),
-                          extraLabel,
-                          modalCount.createdAt,
-                          modalCount.completedAt || "",
+                          kindLabel,
                         ]);
                       });
 
@@ -4175,7 +4350,9 @@ export default function InventoryCountPage() {
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement("a");
                       a.href = url;
-                      a.download = `棚卸履歴_${modalCount.countName || modalCount.id}_${new Date().toISOString().slice(0, 10)}.csv`;
+                      const displayName = modalCount.countName || modalCount.id;
+                      const safeName = String(displayName).replace(/[\\/:*?"<>|\s]/g, "_").trim() || "item";
+                      a.download = `棚卸履歴_${safeName}_${todayInShopTimezone}.csv`;
                       a.click();
                       URL.revokeObjectURL(url);
                     }}
@@ -4325,7 +4502,7 @@ export default function InventoryCountPage() {
                             onClick={() => setShowOnlySelectedInModal((prev) => !prev)}
                             style={{
                               padding: "6px 12px",
-                              backgroundColor: showOnlySelectedInModal ? "#008060" : "#e5e7eb",
+                              backgroundColor: showOnlySelectedInModal ? "#2563eb" : "#e5e7eb",
                               color: showOnlySelectedInModal ? "#fff" : "#202223",
                               border: "none",
                               borderRadius: "6px",

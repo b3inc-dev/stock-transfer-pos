@@ -1,0 +1,17 @@
+api_version = "2026-01"
+
+[[extensions]]
+uid = "9424a63e-9a38-03f0-0711-2fbd51fb7d6ec59244e0"
+type = "ui_extension"
+name = "仕入 / 在庫処理"
+handle = "stock-transfer-purchase"
+description = "仕入 / 在庫処理"
+
+[[extensions.targeting]]
+module = "./src/Tile.jsx"
+target = "pos.home.tile.render"
+
+[[extensions.targeting]]
+module = "./src/Modal.jsx"
+target = "pos.home.modal.render"
+

@@ -1,12 +1,55 @@
-// Modal.jsx
+// ModalOutbound.jsx（出庫のみ）
 import { render, Component } from "preact";
 import { useEffect, useMemo, useRef, useState, useCallback } from "preact/hooks";
+import {
+  SETTINGS_NS,
+  SETTINGS_KEY,
+  UI_PREFS_KEY,
+  APP_STATE_KEY,
+  OUTBOUND_DRAFT_KEY,
+  OUTBOUND_CONDITIONS_DRAFT_KEY,
+  SCAN_QUEUE_KEY,
+  SCREENS,
+} from "./modalConstants.js";
+import {
+  readValue,
+  safeParseJson,
+  fieldPath,
+  formatUserErrors,
+  assertNoUserErrors,
+  getStateSlice,
+  setStateSlice,
+  adminGraphql,
+  normalizeVariantTitleForDisplay_,
+  normalizeVariantOptions_,
+  formatOptionsLine_,
+  getStatusBadgeTone,
+  formatShipmentDisplayId,
+} from "./modalHelpers.js";
+import { useUnifiedDialog } from "./modalDialog.jsx";
+import {
+  Thumb,
+  safeImageSrc_,
+  getDisplayImageUrl_,
+  clampInt_,
+  sumQty_,
+  ListSummaryBar,
+  ItemLeftCompact,
+  QtyControlCompact,
+  StockyRowShell,
+  ItemLeft,
+  useDebounce,
+} from "./modalUiParts.jsx";
 
 const SHOPIFY = globalThis?.shopify;
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 
-export default async () => {
+// ホストから渡される API（showCameraScanner はこちらに含まれる。globalThis.shopify は未設定のことがある）
+let posModalApi = null;
+
+export default async (rootArg, apiArg) => {
   try {
+    if (rootArg !== undefined && apiArg != null) posModalApi = apiArg;
     const root = document.body;
 
     // 前回ツリーが残っていても確実に破棄
@@ -46,227 +89,7 @@ class ErrorBoundary extends Component {
   }
 }
 
-// Dialog
-
-const DIALOG_KIND = {
-  ALERT: "ALERT",
-  CONFIRM: "CONFIRM",
-  INPUT: "INPUT",
-};
-
-function useUnifiedDialog() {
-  const modalRef = useRef(null);
-  const overlayOpenRef = useRef(false);
-
-  const [dlg, setDlg] = useState({
-    isVisible: false,
-    kind: DIALOG_KIND.ALERT,
-    type: "default",
-    title: "",
-    content: "",
-    actionText: "OK",
-    secondaryActionText: "キャンセル",
-    showSecondaryAction: false,
-    inputLabel: "",
-    inputValue: "",
-    inputPlaceholder: "",
-    _resolve: null,
-  });
-
-  const openOverlay = () => {
-    if (overlayOpenRef.current) return;
-    try {
-      modalRef.current?.showOverlay?.();
-    } catch {}
-    overlayOpenRef.current = true;
-  };
-
-  const closeOverlay = () => {
-    if (!overlayOpenRef.current) return;
-    try {
-      modalRef.current?.hideOverlay?.();
-    } catch {}
-    overlayOpenRef.current = false;
-  };
-
-  const close = () => {
-    setDlg((d) => ({ ...d, isVisible: false, _resolve: null }));
-  };
-
-  const alert = ({ type = "default", title, content, message, actionText = "OK" }) =>
-    new Promise((resolve) => {
-      setDlg({
-        isVisible: true,
-        kind: DIALOG_KIND.ALERT,
-        type,
-        title: title ?? "",
-        content: (content ?? message ?? "") ?? "",
-        actionText,
-        secondaryActionText: "",
-        showSecondaryAction: false,
-        inputLabel: "",
-        inputValue: "",
-        inputPlaceholder: "",
-        _resolve: resolve,
-      });
-    });
-
-  const confirm = ({
-    type = "default",
-    title,
-    content,
-    actionText = "OK",
-    secondaryActionText = "キャンセル",
-  }) =>
-    new Promise((resolve) => {
-      setDlg({
-        isVisible: true,
-        kind: DIALOG_KIND.CONFIRM,
-        type,
-        title: title ?? "",
-        content: content ?? "",
-        actionText,
-        secondaryActionText,
-        showSecondaryAction: true,
-        inputLabel: "",
-        inputValue: "",
-        inputPlaceholder: "",
-        _resolve: resolve,
-      });
-    });
-
-  const input = ({
-    type = "default",
-    title,
-    content,
-    actionText = "確定",
-    secondaryActionText = "キャンセル",
-    inputLabel = "数量",
-    inputValue = "",
-    inputPlaceholder = "",
-  }) =>
-    new Promise((resolve) => {
-      setDlg({
-        isVisible: true,
-        kind: DIALOG_KIND.INPUT,
-        type,
-        title: title ?? "",
-        content: content ?? "",
-        actionText,
-        secondaryActionText,
-        showSecondaryAction: true,
-        inputLabel,
-        inputValue: String(inputValue ?? ""),
-        inputPlaceholder,
-        _resolve: resolve,
-      });
-    });
-
-  useEffect(() => {
-    if (dlg.isVisible) openOverlay();
-    else closeOverlay();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dlg.isVisible]);
-
-  const DialogHost = () => {
-    const toneOk =
-      dlg.type === "destructive" || dlg.type === "error" ? "critical" : "success";
-
-    return (
-      <s-modal ref={modalRef} heading={dlg.title || "確認"}>
-        <s-box padding="base">
-          <s-stack gap="base">
-            {dlg.content ? (
-              <s-text tone={dlg.type === "error" ? "critical" : "subdued"}>
-                {dlg.content}
-              </s-text>
-            ) : null}
-
-            {dlg.kind === DIALOG_KIND.INPUT ? (
-              <s-text-field
-                label={dlg.inputLabel || "入力"}
-                value={dlg.inputValue}
-                placeholder={dlg.inputPlaceholder}
-                onInput={(v) =>
-                  setDlg((d) => ({ ...d, inputValue: readValue(v) }))
-                }
-                onChange={(v) =>
-                  setDlg((d) => ({ ...d, inputValue: readValue(v) }))
-                }
-              />
-            ) : null}
-          </s-stack>
-        </s-box>
-
-        {dlg.showSecondaryAction ? (
-          <s-button
-            slot="secondary-actions"
-            onClick={() => {
-              const r = dlg._resolve;
-              const kind = dlg.kind;
-              close();
-              if (kind === DIALOG_KIND.CONFIRM) r?.(false);
-              if (kind === DIALOG_KIND.INPUT) r?.(null);
-            }}
-          >
-            {dlg.secondaryActionText || "キャンセル"}
-          </s-button>
-        ) : null}
-
-        <s-button
-          slot="primary-action"
-          tone={toneOk}
-          onClick={() => {
-            const r = dlg._resolve;
-            const kind = dlg.kind;
-            const value = kind === DIALOG_KIND.INPUT ? dlg.inputValue : true;
-            close();
-            if (kind === DIALOG_KIND.ALERT) r?.(true);
-            if (kind === DIALOG_KIND.CONFIRM) r?.(true);
-            if (kind === DIALOG_KIND.INPUT) r?.(value);
-          }}
-        >
-          {dlg.actionText || "OK"}
-        </s-button>
-      </s-modal>
-    );
-  };
-
-  return { alert, confirm, input, DialogHost };
-}
-
-/* Const */
-
-const SETTINGS_NS = "stock_transfer_pos";
-const SETTINGS_KEY = "settings_v1";
-
-const UI_PREFS_KEY = "stock_transfer_pos_ui_prefs_v1";
-const APP_STATE_KEY = "stock_transfer_pos_state_v1";
-
-const OUTBOUND_DRAFT_KEY = "stock_transfer_pos_outbound_draft_v1";
-const OUTBOUND_CONDITIONS_DRAFT_KEY = "stock_transfer_pos_outbound_conditions_draft_v1";
-
-// 画面ID
-const SCREENS = {
-  MENU: "menu",
-
-  OUTBOUND_COND: "out_cond",
-  OUTBOUND_LIST: "out_list",
-
-  // 追加：出庫履歴一覧（InboundConditions同型）
-  OUTBOUND_HIST_COND: "out_hist_cond",
-
-  OUTBOUND_HIST_DETAIL: "out_hist_detail",
-
-  INBOUND_COND: "in_cond",
-  INBOUND_LIST: "in_list",
-  INBOUND_SHIPMENT_SELECTION: "in_shipment_selection", // Phase 1.3: シップメント選択画面
-
-};
-
 /* UI Root */
-
-const SCAN_QUEUE_KEY = "stock_transfer_pos_scan_queue_v1";
 
 // storage helper（安全に配列化）
 function normalizeScanQueue_(v) {
@@ -402,21 +225,22 @@ function Extension() {
   const [prefs, setPrefs] = useUiPrefs();
   const [appState, setAppState] = usePersistentAppState();
 
-  const nav = useNavStack({ id: SCREENS.MENU, params: {} });
+  const nav = useNavStack({ id: SCREENS.OUTBOUND_COND, params: {} });
   const dialog = useUnifiedDialog();
   const DialogHost = dialog.DialogHost;
 
   // header/footer を保持（どちらも任意）
   const [header, setHeader] = useState(null);
   const [footer, setFooter] = useState(null);
+  // カメラスキャン表示中か（タイトルバーを「カメラを閉じる」に切り替え、連続スキャン後に閉じる用）
+  const [cameraScannerVisible, setCameraScannerVisible] = useState(false);
 
   const liteMode = !!prefs?.liteMode;
   const showImages = !liteMode; // 画像ON/OFFを単独運用しない
 
   // nav.current が一瞬でも崩れても真っ白にしない
-  const screen = nav.current?.id || SCREENS.MENU;
+  const screen = nav.current?.id || SCREENS.OUTBOUND_COND;
 
-  // 追加：軽量モード切替（showImagesは派生なので触らない）
   const toggleLiteMode = useCallback(() => {
     setPrefs((prev) => {
       const p = prev && typeof prev === "object" ? prev : {};
@@ -449,8 +273,8 @@ function Extension() {
       const source = String(result?.source || "");
       if (!data) return;
 
-      // 受信は確認できる
-      toast(`SCAN: ${data} (${source})`);
+      // 受信を可視化（全拡張で同じトースト文言）
+      toast(`スキャン: ${data}`);
 
       const sc = screenRef.current;
       
@@ -460,22 +284,14 @@ function Extension() {
         return;
       }
 
-      // 出庫リスト画面で確定モーダルが開いている時は配送番号に自動入力
+      // 出庫リスト画面で確定モーダルまたは配送情報モーダルが開いている時は配送番号に自動入力、それ以外はスキャンキューに積む
       if (sc === SCREENS.OUTBOUND_LIST) {
-        // モーダルが開いているかどうかをappStateから確認（ref経由で最新値を取得）
         const currentAppState = appStateRef.current;
         const currentOutbound = getStateSlice(currentAppState, "outbound", {});
-        if (currentOutbound?.confirmModalOpen) {
+        if (currentOutbound?.confirmModalOpen || currentOutbound?.shippingInfoModalOpen) {
           setStateSlice(setAppState, "outbound", { trackingNumber: data });
           return;
         }
-        // モーダルが開いていない場合は商品検索のキューに積む
-        pushScanToQueue_(data);
-        return;
-      }
-
-      // 重要：入庫リスト画面の時だけキューに積む
-      if (sc === SCREENS.INBOUND_LIST) {
         pushScanToQueue_(data);
       }
     });
@@ -487,46 +303,46 @@ function Extension() {
     };
   }, []);
 
-  // MENUに戻ったら header/footer を消す（元の footer クリア + header追加）
-  useEffect(() => {
-    if (screen === SCREENS.MENU) {
-      setHeader(null);
-      setFooter(null);
-    }
-  }, [screen]);
-
-  // 画面遷移前に header/footer を必ずクリア
+  // 画面遷移前に header/footer を必ずクリア（コンディション画面では子が setFooter するのでここでは消さない）
   const clearBars = useCallback(() => {
     setHeader(null);
     setFooter(null);
   }, []);
 
   // ---- stable handlers (✅ 遷移前に必ず header/footer をクリア) ----
-  const goMenu = useCallback(() => {
-    clearBars();
-    nav.reset(SCREENS.MENU);
-  }, [nav.reset, clearBars]);
-
   const goBack = useCallback(() => {
     clearBars();
     nav.pop();
   }, [nav.pop, clearBars]);
 
-  // 出庫履歴詳細から戻る時：次に別IDを開いたときに前の詳細が残らないよう、履歴選択状態をクリア
+  // 出庫履歴詳細から戻る時：配送リスト経由の場合は historySelectedTransferId を残し、それ以外は履歴選択状態をクリア
   const goBackFromOutboundHistoryDetail = useCallback(() => {
-    setStateSlice(setAppState, "outbound", (prev) => ({
-      ...(prev || {}),
-      historySelectedTransferId: "",
-      historySelectedTransferName: "",
-      historySelectedOriginName: "",
-      historySelectedDestName: "",
-      historySelectedStatus: "",
-      historySelectedReadOnly: false,
-      historySelectedShipmentId: "",
-      historySelectedOriginLocationId: "",
-      historySelectedDestLocationId: "",
-      historyDraftSourceTransferId: "",
-    }));
+    setStateSlice(setAppState, "outbound", (prev) => {
+      const p = prev || {};
+      if (p.historyFromShipmentSelection) {
+        // 配送リストに戻る：Transfer ID は残し、配送リスト経由フラグと選択シップメントのみクリア
+        return {
+          ...p,
+          historyFromShipmentSelection: false,
+          historySelectedShipmentId: "",
+          historySelectedShipmentIndex: 0,
+        };
+      }
+      return {
+        ...p,
+        historySelectedTransferId: "",
+        historySelectedTransferName: "",
+        historySelectedOriginName: "",
+        historySelectedDestName: "",
+        historySelectedStatus: "",
+        historySelectedReadOnly: false,
+        historySelectedShipmentId: "",
+        historySelectedShipmentIndex: 0,
+        historySelectedOriginLocationId: "",
+        historySelectedDestLocationId: "",
+        historyDraftSourceTransferId: "",
+      };
+    });
     clearBars();
     nav.pop();
   }, [nav.pop, clearBars, setAppState]);
@@ -575,28 +391,9 @@ function Extension() {
     nav.push(SCREENS.OUTBOUND_HIST_COND);
   }, [nav.push, clearBars]);
 
-  const goInboundCond = useCallback(() => {
-    clearBars();
-    nav.push(SCREENS.INBOUND_COND);
-  }, [nav.push, clearBars]);
-
-  const goInboundList = useCallback(() => {
-    clearBars();
-    nav.push(SCREENS.INBOUND_LIST);
-  }, [nav.push, clearBars]);
-
   let body = null;
 
-  if (screen === SCREENS.MENU) {
-    body = (
-      <MenuScreen
-        prefs={prefs}
-        setPrefs={setPrefs}
-        onOutbound={goOutboundCond}
-        onInbound={goInboundCond}
-      />
-    );
-  } else if (screen === SCREENS.OUTBOUND_COND) {
+  if (screen === SCREENS.OUTBOUND_COND) {
     body = (
       <OutboundConditions
         showImages={showImages}
@@ -630,6 +427,32 @@ function Extension() {
           clearBars();
           nav.push(SCREENS.OUTBOUND_HIST_DETAIL);
         }}
+        onOpenOutboundShipmentSelection={() => {
+          clearBars();
+          nav.push(SCREENS.OUTBOUND_SHIPMENT_SELECTION);
+        }}
+        onOpenOutboundList={() => {
+          clearBars();
+          nav.push(SCREENS.OUTBOUND_LIST);
+        }}
+      />
+    );
+  } else if (screen === SCREENS.OUTBOUND_SHIPMENT_SELECTION) {
+    body = (
+      <OutboundShipmentSelection
+        appState={appState}
+        setAppState={setAppState}
+        onBack={goBack}
+        setHeader={setHeader}
+        setFooter={setFooter}
+        onOpenOutboundHistoryDetail={() => {
+          clearBars();
+          nav.push(SCREENS.OUTBOUND_HIST_DETAIL);
+        }}
+        onOpenOutboundList={() => {
+          clearBars();
+          nav.push(SCREENS.OUTBOUND_LIST);
+        }}
       />
     );
   } else if (screen === SCREENS.OUTBOUND_LIST) {
@@ -640,6 +463,19 @@ function Extension() {
         appState={appState}
         setAppState={setAppState}
         onBack={goBack}
+        onAddShipmentSuccess={({ transferId, transferName }) => {
+          setStateSlice(setAppState, "outbound", (prev) => ({
+            ...(prev || {}),
+            historySelectedTransferId: String(transferId || ""),
+            historySelectedTransferName: String(transferName || ""),
+            historySelectedOriginName: "",
+            historySelectedDestName: "",
+            historyFromShipmentSelection: false,
+          }));
+          clearBars();
+          nav.pop();
+          nav.push(SCREENS.OUTBOUND_SHIPMENT_SELECTION);
+        }}
         dialog={dialog}
         setHeader={setHeader}
         setFooter={setFooter}
@@ -664,141 +500,46 @@ function Extension() {
         }}
       />
     );
-  } else if (screen === SCREENS.INBOUND_COND) {
-    body = (
-      <InboundConditions
-        showImages={showImages}
-        liteMode={liteMode}
-        appState={appState}
-        setAppState={setAppState}
-        onBack={goBack}
-        onNext={goInboundList}
-        onOpenShipmentSelection={() => {
-          clearBars();
-          nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION);
-        }}
-        setHeader={setHeader}
-        setFooter={setFooter}
-        onToggleLiteMode={toggleLiteMode}
-      />
-    );
-  } else if (screen === SCREENS.INBOUND_SHIPMENT_SELECTION) {
-    body = (
-      <InboundShipmentSelection
-        showImages={showImages}
-        liteMode={liteMode}
-        appState={appState}
-        setAppState={setAppState}
-        onNext={goInboundList}
-        onBack={goBack}
-        setHeader={setHeader}
-        setFooter={setFooter}
-        onToggleLiteMode={toggleLiteMode}
-      />
-    );
-  } else if (screen === SCREENS.INBOUND_LIST) {
-    body = (
-      <InboundList
-        showImages={showImages}
-        liteMode={liteMode}
-        appState={appState}
-        setAppState={setAppState}
-        onBack={goBack}
-        onAfterReceive={async (transferId) => {
-          // Phase 1.3: 確定後の遷移制御（全シップメント完了判定）
-          if (!transferId) {
-            // transferId が無い場合は通常の戻る
-            goBack();
-            return;
-          }
-
-          try {
-            // Transfer の全シップメントを取得して完了判定
-            // UI Root 側では useOriginLocationGid は使えないため、appState から取得
-            const sessionLocationId = SHOPIFY?.session?.currentSession?.locationId ?? null;
-            const locationGid = sessionLocationId 
-              ? (String(sessionLocationId).startsWith("gid://shopify/Location/") 
-                  ? sessionLocationId 
-                  : `gid://shopify/Location/${String(sessionLocationId).replace(/\D/g, "")}`)
-              : (String(appState?.originLocationIdManual || "").trim() || null);
-            if (!locationGid) {
-              goBack();
-              return;
-            }
-
-            const listLimit = Math.max(1, Math.min(250, Number(appState?.outbound?.settings?.inbound?.listInitialLimit ?? 100)));
-            const result = await fetchTransfersForDestinationAll(locationGid, { first: listLimit });
-            const transfers = Array.isArray(result?.transfers) ? result.transfers : [];
-            const transfer = transfers.find((t) => String(t?.id || "").trim() === String(transferId || "").trim());
-
-            if (!transfer) {
-              // Transfer が見つからない場合は通常の戻る
-              goBack();
-              return;
-            }
-
-            const shipments = Array.isArray(transfer?.shipments) ? transfer.shipments : [];
-            const allReceived = shipments.length > 0 && shipments.every((s) => {
-              const status = String(s?.status || "").toUpperCase();
-              return status === "RECEIVED" || status === "TRANSFERRED";
-            });
-
-            if (allReceived) {
-              // 全シップメント完了 → 入庫一覧に戻る
-              toast("すべてのシップメントの入庫が完了しました");
-              // 次に別IDを開いたときに前の商品リストが表示されないよう、入庫の選択状態をクリア
-              setStateSlice(setAppState, "inbound", {
-                selectedTransferId: "",
-                selectedShipmentId: "",
-                selectedShipmentIds: [],
-                shipmentMode: "single",
-                selectedTransferName: "",
-                selectedOriginName: "",
-                selectedDestinationName: "",
-                selectedTransferStatus: "",
-                selectedTransferTotalQuantity: 0,
-                selectedTransferReceivedQuantity: 0,
-                selectedReadOnly: false,
-              });
-              clearBars();
-              nav.push(SCREENS.INBOUND_COND);
-            } else {
-              // 未完了 → シップメント選択画面に戻る
-              // シップメント選択画面では同じTransferの別シップメントを選ぶため、selectedTransferId 等は維持し、selectedShipmentId のみクリアする（必要に応じて選択し直す）
-              setStateSlice(setAppState, "inbound", (prev) => ({
-                ...(prev || {}),
-                selectedShipmentId: "",
-                selectedShipmentIds: [],
-                shipmentMode: "single",
-              }));
-              clearBars();
-              nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION);
-            }
-          } catch (e) {
-            goBack();
-          }
-        }}
-        dialog={dialog}
-        setHeader={setHeader}
-        setFooter={setFooter}
-        onToggleLiteMode={toggleLiteMode}
-      />
-    );
   }
 
-  // これが無いと「真っ白」になり得る（あなたの症状の最有力）
+  // フォールバック：不正な画面の時はコンディションへ
   if (!body) {
     body = (
       <s-box padding="base">
         <s-text tone="critical">画面の状態が不正です: {String(screen)}</s-text>
-        <s-button onClick={goMenu}>メニューに戻す</s-button>
+        <s-button onClick={() => { clearBars(); nav.reset(SCREENS.OUTBOUND_COND); }}>出庫コンディションへ</s-button>
       </s-box>
     );
   }
 
+  // タイトルバー（×と同じ1本のアクションバー）のカメラスキャン／カメラを閉じる（s-page の secondary-actions スロット）
+  // カメラ表示中は「カメラを閉じる」に切り替え。連続スキャンはカメラを開いたまま行い、終了時のみタップで閉じる。
+  const handleCameraScanToggle = () => {
+    const api = posModalApi ?? SHOPIFY;
+    if (cameraScannerVisible) {
+      if (typeof api?.scanner?.hideCameraScanner === "function") {
+        api.scanner.hideCameraScanner();
+      }
+      setCameraScannerVisible(false);
+    } else {
+      if (typeof api?.scanner?.showCameraScanner === "function") {
+        api.scanner.showCameraScanner();
+        setCameraScannerVisible(true);
+      } else {
+        toast("バーコードをスキャンしてください");
+      }
+    }
+  };
+  const titleBarScanButton = (
+    <s-button slot="secondary-actions" kind="secondary" onClick={handleCameraScanToggle}>
+      {cameraScannerVisible ? "カメラを閉じる" : "カメラスキャン"}
+    </s-button>
+  );
+
   return (
     <>
-      <s-page heading="在庫処理">
+      <s-page heading="出庫">
+        {titleBarScanButton}
         <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
           {/* 上部固定ヘッダー（スクロール外） */}
           {header ? (
@@ -829,7 +570,7 @@ function Extension() {
   );
 }
 
-function MenuScreen({ prefs, setPrefs, onOutbound, onInbound }) {
+function MenuScreen({ prefs, setPrefs, onOutbound }) {
   const liteMode = prefs?.liteMode === true;
 
   const toggleLite = () => {
@@ -837,25 +578,24 @@ function MenuScreen({ prefs, setPrefs, onOutbound, onInbound }) {
     setPrefs((p) => ({
       ...(p || {}),
       liteMode: nextLite,
-      showImages: !nextLite, // ← 互換のため追従させる
+      showImages: !nextLite,
     }));
   };
 
   return (
     <s-box padding="base">
       <s-stack gap="base">
-        <s-text emphasis="bold">メニュー</s-text>
+        <s-text emphasis="bold">メニュー（出庫）</s-text>
 
         <s-stack direction="inline" gap="base" alignItems="center">
           <s-button kind="secondary" tone={liteMode ? "critical" : undefined} onClick={toggleLite}>
-            軽量モード（画像OFF） {liteMode ? "ON" : "OFF"}
+            {liteMode ? "画像OFF" : "画像ON"}
           </s-button>
         </s-stack>
 
         <s-divider />
 
         <s-button tone="success" onClick={onOutbound}>出庫</s-button>
-        <s-button tone="success" onClick={onInbound}>入庫</s-button>
       </s-stack>
     </s-box>
   );
@@ -873,76 +613,6 @@ const toUserMessage = (e) => {
   } catch {}
   return msg;
 };
-
-function safeParseJson(s, fallback) {
-  if (!s) return fallback;
-  try {
-    return JSON.parse(String(s));
-  } catch {
-    return fallback;
-  }
-}
-
-const readValue = (eOrValue) => {
-  // POS UI は onChange/onInput が「文字列」を直接返す実装があるため両対応
-  if (typeof eOrValue === "string" || typeof eOrValue === "number") {
-    return String(eOrValue);
-  }
-
-  return String(
-    eOrValue?.currentTarget?.value ??
-      eOrValue?.target?.value ??
-      eOrValue?.detail?.value ??
-      eOrValue?.currentValue?.value ??
-      ""
-  );
-};
-
-/** fieldPath */
-function fieldPath(field) {
-  if (!Array.isArray(field) || field.length === 0) return "";
-  let out = "";
-  for (const part of field) {
-    const p = String(part);
-    if (/^\d+$/.test(p)) out += `[${p}]`;
-    else out += (out ? "." : "") + p;
-  }
-  return out;
-}
-
-/** userErrors を “行単位” で読みやすくする */
-function formatUserErrors(userErrors, lineItemsMeta) {
-  const errs = Array.isArray(userErrors) ? userErrors : [];
-  if (errs.length === 0) return [];
-
-  const lines = errs.map((e) => {
-    const fp = fieldPath(e?.field);
-    const msg = String(e?.message ?? "Unknown error");
-
-    let itemHint = "";
-    if (fp) {
-      const m = fp.match(/lineItems\[(\d+)\]/);
-      if (m?.[1] && Array.isArray(lineItemsMeta)) {
-        const idx = Number(m[1]);
-        const meta = lineItemsMeta[idx];
-        if (meta?.label) itemHint = `（${meta.label}）`;
-      }
-    }
-
-    return `- ${msg}${itemHint}${fp ? ` [${fp}]` : ""}`;
-  });
-
-  return Array.from(new Set(lines));
-}
-
-function assertNoUserErrors(payload, label = "Mutation", lineItemsMeta) {
-  const errs = payload?.userErrors ?? [];
-  if (!Array.isArray(errs) || errs.length === 0) return;
-
-  const formatted = formatUserErrors(errs, lineItemsMeta);
-  const msg = formatted.length ? formatted.join("\n") : errs.map((e) => e?.message).join(" / ");
-  throw new Error(`${label} failed:\n${msg}`);
-}
 
 function useLocationsIndex(appState, setAppState) {
   const cache = getStateSlice(appState, "locations_cache_v1", {
@@ -1023,40 +693,11 @@ function getLocationName_(locationId, locationsById) {
   return name ? String(name) : "（不明）";
 }
 
-function normalizeVariantTitleForDisplay_(productTitle, variantTitle) {
-  const p = String(productTitle || "").trim();
-  const v = String(variantTitle || "").trim();
-
-  if (!v) return "";
-  if (v.toLowerCase() === "default title") return "";
-  if (p && v === p) return "";
-  return v;
-}
-
-function normalizeVariantOptions_(productTitle, variantTitle) {
-  const v = normalizeVariantTitleForDisplay_(productTitle, variantTitle);
-  if (!v) return [];
-
-  // Shopifyのvariant titleは "Red / Large" のように区切られることが多い
-  const parts = v.split("/").map((s) => s.trim()).filter(Boolean);
-
-  // 1つだけなら “オプション1” 扱い
-  return parts;
-}
-
-function formatOptionsLine_(options) {
-  const ops = Array.isArray(options) ? options.filter(Boolean) : [];
-  if (ops.length === 0) return "";
-  // “オプション1/2/3” 要件に合わせて値だけ並べる（区切りは " / "）
-  return ops.join(" / ");
-}
-
 function FixedFooterNavBar({
   summaryLeft,
   summaryCenter,
   summaryRight,
 
-  // 追加：サマリーの2行目（中央）
   summaryBelow,
 
   leftLabel,
@@ -1109,9 +750,9 @@ function FixedFooterNavBar({
         {/* 上段：サマリー（左・中央・右） */}
         <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
           <s-box style={{ flex: "1 1 0", minInlineSize: 0 }}>
-            <s-text size="small" tone="subdued">
-              {summaryLeft}
-            </s-text>
+            {summaryLeft != null && typeof summaryLeft === "object" && summaryLeft.type != null
+              ? summaryLeft
+              : <s-text size="small" tone="subdued">{summaryLeft}</s-text>}
           </s-box>
 
           {hasCenter ? (
@@ -1660,19 +1301,6 @@ function usePersistentAppState() {
   return [state, setState];
 }
 
-function getStateSlice(appState, key, fallback = {}) {
-  const s = appState?.[key];
-  return s && typeof s === "object" ? s : fallback;
-}
-function setStateSlice(setAppState, key, patch) {
-  setAppState((prev) => {
-    const cur = (prev && typeof prev === "object" ? prev : {})[key];
-    const base = cur && typeof cur === "object" ? cur : {};
-    const next = typeof patch === "function" ? patch(base) : { ...base, ...(patch || {}) };
-    return { ...(prev && typeof prev === "object" ? prev : {}), [key]: next };
-  });
-}
-
 /* AlertModal */
 
 function BlockingAlertModal({ open, title = "エラー", message, onOk }) {
@@ -1857,66 +1485,6 @@ function useOriginLocationGid() {
   }, [raw]);
 }
 
-/* adminGraphql */
-
-async function adminGraphql(query, variables, opts = {}) {
-  const timeoutMsRaw = opts?.timeoutMs;
-  const timeoutMs = Number.isFinite(Number(timeoutMsRaw)) ? Number(timeoutMsRaw) : 20000;
-
-  const controller = new AbortController();
-  const parentSignal = opts?.signal;
-
-  // 親signalがあれば連動
-  const onAbort = () => controller.abort(parentSignal?.reason || new Error("aborted"));
-  if (parentSignal) {
-    if (parentSignal.aborted) onAbort();
-    else parentSignal.addEventListener("abort", onAbort, { once: true });
-  }
-
-  let done = false;
-  let iv = null;
-
-  const timeoutPromise = new Promise((_, reject) => {
-    const started = Date.now();
-
-    // POS iOS で setTimeout が不安定な報告があるため、短周期で監視する
-    iv = setInterval(() => {
-      if (done) return;
-
-      const elapsed = Date.now() - started;
-      if (elapsed >= timeoutMs) {
-        try {
-          controller.abort(new Error(`timeout ${timeoutMs}ms`));
-        } catch {}
-        reject(new Error(`timeout ${timeoutMs}ms`));
-      }
-    }, 200);
-  });
-
-  const fetchPromise = (async () => {
-    const res = await fetch("shopify:admin/api/graphql.json", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, variables }),
-      signal: controller.signal,
-    });
-
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
-
-    const json = text ? JSON.parse(text) : {};
-    if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-    return json.data;
-  })();
-
-  try {
-    return await Promise.race([fetchPromise, timeoutPromise]);
-  } finally {
-    done = true;
-    if (iv) clearInterval(iv);
-  }
-}
-
 /* Outbound split */
 
 function OutboundConditions({
@@ -1939,14 +1507,14 @@ function OutboundConditions({
 
   const sessionOriginLocationGid = useOriginLocationGid();
   const manualOriginLocationGid = String(appState?.originLocationIdManual || "").trim();
-  const originLocationGid = sessionOriginLocationGid || (manualOriginLocationGid ? manualOriginLocationGid : null);
+  const originLocationGid = manualOriginLocationGid || sessionOriginLocationGid || null;
 
   const locIndex = useLocationsIndex(appState, setAppState);
 
   const outbound = getStateSlice(appState, "outbound", {
     destinationLocationId: "",
     showDestPicker: false,
-    showOriginPicker: false,
+    showOriginLocationPicker: false,
 
     carrierId: "",
     showCarrierPicker: false,
@@ -1973,6 +1541,10 @@ function OutboundConditions({
   const [locationsLoading, setLocationsLoading] = useState(false);
 
   const allLocations = Array.isArray(outbound.allLocations) ? outbound.allLocations : [];
+
+  const [originLocationSearchQuery, setOriginLocationSearchQuery] = useState("");
+  const [destLocationSearchQuery, setDestLocationSearchQuery] = useState("");
+
   const settings =
     outbound.settings && typeof outbound.settings === "object"
       ? outbound.settings
@@ -1984,7 +1556,6 @@ function OutboundConditions({
   const [historyError, setHistoryError] = useState("");
   const [historyTransfers, setHistoryTransfers] = useState([]);
 
-  // 追加：履歴で選択しているtransfer（フッターへ反映）
   const [selectedHistoryTransfer, setSelectedHistoryTransfer] = useState(null);
 
   const selectedHistoryTitle = useMemo(() => {
@@ -2081,6 +1652,7 @@ function OutboundConditions({
       historySelectedStatus: "",
       historySelectedReadOnly: false,
       historySelectedShipmentId: "",
+      historySelectedShipmentIndex: 0,
     });
 
     try {
@@ -2190,8 +1762,10 @@ function OutboundConditions({
   }, []);
 
   const arrivesTimeLabel = useMemo(() => {
+    const iso = String(outbound.arrivesAtIso || "").trim();
+    if (!iso) return "未選択";
     const cur = parseIsoToLocalParts_(outbound.arrivesAtIso);
-    if (!cur) return "12:00";
+    if (!cur) return "未選択";
     const hh = String(cur.hh).padStart(2, "0");
     const mm = String(cur.mm).padStart(2, "0");
     return `${hh}:${mm}`;
@@ -2385,6 +1959,20 @@ function OutboundConditions({
     return destinationCandidates.find((l) => l.id === outbound.destinationLocationId)?.name ?? "未選択";
   }, [destinationCandidates, outbound.destinationLocationId]);
 
+  const originLocationList = useMemo(() => {
+    const base = allLocations;
+    const q = String(originLocationSearchQuery || "").trim().toLowerCase();
+    if (!q) return base;
+    return base.filter((l) => String(l?.name || "").toLowerCase().includes(q));
+  }, [allLocations, originLocationSearchQuery]);
+
+  const destLocationList = useMemo(() => {
+    const base = destinationCandidates;
+    const q = String(destLocationSearchQuery || "").trim().toLowerCase();
+    if (!q) return base;
+    return base.filter((l) => String(l?.name || "").toLowerCase().includes(q));
+  }, [destinationCandidates, destLocationSearchQuery]);
+
   const carrierOptions = useMemo(() => {
     const cs = Array.isArray(settings?.carriers) ? settings.carriers : [];
     return cs
@@ -2400,7 +1988,12 @@ function OutboundConditions({
     () => carrierOptions.find((c) => c.id === outbound.carrierId) ?? null,
     [carrierOptions, outbound.carrierId]
   );
-  const selectedCarrierLabel = useMemo(() => (selectedCarrier ? selectedCarrier.label : "未選択"), [selectedCarrier]);
+  const selectedCarrierLabel = useMemo(() => {
+    if (selectedCarrier) return selectedCarrier.label;
+    const manual = String(outbound.manualCompany || "").trim();
+    if (manual) return manual;
+    return "未選択";
+  }, [selectedCarrier, outbound.manualCompany]);
 
   const carrierCompanyText = useMemo(() => {
     const v = String(selectedCarrier?.company || "").trim();
@@ -2442,11 +2035,27 @@ function OutboundConditions({
 
         const cs = Array.isArray(nextSettings.carriers) ? nextSettings.carriers : [];
         const firstCarrierId = cs[0]?.id ? String(cs[0].id) : "";
-        if (!next.carrierId && firstCarrierId) next.carrierId = firstCarrierId;
+        const shippingRequired = Boolean(nextSettings?.outbound?.shippingRequired);
 
-        if (next.carrierId && cs.length > 0) {
-          const valid = cs.some((c) => String(c?.id || "") === String(next.carrierId));
-          if (!valid) next.carrierId = firstCarrierId || "";
+        if (shippingRequired) {
+          if (!next.carrierId && firstCarrierId) next.carrierId = firstCarrierId;
+          if (next.carrierId && cs.length > 0) {
+            const valid = cs.some((c) => String(c?.id || "") === String(next.carrierId));
+            if (!valid) next.carrierId = firstCarrierId || "";
+          }
+          if (!next.arrivesAtIso) {
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            tomorrow.setHours(9, 0, 0, 0);
+            next.arrivesAtIso = tomorrow.toISOString();
+            next.arrivesDateDraft = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`;
+            next.arrivesAutoDisabled = false;
+          }
+        } else {
+          next.carrierId = "";
+          next.arrivesAtIso = "";
+          next.arrivesDateDraft = "";
+          next.arrivesAutoDisabled = true;
         }
 
         return next;
@@ -2605,12 +2214,13 @@ function OutboundConditions({
         summaryLeft={summaryLeft}
         summaryCenter=""
         summaryRight={summaryRight}
-        middleLabel={`軽量:${liteMode ? "ON" : "OFF"}`}
-        middleTone={liteMode ? "critical" : "default"}
-        onMiddle={onToggleLiteMode}
-        middleDisabled={typeof onToggleLiteMode !== "function"}
-        leftLabel="戻る"
-        onLeft={onBack}
+        leftLabel={liteMode ? "画像OFF" : "画像ON"}
+        leftTone={liteMode ? "critical" : "default"}
+        onLeft={typeof onToggleLiteMode === "function" ? onToggleLiteMode : undefined}
+        leftDisabled={typeof onToggleLiteMode !== "function"}
+        middleLabel="履歴一覧"
+        onMiddle={typeof onOpenOutboundHistoryConditions === "function" ? onOpenOutboundHistoryConditions : undefined}
+        middleTone="default"
         rightLabel="次へ"
         onRight={handleNext}
         rightTone="success"
@@ -2624,22 +2234,14 @@ function OutboundConditions({
     originLocationName,
     selectedDestName,
     canNext,
-    onBack,
     onNext,
     liteMode,
     onToggleLiteMode,
+    onOpenOutboundHistoryConditions,
   ]);
 
-  const pickManualOrigin = (id) => {
-    setAppState((prev) => ({ ...(prev || {}), originLocationIdManual: id }));
-    setStateSlice(setAppState, "outbound", (p) => ({
-      ...p,
-      showOriginPicker: false,
-      destinationLocationId: p.destinationLocationId === id ? "" : p.destinationLocationId,
-    }));
-  };
-
   return (
+    <>
     <s-box padding="base">
       <s-stack gap="base">
         {settingsLoading || locationsLoading ? <s-text tone="subdued">初期化中...</s-text> : null}
@@ -2650,101 +2252,123 @@ function OutboundConditions({
           </s-text>
         ) : null}
 
-        {/* 出庫元&宛先 */}
+        {/* 出庫元・宛先（画面上部の右に「変更」ボタン） */}
         <s-stack gap="small">
           <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
             <s-box style={{ flex: "1 1 auto", minInlineSize: 0 }}>
               <s-text>出庫元: {originLocationName}</s-text>
-              {!sessionOriginLocationGid && manualOriginLocationGid ? (
-                <s-text tone="subdued" size="small">
-                  （手動設定）
-                </s-text>
-              ) : null}
               {!originLocationGid ? (
-                <s-text tone="critical" size="small">
-                  出庫元が取得できません。下の「出庫元を設定」から選択してください。
+                <s-text tone="subdued" size="small">
+                  この端末のロケーションを使用します。取得できない場合はアプリを再起動してください。
                 </s-text>
               ) : null}
             </s-box>
-
             <s-button
               kind="secondary"
               onClick={() =>
-                setStateSlice(setAppState, "outbound", (p) => ({ ...p, showOriginPicker: !p.showOriginPicker }))
+                setStateSlice(setAppState, "outbound", (p) => ({ ...p, showOriginLocationPicker: !p.showOriginLocationPicker }))
               }
             >
-              出庫元を設定
+              {outbound.showOriginLocationPicker ? "閉じる" : "変更"}
             </s-button>
           </s-stack>
 
-          {outbound.showOriginPicker ? (
+          {outbound.showOriginLocationPicker ? (
             <s-stack gap="base">
-              {allLocations.length === 0 ? (
-                <s-text tone="subdued">ロケーション一覧がありません（再取得を試してください）</s-text>
-              ) : (
-                allLocations.map((l) => (
-                  <s-button
-                    key={l.id}
-                    tone={l.id === originLocationGid ? "success" : undefined}
-                    onClick={() => pickManualOrigin(l.id)}
-                  >
-                    {l.name}
-                  </s-button>
-                ))
-              )}
-
-              <s-stack direction="inline" justifyContent="end" gap="base">
-                <s-button onClick={bootstrap}>再取得</s-button>
-              </s-stack>
+              <s-text-field
+                label="検索"
+                placeholder="ロケーション名"
+                value={originLocationSearchQuery}
+                onInput={(e) => setOriginLocationSearchQuery(readValue(e))}
+                onChange={(e) => setOriginLocationSearchQuery(readValue(e))}
+              />
+              <s-scroll-view style={{ maxBlockSize: "60vh" }}>
+                <s-stack gap="small">
+                  {originLocationList.length === 0 ? (
+                    <s-text tone="subdued">該当するロケーションがありません</s-text>
+                  ) : (
+                    originLocationList.map((l) => (
+                      <s-button
+                        key={l.id}
+                        tone={l.id === originLocationGid ? "success" : undefined}
+                        onClick={() => {
+                          setAppState((prev) => ({ ...(prev || {}), originLocationIdManual: l.id || "", originLocationNameManual: l.name || "" }));
+                          setStateSlice(setAppState, "outbound", { showOriginLocationPicker: false });
+                          setOriginLocationSearchQuery("");
+                        }}
+                      >
+                        {l.name}
+                      </s-button>
+                    ))
+                  )}
+                </s-stack>
+              </s-scroll-view>
             </s-stack>
           ) : null}
 
           <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
             <s-box style={{ flex: "1 1 auto", minInlineSize: 0 }}>
-              <s-text>宛先: {selectedDestName}（選択中）</s-text>
+              <s-stack direction="inline" gap="small" alignItems="center">
+                <s-text>宛先: {selectedDestName}</s-text>
+                <s-badge tone="info">選択中</s-badge>
+              </s-stack>
               {originLocationGid && destinationCandidates.length === 0 ? (
                 <s-text tone="critical" size="small">
                   宛先候補がありません（グループ設定が “originのみ” になっていないか確認）
                 </s-text>
               ) : null}
             </s-box>
-
             <s-button
               kind="secondary"
               onClick={() =>
                 setStateSlice(setAppState, "outbound", (p) => ({ ...p, showDestPicker: !p.showDestPicker }))
               }
             >
-              宛先を変更
+              {outbound.showDestPicker ? "閉じる" : "変更"}
             </s-button>
           </s-stack>
 
           {outbound.showDestPicker ? (
             <s-stack gap="base">
-              {destinationCandidates.map((l) => (
-                <s-button
-                  key={l.id}
-                  tone={l.id === outbound.destinationLocationId ? "success" : undefined}
-                  onClick={() =>
-                    setStateSlice(setAppState, "outbound", { destinationLocationId: l.id, showDestPicker: false })
-                  }
-                >
-                  {l.name}
-                </s-button>
-              ))}
-
-              <s-stack direction="inline" justifyContent="end" gap="base">
-                <s-button onClick={bootstrap}>再取得</s-button>
-              </s-stack>
+              <s-text-field
+                label="検索"
+                placeholder="ロケーション名"
+                value={destLocationSearchQuery}
+                onInput={(e) => setDestLocationSearchQuery(readValue(e))}
+                onChange={(e) => setDestLocationSearchQuery(readValue(e))}
+              />
+              <s-scroll-view style={{ maxBlockSize: "60vh" }}>
+                <s-stack gap="small">
+                  {destLocationList.length === 0 ? (
+                    <s-text tone="subdued">該当するロケーションがありません</s-text>
+                  ) : (
+                    destLocationList.map((l) => (
+                      <s-button
+                        key={l.id}
+                        tone={l.id === outbound.destinationLocationId ? "success" : undefined}
+                        onClick={() => {
+                          setStateSlice(setAppState, "outbound", { destinationLocationId: l.id || "", showDestPicker: false });
+                          setDestLocationSearchQuery("");
+                        }}
+                      >
+                        {l.name}
+                      </s-button>
+                    ))
+                  )}
+                </s-stack>
+              </s-scroll-view>
             </s-stack>
           ) : null}
         </s-stack>
 
         <s-divider />
 
-        {/* 配送情報 */}
+        {/* 配送情報（バッジは「配送情報」横の1つのみ、項目タイトルは s-text-field の label で枠内表示） */}
         <s-stack gap="base">
-          <s-text emphasis="bold">配送情報（任意）</s-text>
+          <s-stack direction="inline" gap="small" alignItems="center">
+            <s-text emphasis="bold">配送情報</s-text>
+            <s-badge tone="neutral">任意</s-badge>
+          </s-stack>
 
           {/* 配送業者 */}
           {carrierOptions.length === 0 ? (
@@ -2753,7 +2377,7 @@ function OutboundConditions({
                 ※ 管理画面の「配送会社（選択式）」が未設定です。必要なら配送業者を手入力できます。
               </s-text>
               <s-text-field
-                label="配送業者（任意）"
+                label="配送業者"
                 placeholder='例: "Sagawa (JA)" / "Yamato (JA)"'
                 value={String(outbound.manualCompany || "")}
                 onInput={(e) => setStateSlice(setAppState, "outbound", { manualCompany: readValue(e) })}
@@ -2764,7 +2388,14 @@ function OutboundConditions({
             <s-stack gap="base">
               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                 <s-box style={{ flex: "1 1 auto", minInlineSize: 0 }}>
-                  <s-text>配送業者: {selectedCarrierLabel}</s-text>
+                  <s-stack direction="inline" gap="small" alignItems="center">
+                    <s-text>配送業者: {selectedCarrierLabel}</s-text>
+                    {selectedCarrierLabel !== "未選択" && (
+                      <s-badge tone="info">
+                        選択中
+                      </s-badge>
+                    )}
+                  </s-stack>
                   {carrierCompanyText ? (
                     <s-text tone="subdued" size="small">
                       {carrierCompanyText}
@@ -2778,58 +2409,75 @@ function OutboundConditions({
                     setStateSlice(setAppState, "outbound", (p) => ({ ...p, showCarrierPicker: !p.showCarrierPicker }))
                   }
                 >
-                  配送業者を変更
+                  {outbound.showCarrierPicker ? "閉じる" : "変更"}
                 </s-button>
               </s-stack>
 
               {outbound.showCarrierPicker ? (
                 <s-stack gap="base">
-                  <s-button
-                    tone={!outbound.carrierId ? "success" : undefined}
-                    onClick={() => setStateSlice(setAppState, "outbound", { carrierId: "", showCarrierPicker: false })}
-                  >
-                    （未選択）
-                  </s-button>
-
                   {carrierOptions.map((c) => (
                     <s-button
                       key={c.id}
                       tone={c.id === outbound.carrierId ? "success" : undefined}
-                      onClick={() => setStateSlice(setAppState, "outbound", { carrierId: c.id, showCarrierPicker: false })}
+                      onClick={() =>
+                        setStateSlice(setAppState, "outbound", {
+                          carrierId: c.id,
+                          showCarrierPicker: false,
+                          showCarrierCustomInput: false,
+                        })
+                      }
                     >
                       {c.label}
                     </s-button>
                   ))}
+                  <s-button
+                    kind="secondary"
+                    tone={outbound.showCarrierCustomInput ? "success" : undefined}
+                    onClick={() =>
+                      setStateSlice(setAppState, "outbound", (p) => ({
+                        ...p,
+                        carrierId: "",
+                        showCarrierCustomInput: !p.showCarrierCustomInput,
+                      }))
+                    }
+                  >
+                    その他
+                  </s-button>
+                  {outbound.showCarrierCustomInput && (
+                    <s-text-field
+                      label="配送業者"
+                      placeholder='例: "Sagawa (JA)"'
+                      value={String(outbound.manualCompany || "")}
+                      onInput={(e) =>
+                        setStateSlice(setAppState, "outbound", {
+                          manualCompany: readValue(e),
+                        })
+                      }
+                      onChange={(e) =>
+                        setStateSlice(setAppState, "outbound", {
+                          manualCompany: readValue(e),
+                        })
+                      }
+                    />
+                  )}
                 </s-stack>
-              ) : null}
-
-              {!outbound.carrierId ? (
-                <s-text-field
-                  label="配送業者（任意）"
-                  placeholder='例: "Sagawa (JA)"'
-                  value={String(outbound.manualCompany || "")}
-                  onInput={(e) => setStateSlice(setAppState, "outbound", { manualCompany: readValue(e) })}
-                  onChange={(e) => setStateSlice(setAppState, "outbound", { manualCompany: readValue(e) })}
-                />
               ) : null}
             </s-stack>
           )}
 
-          {/* 配送番号 */}
+          {/* 配送番号（label で枠内タイトル表示） */}
           <s-text-field
-            label="配送番号（任意）※スキャン可能"
+            label="配送番号 ※スキャン可能"
             placeholder="例: 1234567890"
             value={String(outbound.trackingNumber || "")}
             onInput={(e) => setStateSlice(setAppState, "outbound", { trackingNumber: readValue(e) })}
             onChange={(e) => setStateSlice(setAppState, "outbound", { trackingNumber: readValue(e) })}
           />
 
-          {/* 到着予定 */}
+          {/* 到着予定（label で枠内タイトル表示） */}
           <s-stack gap="small">
-            <s-text emphasis="bold">到着予定（任意）</s-text>
-
             <s-text-field
-              label="日付"
+              label="到着予定日"
               placeholder="YYYY-MM-DD"
               value={String(outbound.arrivesDateDraft || "")}
               onInput={onArrivesDateDraftInput_}
@@ -2850,9 +2498,14 @@ function OutboundConditions({
 
             <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
               <s-box style={{ flex: "1 1 auto", minInlineSize: 0 }}>
-                <s-text tone="subdued" size="small">
-                  時間: {arrivesTimeLabel}（選択中）
-                </s-text>
+                <s-stack direction="inline" gap="small" alignItems="center">
+                  <s-text tone="subdued" size="small">時間指定: {arrivesTimeLabel}</s-text>
+                  {arrivesTimeLabel !== "未選択" && (
+                    <s-badge tone="info">
+                      選択中
+                    </s-badge>
+                  )}
+                </s-stack>
               </s-box>
 
               <s-button
@@ -2864,44 +2517,25 @@ function OutboundConditions({
                   }))
                 }
               >
-                時間を選択
+                {outbound.showArrivesTimePicker ? "閉じる" : "変更"}
               </s-button>
             </s-stack>
 
             {outbound.showArrivesTimePicker ? (
-              <s-stack gap="base">
-                <s-button onClick={() => applyTimeToArrivesIso_(9, 0)}>午前中</s-button>
-                <s-button onClick={() => applyTimeToArrivesIso_(12, 0)}>12:00</s-button>
-                <s-button onClick={() => applyTimeToArrivesIso_(14, 0)}>14:00</s-button>
-                <s-button onClick={() => applyTimeToArrivesIso_(16, 0)}>16:00</s-button>
-                <s-button onClick={() => applyTimeToArrivesIso_(18, 0)}>18:00</s-button>
-
-                <s-stack direction="inline" justifyContent="end" gap="base">
-                  <s-button
-                    kind="secondary"
-                    onClick={() => setStateSlice(setAppState, "outbound", { showArrivesTimePicker: false })}
-                  >
-                    戻る
-                  </s-button>
-                </s-stack>
+              <s-stack direction="inline" gap="small" justifyContent="start" flexWrap="wrap">
+                <s-button kind="secondary" onClick={() => applyTimeToArrivesIso_(9, 0)}>午前中</s-button>
+                <s-button kind="secondary" onClick={() => applyTimeToArrivesIso_(12, 0)}>12:00</s-button>
+                <s-button kind="secondary" onClick={() => applyTimeToArrivesIso_(14, 0)}>14:00</s-button>
+                <s-button kind="secondary" onClick={() => applyTimeToArrivesIso_(16, 0)}>16:00</s-button>
+                <s-button kind="secondary" onClick={() => applyTimeToArrivesIso_(18, 0)}>18:00</s-button>
               </s-stack>
             ) : null}
           </s-stack>
         </s-stack>
-
-        {/* 出庫履歴 */}
-        <s-divider />
-
-        <s-stack gap="tight">
-          <s-stack direction="inline" justifyContent="space-between" alignItems="center">
-            <s-text emphasis="bold">出庫履歴</s-text>
-            <s-button kind="secondary" onClick={() => onOpenOutboundHistoryConditions?.()}>
-              履歴一覧
-            </s-button>
-          </s-stack>
-        </s-stack>
       </s-stack>
+
     </s-box>
+    </>
   );
 }
 
@@ -3037,7 +2671,13 @@ function OutboundHistoryConditions({
   setFooter,
   onToggleLiteMode,
   onOpenOutboundHistoryDetail,
+  onOpenOutboundShipmentSelection,
+  onOpenOutboundList,
 }) {
+  const READY_TO_SHIP_EDIT_MODAL_ID = "outbound-ready-edit-modal";
+  const [readyToShipEditTransfer, setReadyToShipEditTransfer] = useState(null);
+  const readyToShipModalRef = useRef(null);
+
   useEffect(() => {
     setHeader?.(null);
     return () => setHeader?.(null);
@@ -3045,7 +2685,7 @@ function OutboundHistoryConditions({
 
   const sessionOriginLocationGid = useOriginLocationGid();
   const manualOriginLocationGid = String(appState?.originLocationIdManual || "").trim();
-  const originLocationGid = sessionOriginLocationGid || (manualOriginLocationGid ? manualOriginLocationGid : null);
+  const originLocationGid = manualOriginLocationGid || sessionOriginLocationGid || null;
 
   const locIndex = useLocationsIndex(appState, setAppState);
 
@@ -3059,12 +2699,12 @@ function OutboundHistoryConditions({
     return allLocations.find((l) => l.id === originLocationGid)?.name ?? "（不明）";
   }, [originLocationGid, locIndex.byId, allLocations]);
 
-  const [historyMode, setHistoryMode] = useState("active"); // "active" | "done"
+  const [historyMode, setHistoryMode] = useState("pending"); // "pending" | "shipped"（初回表示で未出庫タブが primary になるよう "pending" で初期化）
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [historyTransfers, setHistoryTransfers] = useState([]);
   const [transfersPageInfo, setTransfersPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ページネーション用
-  const [loadingMore, setLoadingMore] = useState(false); // 追加読み込み中フラグ
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const STATUS_LABEL = useMemo(
     () => ({
@@ -3103,38 +2743,40 @@ function OutboundHistoryConditions({
       historySelectedStatus: "",
       historySelectedReadOnly: false,
       historySelectedShipmentId: "",
+      historySelectedShipmentIndex: 0,
     });
 
     try {
       const historyLimit = Math.max(1, Math.min(250, Number(outbound?.settings?.outbound?.historyInitialLimit ?? 100)));
       const result = await fetchTransfersForOriginAll(originLocationGid, { first: historyLimit });
-      // 監査ログから過剰分/予定外分/拒否分を合算して display に反映
-      let patched = Array.isArray(result?.transfers) ? result.transfers : [];
+      const baseTransfers = Array.isArray(result?.transfers) ? result.transfers : [];
+      setTransfersPageInfo(result?.pageInfo || { hasNextPage: false, endCursor: null });
+      // 二相ロード：先に baseTransfers を表示
+      setHistoryTransfers(baseTransfers);
+      setHistoryLoading(false);
+      // その後、非同期で監査ログをマージ
       try {
         const audit = await readInboundAuditLog();
         const overIdx = buildInboundOverIndex_(audit, { locationId: originLocationGid });
         const extrasIdx = buildInboundExtrasIndex_(audit, { locationId: originLocationGid });
         
         // 拒否分を集計（shipmentsのlineItemsから取得）
-        const shipmentIds = patched.flatMap((t) => 
+        const shipmentIds = baseTransfers.flatMap((t) => 
           (Array.isArray(t?.shipments) ? t.shipments : [])
             .map((s) => String(s?.id || "").trim())
             .filter(Boolean)
         );
         const rejectedIdx = await buildInboundRejectedIndex_(shipmentIds);
         
-        patched = mergeInboundOverIntoTransfers_(patched, overIdx, extrasIdx, rejectedIdx);
+        const patched = mergeInboundOverIntoTransfers_(baseTransfers, overIdx, extrasIdx, rejectedIdx);
+        setHistoryTransfers(patched);
       } catch (_) {
         // エラー時はそのまま
       }
-      
-      setHistoryTransfers(patched);
-      setTransfersPageInfo(result?.pageInfo || { hasNextPage: false, endCursor: null });
     } catch (e) {
       setHistoryError(toUserMessage(e));
       setHistoryTransfers([]);
       setTransfersPageInfo({ hasNextPage: false, endCursor: null });
-    } finally {
       setHistoryLoading(false);
     }
   }, [originLocationGid, setAppState, outbound?.settings?.outbound?.historyInitialLimit]);
@@ -3145,8 +2787,6 @@ function OutboundHistoryConditions({
   }, [originLocationGid, refreshOutboundHistory]);
 
   // タブ分けの判定関数
-  // 「未出庫」：DRAFT（下書き）とREADY_TO_SHIP（配送準備完了）
-  // 「出庫済み」：IN_PROGRESS（処理中）とTRANSFERRED（処理済み）
   const isPendingTransfer = useCallback((t) => {
     const s = String(t?.status || "").toUpperCase();
     return s === "DRAFT" || s === "READY_TO_SHIP";
@@ -3189,6 +2829,62 @@ function OutboundHistoryConditions({
     [setAppState, onOpenOutboundHistoryDetail]
   );
 
+  const onTapHistoryTransferRef = useRef(onTapHistoryTransfer);
+  onTapHistoryTransferRef.current = onTapHistoryTransfer;
+
+  const closeReadyToShipModal = useCallback(() => {
+    try {
+      readyToShipModalRef.current?.hideOverlay?.();
+    } catch {}
+    setReadyToShipEditTransfer(null);
+  }, []);
+
+  const onConfirmShipment = useCallback(() => {
+    if (readyToShipEditTransfer) {
+      const t = readyToShipEditTransfer;
+      closeReadyToShipModal();
+      setStateSlice(setAppState, "outbound", {
+        historySelectedTransferId: String(t?.id || ""),
+        historySelectedTransferName: String(t?.name || ""),
+        historySelectedOriginName: String(t?.originName || ""),
+        historySelectedDestName: String(t?.destinationName || ""),
+        historySelectedStatus: String(t?.status || ""),
+        historySelectedReadOnly: String(t?.status || "").toUpperCase() === "TRANSFERRED",
+        historySelectedShipmentId: "",
+        historySelectedShipmentIndex: 0,
+      });
+      onOpenOutboundShipmentSelection?.();
+    }
+  }, [readyToShipEditTransfer, closeReadyToShipModal, setAppState, onOpenOutboundShipmentSelection]);
+
+  const onAddShipment = useCallback(() => {
+    if (!readyToShipEditTransfer || !setAppState) return;
+    const t = readyToShipEditTransfer;
+    closeReadyToShipModal();
+    try {
+      if (SHOPIFY?.storage?.delete) SHOPIFY.storage.delete(OUTBOUND_DRAFT_KEY);
+    } catch (_) {}
+    setStateSlice(setAppState, "outbound", (prev) => ({
+      ...(prev || {}),
+      addingShipmentToTransferId: String(t?.id || "").trim(),
+      addingShipmentToTransferName: String(t?.name || "").trim(),
+      editingTransferId: "",
+      draftTransferId: "",
+      lines: [],
+      destinationLocationId: String(t?.destinationLocationId || t?.destination?.id || prev?.destinationLocationId || "").trim(),
+      historySelectedTransferId: "",
+      historySelectedTransferName: "",
+      historySelectedOriginName: "",
+      historySelectedDestName: "",
+      historySelectedStatus: "",
+      historySelectedReadOnly: false,
+      historyDraftSourceTransferId: "",
+    }));
+    requestAnimationFrame(() => {
+      onOpenOutboundList?.();
+    });
+  }, [readyToShipEditTransfer, closeReadyToShipModal, setAppState, onOpenOutboundList]);
+
   // 次のページのTransfer一覧を読み込む関数
   const loadMoreTransfers_ = useCallback(async () => {
     if (!originLocationGid || !transfersPageInfo?.hasNextPage || !transfersPageInfo?.endCursor) return;
@@ -3207,9 +2903,10 @@ function OutboundHistoryConditions({
       }
 
       const newTransfers = Array.isArray(result?.transfers) ? result.transfers : [];
-      
-      // 監査ログから過剰分/予定外分/拒否分を合算
-      let patched = newTransfers;
+      // 二相ロード：先に newTransfers を追加表示
+      setHistoryTransfers((prev) => [...prev, ...newTransfers]);
+      setLoadingMore(false);
+      // その後、非同期で監査ログをマージ
       try {
         const audit = await readInboundAuditLog();
         const overIdx = buildInboundOverIndex_(audit, { locationId: originLocationGid });
@@ -3223,13 +2920,15 @@ function OutboundHistoryConditions({
         );
         const rejectedIdx = await buildInboundRejectedIndex_(shipmentIds);
         
-        patched = mergeInboundOverIntoTransfers_(newTransfers, overIdx, extrasIdx, rejectedIdx);
+        const patched = mergeInboundOverIntoTransfers_(newTransfers, overIdx, extrasIdx, rejectedIdx);
+        // 既存の newTransfers を patched に置き換え
+        setHistoryTransfers((prev) => {
+          const withoutNew = prev.slice(0, prev.length - newTransfers.length);
+          return [...withoutNew, ...patched];
+        });
       } catch (_) {}
-      
-      setHistoryTransfers((prev) => [...prev, ...patched]);
     } catch (e) {
       toast(String(e?.message || e || "追加読み込みに失敗しました"));
-    } finally {
       setLoadingMore(false);
     }
   }, [originLocationGid, transfersPageInfo, loadingMore]);
@@ -3243,7 +2942,7 @@ function OutboundHistoryConditions({
           <s-stack direction="inline" gap="none" inlineSize="100%">
             <s-box inlineSize="50%">
               <s-button
-                kind={historyMode === "pending" ? "primary" : "secondary"}
+                variant={historyMode === "pending" ? "primary" : "secondary"}
                 onClick={() => setHistoryMode("pending")}
               >
                 未出庫 {pendingTransfersAll.length}件
@@ -3252,7 +2951,7 @@ function OutboundHistoryConditions({
 
             <s-box inlineSize="50%">
               <s-button
-                kind={historyMode === "shipped" ? "primary" : "secondary"}
+                variant={historyMode === "shipped" ? "primary" : "secondary"}
                 onClick={() => setHistoryMode("shipped")}
               >
                 出庫済み {shippedTransfersAll.length}件
@@ -3273,7 +2972,7 @@ function OutboundHistoryConditions({
                   onPress={loadMoreTransfers_}
                   disabled={loadingMore}
                 >
-                  {loadingMore ? "読み込み中..." : "読込"}
+                  {loadingMore ? "読込中..." : "読込"}
                 </s-button>
               </s-stack>
             </s-box>
@@ -3306,11 +3005,11 @@ function OutboundHistoryConditions({
         summaryRight={summaryRight}
         leftLabel="戻る"
         onLeft={onBack}
-        middleLabel={liteMode ? "軽量:ON" : "軽量:OFF"}
+        middleLabel={liteMode ? "画像OFF" : "画像ON"}
         middleTone={liteMode ? "critical" : "default"}
         onMiddle={onToggleLiteMode}
         middleDisabled={typeof onToggleLiteMode !== "function"}
-        rightLabel={historyLoading ? "取得中..." : "再取得"}
+        rightLabel={historyLoading ? "読込中..." : "再読込"}
         onRight={refreshOutboundHistory}
         rightTone="secondary"
         rightDisabled={!originLocationGid || historyLoading}
@@ -3338,7 +3037,7 @@ function OutboundHistoryConditions({
 
         {listToShow.length === 0 ? (
           <s-text tone="subdued" size="small">
-            {historyLoading ? "取得中..." : "表示できる履歴がありません"}
+            {historyLoading ? "読み込み中..." : "表示できる履歴がありません"}
           </s-text>
         ) : (
           <s-stack gap="base">
@@ -3350,54 +3049,522 @@ function OutboundHistoryConditions({
               const total = Number(t?.totalQuantity ?? 0);
               const received = Number(t?.receivedQuantityDisplay ?? t?.receivedQuantity ?? 0);
 
-              // 強制キャンセル判定：noteに[強制キャンセル]が含まれている場合は「強制キャンセル」と表示
               const note = String(t?.note || "").trim();
               const isForcedCancel = note.includes("[強制キャンセル]");
-              
               const rawStatus = String(t?.status || "").trim();
-              const statusJa = isForcedCancel 
+              const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
+              const shipmentCount = shipments.length;
+              const unconfirmedCount = shipments.filter(
+                (s) => String(s?.status || "").toUpperCase() === "DRAFT"
+              ).length;
+              const statusJaBase = isForcedCancel
                 ? (STATUS_LABEL.FORCED_CANCEL || "強制キャンセル")
                 : (STATUS_LABEL[rawStatus] || (rawStatus ? rawStatus : "不明"));
+              let statusJa = statusJaBase;
+              if (rawStatus.toUpperCase() === "READY_TO_SHIP" && unconfirmedCount > 0) {
+                statusJa = `${statusJaBase}（未確定：${unconfirmedCount}）`;
+              }
+              const isReadyToShip = rawStatus.toUpperCase() === "READY_TO_SHIP";
+              const displayShipmentCount = isReadyToShip ? Math.max(1, shipmentCount) : shipmentCount;
+              const statusSupplementText = (isReadyToShip || displayShipmentCount >= 1)
+                ? `配送数${displayShipmentCount} / 未確定${unconfirmedCount}`
+                : (statusJa !== statusJaBase
+                    ? statusJa.slice(String(statusJaBase).length).trim().replace(/^（/, "").replace(/）$/, "")
+                    : "");
+              const statusBadgeTone = getStatusBadgeTone(statusJaBase);
+              const statusLineText = statusJa; // 互換用（参照エラー防止）
 
               return (
-                <s-clickable key={t.id} onClick={() => onTapHistoryTransfer(t)}>
-                  <s-box padding="small">
-                    <s-stack gap="tight">
-                      <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
-                        <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {head}
-                        </s-text>
-                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                          {date}
-                        </s-text>
-                      </s-stack>
-
-                      <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        出庫元: {origin}
-                      </s-text>
-
-                      <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        入庫先: {dest}
-                      </s-text>
-
-                      <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
-                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                          状態: {statusJa}
-                        </s-text>
-                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                          {received}/{total}
-                        </s-text>
-                      </s-stack>
+                <s-box key={t.id}>
+                  {isReadyToShip ? (
+                    <s-stack direction="inline" gap="base" alignItems="center" justifyContent="space-between" style={{ width: "100%" }}>
+                      <s-clickable onClick={() => onTapHistoryTransfer(t)} style={{ flex: "1 1 0", minWidth: 0 }}>
+                        <s-box padding="small" style={{ width: "100%" }}>
+                          <s-stack gap="tight" style={{ width: "100%" }}>
+                            <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small" style={{ width: "100%" }}>
+                              <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {head}
+                              </s-text>
+                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                                {date}
+                              </s-text>
+                            </s-stack>
+                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              出庫元: {origin}
+                            </s-text>
+                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              入庫先: {dest}
+                            </s-text>
+                            <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small" style={{ width: "100%", flexWrap: "nowrap" }}>
+                              <s-box style={{ flex: "1 1 0", minWidth: 0 }}>
+                                <s-stack direction="inline" gap="small" alignItems="center">
+                                  <s-badge tone={statusBadgeTone}>{statusJaBase}</s-badge>
+                                  {statusSupplementText ? <s-text tone="subdued" size="small">{statusSupplementText}</s-text> : null}
+                                </s-stack>
+                              </s-box>
+                              <s-box style={{ flexShrink: 0 }}>
+                                <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                                  {received}/{total}
+                                </s-text>
+                              </s-box>
+                            </s-stack>
+                          </s-stack>
+                        </s-box>
+                      </s-clickable>
+                      <s-box style={{ flex: "0 0 auto", flexShrink: 0 }}>
+                        <s-button
+                          kind="secondary"
+                          size="small"
+                          command="--show"
+                          commandFor={READY_TO_SHIP_EDIT_MODAL_ID}
+                          onClick={() => setReadyToShipEditTransfer(t)}
+                        >
+                          編集
+                        </s-button>
+                      </s-box>
                     </s-stack>
-                  </s-box>
+                  ) : (
+                    <s-clickable onClick={() => onTapHistoryTransfer(t)}>
+                      <s-box padding="small">
+                        <s-stack gap="tight">
+                          <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
+                            <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {head}
+                            </s-text>
+                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                              {date}
+                            </s-text>
+                          </s-stack>
+                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            出庫元: {origin}
+                          </s-text>
+                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            入庫先: {dest}
+                          </s-text>
+                          <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small" style={{ width: "100%", flexWrap: "nowrap" }}>
+                            <s-box style={{ flex: "1 1 0", minWidth: 0 }}>
+                              <s-stack direction="inline" gap="small" alignItems="center">
+                                <s-badge tone={statusBadgeTone}>{statusJaBase}</s-badge>
+                                {statusSupplementText ? <s-text tone="subdued" size="small">{statusSupplementText}</s-text> : null}
+                              </s-stack>
+                            </s-box>
+                            <s-box style={{ flexShrink: 0 }}>
+                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                                {received}/{total}
+                              </s-text>
+                            </s-box>
+                          </s-stack>
+                        </s-stack>
+                      </s-box>
+                    </s-clickable>
+                  )}
                   <s-divider />
-                </s-clickable>
+                </s-box>
               );
             })}
           </s-stack>
         )}
+
+      <s-modal id={READY_TO_SHIP_EDIT_MODAL_ID} heading="処理を選択" ref={readyToShipModalRef}>
+        {readyToShipEditTransfer ? (
+          <s-box padding="base" paddingBlockEnd="none">
+            <s-stack gap="base">
+              <s-stack gap="none">
+                <s-text tone="subdued" size="small">
+                  {String(readyToShipEditTransfer?.name || "").trim() || "出庫ID"}
+                </s-text>
+                <s-text tone="subdued" size="small">
+                  出庫元: {String(readyToShipEditTransfer?.originName || "").trim() || "-"}
+                </s-text>
+                <s-text tone="subdued" size="small">
+                  宛先: {String(readyToShipEditTransfer?.destinationName || "").trim() || "-"}
+                </s-text>
+              </s-stack>
+              <s-divider />
+              <s-text tone="subdued" size="small">
+                配送準備完了の出庫です。編集して確定するか、追加してから確定できます。
+              </s-text>
+              <s-box>
+                <s-button
+                  command="--hide"
+                  commandFor={READY_TO_SHIP_EDIT_MODAL_ID}
+                  onClick={() => setReadyToShipEditTransfer(null)}
+                >
+                  戻る
+                </s-button>
+              </s-box>
+            </s-stack>
+          </s-box>
+        ) : null}
+
+        <s-button slot="secondary-actions" onClick={onAddShipment}>
+          追加
+        </s-button>
+        <s-button slot="primary-action" tone="success" onClick={onConfirmShipment}>
+          編集
+        </s-button>
+      </s-modal>
       </s-stack>
     </s-box>
+  );
+}
+
+/* OutboundShipmentSelection（編集時：1件でも必ず配送リストを表示） */
+
+function OutboundShipmentSelection({
+  appState,
+  setAppState,
+  onBack,
+  setHeader,
+  setFooter,
+  onOpenOutboundHistoryDetail,
+  onOpenOutboundList,
+}) {
+  const outbound = getStateSlice(appState, "outbound", {
+    historySelectedTransferId: "",
+    historySelectedTransferName: "",
+    historySelectedOriginName: "",
+    historySelectedDestName: "",
+  });
+  const transferId = String(outbound.historySelectedTransferId || "").trim();
+  const transferName = String(outbound.historySelectedTransferName || "").trim();
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [detail, setDetail] = useState(null);
+  const [selectingShipmentId, setSelectingShipmentId] = useState(null);
+
+  // 仮想行（発送準備完了）は #T0127-L、実Shipmentは #T0127-1, #T0127-2... で管理画面と重複しない
+  const formatShipmentLabel = useCallback((name, index, isVirtual) => {
+    const base = String(name || "").trim() || "T0000";
+    const match = base.match(/(T?\d+)$/);
+    const numPart = match ? match[1] : base;
+    if (isVirtual) return `#${numPart}-L`;
+    return `#${numPart}-${index + 1}`;
+  }, []);
+
+  const loadTransfer = useCallback(async () => {
+    if (!transferId) return;
+    setLoading(true);
+    setError("");
+    setDetail(null);
+    try {
+      const d = await fetchInventoryTransferDetailForHistory({ id: transferId });
+      setDetail(d);
+    } catch (e) {
+      setError(toUserMessage(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [transferId]);
+
+  useEffect(() => {
+    loadTransfer();
+  }, [loadTransfer]);
+
+  const shipments = useMemo(() => {
+    if (!detail) return [];
+    const nodes = Array.isArray(detail?.shipments) ? detail.shipments : [];
+    return nodes
+      .map((s) => ({
+        id: String(s?.id || "").trim(),
+        status: String(s?.status || ""),
+        totalQuantity: Number(s?.totalQuantity ?? 0),
+      }))
+      .filter((s) => s.id);
+  }, [detail]);
+
+  // Transfer の lineItems（発送準備完了ブロック）を仮想行として先頭に追加（管理画面と同一表示）
+  const VIRTUAL_PREFIX = "__transfer__";
+  const virtualRowFromTransfer = useMemo(() => {
+    if (!detail?.id) return null;
+    const status = String(detail?.status || "").toUpperCase();
+    if (status !== "READY_TO_SHIP") return null;
+    const lineNodes = Array.isArray(detail?.lineItems) ? detail.lineItems : [];
+    const totalQty = lineNodes.reduce(
+      (sum, li) => sum + Math.max(0, Number(li?.shippableQuantity ?? li?.processableQuantity ?? 0)),
+      0
+    );
+    if (totalQty <= 0) return null;
+    return {
+      id: `${VIRTUAL_PREFIX}${detail.id}`,
+      status: "READY_TO_SHIP",
+      totalQuantity: totalQty,
+      isVirtual: true,
+    };
+  }, [detail]);
+
+  const displayShipments = useMemo(() => {
+    if (!detail?.id) return [];
+    const apiShipments = shipments;
+    const virtual = virtualRowFromTransfer;
+    if (virtual) {
+      return [virtual, ...apiShipments];
+    }
+    if (apiShipments.length > 0) return apiShipments;
+    return [{ id: `${VIRTUAL_PREFIX}${detail.id}`, status: String(detail?.status || ""), isVirtual: true }];
+  }, [detail, shipments, virtualRowFromTransfer]);
+
+  // 配送一覧フッター用：トランスファーがキャンセル可能か（TRANSFERRED/CANCELEDは不可）
+  const statusRawShipmentList = String(detail?.status || "").toUpperCase();
+  const canCancelFromShipmentList = useMemo(() => {
+    return !!detail?.id && statusRawShipmentList !== "TRANSFERRED" && statusRawShipmentList !== "CANCELED";
+  }, [detail?.id, statusRawShipmentList]);
+
+  const CONFIRM_CANCEL_SHIPMENT_LIST_MODAL_ID = "confirm-cancel-shipment-list-modal";
+
+  // 配送一覧からキャンセル実行（履歴商品リストのキャンセルモーダルと同じ処理）
+  const executeCancelFromShipmentList = useCallback(async () => {
+    if (!transferId) {
+      toast("キャンセルできません（transferId 未取得）");
+      return;
+    }
+    try {
+      await inventoryTransferCancelSafe({ id: transferId });
+      const originLocationId = String(detail?.originLocationId || "").trim();
+      const lineItems = Array.isArray(detail?.lineItems) ? detail.lineItems : [];
+      const deltas = lineItems
+        .map((li) => ({
+          inventoryItemId: String(li?.inventoryItemId || "").trim(),
+          delta: Math.max(0, Number(li?.processableQuantity ?? 0)),
+        }))
+        .filter((d) => d.inventoryItemId && d.delta > 0);
+      if (originLocationId && deltas.length > 0) {
+        const inventoryItemIds = deltas.map((d) => d.inventoryItemId).filter(Boolean);
+        await ensureInventoryActivatedAtLocation({
+          locationId: originLocationId,
+          inventoryItemIds,
+          debug,
+        });
+        // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
+        const transferIdStr = String(transferId || "").trim();
+        const transferIdMatch = transferIdStr.match(/(\d+)$/);
+        const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+        
+        await adjustInventoryAtLocationWithFallback({
+          locationId: originLocationId,
+          deltas,
+          referenceDocumentUri: transferIdForUri,
+        });
+        const originLocationName = String(detail?.originName || "").trim() || "出庫元";
+        await logInventoryChangeToApi({
+          activity: "outbound_transfer",
+          locationId: originLocationId,
+          locationName: originLocationName,
+          deltas,
+          sourceId: transferIdForUri,
+          lineItems,
+        });
+        const adjustments = deltas.map((d) => {
+          const li = lineItems.find((l) => String(l?.inventoryItemId || "").trim() === d.inventoryItemId);
+          return {
+            locationName: originLocationName,
+            locationId: originLocationId,
+            inventoryItemId: d.inventoryItemId,
+            sku: String(li?.sku || "").trim(),
+            title: String(li?.title || "").trim() || d.inventoryItemId,
+            delta: d.delta,
+          };
+        });
+        const adjustmentNote = buildInboundNoteLine_({
+          shipmentId: null,
+          locationId: originLocationId,
+          finalize: false,
+          note: "",
+          over: [],
+          extras: [],
+          inventoryAdjustments: adjustments,
+        });
+        await appendInventoryTransferNote_({
+          transferId,
+          line: `[キャンセル] 在庫を出庫元に戻しました\n${adjustmentNote}`,
+        });
+      }
+      toast("キャンセルしました");
+      document.querySelector(`#${CONFIRM_CANCEL_SHIPMENT_LIST_MODAL_ID}`)?.hide?.();
+      loadTransfer();
+    } catch (e) {
+      toast(String(e?.message || e || "キャンセルに失敗しました"));
+    }
+  }, [transferId, detail]);
+
+  // 配送リストからは「履歴商品リスト（詳細）」に遷移し、そこで戻る／編集／キャンセルを選ぶ（下書きと同じ流れ）
+  const onSelectShipment = useCallback(
+    (shipmentId, shipmentIndex1Based) => {
+      if (!shipmentId || !detail?.id) return;
+      try {
+        if (SHOPIFY?.storage?.delete) SHOPIFY.storage.delete(OUTBOUND_DRAFT_KEY);
+      } catch (_) {}
+      setStateSlice(setAppState, "outbound", (prev) => ({
+        ...(prev || {}),
+        historySelectedShipmentId: String(shipmentId || "").trim(),
+        historySelectedShipmentIndex: Number(shipmentIndex1Based) >= 1 ? Number(shipmentIndex1Based) : 1,
+        historyFromShipmentSelection: true,
+      }));
+      onOpenOutboundHistoryDetail?.();
+    },
+    [detail?.id, setAppState, onOpenOutboundHistoryDetail]
+  );
+
+  useEffect(() => {
+    setHeader?.(
+      <s-box padding="base">
+        <s-stack gap="base">
+          <s-text emphasis="bold">配送を選択</s-text>
+          {detail ? (
+            <s-stack gap="none">
+              <s-text tone="subdued" size="small">
+                {transferName || String(detail?.name || "").trim() || "出庫ID"}
+              </s-text>
+              <s-text tone="subdued" size="small">
+                出庫元: {String(detail?.originName || "").trim() || "-"}
+              </s-text>
+              <s-text tone="subdued" size="small">
+                宛先: {String(detail?.destinationName || "").trim() || "-"}
+              </s-text>
+              <s-text tone="subdued" size="small">
+                配送数: {displayShipments.length}
+              </s-text>
+            </s-stack>
+          ) : null}
+        </s-stack>
+      </s-box>
+    );
+    return () => setHeader?.(null);
+  }, [setHeader, detail, transferName, displayShipments.length]);
+
+  useEffect(() => {
+    setFooter?.(
+      <FixedFooterNavBar
+        summaryLeft={transferName || "-"}
+        summaryRight={`${displayShipments.length}件`}
+        leftLabel="戻る"
+        onLeft={onBack}
+        middleLabel="キャンセル"
+        onMiddle={() => document.querySelector(`#${CONFIRM_CANCEL_SHIPMENT_LIST_MODAL_ID}`)?.show?.()}
+        middleDisabled={!canCancelFromShipmentList}
+        middleTone="critical"
+        middleCommand="--show"
+        middleCommandFor={CONFIRM_CANCEL_SHIPMENT_LIST_MODAL_ID}
+        rightLabel={loading ? "読込中..." : "再読込"}
+        onRight={loadTransfer}
+        rightDisabled={loading}
+      />
+    );
+    return () => setFooter?.(null);
+  }, [setFooter, transferName, displayShipments.length, onBack, loadTransfer, loading, canCancelFromShipmentList]);
+
+  if (loading) {
+    return (
+      <s-box padding="base">
+        <s-text tone="subdued">読み込み中...</s-text>
+      </s-box>
+    );
+  }
+  if (error) {
+    return (
+      <s-box padding="base">
+        <s-text tone="critical">エラー: {error}</s-text>
+      </s-box>
+    );
+  }
+  if (!detail || displayShipments.length === 0) {
+    return (
+      <s-box padding="base">
+        <s-text tone="subdued">配送が見つかりません</s-text>
+      </s-box>
+    );
+  }
+
+  // 入庫の InboundShipmentSelection と同じレイアウト（paddingBlockStart/End、s-divider、左：ラベル+状態、右：数量）
+  return (
+    <>
+    <s-box padding="base">
+      <s-stack gap="none">
+        {displayShipments.map((shipment, index) => {
+          const sid = shipment.id;
+          const isVirtual = !!shipment.isVirtual;
+          const nonVirtualIndex = displayShipments.slice(0, index).filter((s) => !s.isVirtual).length;
+          const label = formatShipmentLabel(transferName || detail?.name || "", nonVirtualIndex, isVirtual);
+          const status = String(shipment.status || "").toUpperCase();
+          const statusJa =
+            status === "DRAFT"
+              ? "下書き"
+              : status === "IN_TRANSIT"
+                ? "進行中"
+                : status === "RECEIVED"
+                  ? "入庫済み"
+                  : status === "READY_TO_SHIP"
+                    ? "配送準備完了"
+                    : status || "不明";
+          const isSelecting = selectingShipmentId === sid;
+          const qtyText = shipment.isVirtual && Array.isArray(detail?.lineItems)
+            ? String(detail.lineItems.reduce((sum, li) => sum + Math.max(0, Number(li?.shippableQuantity ?? li?.processableQuantity ?? 0)), 0))
+            : Number(shipment.totalQuantity) > 0
+              ? String(shipment.totalQuantity)
+              : "—";
+          const shipmentBadgeTone = getStatusBadgeTone(statusJa);
+
+          return (
+            <s-box key={sid} padding="none">
+              <s-clickable onClick={() => !isSelecting && onSelectShipment(sid, index + 1)}>
+                <s-box
+                  paddingInline="none"
+                  paddingBlockStart="small-100"
+                  paddingBlockEnd="small-200"
+                  style={{ backgroundColor: "var(--s-color-bg-surface-primary)" }}
+                >
+                  <s-stack gap="base">
+                    <s-stack direction="inline" justifyContent="space-between" alignItems="flex-end" gap="small">
+                      <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
+                        <s-stack gap="none">
+                          <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {label}
+                          </s-text>
+                          <s-badge tone={shipmentBadgeTone}>{statusJa}</s-badge>
+                        </s-stack>
+                      </s-box>
+                      <s-box style={{ flex: "0 0 auto" }}>
+                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                          {qtyText}
+                        </s-text>
+                      </s-box>
+                    </s-stack>
+                  </s-stack>
+                </s-box>
+              </s-clickable>
+              <s-divider />
+            </s-box>
+          );
+        })}
+      </s-stack>
+    </s-box>
+
+    {/* 配送一覧のキャンセル確認モーダル（履歴商品リストと同じ） */}
+    <s-modal id={CONFIRM_CANCEL_SHIPMENT_LIST_MODAL_ID} heading="キャンセル確認">
+      <s-box padding="base" paddingBlockEnd="none">
+        <s-stack gap="base">
+          <s-text tone="subdued">
+            この出庫をキャンセルします。
+            {"\n"}よろしいですか？
+          </s-text>
+          <s-divider />
+          <s-box>
+            <s-button command="--hide" commandFor={CONFIRM_CANCEL_SHIPMENT_LIST_MODAL_ID}>
+              戻る
+            </s-button>
+          </s-box>
+        </s-stack>
+      </s-box>
+      <s-button
+        slot="primary-action"
+        tone="critical"
+        onClick={() => executeCancelFromShipmentList()}
+      >
+        キャンセルする
+      </s-button>
+    </s-modal>
+  </>
   );
 }
 
@@ -3423,12 +3590,15 @@ function OutboundHistoryDetail({
     historySelectedStatus: "",
     historySelectedReadOnly: false,
     historySelectedShipmentId: "",
+    historySelectedShipmentIndex: 0,
+    historyFromShipmentSelection: false,
     historySelectedOriginLocationId: "",
     historySelectedDestLocationId: "",
   });
 
   const transferId = String(outbound.historySelectedTransferId || "").trim();
   const selectedShipmentId = String(outbound.historySelectedShipmentId || "").trim();
+  const selectedShipmentIndex = Number(outbound.historySelectedShipmentIndex) >= 1 ? Number(outbound.historySelectedShipmentIndex) : 0;
 
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
@@ -3439,9 +3609,11 @@ function OutboundHistoryDetail({
   const [cancelArmedAt, setCancelArmedAt] = useState(0);
   const [editOrDuplicateMode, setEditOrDuplicateMode] = useState(null);
   const [historyShipmentTracking, setHistoryShipmentTracking] = useState(null);
+  const [stockRefreshing, setStockRefreshing] = useState(false);
 
   const loadSeqRef = useRef(0);
   const abortRef = useRef(null);
+  const initialStockLoadedRef = useRef(false);
 
   useEffect(() => {
     return () => {
@@ -3450,6 +3622,10 @@ function OutboundHistoryDetail({
       } catch {}
     };
   }, []);
+
+  useEffect(() => {
+    initialStockLoadedRef.current = false;
+  }, [transferId, selectedShipmentId]);
 
   const STATUS_LABEL = useMemo(
     () => ({
@@ -3550,6 +3726,245 @@ function OutboundHistoryDetail({
   const openEditAndOpen_ = useCallback(async () => {
     if (!detail?.id) return;
 
+    // 配送リスト経由で開いた場合：選択したシップメントの行を読み込んでから商品リストへ
+    const VIRTUAL_PREFIX = "__transfer__";
+    if (outbound.historyFromShipmentSelection && selectedShipmentId) {
+      try {
+        if (SHOPIFY?.storage?.delete) {
+          await SHOPIFY.storage.delete(OUTBOUND_DRAFT_KEY);
+        }
+      } catch (_) {}
+      try {
+        // 下書きシップメントでは API が variant=null・数量不正で返ることがある。
+        // loadDetail_ は既に商品リスト画面に正しい items を表示しており、
+        // Transfer/fetchTransferLineItemsEnriched で補完済み。
+        // → 表示されている items をそのまま lines に使う（最も確実）
+        const displayedItems = Array.isArray(items) ? items : [];
+        if (displayedItems.length > 0) {
+          let itemsToUse = displayedItems;
+          const hasEmptyProductTitle = itemsToUse.some((it) => !String(it?.productTitle || "").trim());
+          if (hasEmptyProductTitle && detail?.id) {
+            try {
+              const transferDetail = await fetchInventoryTransferDetailForHistory({ id: detail.id });
+              const tlItems = Array.isArray(transferDetail?.lineItems) ? transferDetail.lineItems : [];
+              const titleByInvId = new Map();
+              const skuByInvId = new Map();
+              for (const li of tlItems) {
+                const k = String(li?.inventoryItemId || "").trim();
+                if (!k) continue;
+                const t = String(li?.title ?? "").trim();
+                const s = String(li?.sku ?? "").trim();
+                if (t) titleByInvId.set(k, t);
+                if (s) skuByInvId.set(k, s);
+              }
+              itemsToUse = itemsToUse.map((it) => {
+                const invId = String(it?.inventoryItemId || "").trim();
+                const title = invId ? titleByInvId.get(invId) : "";
+                const sku = invId ? skuByInvId.get(invId) : "";
+                if (!title && !sku) return it;
+                return {
+                  ...it,
+                  productTitle: String(it?.productTitle || "").trim() || title || it.productTitle,
+                  sku: String(it?.sku || "").trim() || sku || it.sku,
+                };
+              });
+            } catch (_) {}
+          }
+          const nextLinesFromItems = itemsToUse.map((it, i) => {
+            const q = Math.max(0, Number(it.quantity ?? it.qty ?? 0));
+            const keyCandidate = String(it.key || "").trim();
+            const inventoryItemIdCandidate = String(it.inventoryItemId || "").trim();
+            const variantIdCandidate = String(it.variantId || "").trim();
+            const uniqueId = keyCandidate || inventoryItemIdCandidate || variantIdCandidate || `item-${i}`;
+            const productTitle = String(it.productTitle || "").trim();
+            const variantTitle = String(it.variantTitle || "").trim();
+            const label = productTitle + (variantTitle ? " / " + variantTitle : "") || productTitle || String(it.sku || "").trim() || "";
+            return {
+              id: uniqueId,
+              variantId: it.variantId ?? null,
+              inventoryItemId: it.inventoryItemId ?? null,
+              sku: String(it.sku || ""),
+              barcode: String(it.barcode || ""),
+              productTitle,
+              variantTitle,
+              imageUrl: String(it.imageUrl || ""),
+              qty: q,
+              quantity: q,
+              title: productTitle || label,
+              label: label || productTitle,
+            };
+          }).filter((l) => Number(l.qty || 0) > 0);
+          if (nextLinesFromItems.length > 0) {
+            const isVirtual = String(selectedShipmentId).startsWith(VIRTUAL_PREFIX);
+            setStateSlice(setAppState, "outbound", (prev) => ({
+              ...(prev || {}),
+              editingTransferId: String(detail.id),
+              editingTransferName: String(detail?.name || "").trim(),
+              draftTransferId: "",
+              lines: nextLinesFromItems,
+              destinationLocationId: detail.destinationLocationId || prev?.destinationLocationId || "",
+              historyFromShipmentSelection: false,
+              historySelectedShipmentId: isVirtual ? "" : selectedShipmentId,
+              historyDraftSourceTransferId: "",
+            }));
+            requestAnimationFrame(() => openOutboundListRef.current?.());
+            return;
+          }
+        }
+
+        // items が空の場合のみ API から再取得（フォールバック）
+        // 複数シップメントの Transfer は lineItems に全商品の title/sku がある → 必ず再取得して shipment 行と inventoryItemId で照合
+        let transferLineItemsForMerge = Array.isArray(detail?.lineItems) ? detail.lineItems : [];
+        if (detail?.id) {
+          try {
+            const freshTransfer = await fetchInventoryTransferDetailForHistory({ id: detail.id });
+            transferLineItemsForMerge = Array.isArray(freshTransfer?.lineItems) ? freshTransfer.lineItems : transferLineItemsForMerge;
+          } catch (_) {}
+        }
+
+        let nextLines = [];
+        const isVirtual = String(selectedShipmentId).startsWith(VIRTUAL_PREFIX);
+        if (isVirtual) {
+          const lineNodes = Array.isArray(detail?.lineItems) ? detail.lineItems : [];
+          nextLines = lineNodes
+            .map((li, i) => {
+              const shippable = Number(li?.shippableQuantity ?? 0);
+              const shipped = Number(li?.shippedQuantity ?? 0);
+              const processable = Number(li?.processableQuantity ?? 0);
+              const q = Math.max(0, (shippable + shipped) || processable || 0);
+              if (q <= 0) return null;
+              const key = String(li?.id || "").trim() || `item-${i}`;
+              const productTitle = String(li?.title ?? "").trim();
+              const label = productTitle || String(li?.sku ?? "").trim() || "";
+              return {
+                id: key,
+                variantId: null,
+                inventoryItemId: String(li?.inventoryItemId || "").trim() || null,
+                sku: String(li?.sku ?? ""),
+                barcode: "",
+                productTitle,
+                variantTitle: "",
+                imageUrl: "",
+                qty: q,
+                quantity: q,
+                title: productTitle || label,
+                label: label || productTitle,
+              };
+            })
+            .filter(Boolean);
+        } else {
+          const shipResult = await fetchInventoryShipmentEnriched(selectedShipmentId, { includeImages: false });
+          const lineNodes = Array.isArray(shipResult?.lineItems) ? shipResult.lineItems : [];
+          nextLines = lineNodes
+            .map((li, i) => {
+              const q = Math.max(0, Number(li?.quantity ?? 0));
+              if (q <= 0) return null;
+              const invItem = li?.inventoryItem;
+              const variant = invItem?.variant;
+              const key = String(li?.id || variant?.id || invItem?.id || "").trim() || `item-${i}`;
+              const productTitle = String(variant?.title ?? "").trim();
+              const label = productTitle || String(variant?.sku ?? "").trim() || "";
+              return {
+                id: key,
+                variantId: variant?.id ?? null,
+                inventoryItemId: invItem?.id ?? null,
+                sku: String(variant?.sku ?? ""),
+                barcode: String(variant?.barcode ?? ""),
+                productTitle,
+                variantTitle: "",
+                imageUrl: "",
+                qty: q,
+                quantity: q,
+                title: productTitle || label,
+                label: label || productTitle,
+              };
+            })
+            .filter(Boolean);
+          // DRAFT シップメントでは API が数量1や商品名なしで返ることがある → Transfer lineItems（上で再取得済み）で補完
+          const detailLines = transferLineItemsForMerge;
+          if (detailLines.length > 0) {
+            const byInvId = new Map();
+            for (const dl of detailLines) {
+              const k = String(dl?.inventoryItemId || "").trim();
+              if (!k) continue;
+              const shippable = Number(dl?.shippableQuantity ?? 0);
+              const shipped = Number(dl?.shippedQuantity ?? 0);
+              const processable = Number(dl?.processableQuantity ?? 0);
+              const transferQty = (shippable + shipped) || processable || 0;
+              byInvId.set(k, { ...dl, transferQty });
+            }
+            nextLines = nextLines.map((nl) => {
+              const invId = String(nl?.inventoryItemId || "").trim();
+              const dl = invId ? byInvId.get(invId) : null;
+              if (!dl) return nl;
+              const qtyFromTransfer = Math.max(0, Number(dl.transferQty ?? 0));
+              const qty = Math.max(Number(nl?.qty || 0), qtyFromTransfer);
+              const productTitle = String(nl?.productTitle || "").trim() || String(dl?.title ?? "").trim() || nl.productTitle || "";
+              const variantTitle = String(nl?.variantTitle || "").trim() || "";
+              const label = productTitle + (variantTitle ? " / " + variantTitle : "") || productTitle || nl.sku || "";
+              return {
+                ...nl,
+                productTitle,
+                variantTitle: variantTitle || nl.variantTitle,
+                sku: String(nl?.sku || "").trim() || String(dl?.sku ?? "").trim() || nl.sku,
+                qty,
+                quantity: q,
+                title: productTitle || label,
+                label: label || productTitle,
+              };
+            });
+          }
+          if (nextLines.length === 0) {
+            const lineNodesFromTransfer = detailLines.length > 0 ? detailLines : (Array.isArray(detail?.lineItems) ? detail.lineItems : []);
+            nextLines = lineNodesFromTransfer
+              .map((li, i) => {
+                const shippable = Number(li?.shippableQuantity ?? 0);
+                const shipped = Number(li?.shippedQuantity ?? 0);
+                const processable = Number(li?.processableQuantity ?? 0);
+                const q = Math.max(0, (shippable + shipped) || processable || 0);
+                if (q <= 0) return null;
+                const key = String(li?.id || "").trim() || `item-${i}`;
+                const productTitle = String(li?.title ?? "").trim();
+                const label = productTitle || String(li?.sku ?? "").trim();
+                return {
+                  id: key,
+                  variantId: null,
+                  inventoryItemId: String(li?.inventoryItemId || "").trim() || null,
+                  sku: String(li?.sku ?? ""),
+                  barcode: "",
+                  productTitle,
+                  variantTitle: "",
+                  imageUrl: "",
+                  qty: q,
+                  quantity: q,
+                  title: productTitle || label,
+                  label: label || productTitle,
+                };
+              })
+              .filter(Boolean);
+          }
+        }
+        setStateSlice(setAppState, "outbound", (prev) => ({
+          ...(prev || {}),
+          editingTransferId: String(detail.id),
+          editingTransferName: String(detail?.name || "").trim(),
+          draftTransferId: "",
+          lines: nextLines,
+          destinationLocationId: detail.destinationLocationId || prev?.destinationLocationId || "",
+          historyFromShipmentSelection: false,
+          historySelectedShipmentId: isVirtual ? "" : selectedShipmentId,
+          historyDraftSourceTransferId: "",
+        }));
+        // 状態更新が反映されてからOutboundListを開く（反映前に開くとlinesが空でマウントする）
+        requestAnimationFrame(() => {
+          openOutboundListRef.current?.();
+        });
+      } catch (e) {
+        toast(toUserMessage(e));
+      }
+      return;
+    }
+
     // OutboundList の「下書き復元」に勝つため、先に保存下書きを消す（編集時も同様）
     try {
       if (SHOPIFY?.storage?.delete) {
@@ -3557,14 +3972,43 @@ function OutboundHistoryDetail({
       }
     } catch {}
 
-    // items → OutboundList 用 lines を作る（createDraftAndOpen_と同じ形式）
-    const nextLines = (Array.isArray(items) ? items : []).map((it, i) => {
+    // 履歴詳細経由：items に商品名が空の行があれば Transfer lineItems（全商品の title/sku）から inventoryItemId で補完
+    let itemsToUse = Array.isArray(items) ? items : [];
+    const hasEmptyProductTitle = itemsToUse.some((it) => !String(it?.productTitle || "").trim());
+    if (hasEmptyProductTitle && detail?.id) {
+      try {
+        const transferDetail = await fetchInventoryTransferDetailForHistory({ id: detail.id });
+        const tlItems = Array.isArray(transferDetail?.lineItems) ? transferDetail.lineItems : [];
+        const titleByInvId = new Map();
+        const skuByInvId = new Map();
+        for (const li of tlItems) {
+          const k = String(li?.inventoryItemId || "").trim();
+          if (!k) continue;
+          const t = String(li?.title ?? "").trim();
+          const s = String(li?.sku ?? "").trim();
+          if (t) titleByInvId.set(k, t);
+          if (s) skuByInvId.set(k, s);
+        }
+        itemsToUse = itemsToUse.map((it) => {
+          const invId = String(it?.inventoryItemId || "").trim();
+          const title = invId ? titleByInvId.get(invId) : "";
+          const sku = invId ? skuByInvId.get(invId) : "";
+          if (!title && !sku) return it;
+          return {
+            ...it,
+            productTitle: String(it?.productTitle || "").trim() || title || it.productTitle,
+            sku: String(it?.sku || "").trim() || sku || it.sku,
+          };
+        });
+      } catch (_) {}
+    }
+
+    // items → OutboundList 用 lines を作る（createDraftAndOpen_と同じ形式・表示用 label/title も設定）
+    const nextLines = itemsToUse.map((it, i) => {
       // 数量を確実に取得（quantity を優先、なければ qty、どちらもなければ 0）
       const q = Math.max(0, Number(it.quantity ?? it.qty ?? 0));
       
       // idを一意に生成（loadDetail_で設定されたkeyを優先、なければinventoryItemId > variantId > インデックス）
-      //    loadDetail_では key = inventoryItemId || variantId || id で生成されているため、同じロジックを使用
-      //    keyが空文字列の場合は次の候補を使用
       const keyCandidate = String(it.key || "").trim();
       const inventoryItemIdCandidate = String(it.inventoryItemId || "").trim();
       const variantIdCandidate = String(it.variantId || "").trim();
@@ -3576,17 +4020,23 @@ function OutboundHistoryDetail({
         `item-${i}`
       );
       
+      const productTitle = String(it.productTitle || "").trim();
+      const variantTitle = String(it.variantTitle || "").trim();
+      const label = productTitle + (variantTitle ? " / " + variantTitle : "") || productTitle || String(it.sku || "").trim() || "";
+      
       return {
         id: uniqueId,
         variantId: it.variantId ?? null,
         inventoryItemId: it.inventoryItemId ?? null,
         sku: String(it.sku || ""),
         barcode: String(it.barcode || ""),
-        productTitle: String(it.productTitle || ""),
-        variantTitle: String(it.variantTitle || ""),
+        productTitle,
+        variantTitle,
         imageUrl: String(it.imageUrl || ""),
-        qty: q,          // OutboundList が参照する本体（必須）- 確実に設定
-        quantity: q,     // 既存ロジック互換（draft保存など）
+        qty: q,
+        quantity: q,
+        title: productTitle || label,
+        label: label || productTitle,
       };
     }).filter((l) => Number(l.qty || 0) > 0); // qtyが0のアイテムは除外
 
@@ -3612,32 +4062,57 @@ function OutboundHistoryDetail({
       historyDraftSourceTransferId: "",
     }));
 
-    openOutboundListRef.current?.();
-  }, [detail, items, setAppState]);
+    // 状態更新が反映されてからOutboundListを開く（反映前に開くとlinesが空でマウントする）
+    requestAnimationFrame(() => {
+      openOutboundListRef.current?.();
+    });
+  }, [detail, items, setAppState, outbound.historyFromShipmentSelection, selectedShipmentId]);
+
+  const transferNameForDisplay = String(outbound.historySelectedTransferName || detail?.name || "").trim();
 
   const title = useMemo(() => {
-    const name = String(outbound.historySelectedTransferName || "").trim();
-    if (name) return `${name}`;
-    if (transferId) return `#${transferId.slice(-6)}`;
+    const name = transferNameForDisplay;
+    if (selectedShipmentId && transferId) {
+      let idx = selectedShipmentIndex;
+      if (!idx && detail) {
+        const list = detail?.shipments?.nodes ?? detail?.shipments ?? [];
+        const i = list.findIndex((s) => String(s?.id) === String(selectedShipmentId));
+        idx = i >= 0 ? i + 1 : 1;
+      }
+      if (!idx) idx = 1;
+      return formatShipmentDisplayId(name, idx);
+    }
+    if (name) return name;
+    if (transferId) return `#T${transferId.slice(-6)}`;
     return "出庫履歴詳細";
-  }, [outbound.historySelectedTransferName, transferId]);
+  }, [transferNameForDisplay, transferId, selectedShipmentId, selectedShipmentIndex, detail]);
+
+  const selectedShipment = useMemo(() => {
+    if (!selectedShipmentId || !detail) return null;
+    const list = detail?.shipments?.nodes ?? detail?.shipments ?? [];
+    return list.find((s) => String(s?.id) === String(selectedShipmentId)) ?? null;
+  }, [detail, selectedShipmentId]);
 
   const statusLabel = useMemo(() => {
-    // 強制キャンセル判定：noteに[強制キャンセル]が含まれている場合は「強制キャンセル」と表示
+    if (selectedShipmentId && selectedShipment) {
+      const s = String(selectedShipment?.status || "").toUpperCase();
+      return STATUS_LABEL[s] || s || "不明";
+    }
     const note = String(detail?.note || "").trim();
     const isForcedCancel = note.includes("[強制キャンセル]");
-    
     if (isForcedCancel) {
       return STATUS_LABEL.FORCED_CANCEL || "強制キャンセル";
     }
-    
     const s = String(outbound.historySelectedStatus || detail?.status || "").toUpperCase();
     return STATUS_LABEL[s] || s || "不明";
-  }, [outbound.historySelectedStatus, detail?.status, detail?.note, STATUS_LABEL]);
+  }, [selectedShipmentId, selectedShipment, outbound.historySelectedStatus, detail?.status, detail?.note, STATUS_LABEL]);
 
   const statusRaw = useMemo(() => {
+    if (selectedShipmentId && selectedShipment) {
+      return String(selectedShipment?.status || "").toUpperCase();
+    }
     return String(outbound.historySelectedStatus || detail?.status || "").toUpperCase();
-  }, [outbound.historySelectedStatus, detail?.status]);
+  }, [selectedShipmentId, selectedShipment, outbound.historySelectedStatus, detail?.status]);
 
   // 編集モード（スキャン/検索/数量/確定 = OutboundList に任せる）
   const isEditable = statusRaw === "DRAFT" || statusRaw === "READY_TO_SHIP";
@@ -3700,9 +4175,44 @@ function OutboundHistoryDetail({
 
       setDetail(detailWithDisplay);
 
-      // shipmentId があれば shipment ベースで items を作る（画像/商品情報が揃う）
+      const VIRTUAL_PREFIX_DETAIL = "__transfer__";
       const sid = String(selectedShipmentId || d?.shipments?.[0]?.id || "").trim();
+      const isVirtualSelection = sid.startsWith(VIRTUAL_PREFIX_DETAIL);
 
+      // 仮想行選択時：Transfer の lineItems のみ表示（Shipment ID 付与なし＝発送準備完了ブロック）
+      if (isVirtualSelection) {
+        const detailLineItems = Array.isArray(d?.lineItems) ? d.lineItems : [];
+        const lis = detailLineItems
+          .filter((li) => {
+            const qty = Math.max(0, Number(li?.shippableQuantity ?? li?.processableQuantity ?? 0));
+            return qty > 0 && String(li?.inventoryItemId || "").trim();
+          })
+          .map((li, i) => {
+            const qty = Math.max(0, Number(li?.shippableQuantity ?? li?.processableQuantity ?? 0));
+            const invId = String(li?.inventoryItemId || "").trim();
+            const key = invId || `line-${i}`;
+            return {
+              key,
+              inventoryItemId: invId || null,
+              variantId: null,
+              productTitle: String(li?.title ?? "").trim(),
+              variantTitle: "",
+              sku: String(li?.sku ?? "").trim(),
+              barcode: "",
+              imageUrl: "",
+              quantity: qty,
+              available: null,
+              plannedQuantity: qty,
+              receivedQuantity: null,
+            };
+          });
+        setItems(lis);
+        setLineItemsPageInfo({ hasNextPage: false, endCursor: null });
+        setHistoryShipmentTracking(null);
+        return;
+      }
+
+      // shipmentId があれば shipment ベースで items を作る（画像/商品情報が揃う）
       if (sid) {
         // state にも反映（次回以降の安定化）
         // 注意: setStateSliceを呼び出すとselectedShipmentIdが変更され、loadDetail_が再実行される可能性がある
@@ -3724,7 +4234,7 @@ function OutboundHistoryDetail({
           if (seq !== loadSeqRef.current) return;
 
           const ship = shipResult || {};
-          const src = Array.isArray(ship?.lineItems) ? ship.lineItems : [];
+          const src = Array.isArray(ship?.lineItems) ? ship.lineItems : (Array.isArray(ship?.lineItems?.nodes) ? ship.lineItems.nodes : []);
           const pageInfo = ship?.pageInfo || { hasNextPage: false, endCursor: null };
           setLineItemsPageInfo(pageInfo);
           setHistoryShipmentTracking(ship?.tracking ?? null);
@@ -3756,7 +4266,6 @@ function OutboundHistoryDetail({
                 imageUrl: String(li?.imageUrl || ""),
                 quantity: qty,
 
-                // 追加：UI表示用
                 available: li?.available ?? null,
                 plannedQuantity: li?.plannedQuantity ?? li?.quantity ?? null,
                 // 修正：acceptedQuantityを使用（receivedQuantityフィールドは存在しない）
@@ -3765,8 +4274,68 @@ function OutboundHistoryDetail({
             }
           }
 
-          setItems(Array.from(map.values()));
-          return;
+          if (map.size > 0) {
+            // DRAFT シップメントでは API が productTitle/variantTitle を返さないことがある → Transfer lineItems で補完
+            const hasEmptyTitle = Array.from(map.values()).some(
+              (it) => !String(it?.productTitle || "").trim()
+            );
+            if (hasEmptyTitle && transferId) {
+              try {
+                const transferResult = await fetchTransferLineItemsEnriched(transferId, {
+                  includeImages: !!showImages && !liteMode,
+                  signal: ac.signal,
+                });
+                if (seq !== loadSeqRef.current) return;
+                const transferLines = Array.isArray(transferResult?.lineItems) ? transferResult.lineItems : [];
+                const detailLineItems = Array.isArray(d?.lineItems) ? d.lineItems : [];
+                const byInvId = new Map();
+                for (const li of transferLines) {
+                  const k = String(li?.inventoryItemId || "").trim();
+                  if (k) byInvId.set(k, li);
+                }
+                const qtyByInvId = new Map();
+                const titleByInvId = new Map();
+                for (const dli of detailLineItems) {
+                  const k = String(dli?.inventoryItemId || "").trim();
+                  if (!k) continue;
+                  const shippable = Number(dli?.shippableQuantity ?? 0);
+                  const shipped = Number(dli?.shippedQuantity ?? 0);
+                  const processable = Number(dli?.processableQuantity ?? 0);
+                  qtyByInvId.set(k, (shippable + shipped) || processable || 0);
+                  const detailTitle = String(dli?.title ?? "").trim();
+                  if (detailTitle) titleByInvId.set(k, detailTitle);
+                }
+                for (const it of map.values()) {
+                  const invId = String(it?.inventoryItemId || "").trim();
+                  const tl = invId ? byInvId.get(invId) : null;
+                  const transferQty = invId ? (qtyByInvId.get(invId) ?? 0) : 0;
+                  const detailTitle = invId ? titleByInvId.get(invId) : "";
+                  if (tl) {
+                    if (!String(it?.productTitle || "").trim()) {
+                      it.productTitle = String(tl?.productTitle || tl?.title || "").trim() || detailTitle;
+                      it.variantTitle = String(tl?.variantTitle || "").trim();
+                      it.sku = String(it?.sku || "").trim() || String(tl?.sku ?? "").trim() || String(detailLineItems.find((dli) => String(dli?.inventoryItemId || "").trim() === invId)?.sku ?? "").trim();
+                      it.barcode = String(tl?.barcode ?? "").trim();
+                      if (tl?.imageUrl) it.imageUrl = String(tl.imageUrl);
+                    }
+                    if (transferQty > 0 && transferQty > Number(it?.quantity ?? 0)) {
+                      it.quantity = transferQty;
+                      it.plannedQuantity = transferQty;
+                    }
+                  } else if (detailTitle && !String(it?.productTitle || "").trim()) {
+                    it.productTitle = detailTitle;
+                    const dli = detailLineItems.find((x) => String(x?.inventoryItemId || "").trim() === invId);
+                    if (dli && !String(it?.sku || "").trim()) it.sku = String(dli?.sku ?? "").trim();
+                  }
+                }
+              } catch (_) {
+                // 補完失敗時はそのまま表示（数量はあるので (unknown) 表示になる）
+              }
+            }
+            setItems(Array.from(map.values()));
+            return;
+          }
+          // DRAFT シップメントなど lineItems が空の場合は下の transfer lineItems で表示継続
         } catch (e) {
           // shipment 読めなくても transfer lineItems で表示継続
         }
@@ -4007,7 +4576,6 @@ function OutboundHistoryDetail({
   // 現在の自動保存を確認（OutboundListを開いて下書きを復元）
   const openCurrentDraft_ = useCallback(async () => {
     // OutboundListを開く（下書き復元機能が自動的に動作する）
-    // モーダルはcommand="--hide"で閉じられる
     openOutboundListRef.current?.();
   }, []);
 
@@ -4015,6 +4583,59 @@ function OutboundHistoryDetail({
   const prepareEditOrDuplicate_ = useCallback((isEdit) => {
     setEditOrDuplicateMode(isEdit ? "edit" : "duplicate");
   }, []);
+
+  // 在庫更新（下書き・配送準備完了の商品リストで出庫元の在庫を表示するため）
+  const originLocationGidForDetail = detail?.originLocationId || outbound.historySelectedOriginLocationId || "";
+  const refreshStocks_ = useCallback(async (opts = {}) => {
+    if (!originLocationGidForDetail || !Array.isArray(items) || items.length === 0) return;
+    const silent = !!opts?.silent;
+    setStockRefreshing(true);
+    try {
+      const results = await Promise.all(
+        items.map(async (it) => {
+          const key = it.key;
+          try {
+            if (it.variantId) {
+              const r = await fetchVariantAvailable({
+                variantGid: it.variantId,
+                locationGid: originLocationGidForDetail,
+              });
+              return { key, available: r?.available ?? null };
+            }
+            if (it.inventoryItemId) {
+              const r = await fetchInventoryItemAvailable({
+                inventoryItemId: it.inventoryItemId,
+                locationGid: originLocationGidForDetail,
+              });
+              return { key, available: r?.available ?? null };
+            }
+            return { key, available: null };
+          } catch (e) {
+            return { key, available: null };
+          }
+        })
+      );
+      const availByKey = new Map(results.map((r) => [r.key, r.available]));
+      setItems((prev) =>
+        prev.map((it) => ({
+          ...it,
+          available: availByKey.get(it.key) ?? it.available,
+        }))
+      );
+      if (!silent) toast("在庫を更新しました");
+    } catch (e) {
+      toast(`在庫の取得に失敗しました: ${toUserMessage(e)}`);
+    } finally {
+      setStockRefreshing(false);
+    }
+  }, [items, originLocationGidForDetail]);
+
+  // 商品リスト・出庫元ロケーションが揃ったタイミングで一度だけ在庫を自動取得（初回表示で在庫数を表示するため・トーストは出さない）
+  useEffect(() => {
+    if (!originLocationGidForDetail || !Array.isArray(items) || items.length === 0 || initialStockLoadedRef.current) return;
+    initialStockLoadedRef.current = true;
+    refreshStocks_({ silent: true }).catch(() => {});
+  }, [originLocationGidForDetail, items.length, refreshStocks_]);
 
   // 編集/複製を実行する関数（確認ダイアログのOKボタンから呼ばれる）
   const executeEditOrDuplicate_ = useCallback(() => {
@@ -4095,11 +4716,24 @@ function OutboundHistoryDetail({
             debug,
           });
           
+          // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
+          const transferIdStr = String(transferId || "").trim();
+          const transferIdMatch = transferIdStr.match(/(\d+)$/);
+          const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+          
           await adjustInventoryAtLocationWithFallback({
             locationId: originLocationId,
             deltas,
+            referenceDocumentUri: transferIdForUri,
           });
-
+          await logInventoryChangeToApi({
+            activity: "outbound_transfer",
+            locationId: originLocationId,
+            locationName: detail?.originName || "",
+            deltas,
+            sourceId: transferIdForUri,
+            lineItems: lineItems || detail?.lineItems,
+          });
           // 在庫調整履歴をメモに反映
           // detailオブジェクトにはoriginNameが直接プロパティとして含まれている
           const originLocationName = detail?.originName || 
@@ -4177,11 +4811,24 @@ function OutboundHistoryDetail({
             debug,
           });
           
+          // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
+          const transferIdStr = String(transferId || "").trim();
+          const transferIdMatch = transferIdStr.match(/(\d+)$/);
+          const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+          
           await adjustInventoryAtLocationWithFallback({
             locationId: originLocationId,
             deltas,
+            referenceDocumentUri: transferIdForUri,
           });
-
+          await logInventoryChangeToApi({
+            activity: "outbound_transfer",
+            locationId: originLocationId,
+            locationName: detail?.originName || "",
+            deltas,
+            sourceId: transferIdForUri,
+            lineItems: lineItems || detail?.lineItems,
+          });
           // 在庫調整履歴をメモに反映
           // detailオブジェクトにはoriginNameが直接プロパティとして含まれている
           const originLocationName = detail?.originName || 
@@ -4243,9 +4890,23 @@ function OutboundHistoryDetail({
         })).filter((d) => d.inventoryItemId && d.delta > 0);
 
         if (deltas.length > 0) {
+          // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
+          const transferIdStr = String(transferId || "").trim();
+          const transferIdMatch = transferIdStr.match(/(\d+)$/);
+          const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+          
           await adjustInventoryAtLocationWithFallback({
             locationId: originLocationId,
             deltas,
+            referenceDocumentUri: transferIdForUri,
+          });
+          await logInventoryChangeToApi({
+            activity: "outbound_transfer",
+            locationId: originLocationId,
+            locationName: detail?.originName || "",
+            deltas,
+            sourceId: transferIdForUri,
+            lineItems: items || detail?.lineItems,
           });
         }
       }
@@ -4266,7 +4927,6 @@ function OutboundHistoryDetail({
       toast("キャンセルできません（入庫済みまたはキャンセル済み）");
       return;
     }
-    // モーダルはJSXでcommand="--show"で開く
   }, [canCancel]);
 
   const formatArrivesAt_ = (iso) => {
@@ -4306,16 +4966,37 @@ function OutboundHistoryDetail({
             </s-stack>
           </s-box>
 
-          {/* ✅ 右：複製ボタン */}
+          {/* ✅ ボタン並び：画像表示 → 在庫更新 → 複製 */}
           <s-box style={{ flex: "0 0 auto" }}>
-            <s-button
-              tone="success"
-              command="--show"
-              commandFor={CONFIRM_EDIT_OR_DUPLICATE_MODAL_ID}
-              onClick={() => prepareEditOrDuplicate_(false)}
-            >
-              複製（下書き）
-            </s-button>
+            <s-stack direction="inline" gap="base" alignItems="center">
+              {onToggleLiteMode ? (
+                <s-button
+                  kind="secondary"
+                  tone={liteMode ? "critical" : undefined}
+                  onClick={onToggleLiteMode}
+                  onPress={onToggleLiteMode}
+                  style={{ whiteSpace: "nowrap" }}
+                >
+                  {liteMode ? "画像OFF" : "画像ON"}
+                </s-button>
+              ) : null}
+              <s-button
+                kind="secondary"
+                disabled={stockRefreshing || !Array.isArray(items) || items.length === 0}
+                onClick={refreshStocks_}
+                onPress={refreshStocks_}
+              >
+                {stockRefreshing ? "読込中..." : "在庫更新"}
+              </s-button>
+              <s-button
+                tone="success"
+                command="--show"
+                commandFor={CONFIRM_EDIT_OR_DUPLICATE_MODAL_ID}
+                onClick={() => prepareEditOrDuplicate_(false)}
+              >
+                複製
+              </s-button>
+            </s-stack>
           </s-box>
         </s-stack>
       </s-box>
@@ -4329,6 +5010,11 @@ function OutboundHistoryDetail({
     historyShipmentTracking,
     prepareEditOrDuplicate_,
     CONFIRM_EDIT_OR_DUPLICATE_MODAL_ID,
+    stockRefreshing,
+    items,
+    refreshStocks_,
+    onToggleLiteMode,
+    liteMode,
   ]);
 
   const bindPress = (fn) => ({
@@ -4344,7 +5030,10 @@ function OutboundHistoryDetail({
   }, [setHeader, headerNode]);
 
   useEffect(() => {
-    const summaryLeft = `状態: ${statusLabel}`;
+    const statusBadgeTone = getStatusBadgeTone(statusLabel);
+    const summaryLeft = (
+      <s-badge tone={statusBadgeTone}>{statusLabel}</s-badge>
+    );
     const summaryRight = `数量: ${Number(detail?.receivedQuantityDisplay ?? detail?.receivedQuantity ?? 0)}/${Number(detail?.totalQuantity ?? 0)}`;
 
     const rightLabel = (statusRaw === "IN_TRANSIT" || statusRaw === "IN_PROGRESS") ? "強制キャンセル" : "キャンセル";
@@ -4355,18 +5044,18 @@ function OutboundHistoryDetail({
         summaryRight={summaryRight}
         leftLabel="戻る"
         onLeft={onBack}
-        middleLabel="編集"
-        onMiddle={() => prepareEditOrDuplicate_(true)}
-        middleDisabled={!isEditable}
-        middleCommand={isEditable ? "--show" : undefined}
-        middleCommandFor={isEditable ? CONFIRM_EDIT_OR_DUPLICATE_MODAL_ID : undefined}
-        middleTone="success"
-        rightLabel={rightLabel}
-        onRight={onCancel_}
-        rightTone="critical"
-        rightDisabled={!canCancel}
-        rightCommand="--show"
-        rightCommandFor={CONFIRM_CANCEL_MODAL_ID}
+        middleLabel={rightLabel}
+        onMiddle={onCancel_}
+        middleDisabled={!canCancel}
+        middleCommand="--show"
+        middleCommandFor={CONFIRM_CANCEL_MODAL_ID}
+        middleTone="critical"
+        rightLabel="編集"
+        onRight={() => prepareEditOrDuplicate_(true)}
+        rightDisabled={!isEditable}
+        rightCommand={isEditable ? "--show" : undefined}
+        rightCommandFor={isEditable ? CONFIRM_EDIT_OR_DUPLICATE_MODAL_ID : undefined}
+        rightTone="success"
       />
     );
 
@@ -4390,15 +5079,23 @@ function OutboundHistoryDetail({
     openCurrentDraft_,
   ]);
 
+  // 読み込み中は他商品リスト（入庫・履歴等）と同じ表示：padding="base" で中央に表示（下線なし）
+  if (detailLoading) {
+    return (
+      <s-box padding="base">
+        <s-text tone="subdued">読み込み中...</s-text>
+      </s-box>
+    );
+  }
+
   return (
     <s-box padding="tight">
       <s-stack gap="tight">
-        {detailLoading ? <s-text tone="subdued">読み込み中…</s-text> : null}
         {detailError ? <s-text tone="critical">{detailError}</s-text> : null}
 
         <s-divider />
 
-        {/* ✅ 商品リスト */}
+        {/* ✅ 商品リスト（読み込み中は早期 return 済み） */}
         {Array.isArray(items) && items.length > 0 ? (
           <s-stack gap="none">
             {/* ✅ 未読み込み商品リストがある場合は最上部に表示 */}
@@ -4414,7 +5111,7 @@ function OutboundHistoryDetail({
                     onPress={loadMoreLineItems_}
                     disabled={loadingMore}
                   >
-                    {loadingMore ? "読み込み中..." : "読込"}
+                    {loadingMore ? "読込中..." : "読込"}
                   </s-button>
                 </s-stack>
               </s-box>
@@ -4475,7 +5172,7 @@ function OutboundHistoryDetail({
             })}
           </s-stack>
         ) : (
-          <s-text tone="subdued">商品がありません（Shipment未作成の下書き等の可能性）</s-text>
+          <s-text tone="subdued">商品がありません</s-text>
         )}
       </s-stack>
 
@@ -4635,6 +5332,7 @@ function OutboundList({
   appState,
   setAppState,
   onBack,
+  onAddShipmentSuccess,
   dialog,
   setHeader,
   setFooter,
@@ -4643,6 +5341,7 @@ function OutboundList({
   const DEBUG_UI = false;
 
   const CONFIRM_TRANSFER_MODAL_ID = "confirm-transfer-modal";
+  const SHIPPING_INFO_MODAL_ID = "shipping-info-modal";
 
   const originLocationGid =
     useOriginLocationGid() || String(appState?.originLocationIdManual || "").trim() || null;
@@ -4652,18 +5351,24 @@ function OutboundList({
   const outbound = getStateSlice(appState, "outbound", {
     destinationLocationId: "",
     carrierId: "",
+    showCarrierPicker: false,
     manualCompany: "",
     trackingNumber: "",
     trackingUrl: "",
     arrivesAtIso: "",
+    arrivesDateDraft: "",
+    arrivesAutoDisabled: false,
     settings: { version: 1, destinationGroups: [], carriers: [] },
     allLocations: [],
     lines: [],
     editingTransferId: "",
     editingTransferName: "",
+    addingShipmentToTransferId: "",   // ③配送追加モード用（既存Transferに配送を追加）
+    addingShipmentToTransferName: "",
     draftTransferId: "",
     result: null,
     confirmModalOpen: false, // 確定モーダルが開いているかどうか
+    shippingInfoModalOpen: false, // 商品リストヘッダーの配送情報モーダルが開いているかどうか
   });
 
   const settings =
@@ -4711,7 +5416,12 @@ function OutboundList({
   const lines = Array.isArray(outbound.lines) ? outbound.lines : [];
   const draftTransferId = String(outbound.draftTransferId || "").trim();
   const editingTransferId = String(outbound.editingTransferId || "").trim();
+  const addingShipmentToTransferId = String(outbound.addingShipmentToTransferId || "").trim();
+  const historyFromShipmentSelection = !!outbound.historyFromShipmentSelection;
   const historyDraftSourceTransferId = String(outbound.historyDraftSourceTransferId || "").trim();
+
+  // 複数シップメント追加(③)または編集(②④)のときは「確定」「下書き」の2種のみ
+  const isMultiShipmentAddOrEdit = !!addingShipmentToTransferId || (!!editingTransferId && historyFromShipmentSelection);
 
   // 商品リストの在庫自動取得用のref（無限ループ防止）
   const linesStockAutoFetchRef = useRef(false);
@@ -4732,6 +5442,64 @@ function OutboundList({
     onClick: fn,
     onPress: fn,
   });
+
+  // 配送情報モーダル用：到着予定日プリセット
+  const setArrivesPreset = useCallback(
+    (kind) => {
+      if (kind === "clear") {
+        setStateSlice(setAppState, "outbound", {
+          arrivesAtIso: "",
+          arrivesDateDraft: "",
+          arrivesAutoDisabled: true,
+        });
+        return;
+      }
+      const days = kind === "d2" ? 2 : 1;
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      d.setHours(12, 0, 0, 0);
+      const iso = d.toISOString();
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      const ymd = `${y}-${m}-${day}`;
+      setStateSlice(setAppState, "outbound", {
+        arrivesAtIso: iso,
+        arrivesDateDraft: ymd,
+        arrivesAutoDisabled: false,
+      });
+    },
+    [setAppState]
+  );
+
+  const onArrivesDateInput = useCallback(
+    (e) => {
+      const raw = String(e?.target?.value ?? e ?? "").trim();
+      setStateSlice(setAppState, "outbound", { arrivesDateDraft: raw, arrivesAutoDisabled: false });
+    },
+    [setAppState]
+  );
+
+  const onArrivesDateCommit = useCallback(
+    (e) => {
+      const raw = String(e?.target?.value ?? e ?? "").trim();
+      const m = raw.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+      if (!m) return;
+      const y = Number(m[1]);
+      const mo = Number(m[2]);
+      const day = Number(m[3]);
+      if (!y || mo < 1 || mo > 12 || day < 1 || day > 31) return;
+      const d = new Date(y, mo - 1, day, 12, 0, 0, 0);
+      const iso = d.toISOString();
+      const ymd = `${y}-${String(mo).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      setStateSlice(setAppState, "outbound", {
+        arrivesAtIso: iso,
+        arrivesDateDraft: ymd,
+        arrivesAutoDisabled: false,
+      });
+    },
+    [setAppState]
+  );
 
   // --- search state ---
   const [query, setQuery] = useState("");
@@ -5004,19 +5772,34 @@ function OutboundList({
 
     // ID表示（OutboundHistoryDetailと同じ方式：nameを優先、なければ# + 6桁）
     // 複製時は「新規出庫」として表示（商品リストの内容だけコピーして新規扱い）
-    let title = "新規出庫"; // デフォルトは新規（新規作成時と複製時）
-    
-    if (editingTransferId) {
-      // 編集モード時：Transfer名を優先、なければIDを表示（OutboundHistoryDetailと同じ方式）
-      const name = String(outbound.editingTransferName || "").trim();
-      if (name) {
-        title = name;
+    const addingId = String(outbound?.addingShipmentToTransferId || "").trim();
+    let titleBase = "新規出庫";
+    let titleBadge = null; // "編集" | "追加" | null
+    if (addingId) {
+      const name = String(outbound?.addingShipmentToTransferName || "").trim();
+      titleBase = name ? name : `#${addingId.slice(-6)}`;
+      titleBadge = "追加";
+    } else if (editingTransferId) {
+      const shipmentIndex = Number(outbound.historySelectedShipmentIndex) >= 1 ? Number(outbound.historySelectedShipmentIndex) : 0;
+      const transferNameForTitle = String(outbound.historySelectedTransferName || outbound.editingTransferName || "").trim();
+      if (outbound.historySelectedShipmentId && shipmentIndex) {
+        titleBase = formatShipmentDisplayId(transferNameForTitle, shipmentIndex);
       } else {
-        // editingTransferIdはGID形式（gid://shopify/InventoryTransfer/...）なので、そのままslice(-6)で末尾6桁を取得
-        title = `#${editingTransferId.slice(-6)}`;
+        const name = String(outbound.editingTransferName || "").trim();
+        titleBase = name ? name : `#T${editingTransferId.slice(-6)}`;
       }
+      titleBadge = "編集";
     }
     // 複製時（historyDraftSourceTransferId）は「新規出庫」のまま（IDを表示しない）
+    let title = titleBase;
+    if (titleBadge) {
+      title = (
+        <s-stack direction="inline" gap="small" alignItems="center">
+          <s-text emphasis="bold" size="small">{titleBase}</s-text>
+          <s-badge tone={titleBadge === "編集" ? "info" : "success"}>{titleBadge}</s-badge>
+        </s-stack>
+      );
+    }
 
     setHeader?.(
       <s-box padding="base">
@@ -5029,7 +5812,7 @@ function OutboundList({
 
           <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
             <s-stack gap="none">
-              <s-text emphasis="bold" size="small">{title}</s-text>
+              {typeof title === "string" ? <s-text emphasis="bold" size="small">{title}</s-text> : title}
               <s-text size="small">出庫元：{originLocationName}</s-text>
               <s-text size="small">宛先：{destinationLocationName}</s-text>
               <s-text size="small" tone="subdued">配送業者: {resolvedCompany || ""}</s-text>
@@ -5039,11 +5822,20 @@ function OutboundList({
 
             <s-stack direction="inline" gap="base" alignItems="center">
               <s-button kind="secondary" tone={liteMode ? "critical" : undefined} {...bindPress(handleToggleLite)}>
-                {liteMode ? "軽量" : "軽量"}
+                {liteMode ? "画像OFF" : "画像ON"}
               </s-button>
 
               <s-button {...bindPress(refreshStocks)} disabled={refreshing || lines.length === 0}>
-                {refreshing ? "更新中..." : "在庫再取得"}
+                {refreshing ? "更新中..." : "在庫更新"}
+              </s-button>
+
+              <s-button
+                kind="secondary"
+                command="--show"
+                commandFor={SHIPPING_INFO_MODAL_ID}
+                onClick={() => setStateSlice(setAppState, "outbound", { shippingInfoModalOpen: true })}
+              >
+                配送情報
               </s-button>
             </s-stack>
           </s-stack>
@@ -5073,7 +5865,7 @@ function OutboundList({
             </s-text>
           ) : null}
 
-          {loading ? <s-text tone="subdued" size="small">検索中...</s-text> : null}
+          {loading ? <s-text tone="subdued" size="small">読み込み中...</s-text> : null}
         </s-stack>
       </s-box>
     );
@@ -5085,6 +5877,11 @@ function OutboundList({
     UI_REV,
     editingTransferId,
     outbound.editingTransferName,
+    outbound.addingShipmentToTransferId,
+    outbound.addingShipmentToTransferName,
+    outbound.historySelectedShipmentId,
+    outbound.historySelectedShipmentIndex,
+    outbound.historySelectedTransferName,
     historyDraftSourceTransferId,
     originLocationName,
     destinationLocationName,
@@ -5655,7 +6452,48 @@ function OutboundList({
         }
       }
 
-      // 編集モード（同ID）：lineItems を差し替えるだけ（下書き蓄積させない）
+      // ③配送追加モード：既存Transferに配送を追加（Transfer引き継ぎのみ、新規Shipment作成）
+      const addingIdForConfirm = String(outbound?.addingShipmentToTransferId || "").trim();
+      if (addingIdForConfirm) {
+        const trackingInput = hasShipmentMeta
+          ? {
+              company: resolvedCompany || null,
+              trackingNumber: trackingNumberTrim || null,
+              trackingUrl: trackingUrlTrim || null,
+              arrivesAt: String(outbound.arrivesAtIso || "").trim() || null,
+            }
+          : null;
+        const shipment = await createInventoryShipmentInTransit({
+          movementId: addingIdForConfirm,
+          lineItems,
+          trackingInput,
+          lineItemsMeta,
+        });
+        toast(shipment ? "配送を追加しました（出庫確定）" : "配送を追加しました");
+        try { await clearOutboundDraft?.(); } catch (_) {}
+        try {
+          if (SHOPIFY?.storage?.delete) {
+            await SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY);
+          }
+        } catch (_) {}
+        try { setLines([]); } catch (_) {}
+        try { setCandidateQtyMap?.({}); } catch (_) {}
+        setStateSlice(setAppState, "outbound", (prev) => ({
+          ...(prev || {}),
+          addingShipmentToTransferId: "",
+          editingTransferId: "",
+        }));
+        // 追加した Transfer のシップメントリストへ直接遷移
+        const addTransferNameForConfirm = String(outbound?.addingShipmentToTransferName || "").trim();
+        if (typeof onAddShipmentSuccess === "function") {
+          onAddShipmentSuccess({ transferId: addingIdForConfirm, transferName: addTransferNameForConfirm });
+        } else {
+          onBack?.();
+        }
+        return { transfer: null, shipment };
+      }
+
+      // ②編集モード（同ID）：lineItems を差し替えるだけ（下書き蓄積させない）
       const editingTransferId = String(outbound?.editingTransferId || "").trim();
       if (editingTransferId) {
         const transfer = await inventoryTransferSetItemsSafe({
@@ -5956,8 +6794,6 @@ function OutboundList({
 
   // 「配送準備完了にする」ボタン用（Shipment作成なし）
   const createTransferAsReadyToShipOnly = async ({ skipActivate = false } = {}) => {
-    toast("createTransferAsReadyToShipOnly: start");
-
     // 二重実行ガード
     if (submitLockRef.current || submitting) {
       toast(`処理中です… (lock=${submitLockRef.current ? "1" : "0"} submitting=${submitting ? "1" : "0"})`);
@@ -6164,6 +7000,38 @@ function OutboundList({
         }
       }
 
+      // ③配送追加モード：「配送準備完了にする」＝既存 Transfer に DRAFT シップメントを追加（新規 Transfer は作らない）
+      const addingId = String(outbound?.addingShipmentToTransferId || "").trim();
+      if (addingId) {
+        const shipment = await createInventoryShipmentDraft({
+          movementId: addingId,
+          lineItems,
+          lineItemsMeta,
+        });
+        toast(shipment ? "配送を追加しました（DRAFT）" : "配送を追加しました");
+        try { await clearOutboundDraft?.(); } catch (_) {}
+        try {
+          if (SHOPIFY?.storage?.delete) {
+            await SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY);
+          }
+        } catch (_) {}
+        try { setLines([]); } catch (_) {}
+        try { setCandidateQtyMap?.({}); } catch (_) {}
+        setStateSlice(setAppState, "outbound", (prev) => ({
+          ...(prev || {}),
+          addingShipmentToTransferId: "",
+          editingTransferId: "",
+        }));
+        // 追加した Transfer のシップメントリストへ直接遷移（再取得で確実に表示される）
+        const addTransferName = String(outbound?.addingShipmentToTransferName || "").trim();
+        if (typeof onAddShipmentSuccess === "function") {
+          onAddShipmentSuccess({ transferId: addingId, transferName: addTransferName });
+        } else {
+          onBack?.();
+        }
+        return { transfer: null, shipment };
+      }
+
       // 編集モード（同ID）：明細更新 + ステータス変更（DRAFT → READY_TO_SHIP）
       const editingTransferId = String(outbound?.editingTransferId || "").trim();
       if (editingTransferId) {
@@ -6285,7 +7153,7 @@ function OutboundList({
 
   const handleToggleLite = () => {
     if (typeof onToggleLiteMode === "function") onToggleLiteMode();
-    else toast("軽量切替が未設定です（onToggleLiteMode）");
+    else toast("画像表示切替が未設定です（onToggleLiteMode）");
   };
 
   const safeBack = () => {
@@ -6314,18 +7182,11 @@ function OutboundList({
             </s-button>
           </s-box>
 
-          {/* 中央：情報（縮む担当） */}
-          <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
-            <s-stack gap="none">
-              <s-text alignment="center" size="small" tone="subdued">
-                明細 {totalLines} / 合計 {totalQty}
-              </s-text>
-              {liteMode ? (
-                <s-text alignment="center" size="small" tone="subdued">
-                  軽量ON
-                </s-text>
-              ) : null}
-            </s-stack>
+          {/* 中央：明細/合計（入庫の商品リストフッターと同様に中央寄せ・画像ON/OFFは表示しない） */}
+          <s-box style={{ flex: "1 1 auto", minWidth: 0, display: "flex", justifyContent: "center", alignItems: "center" }}>
+            <s-text alignment="center" size="small" tone="subdued">
+              明細 {totalLines} / 合計 {totalQty}
+            </s-text>
           </s-box>
 
           {/* 右：確定（ゲート更新→confirm を開く） */}
@@ -6338,13 +7199,11 @@ function OutboundList({
               onClick={() => {
                 refreshOutboundGate();
                 setGateAck(false);
-                // モーダルが開いたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: true });
               }}
               onPress={() => {
                 refreshOutboundGate();
                 setGateAck(false);
-                // モーダルが開いたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: true });
               }}
             >
@@ -6361,7 +7220,6 @@ function OutboundList({
     submitting,
     totalLines,
     totalQty,
-    liteMode,
     scanQueueLen,
     scanRps,
     canSubmit,
@@ -6627,6 +7485,101 @@ function OutboundList({
 
       {candidates.length > 0 ? <s-divider /> : null}
 
+      {/* 配送情報モーダル（コンディションと同様の入力） */}
+      <s-modal id={SHIPPING_INFO_MODAL_ID} heading="配送情報">
+        <s-box padding="base" paddingBlockEnd="none">
+          <s-stack gap="base">
+            <s-stack direction="inline" gap="small" alignItems="center">
+              <s-text emphasis="bold">配送情報</s-text>
+              <s-badge tone="neutral">任意</s-badge>
+            </s-stack>
+
+            {carrierOptions.length > 0 ? (
+              <s-stack gap="small">
+                <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
+                  <s-text>配送業者: {selectedCarrier?.label || "未選択"}</s-text>
+                  <s-button
+                    kind="secondary"
+                    onClick={() =>
+                      setStateSlice(setAppState, "outbound", (p) => ({ ...p, showCarrierPicker: !p.showCarrierPicker }))
+                    }
+                  >
+                    変更
+                  </s-button>
+                </s-stack>
+                {outbound.showCarrierPicker ? (
+                  <s-stack gap="small">
+                    <s-button
+                      tone={!outbound.carrierId ? "success" : undefined}
+                      onClick={() => setStateSlice(setAppState, "outbound", { carrierId: "", showCarrierPicker: false })}
+                    >
+                      直接入力
+                    </s-button>
+                    {carrierOptions.map((c) => (
+                      <s-button
+                        key={c.id}
+                        tone={c.id === outbound.carrierId ? "success" : undefined}
+                        onClick={() =>
+                          setStateSlice(setAppState, "outbound", { carrierId: c.id, showCarrierPicker: false })
+                        }
+                      >
+                        {c.label}
+                      </s-button>
+                    ))}
+                  </s-stack>
+                ) : null}
+                {!outbound.carrierId ? (
+                  <s-text-field
+                    label="配送業者（直接入力）"
+                    placeholder='例: "Sagawa (JA)"'
+                    value={String(outbound.manualCompany || "")}
+                    onInput={(e) => setStateSlice(setAppState, "outbound", { manualCompany: readText(e) })}
+                    onChange={(e) => setStateSlice(setAppState, "outbound", { manualCompany: readText(e) })}
+                  />
+                ) : null}
+              </s-stack>
+            ) : (
+              <s-text-field
+                label="配送業者"
+                placeholder='例: "Sagawa (JA)"'
+                value={String(outbound.manualCompany || "")}
+                onInput={(e) => setStateSlice(setAppState, "outbound", { manualCompany: readText(e) })}
+                onChange={(e) => setStateSlice(setAppState, "outbound", { manualCompany: readText(e) })}
+              />
+            )}
+
+            <s-text-field
+              label="配送番号 ※スキャン可能"
+              placeholder="例: 1234567890"
+              value={String(outbound.trackingNumber || "")}
+              onInput={(e) => setStateSlice(setAppState, "outbound", { trackingNumber: readText(e) })}
+              onChange={(e) => setStateSlice(setAppState, "outbound", { trackingNumber: readText(e) })}
+            />
+
+            <s-stack gap="small">
+              <s-text-field
+                label="到着予定日"
+                placeholder="YYYY-MM-DD"
+                value={String(outbound.arrivesDateDraft || "")}
+                onInput={onArrivesDateInput}
+                onChange={onArrivesDateCommit}
+              />
+              <s-stack direction="inline" gap="small" justifyContent="end">
+                <s-button kind="secondary" onClick={() => setArrivesPreset("d1")}>
+                  1日後
+                </s-button>
+                <s-button kind="secondary" onClick={() => setArrivesPreset("d2")}>
+                  2日後
+                </s-button>
+                <s-button kind="secondary" onClick={() => setArrivesPreset("clear")}>
+                  クリア
+                </s-button>
+              </s-stack>
+            </s-stack>
+          </s-stack>
+        </s-box>
+      </s-modal>
+
       {/* ✅ 確定 confirm（ゲート統合版） */}
       <s-modal id={CONFIRM_TRANSFER_MODAL_ID} heading="出庫を確定しますか？" ref={confirmTransferModalRef}>
         <s-box padding="base" paddingBlockEnd="none">
@@ -6714,8 +7667,12 @@ function OutboundList({
             {/* ✅ 配送番号入力欄（モーダル内に配置） */}
             <s-divider />
             <s-stack gap="small">
+              <s-stack direction="inline" gap="small" alignItems="center">
+                <s-text>配送番号</s-text>
+                <s-badge tone="neutral">任意</s-badge>
+                <s-text tone="subdued" size="small">※スキャン可能</s-text>
+              </s-stack>
               <s-text-field
-                label="配送番号（任意）※スキャン可能"
                 placeholder="例: 1234567890"
                 value={String(outbound.trackingNumber || "")}
                 onInput={(e) => setStateSlice(setAppState, "outbound", { trackingNumber: readText(e) })}
@@ -6730,7 +7687,6 @@ function OutboundList({
                 command="--hide"
                 commandFor={CONFIRM_TRANSFER_MODAL_ID}
                 onClick={() => {
-                  // モーダルが閉じたことを記録
                   setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
                 }}
               >
@@ -6742,8 +7698,10 @@ function OutboundList({
 
         {/* ✅ secondary-actionsは最大2つまで表示可能（逆順に表示される） */}
         {/* 表示順: 配送準備完了にする → 下書き保存（新規作成時のみ） */}
+        {/* 複数シップメント追加/編集時は「配送準備完了にする」を非表示（確定・下書きの2種のみ） */}
 
-        {/* 2. 配送準備完了にする（中央に表示） */}
+        {/* 2. 配送準備完了にする（複数シップメント追加/編集時は非表示） */}
+        {!isMultiShipmentAddOrEdit ? (
         <s-button
           slot="secondary-actions"
           command="--hide"
@@ -6821,7 +7779,6 @@ function OutboundList({
               if (r) {
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
-                // モーダルが閉じたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
               }
             } catch (e) {
@@ -6902,7 +7859,6 @@ function OutboundList({
               if (r) {
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
-                // モーダルが閉じたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
               }
             } catch (e) {
@@ -6914,10 +7870,11 @@ function OutboundList({
         >
           配送準備完了にする
         </s-button>
+        ) : null}
 
-        {/* 3. 下書き保存（新規作成時のみ表示、編集時は非表示） */}
-        {/* ✅ 編集モード（editingTransferIdがある）場合は下書き保存を非表示にして、3つのボタンに収める */}
-        {!editingTransferId ? (
+        {/* 3. 下書き保存（新規作成時・複数シップメント追加/編集時に表示） */}
+        {/* 複数シップメント追加/編集時は「確定」「下書き」の2種にするため下書き保存を表示 */}
+        {(!editingTransferId || isMultiShipmentAddOrEdit) ? (
           <s-button
             slot="secondary-actions"
             command="--hide"
@@ -6936,6 +7893,50 @@ function OutboundList({
                   .filter((x) => x.inventoryItemId && Number.isFinite(x.quantity) && x.quantity > 0);
 
                 if (lineItems.length === 0) return toast("数量が0のため下書き保存できません");
+
+                // ③配送追加：既存 Transfer に DRAFT シップメントを追加
+                if (addingShipmentToTransferId) {
+                  const lineItemsMeta = lines.map((l) => ({
+                    inventoryItemId: String(l?.inventoryItemId || "").trim(),
+                    sku: String(l?.sku || "").trim(),
+                    barcode: String(l?.barcode || "").trim(),
+                    label: String(l?.label || "").trim(),
+                  }));
+                  await createInventoryShipmentDraft({
+                    movementId: addingShipmentToTransferId,
+                    lineItems,
+                    lineItemsMeta,
+                  });
+                  toast("配送を追加しました（下書き）");
+                  try { await clearOutboundDraft?.(); } catch (_) {}
+                  try { setLines([]); } catch (_) {}
+                  try { setCandidateQtyMap?.({}); } catch (_) {}
+                  setStateSlice(setAppState, "outbound", (prev) => ({
+                    ...(prev || {}),
+                    addingShipmentToTransferId: "",
+                    editingTransferId: "",
+                  }));
+                  if (typeof onAddShipmentSuccess === "function") {
+                    const addName = String(outbound?.addingShipmentToTransferName || "").trim();
+                    onAddShipmentSuccess({ transferId: addingShipmentToTransferId, transferName: addName });
+                  } else {
+                    onBack?.();
+                  }
+                  return;
+                }
+
+                // ②④編集（仮想行またはTransferのlineItems）：inventoryTransferSetItems で更新
+                if (editingTransferId && isMultiShipmentAddOrEdit) {
+                  await inventoryTransferSetItemsSafe({ id: editingTransferId, lineItems });
+                  toast("明細を更新しました");
+                  try { await clearOutboundDraft?.(); } catch (_) {}
+                  setStateSlice(setAppState, "outbound", (prev) => ({
+                    ...(prev || {}),
+                    editingTransferId: "",
+                  }));
+                  onBack?.();
+                  return;
+                }
 
                 if (draftTransferId) {
                   await inventoryTransferSetItemsSafe({ id: draftTransferId, lineItems });
@@ -7043,7 +8044,6 @@ function OutboundList({
               if (r) {
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
-                // モーダルが閉じたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
               }
             } catch (e) {
@@ -7126,7 +8126,6 @@ function OutboundList({
               if (r) {
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
-                // モーダルが閉じたことを記録
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
               }
             } catch (e) {
@@ -7379,4033 +8378,6 @@ function QtyControlCompact_3Buttons({
   );
 }
 
-/* Inbound split */
-
-function InboundConditions({
-  showImages,
-  liteMode,
-  onToggleLiteMode,
-  appState,
-  setAppState,
-  onNext,
-  onBack,
-  onOpenShipmentSelection, // Phase 1.3: シップメント選択画面への遷移
-  setHeader,
-  setFooter,
-}) {
-  const locationGid = useOriginLocationGid() || String(appState?.originLocationIdManual || "").trim() || null;
-  const locIndex = useLocationsIndex(appState, setAppState);
-
-  const inbound = getStateSlice(appState, "inbound", { selectedShipmentId: "" });
-
-  const locationName = useMemo(() => {
-    // locIndex.byId は「gid -> name(文字列)」
-    const fromIndex = getLocationName_(locationGid, locIndex.byId);
-    if (fromIndex && fromIndex !== "（不明）") return fromIndex;
-
-    return String(appState?.originLocationNameManual || "").trim() || "現在店舗";
-  }, [locationGid, locIndex.byId, appState?.originLocationNameManual]);
-
-  const [viewMode, setViewMode] = useState("pending"); // "pending" | "received"
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [transfers, setTransfers] = useState([]);
-  const [transfersPageInfo, setTransfersPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ページネーション用
-  const [loadingMore, setLoadingMore] = useState(false); // 追加読み込み中フラグ
-
-  // Phase 1.2: Shipment選択モーダル用の状態（refで管理）
-  const SHIPMENT_MODE_SELECTION_MODAL_ID = "shipment-mode-selection-modal";
-  const shipmentModeSelectionModalRef = useRef(null);
-  const [pendingTransferForModal, setPendingTransferForModal] = useState(null);
-
-  const displayLocationName = useMemo(() => {
-    const arr = Array.isArray(transfers) ? transfers : [];
-    const any = arr.find((t) => String(t?.destinationName || "").trim());
-    const fromTransfers = String(any?.destinationName || "").trim();
-    if (fromTransfers) return fromTransfers;
-
-    return locationName;
-  }, [transfers, locationName]);
-
-  const STATUS_LABEL = useMemo(
-    () => ({
-      DRAFT: "下書き",
-      READY_TO_SHIP: "配送準備完了",
-      IN_PROGRESS: "処理中",
-      IN_TRANSIT: "進行中",
-      RECEIVED: "入庫",
-      TRANSFERRED: "入庫済み",
-      CANCELED: "キャンセル",
-      OTHER: "その他",
-    }),
-    []
-  );
-
-  const formatDate = (iso) => {
-    const s = String(iso || "").trim();
-    if (!s) return "-";
-    // "2025-12-30T..." -> "2025-12-30"
-    return s.slice(0, 10);
-  };
-
-  // Phase 1.2: Transfer名からShipmentラベルを生成
-  const formatShipmentLabel = useCallback((transferName, index) => {
-    const base = String(transferName || "").trim() || "T0000";
-    // Transfer名から末尾の数字部分を抽出（例: "T0000" → "T0000"）
-    const match = base.match(/(\d+)$/);
-    const numPart = match ? match[1] : base;
-    return `#${numPart}-${index + 1}`;
-  }, []);
-
-  const isCompleted = (t) => {
-    // 管理画面と揃える：入庫済みは status === "TRANSFERRED" のときだけ
-    // （received >= total では判定しない。二重基準・一部受領ずれを防ぐ）
-    return String(t?.status || "").toUpperCase() === "TRANSFERRED";
-  };
-
-  const listToShow = useMemo(() => {
-    const base = Array.isArray(transfers) ? transfers : [];
-    return viewMode === "received" ? base.filter(isCompleted) : base.filter((t) => !isCompleted(t));
-  }, [transfers, viewMode]);
-
-  const baseAll = Array.isArray(transfers) ? transfers : [];
-  const pendingTransfersAll = baseAll.filter((t) => !isCompleted(t));
-  const receivedTransfersAll = baseAll.filter((t) => isCompleted(t));
-
-  const refresh = useCallback(async () => {
-    if (!locationGid) return;
-    setLoading(true);
-    setError("");
-    // 既存データをクリア（一度読み込まれたデータが残らないように）
-    setTransfers([]);
-    setTransfersPageInfo({ hasNextPage: false, endCursor: null });
-    try {
-      const listLimit = Math.max(1, Math.min(250, Number(appState?.outbound?.settings?.inbound?.listInitialLimit ?? 100)));
-      const result = await fetchTransfersForDestinationAll(locationGid, { first: listLimit });
-
-      // 監査ログから過剰分/予定外分を合算して display に反映
-      let patched = Array.isArray(result?.transfers) ? result.transfers : [];
-      setTransfersPageInfo(result?.pageInfo || { hasNextPage: false, endCursor: null });
-      try {
-        const audit = await readInboundAuditLog();
-        const overIdx = buildInboundOverIndex_(audit, { locationId: locationGid });
-        const extrasIdx = buildInboundExtrasIndex_(audit, { locationId: locationGid }); // ✅追加
-        
-        // 拒否分を集計（shipmentsのlineItemsから取得）
-        const shipmentIds = patched.flatMap((t) => 
-          (Array.isArray(t?.shipments) ? t.shipments : [])
-            .map((s) => String(s?.id || "").trim())
-            .filter(Boolean)
-        );
-        const rejectedIdx = await buildInboundRejectedIndex_(shipmentIds);
-        
-        patched = mergeInboundOverIntoTransfers_(patched, overIdx, extrasIdx, rejectedIdx); // ✅第4引数を渡す
-      } catch (_) {
-        // エラー時はそのまま
-      }
-
-      setTransfers(patched);
-    } catch (e) {
-      setError(toUserMessage(e));
-      setTransfers([]);
-      setTransfersPageInfo({ hasNextPage: false, endCursor: null });
-    } finally {
-      setLoading(false);
-    }
-  }, [locationGid, appState?.outbound?.settings?.inbound?.listInitialLimit]);
-
-  // 初回取得（locationGid が取れたら1回）
-  useEffect(() => {
-    if (!locationGid) return;
-    refresh().catch(() => {});
-  }, [locationGid, refresh]);
-
-  const pickShipmentIdFromTransfer = (t) => {
-    const nodes = t?.shipments ?? [];
-    // 未受領っぽい shipment を優先（なければ先頭）
-    const cand =
-      nodes.find((s) => String(s?.status || "").toUpperCase() !== "RECEIVED") ||
-      nodes.find((s) => String(s?.status || "").toUpperCase() !== "TRANSFERRED") ||
-      nodes[0];
-    return String(cand?.id || "").trim();
-  };
-
-  const onTapTransfer = (t) => {
-    // Phase 1.2: Shipment数が2つ以上の場合、選択モーダルを表示
-    const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
-    const shipmentCount = shipments.length;
-
-    if (shipmentCount === 0) {
-      toast("Shipmentが見つかりません");
-      return;
-    }
-
-    if (shipmentCount === 1) {
-      // 既存の動作（自動スキップ）
-      const shipmentId = pickShipmentIdFromTransfer(t);
-      if (!shipmentId) return;
-
-      const readOnly = isCompleted(t); // 入庫済み（処理済み）扱い
-
-      setStateSlice(setAppState, "inbound", {
-        selectedShipmentId: shipmentId,
-
-        // 表示用メタ（壊さない範囲で追加）
-        selectedTransferId: String(t?.id || ""),
-        selectedTransferName: String(t?.name || ""),
-
-        // ここが重要：InboundList ヘッダーの fallback 用
-        selectedOriginName: String(t?.originName || ""),
-        selectedDestinationName: String(t?.destinationName || ""),
-        selectedTransferStatus: String(t?.status || ""),
-        selectedTransferTotalQuantity: Number(t?.totalQuantity ?? 0),
-        selectedTransferReceivedQuantity: Number(t?.receivedQuantityDisplay ?? t?.receivedQuantity ?? 0),
-        selectedReadOnly: !!readOnly,
-      });
-
-      onNext?.();
-      return;
-    }
-
-    // 2つ以上の場合：選択モーダルを表示
-    setPendingTransferForModal(t);
-    // モーダル表示はuseEffectで制御（状態更新後に実行される）
-  };
-
-  // Phase 1.3: シップメントごとに選択（1つ選択してInboundListへ）
-  const handleSelectSingleShipment = useCallback(() => {
-    const t = pendingTransferForModal;
-    if (!t) {
-      setPendingTransferForModal(null);
-      return;
-    }
-
-    const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
-    if (shipments.length === 0) {
-      toast("Shipmentが見つかりません");
-      setPendingTransferForModal(null);
-      return;
-    }
-
-    // Transfer メタ情報を設定
-    setStateSlice(setAppState, "inbound", {
-      selectedTransferId: String(t?.id || ""),
-      selectedTransferName: String(t?.name || ""),
-      selectedOriginName: String(t?.originName || ""),
-      selectedDestinationName: String(t?.destinationName || ""),
-      selectedTransferStatus: String(t?.status || ""),
-      selectedTransferTotalQuantity: Number(t?.totalQuantity ?? 0),
-      selectedTransferReceivedQuantity: Number(t?.receivedQuantityDisplay ?? t?.receivedQuantity ?? 0),
-      // シップメント選択画面用の状態はここでは設定しない（選択画面で設定）
-    });
-
-    // モーダルを閉じる
-    setPendingTransferForModal(null);
-
-    // シップメント選択画面へ遷移
-    onOpenShipmentSelection?.();
-  }, [pendingTransferForModal, setAppState, onOpenShipmentSelection]);
-
-  // Phase 1.2: まとめて表示（全Shipmentを1画面で表示）
-  const handleShowAllShipments = useCallback(() => {
-    const t = pendingTransferForModal;
-    if (!t) return;
-
-    const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
-    const shipmentIds = shipments.map(s => String(s?.id || "").trim()).filter(Boolean);
-    
-    if (shipmentIds.length === 0) {
-      toast("Shipmentが見つかりません");
-      return;
-    }
-
-    const readOnly = isCompleted(t);
-
-    setStateSlice(setAppState, "inbound", {
-      // 既存（後方互換性のため残す）
-      selectedShipmentId: shipmentIds[0] || "",
-
-      // 新規追加（複数Shipmentモード）
-      selectedShipmentIds: shipmentIds,
-      shipmentMode: "multiple",
-
-      // 表示用メタ
-      selectedTransferId: String(t?.id || ""),
-      selectedTransferName: String(t?.name || ""),
-      selectedOriginName: String(t?.originName || ""),
-      selectedDestinationName: String(t?.destinationName || ""),
-      selectedTransferStatus: String(t?.status || ""),
-      selectedTransferTotalQuantity: Number(t?.totalQuantity ?? 0),
-      selectedTransferReceivedQuantity: Number(t?.receivedQuantityDisplay ?? t?.receivedQuantity ?? 0),
-      selectedReadOnly: !!readOnly,
-    });
-
-    // モーダルを閉じる（useEffectで自動的に閉じられる）
-    setPendingTransferForModal(null);
-
-    onNext?.();
-  }, [pendingTransferForModal, setAppState, onNext]);
-
-  // 次のページのTransfer一覧を読み込む関数
-  const loadMoreTransfers_ = useCallback(async () => {
-    if (!locationGid || !transfersPageInfo?.hasNextPage || !transfersPageInfo?.endCursor) return;
-    if (loadingMore) return; // 既に読み込み中の場合はスキップ
-
-    setLoadingMore(true);
-    try {
-      const listLimit = Math.max(1, Math.min(250, Number(appState?.outbound?.settings?.inbound?.listInitialLimit ?? 100)));
-      const result = await fetchTransfersForDestinationAll(locationGid, {
-        after: transfersPageInfo.endCursor,
-        first: listLimit,
-      });
-
-      if (result?.pageInfo) {
-        setTransfersPageInfo(result.pageInfo);
-      }
-
-      const newTransfers = Array.isArray(result?.transfers) ? result.transfers : [];
-      
-      // 監査ログから過剰分/予定外分を合算
-      let patched = newTransfers;
-      try {
-        const audit = await readInboundAuditLog();
-        const overIdx = buildInboundOverIndex_(audit, { locationId: locationGid });
-        const extrasIdx = buildInboundExtrasIndex_(audit, { locationId: locationGid });
-        
-        // 拒否分を集計（shipmentsのlineItemsから取得）
-        const shipmentIds = newTransfers.flatMap((t) => 
-          (Array.isArray(t?.shipments) ? t.shipments : [])
-            .map((s) => String(s?.id || "").trim())
-            .filter(Boolean)
-        );
-        const rejectedIdx = await buildInboundRejectedIndex_(shipmentIds);
-        
-        patched = mergeInboundOverIntoTransfers_(newTransfers, overIdx, extrasIdx, rejectedIdx);
-      } catch (_) {}
-
-      setTransfers((prev) => [...prev, ...patched]);
-    } catch (e) {
-      toast(String(e?.message || e || "追加読み込みに失敗しました"));
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [locationGid, transfersPageInfo, loadingMore]);
-
-  // Header（タブ + さらに読み込みボタン）
-  useEffect(() => {
-    setHeader?.(
-      <s-box padding="base">
-        <s-stack gap="base">
-          {/* タブ（左右50%ずつ"領域"を確保） */}
-          <s-stack direction="inline" gap="none" inlineSize="100%">
-            <s-box inlineSize="50%">
-              <s-button
-                kind={viewMode === "pending" ? "primary" : "secondary"}
-                onClick={() => setViewMode("pending")}
-              >
-                未入庫 {pendingTransfersAll.length}件
-              </s-button>
-            </s-box>
-
-            <s-box inlineSize="50%">
-              <s-button
-                kind={viewMode === "received" ? "primary" : "secondary"}
-                onClick={() => setViewMode("received")}
-              >
-                入庫済み {receivedTransfersAll.length}件
-              </s-button>
-            </s-box>
-          </s-stack>
-
-          {/* ✅ さらに読み込みボタン（リストが全て表示されていない時だけ表示） */}
-          {transfersPageInfo?.hasNextPage ? (
-            <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
-              <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-                <s-text tone="subdued" size="small">
-                  未読み込み一覧リストがあります。（過去分）
-                </s-text>
-                <s-button
-                  kind="secondary"
-                  onClick={loadMoreTransfers_}
-                  onPress={loadMoreTransfers_}
-                  disabled={loadingMore}
-                >
-                  {loadingMore ? "読み込み中..." : "読込"}
-                </s-button>
-              </s-stack>
-            </s-box>
-          ) : null}
-        </s-stack>
-      </s-box>
-    );
-    return () => setHeader?.(null);
-  }, [
-    setHeader,
-    viewMode,
-    pendingTransfersAll.length,
-    receivedTransfersAll.length,
-    transfersPageInfo?.hasNextPage,
-    loadingMore,
-    loadMoreTransfers_,
-  ]);
-
-  // Phase 1.2: pendingTransferForModalが設定されたらモーダルを表示
-  // 注意: 「開く」ボタンに直接command="--show"を設定しているため、useEffectは不要
-
-  // Footer（戻る／軽量／再取得）
-  useEffect(() => {
-    const summaryLeft = `入庫先: ${displayLocationName}`;
-    const summaryRight =
-      viewMode === "received"
-        ? `入庫済み ${listToShow.length}件`
-        : `未入庫 ${listToShow.length}件`;
-
-    setFooter?.(
-      <FixedFooterNavBar
-        summaryLeft={summaryLeft}
-        summaryRight={summaryRight}
-        leftLabel="戻る"
-        onLeft={onBack}
-        middleLabel={liteMode ? "軽量:ON" : "軽量:OFF"}
-        middleTone={liteMode ? "critical" : "default"}
-        onMiddle={onToggleLiteMode}
-        rightLabel={loading ? "取得中..." : "再取得"}
-        onRight={refresh}
-        rightDisabled={loading || !locationGid}
-      />
-    );
-    return () => setFooter?.(null);
-  }, [setFooter, displayLocationName, viewMode, listToShow.length, onBack, liteMode, onToggleLiteMode, refresh, loading, locationGid]);
-
-  return (
-    <>
-      <s-box padding="base">
-        <s-stack gap="base">
-
-          {error ? (
-            <s-box padding="none">
-              <s-text tone="critical">入庫ID一覧の取得に失敗しました: {error}</s-text>
-            </s-box>
-          ) : null}
-
-          {listToShow.length === 0 ? (
-            <s-text tone="subdued" size="small">
-              {loading ? "取得中..." : "表示できる入庫IDがありません"}
-            </s-text>
-          ) : (
-            <s-stack gap="base">
-              {listToShow.map((t) => {
-              const head = String(t?.name || "").trim() || "入庫ID";
-              const date = formatDate(t?.dateCreated);
-              const origin = t?.originName || "-";
-              const dest = t?.destinationName || "-";
-
-              const total = Number(t?.totalQuantity ?? 0);
-              const received = Number(t?.receivedQuantityDisplay ?? t?.receivedQuantity ?? 0);
-
-              const hasProgress = received > 0;
-              const isPartial = hasProgress && received < total;
-              const isOver = hasProgress && received > total;
-              const hasDiff = isPartial || isOver;
-              const statusSuffix = isPartial ? "（一部入庫）" : isOver ? "（予定超過）" : "";
-
-              const rawStatus = String(t?.status || "").trim();
-              const statusJa = STATUS_LABEL[rawStatus] || (rawStatus ? rawStatus : "不明");
-
-              // Phase 1.1: Shipment数の表示（2つ以上の場合のみ）
-              const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
-              const shipmentCount = shipments.length;
-
-              return (
-                <s-box key={t.id}>
-                  {shipmentCount > 1 ? (
-                    // シップメントが2つ以上の場合：シップメントが1つの場合と同じレイアウト + 右端に「リスト」ボタン
-                    // ⚠️ POS UI制限：日付と数量をボタンの左端に完全に合わせることは困難
-                    // - s-clickableがflex: 1で親コンテナの一部を占めるため、その中での右寄せはs-clickableの右端にしかならない
-                    // - ボタンの左端に合わせるには「親コンテナ幅 - ボタン幅 - gap」の動的計算が必要だが、POS UIではcalc()や動的幅計算が制限される
-                    // - position: absoluteも制限される可能性がある
-                    // 現状：ボタンは右端に固定されているが、日付と数量はs-clickable内での右寄せ（左寄りに見える）
-                    <s-stack direction="inline" gap="base" alignItems="center" justifyContent="space-between" style={{ width: "100%" }}>
-                      <s-clickable onClick={() => onTapTransfer(t)} style={{ flex: "1 1 0", minWidth: 0 }}>
-                        <s-box padding="small" style={{ width: "100%" }}>
-                          <s-stack gap="tight" style={{ width: "100%" }}>
-                            <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small" style={{ width: "100%" }}>
-                              <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                {head}
-                              </s-text>
-                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                                {date}
-                              </s-text>
-                            </s-stack>
-
-                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              出庫元: {origin}
-                            </s-text>
-
-                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              入庫先: {dest}
-                            </s-text>
-
-                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                              シップメント数: {shipmentCount}
-                            </s-text>
-
-                            <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small" style={{ width: "100%" }}>
-                              <s-text tone={hasDiff ? "critical" : "subdued"} size="small" style={{ whiteSpace: "nowrap" }}>
-                                状態: {statusJa}
-                                {statusSuffix}
-                              </s-text>
-                              <s-text tone={hasDiff ? "critical" : "subdued"} size="small" style={{ whiteSpace: "nowrap" }}>
-                                {received}/{total}
-                              </s-text>
-                            </s-stack>
-                          </s-stack>
-                        </s-box>
-                      </s-clickable>
-                      
-                      {/* 右端：「リスト」ボタン（右固定・縮まない） */}
-                      <s-box style={{ flex: "0 0 auto", flexShrink: 0 }}>
-                        <s-button
-                          kind="secondary"
-                          size="small"
-                          command="--show"
-                          commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID}
-                          onClick={() => {
-                            setPendingTransferForModal(t);
-                          }}
-                        >
-                          リスト
-                        </s-button>
-                      </s-box>
-                    </s-stack>
-                  ) : (
-                    // シップメントが1つの場合：元のレイアウト（全体がクリック可能、右上に日付、右下に数量）
-                    <s-clickable onClick={() => onTapTransfer(t)}>
-                      <s-box padding="small">
-                        <s-stack gap="tight">
-                          <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
-                            <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {head}
-                            </s-text>
-                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                              {date}
-                            </s-text>
-                          </s-stack>
-
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            出庫元: {origin}
-                          </s-text>
-
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            入庫先: {dest}
-                          </s-text>
-
-                          <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
-                            <s-text tone={hasDiff ? "critical" : "subdued"} size="small" style={{ whiteSpace: "nowrap" }}>
-                              状態: {statusJa}
-                              {statusSuffix}
-                            </s-text>
-                            <s-text tone={hasDiff ? "critical" : "subdued"} size="small" style={{ whiteSpace: "nowrap" }}>
-                              {received}/{total}
-                            </s-text>
-                          </s-stack>
-                        </s-stack>
-                      </s-box>
-                    </s-clickable>
-                  )}
-                  <s-divider />
-                </s-box>
-              );
-            })}
-          </s-stack>
-        )}
-      </s-stack>
-    </s-box>
-
-      {/* ✅ Phase 1.2: Shipment選択モーダル */}
-      <s-modal id={SHIPMENT_MODE_SELECTION_MODAL_ID} heading="処理方法を選択" ref={shipmentModeSelectionModalRef}>
-        {pendingTransferForModal ? (
-          <s-box padding="base" paddingBlockEnd="none">
-            <s-stack gap="base">
-              <s-stack gap="none">
-                <s-text tone="subdued" size="small">
-                  Transfer: {String(pendingTransferForModal?.name || "").trim() || "入庫ID"}
-                </s-text>
-                <s-text tone="subdued" size="small">
-                  出庫元: {String(pendingTransferForModal?.originName || "").trim() || "-"}
-                </s-text>
-                <s-text tone="subdued" size="small">
-                  宛先: {String(pendingTransferForModal?.destinationName || "").trim() || "-"}
-                </s-text>
-                <s-text tone="subdued" size="small">
-                  シップメント数: {Array.isArray(pendingTransferForModal?.shipments) ? pendingTransferForModal.shipments.length : 0}
-                </s-text>
-              </s-stack>
-              <s-divider />
-              <s-stack gap="none">
-                <s-box padding="none" style={{ border: "1px solid var(--s-color-border)", borderRadius: 4 }}>
-                  <s-text tone="subdued" size="small">シップメントごとに選択：1つのShipmentを選択して処理します</s-text>
-                </s-box>
-                <s-box padding="none" style={{ border: "1px solid var(--s-color-border)", borderRadius: 4 }}>
-                  <s-text tone="subdued" size="small">まとめて表示：全Shipmentを1画面で表示して処理します</s-text>
-                </s-box>
-              </s-stack>
-              <s-divider />
-              <s-box>
-                <s-button
-                  command="--hide"
-                  commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID}
-                  onClick={() => {
-                    setPendingTransferForModal(null);
-                  }}
-                >
-                  戻る
-                </s-button>
-              </s-box>
-            </s-stack>
-          </s-box>
-        ) : null}
-
-        {/* ✅ アクションボタン（slot="secondary-actions"とslot="primary-action"を使用） */}
-        <s-button
-          slot="secondary-actions"
-          onClick={handleSelectSingleShipment}
-        >
-          シップメントごとに選択
-        </s-button>
-        <s-button
-          slot="primary-action"
-          tone="success"
-          onClick={handleShowAllShipments}
-        >
-          まとめて表示
-        </s-button>
-      </s-modal>
-    </>
-  );
-}
-
-/* =========================
-   ✅ Phase 1.3: InboundShipmentSelection（シップメント選択画面）
-   - Transfer に複数シップメントがある場合、1つずつ選択して処理する画面
-*/
-function InboundShipmentSelection({
-  showImages,
-  liteMode,
-  appState,
-  setAppState,
-  onNext,
-  onBack,
-  setHeader,
-  setFooter,
-  onToggleLiteMode,
-}) {
-  const locationGid = useOriginLocationGid() || String(appState?.originLocationIdManual || "").trim() || null;
-  const inbound = getStateSlice(appState, "inbound", {
-    selectedTransferId: "",
-    selectedTransferName: "",
-    selectedOriginName: "",
-    selectedDestinationName: "",
-    selectedTransferStatus: "",
-    selectedTransferTotalQuantity: 0,
-    selectedTransferReceivedQuantity: 0,
-  });
-
-  const transferId = String(inbound?.selectedTransferId || "").trim();
-  const transferName = String(inbound?.selectedTransferName || "").trim();
-
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [transfer, setTransfer] = useState(null);
-  const [shipments, setShipments] = useState([]);
-  const [shipmentQuantities, setShipmentQuantities] = useState(new Map()); // 各シップメントの数量情報
-
-  // Phase 1.2: Transfer名からShipmentラベルを生成
-  const formatShipmentLabel = useCallback((transferName, index) => {
-    const base = String(transferName || "").trim() || "T0000";
-    const match = base.match(/(\d+)$/);
-    const numPart = match ? match[1] : base;
-    return `#${numPart}-${index + 1}`;
-  }, []);
-
-  // Transfer とシップメント情報を取得
-  const loadTransfer = useCallback(async () => {
-    if (!transferId || !locationGid) return;
-    setLoading(true);
-    setError("");
-    try {
-      const listLimit = Math.max(1, Math.min(250, Number(appState?.outbound?.settings?.inbound?.listInitialLimit ?? 100)));
-      const result = await fetchTransfersForDestinationAll(locationGid, { first: listLimit });
-      const found = Array.isArray(result?.transfers) ? result.transfers : [];
-      const t = found.find((tr) => String(tr?.id || "").trim() === transferId);
-      
-      if (!t) {
-        setError("Transferが見つかりません");
-        setTransfer(null);
-        setShipments([]);
-        return;
-      }
-
-      setTransfer(t);
-      const ships = Array.isArray(t?.shipments) ? t.shipments : [];
-      setShipments(ships);
-
-      // 各シップメントの数量情報を取得
-      const qtyMap = new Map();
-      try {
-        await Promise.all(
-          ships.map(async (shipment) => {
-            const sid = String(shipment?.id || "").trim();
-            if (!sid) return;
-            try {
-              const shipResult = await fetchInventoryShipmentEnriched(sid, { includeImages: false });
-              const lineItems = Array.isArray(shipResult?.lineItems) ? shipResult.lineItems : [];
-              const totalQty = lineItems.reduce((sum, li) => sum + Number(li?.quantity || 0), 0);
-              const receivedQty = lineItems.reduce((sum, li) => sum + Number(li?.acceptedQuantity || 0), 0);
-              qtyMap.set(sid, { total: totalQty, received: receivedQty });
-            } catch (e) {
-              // エラー時は0/0として扱う
-              qtyMap.set(sid, { total: 0, received: 0 });
-            }
-          })
-        );
-      } catch (e) {
-        // エラー時は空のMapのまま
-      }
-      setShipmentQuantities(qtyMap);
-    } catch (e) {
-      setError(toUserMessage(e));
-      setTransfer(null);
-      setShipments([]);
-      setShipmentQuantities(new Map());
-    } finally {
-      setLoading(false);
-    }
-  }, [transferId, locationGid]);
-
-  useEffect(() => {
-    loadTransfer();
-  }, [loadTransfer]);
-
-  // シップメントが受領済みかどうか判定
-  const isShipmentReceived = useCallback((shipment) => {
-    const status = String(shipment?.status || "").toUpperCase();
-    return status === "RECEIVED" || status === "TRANSFERRED";
-  }, []);
-
-  // シップメントを選択して InboundList へ遷移
-  const onSelectShipment = useCallback((shipmentId) => {
-    if (!transfer) return;
-    
-    const readOnly = isShipmentReceived(
-      (shipments || []).find((s) => String(s?.id || "").trim() === shipmentId)
-    );
-
-    setStateSlice(setAppState, "inbound", {
-      selectedShipmentId: shipmentId,
-      selectedShipmentIds: [], // 複数モードではない
-      shipmentMode: "single", // 1シップメントモード
-
-      // Transfer メタ情報（既存のまま）
-      selectedTransferId: String(transfer?.id || ""),
-      selectedTransferName: String(transfer?.name || ""),
-      selectedOriginName: String(transfer?.originName || ""),
-      selectedDestinationName: String(transfer?.destinationName || ""),
-      selectedTransferStatus: String(transfer?.status || ""),
-      selectedTransferTotalQuantity: Number(transfer?.totalQuantity ?? 0),
-      selectedTransferReceivedQuantity: Number(transfer?.receivedQuantityDisplay ?? transfer?.receivedQuantity ?? 0),
-      selectedReadOnly: !!readOnly,
-    });
-
-    onNext?.();
-  }, [transfer, shipments, setAppState, onNext, isShipmentReceived]);
-
-  // Header
-  useEffect(() => {
-    setHeader?.(
-      <s-box padding="base">
-        <s-stack gap="base">
-          <s-text emphasis="bold">シップメントを選択</s-text>
-          {transfer ? (
-            <s-stack gap="none">
-              <s-text tone="subdued" size="small">
-                Transfer: {transferName || String(transfer?.name || "").trim() || "入庫ID"}
-              </s-text>
-              <s-text tone="subdued" size="small">
-                出庫元: {String(transfer?.originName || "").trim() || "-"}
-              </s-text>
-              <s-text tone="subdued" size="small">
-                宛先: {String(transfer?.destinationName || "").trim() || "-"}
-              </s-text>
-              <s-text tone="subdued" size="small">
-                シップメント数: {shipments.length}
-              </s-text>
-            </s-stack>
-          ) : null}
-        </s-stack>
-      </s-box>
-    );
-    return () => setHeader?.(null);
-  }, [setHeader, transfer, transferName, shipments.length]);
-
-  // Footer
-  useEffect(() => {
-    setFooter?.(
-      <FixedFooterNavBar
-        summaryLeft={`Transfer: ${transferName || "-"}`}
-        summaryRight={`${shipments.length}件`}
-        leftLabel="戻る"
-        onLeft={onBack}
-        rightLabel="再取得"
-        onRight={loadTransfer}
-        rightTone="default"
-      />
-    );
-    return () => setFooter?.(null);
-  }, [setFooter, transferName, shipments.length, onBack, loadTransfer]);
-
-  if (loading) {
-    return (
-      <s-box padding="base">
-        <s-text tone="subdued">読み込み中...</s-text>
-      </s-box>
-    );
-  }
-
-  if (error) {
-    return (
-      <s-box padding="base">
-        <s-text tone="critical">エラー: {error}</s-text>
-      </s-box>
-    );
-  }
-
-  if (!transfer || shipments.length === 0) {
-    return (
-      <s-box padding="base">
-        <s-text tone="subdued">シップメントが見つかりません</s-text>
-      </s-box>
-    );
-  }
-
-  return (
-    <s-box padding="base">
-      <s-stack gap="none">
-        {shipments.map((shipment, index) => {
-          const shipmentId = String(shipment?.id || "").trim();
-          const shipmentLabel = formatShipmentLabel(transferName || transfer?.name || "", index);
-          const status = String(shipment?.status || "").toUpperCase();
-          const isReceived = isShipmentReceived(shipment);
-          const statusJa = status === "RECEIVED" ? "入庫済み" : 
-                          status === "TRANSFERRED" ? "入庫済み" :
-                          status === "IN_TRANSIT" ? "配送中" :
-                          status === "READY_TO_SHIP" ? "配送準備完了" :
-                          status || "不明";
-          
-          // 数量情報を取得
-          const qtyInfo = shipmentQuantities.get(shipmentId) || { total: 0, received: 0 };
-          const qtyText = `${qtyInfo.received}/${qtyInfo.total}`;
-
-          return (
-            <s-box key={shipmentId} padding="none">
-              <s-clickable 
-                onClick={() => {
-                  // 入庫済みでもInboundListに遷移（readOnlyモードで表示）
-                  onSelectShipment(shipmentId);
-                }}
-              >
-                <s-box
-                  paddingInline="none"
-                  paddingBlockStart="small-100"
-                  paddingBlockEnd="small-200"
-                  style={{ 
-                    opacity: isReceived ? 0.6 : 1,
-                    backgroundColor: isReceived ? "var(--s-color-bg-surface-secondary)" : undefined
-                  }}
-                >
-                  <s-stack gap="base">
-                    <s-stack direction="inline" justifyContent="space-between" alignItems="flex-end" gap="small">
-                      <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
-                        <s-stack gap="none">
-                          <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {shipmentLabel}
-                          </s-text>
-                          <s-text tone="subdued" size="small">
-                            状態: {statusJa}
-                          </s-text>
-                        </s-stack>
-                      </s-box>
-                      <s-box style={{ flex: "0 0 auto" }}>
-                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                          {qtyText}
-                        </s-text>
-                      </s-box>
-                    </s-stack>
-                    {shipment?.tracking?.trackingNumber ? (
-                      <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        追跡番号: {String(shipment.tracking.trackingNumber).trim()}
-                      </s-text>
-                    ) : null}
-                  </s-stack>
-                </s-box>
-              </s-clickable>
-              <s-divider />
-            </s-box>
-          );
-        })}
-      </s-stack>
-    </s-box>
-  );
-}
-
-/* =========================
-   InboundList（貼り替え完全版 / 同一SKU安定版）
-   - 外部スキャン（SCAN_QUEUE_KEY）を scanQueueRef に合流
-   - JAN/SKU -> variant は resolveVariantByCode（永続キャッシュ）を利用
-   - footer に滞留数/処理率を表示
-   - ✅ addOrIncrement の hit 判定が stale にならないよう rows/extras を ref で最新参照
-*/
-
-function InboundList({
-  showImages,
-  liteMode,
-  onToggleLiteMode,
-  appState,
-  setAppState,
-  onBack,
-  onAfterReceive, // Phase 1.3: 確定後の遷移制御
-  dialog,
-  setHeader,
-  setFooter,
-}) {
-  const mountedRef = useRef(true);
-  const locationGid = useOriginLocationGid();
-  const locIndex = useLocationsIndex(appState, setAppState);
-  const inbound = getStateSlice(appState, "inbound", {
-    selectedShipmentId: "",
-    selectedShipmentIds: [],        // Phase 1.4: 複数Shipment対応
-    shipmentMode: "single",         // Phase 1.4: "single" | "multiple"
-    selectedTransferId: "",
-    selectedTransferName: "",
-    selectedOriginName: "",
-    selectedDestinationName: "",
-    selectedTransferStatus: "",
-    selectedTransferTotalQuantity: 0,
-    selectedTransferReceivedQuantity: 0,
-    selectedReadOnly: false,
-  });
-  const selectedShipmentId = String(inbound.selectedShipmentId || "").trim();
-  
-  // Phase 1.4: 複数Shipmentモードの判定
-  const isMultipleMode = inbound.shipmentMode === "multiple" && 
-                         Array.isArray(inbound.selectedShipmentIds) && 
-                         inbound.selectedShipmentIds.length > 1;
-
-  const CONFIRM_RECEIVE_MODAL_ID = "CONFIRM_RECEIVE_MODAL_ID";
-
-  const WARNING_REASONS = [
-    { id: "over_received", label: "予定超過" },
-    { id: "unplanned", label: "予定外入荷" },
-    { id: "damage_replace", label: "破損" },
-    { id: "other", label: "その他" },
-  ];
-
-  // 予定差異モーダル：各カテゴリの表示は“1件だけ”にして、残りは「…他N件」
-  const DIFF_PREVIEW_LIMIT = 1;
-
-  // 長い商品名で縦に伸びないように 1 行 + 省略
-  const oneLineStyle = {
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  };
-
-  const [pendingLoading, setPendingLoading] = useState(false);
-  const [pendingTransfers, setPendingTransfers] = useState([]);
-
-  const [allTransfersLoading, setAllTransfersLoading] = useState(false);
-  const [allTransfers, setAllTransfers] = useState([]);
-
-  const refreshAllTransfers = async () => {
-    if (!locationGid) return;
-    setAllTransfersLoading(true);
-    try {
-      const listLimit = Math.max(1, Math.min(250, Number(appState?.outbound?.settings?.inbound?.listInitialLimit ?? 100)));
-      const all = await fetchTransfersForDestinationAll(locationGid, { first: listLimit });
-
-      let list = Array.isArray(all?.transfers) ? all.transfers : [];
-      try {
-        const audit = await readInboundAuditLog();
-        const overIndex = buildInboundOverIndex_(audit, { locationId: locationGid });
-        const extrasIndex = buildInboundExtrasIndex_(audit, { locationId: locationGid });
-        
-        // 拒否分を集計（shipmentsのlineItemsから取得）
-        const shipmentIds = list.flatMap((t) => 
-          (Array.isArray(t?.shipments) ? t.shipments : [])
-            .map((s) => String(s?.id || "").trim())
-            .filter(Boolean)
-        );
-        const rejectedIndex = await buildInboundRejectedIndex_(shipmentIds);
-        
-        list = mergeInboundOverIntoTransfers_(list, overIndex, extrasIndex, rejectedIndex);
-      } catch (_) {}
-
-      setAllTransfers(list);
-    } catch {
-      setAllTransfers([]);
-    } finally {
-      setAllTransfersLoading(false);
-    }
-  };
-
-  const refreshPending = async () => {
-    if (!locationGid) return;
-    setPendingLoading(true);
-    try {
-      const listLimit = Math.max(1, Math.min(250, Number(appState?.outbound?.settings?.inbound?.listInitialLimit ?? 100)));
-      const data = await fetchPendingTransfersForDestination(locationGid, { first: listLimit });
-
-      let list = Array.isArray(data) ? data : [];
-      try {
-        const audit = await readInboundAuditLog();
-        const overIndex = buildInboundOverIndex_(audit, { locationId: locationGid });
-        const extrasIndex = buildInboundExtrasIndex_(audit, { locationId: locationGid });
-        
-        // 拒否分を集計（shipmentsのlineItemsから取得）
-        const shipmentIds = list.flatMap((t) => 
-          (Array.isArray(t?.shipments) ? t.shipments : [])
-            .map((s) => String(s?.id || "").trim())
-            .filter(Boolean)
-        );
-        const rejectedIndex = await buildInboundRejectedIndex_(shipmentIds);
-        
-        list = mergeInboundOverIntoTransfers_(list, overIndex, extrasIndex, rejectedIndex);
-      } catch (_) {}
-
-      setPendingTransfers(list);
-    } catch {
-      setPendingTransfers([]);
-    } finally {
-      setPendingLoading(false);
-    }
-  };
-
-  // 追加：InboundList を開いたら pendingTransfers を自動取得（ヘッダーの #T / 出庫元 / 入庫先用）
-  useEffect(() => {
-    if (!locationGid) return;
-    refreshPending().catch(() => {});
-    refreshAllTransfers().catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationGid]);
-
-  const [shipmentLoading, setShipmentLoading] = useState(false);
-  const [shipmentError, setShipmentError] = useState("");
-  const [shipment, setShipment] = useState(null);
-
-  const [rows, setRows] = useState([]);
-  const [extras, setExtras] = useState([]);
-  const [lineItemsPageInfo, setLineItemsPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ページネーション用
-  const [loadingMore, setLoadingMore] = useState(false); // 追加読み込み中フラグ
-
-  // stale回避用 ref
-  const rowsRef = useRef([]);
-  const extrasRef = useRef([]);
-  useEffect(() => {
-    rowsRef.current = Array.isArray(rows) ? rows : [];
-  }, [rows]);
-  useEffect(() => {
-    extrasRef.current = Array.isArray(extras) ? extras : [];
-  }, [extras]);
-
-  const [onlyUnreceived, setOnlyUnreceived] = useState(false);
-
-  const [reason, setReason] = useState("");
-  const [note, setNote] = useState("");
-  const [ackWarning, setAckWarning] = useState(false);
-
-  const [scanValue, setScanValue] = useState("");
-  const scanFinalizeTimerRef = useRef(null);
-  const scanQueueRef = useRef([]);
-  const scanProcessingRef = useRef(false);
-  const scanPausedRef = useRef(false);
-  const headerDebounceRef = useRef(null);
-  
-  const [scanDisabled, setScanDisabled] = useState(false);
-
-  // queue metrics
-  const [scanQueueLen, setScanQueueLen] = useState(0);
-  const [scanRps, setScanRps] = useState(0);
-  const scanProcessedTimestampsRef = useRef([]);
-
-  const scanDisabledRef = useRef(false);
-  useEffect(() => {
-    scanDisabledRef.current = scanDisabled;
-  }, [scanDisabled]);
-
-  // readOnly中の編集を完全に止める（state更新をブロック）
-  const readOnlyRef = useRef(false);
-  const toastReadOnlyOnceRef = useRef(false);
-
-  const denyEdit_ = () => {
-    if (toastReadOnlyOnceRef.current) return;
-    toastReadOnlyOnceRef.current = true;
-    toast("この入庫は入庫済みのため変更できません");
-  };
-
-  const lastScanValueRef = useRef("");
-  const lastScanChangeAtRef = useRef(0);
-
-  useEffect(() => {
-    VariantCache.init?.().catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-
-      scanPausedRef.current = true;
-      scanQueueRef.current = [];
-      scanProcessingRef.current = false;
-
-      try {
-        if (scanFinalizeTimerRef.current) clearTimeout(scanFinalizeTimerRef.current);
-      } catch {}
-    };
-  }, []);
-
-  const [addQuery, setAddQuery] = useState("");
-  const debouncedAddQuery = useDebounce(addQuery.trim(), 200);
-  const [addLoading, setAddLoading] = useState(false);
-  const [addCandidates, setAddCandidates] = useState([]);
-  const [addCandidatesDisplayLimit, setAddCandidatesDisplayLimit] = useState(50); // 初期表示50件（「さらに表示」で追加読み込み可能）
-
-  const [addQtyById, setAddQtyById] = useState({});
-
-  const clearAddSearch = useCallback(() => {
-    setAddQuery("");
-    setAddCandidates([]);
-    setAddCandidatesDisplayLimit(20); // 検索クリア時に表示件数もリセット
-    setAddQtyById({});
-  }, []);
-
-  // 「さらに表示」ボタン用（Inbound）
-  const handleShowMoreAddCandidates = useCallback(() => {
-    setAddCandidatesDisplayLimit((prev) => prev + 20);
-  }, []);
-
-  const [receiveSubmitting, setReceiveSubmitting] = useState(false);
-  const receiveLockRef = useRef(false);
-  const hideReceiveConfirmRef = useRef(null);
-
-  const [draftSavedAt, setDraftSavedAt] = useState(null);
-
-  const safeSet = (fn, signal) => {
-    if (!mountedRef.current) return;
-    if (signal?.aborted) return;
-    fn?.();
-  };
-
-  const loadShipment = async (id, { signal } = {}) => {
-    const shipmentId = String(id || "").trim();
-    if (!shipmentId) return toast("Shipment ID が空です");
-
-    safeSet(() => {
-      setShipment(null);
-      setRows([]);
-      setExtras([]);
-      setShipmentError("");
-      setReason("");
-      setNote("");
-      setAckWarning(false);
-      setDraftSavedAt(null);
-
-      setScanValue("");
-      lastScanValueRef.current = "";
-      lastScanChangeAtRef.current = 0;
-
-      try {
-        if (scanFinalizeTimerRef.current) clearTimeout(scanFinalizeTimerRef.current);
-      } catch {}
-      scanQueueRef.current = [];
-      scanProcessingRef.current = false;
-      scanPausedRef.current = false;
-      setScanDisabled(false);
-
-      setShipmentLoading(true);
-      // 既存データをクリア（一度読み込まれたデータが残らないように）
-      setLineItemsPageInfo({ hasNextPage: false, endCursor: null });
-    }, signal);
-
-    try {
-      const shipmentResult = await fetchInventoryShipmentEnriched(shipmentId, {
-        includeImages: showImages && !liteMode,
-        signal,
-      });
-
-      // pageInfoを処理
-      const s = shipmentResult || {};
-      const pageInfo = shipmentResult?.pageInfo || { hasNextPage: false, endCursor: null };
-      safeSet(() => setLineItemsPageInfo(pageInfo), signal);
-
-      // 監査ログの over（過剰分）を「明細（SKU行）」にも反映するために取得
-      //    ※ readInboundAuditLog / buildInboundOverItemIndex_ は事前に定義済み前提
-      let overByInventoryItemId = new Map();
-      try {
-          const audit = await readInboundAuditLog();
-          overByInventoryItemId = buildInboundOverItemIndex_(audit, {
-            locationId: locationGid,
-            shipmentId: s?.id,
-          });
-      } catch (_) {
-        overByInventoryItemId = new Map();
-      }
-
-      // baseRows は safeSet の外で作る（同期処理なのでOK）
-      const baseRows = (s.lineItems ?? []).map((li) => {
-        const plannedQty = Number(li.quantity ?? 0);
-
-        // Shopify側の実績（未入庫=0 / 部分受領は>0）
-        const alreadyAcceptedQty = Math.max(0, Number(li.acceptedQuantity ?? 0));
-        const alreadyRejectedQty = Math.max(0, Number(li.rejectedQuantity ?? 0));
-
-        // 監査ログ over（過剰分）を取得（表示用のみ、加算しない）
-        //    GraphQLのacceptedQuantityは既に過剰分を含んでいるため、加算すると2倍になる
-        const inventoryItemId = li.inventoryItemId;
-        const overAcceptedQty = Math.max(
-          0,
-          Math.floor(Number(inventoryItemId ? overByInventoryItemId.get(String(inventoryItemId)) || 0 : 0))
-        );
-        // 修正：acceptedQuantityは既に過剰分を含んでいるため、監査ログの過剰分は加算しない
-        const alreadyAcceptedTotalQty = alreadyAcceptedQty;
-
-        // 初期表示は「accepted」に合わせる（acceptedQuantityは既に過剰分を含んでいる）
-        const initialReceiveQty = alreadyAcceptedTotalQty;
-
-        return {
-          key: li.id,
-          shipmentLineItemId: li.id,
-          inventoryItemId: li.inventoryItemId,
-          title: li.title || li.sku || li.inventoryItemId || "(unknown)",
-          sku: li.sku || "",
-          barcode: li.barcode || "",
-          imageUrl: li.imageUrl || "",
-          plannedQty,
-          alreadyAcceptedQty,        // Shopify accepted（そのまま）
-          alreadyRejectedQty,
-          overAcceptedQty,           // 追加：監査ログ over
-          alreadyAcceptedTotalQty,   // 追加：accepted + over
-          receiveQty: initialReceiveQty,
-        };
-      });
-
-      const transferId = String(inbound?.selectedTransferId || "").trim();
-
-      let draft = null;
-      try {
-          draft = await loadInboundDraft({ locationGid, transferId, shipmentId: s.id });
-      } catch (_) {
-        draft = null;
-      }
-
-      // safeSet の中は “同期” で state を当てるだけにする
-      safeSet(() => {
-        setShipment(s);
-
-        if (draft) {
-          const nextRows = baseRows.map((r) => {
-            const saved = draft.rows?.find((x) => x.shipmentLineItemId === r.shipmentLineItemId);
-            if (!saved) return r;
-            const savedQty = Math.max(0, Math.floor(Number(saved.receiveQty || 0)));
-            const nextQty = clampReceiveQty_(r, savedQty);
-            return { ...r, receiveQty: nextQty };
-          });
-
-          setRows(nextRows);
-          setExtras(Array.isArray(draft.extras) ? draft.extras : []);
-          setOnlyUnreceived(!!draft.onlyUnreceived);
-          setReason(String(draft.reason || ""));
-          setNote(String(draft.note || ""));
-          setAckWarning(false);
-          setDraftSavedAt(draft.savedAt || null);
-
-          toast("下書きを復元しました");
-        } else {
-          setRows(baseRows);
-        }
-      }, signal);
-
-    } catch (e) {
-      if (signal?.aborted) return;
-      safeSet(() => setShipmentError(toUserMessage(e)), signal);
-    } finally {
-      safeSet(() => setShipmentLoading(false), signal);
-    }
-  };
-
-  const loadShipmentById = loadShipment;
-
-  // Phase 1.4: formatShipmentLabel関数（InboundList内で使用）- loadMultipleShipmentsより前に定義
-  const formatShipmentLabelLocal = useCallback((transferName, index) => {
-    const base = String(transferName || "").trim() || "T0000";
-    const match = base.match(/(\d+)$/);
-    const numPart = match ? match[1] : base;
-    return `#${numPart}-${index + 1}`;
-  }, []);
-
-  // Phase 1.4: 複数Shipmentモード用のデータ取得
-  const loadMultipleShipments = useCallback(async (shipmentIds, { signal } = {}) => {
-    if (!Array.isArray(shipmentIds) || shipmentIds.length === 0) {
-      toast("Shipment ID が空です");
-      return;
-    }
-
-    safeSet(() => {
-      setShipment(null);
-      setRows([]);
-      setExtras([]);
-      setShipmentError("");
-      setReason("");
-      setNote("");
-      setAckWarning(false);
-      setDraftSavedAt(null);
-
-      setScanValue("");
-      lastScanValueRef.current = "";
-      lastScanChangeAtRef.current = 0;
-
-      try {
-        if (scanFinalizeTimerRef.current) clearTimeout(scanFinalizeTimerRef.current);
-      } catch {}
-      scanQueueRef.current = [];
-      scanProcessingRef.current = false;
-      scanPausedRef.current = false;
-      setScanDisabled(false);
-
-      setShipmentLoading(true);
-      setLineItemsPageInfo({ hasNextPage: false, endCursor: null });
-    }, signal);
-
-    try {
-      // 全Shipmentを並列取得
-      const shipmentResults = await Promise.all(
-        shipmentIds.map(id => 
-          fetchInventoryShipmentEnriched(id, {
-            includeImages: showImages && !liteMode,
-            signal,
-          })
-        )
-      );
-
-      // 監査ログの over（過剰分）を取得
-      let overByInventoryItemId = new Map();
-      try {
-        const audit = await readInboundAuditLog();
-        shipmentIds.forEach(shipmentId => {
-          const itemOver = buildInboundOverItemIndex_(audit, {
-            locationId: locationGid,
-            shipmentId,
-          });
-          // マージ（shipmentIdごとに分ける必要があるが、簡易的に統合）
-          itemOver.forEach((value, key) => {
-            overByInventoryItemId.set(key, (overByInventoryItemId.get(key) || 0) + value);
-          });
-        });
-      } catch (_) {
-        overByInventoryItemId = new Map();
-      }
-
-      // まとめて表示モード：下書きを先に読み込む
-      const transferId = String(inbound?.selectedTransferId || "").trim();
-      let draft = null;
-      try {
-        draft = await loadInboundDraft({ locationGid, transferId, shipmentId: shipmentIds[0] });
-      } catch (_) {
-        draft = null;
-      }
-
-      // 各ShipmentのlineItemsを統合（shipmentIdとshipmentLabelを付与）
-      const transferName = String(inbound?.selectedTransferName || "").trim();
-      const allRows = shipmentResults.flatMap((s, index) => {
-        if (!s) return [];
-        const shipmentLabel = formatShipmentLabelLocal(transferName, index);
-        return (s.lineItems ?? []).map((li) => {
-          const plannedQty = Number(li.quantity ?? 0);
-          const alreadyAcceptedQty = Math.max(0, Number(li.acceptedQuantity ?? 0));
-          const alreadyRejectedQty = Math.max(0, Number(li.rejectedQuantity ?? 0));
-          const inventoryItemId = li.inventoryItemId;
-          const overAcceptedQty = Math.max(
-            0,
-            Math.floor(Number(inventoryItemId ? overByInventoryItemId.get(String(inventoryItemId)) || 0 : 0))
-          );
-          const alreadyAcceptedTotalQty = alreadyAcceptedQty;
-          
-          // 下書きから復元（shipmentIdとshipmentLineItemIdで一致する行を探す）
-          let initialReceiveQty = alreadyAcceptedTotalQty;
-          if (draft && Array.isArray(draft.rows)) {
-            const savedRow = draft.rows.find((r) => {
-              // shipmentIdが保存されている場合は、shipmentIdとshipmentLineItemIdの両方が一致する必要がある
-              if (r.shipmentId) {
-                return String(r.shipmentId) === String(s.id) && String(r.shipmentLineItemId) === String(li.id);
-              }
-              // shipmentIdが保存されていない場合（旧データ）は、shipmentLineItemIdのみで一致
-              return String(r.shipmentLineItemId) === String(li.id);
-            });
-            if (savedRow) {
-              initialReceiveQty = Math.max(0, Math.floor(Number(savedRow.receiveQty || 0)));
-            }
-          }
-
-          return {
-            key: `${s.id}-${li.id}`, // 複数Shipment対応のため、shipmentIdも含める
-            shipmentLineItemId: li.id,
-            shipmentId: s.id,              // Phase 1.4: shipmentIdを付与
-            shipmentLabel: shipmentLabel,  // Phase 1.4: shipmentLabelを付与
-            inventoryItemId: li.inventoryItemId,
-            title: li.title || li.sku || li.inventoryItemId || "(unknown)",
-            sku: li.sku || "",
-            barcode: li.barcode || "",
-            imageUrl: li.imageUrl || "",
-            plannedQty,
-            alreadyAcceptedQty,
-            alreadyRejectedQty,
-            overAcceptedQty,
-            alreadyAcceptedTotalQty,
-            receiveQty: initialReceiveQty,
-          };
-        });
-      });
-
-      safeSet(() => {
-        setShipment(shipmentResults[0] || null); // 最初のShipmentを設定（互換性のため）
-        setRows(allRows);
-        setShipmentError("");
-        
-        // 下書きから復元（extras、reason、note、onlyUnreceivedも復元）
-        if (draft) {
-          setExtras(Array.isArray(draft.extras) ? draft.extras : []);
-          setOnlyUnreceived(!!draft.onlyUnreceived);
-          setReason(String(draft.reason || ""));
-          setNote(String(draft.note || ""));
-          setAckWarning(false);
-          setDraftSavedAt(draft.savedAt || null);
-          toast("下書きを復元しました");
-        }
-      }, signal);
-    } catch (e) {
-      if (signal?.aborted) return;
-      safeSet(() => setShipmentError(toUserMessage(e)), signal);
-    } finally {
-      safeSet(() => setShipmentLoading(false), signal);
-    }
-  }, [showImages, liteMode, locationGid, inbound?.selectedTransferName, formatShipmentLabelLocal]);
-
-  useEffect(() => {
-    // Phase 1.4: 複数Shipmentモードの場合
-    if (isMultipleMode) {
-      const selectedShipmentIds = Array.isArray(inbound.selectedShipmentIds) 
-        ? inbound.selectedShipmentIds 
-        : [];
-      
-      if (selectedShipmentIds.length === 0) {
-        setShipment(null);
-        setRows([]);
-        setExtras([]);
-        setShipmentError("");
-        setLineItemsPageInfo({ hasNextPage: false, endCursor: null });
-        return;
-      }
-
-      const ac = new AbortController();
-      (async () => {
-        await loadMultipleShipments(selectedShipmentIds, { signal: ac.signal });
-      })();
-
-      return () => ac.abort();
-    }
-
-    // 既存の動作（1つのShipment）
-    if (!selectedShipmentId) {
-      setShipment(null);
-      setRows([]);
-      setExtras([]);
-      setShipmentError("");
-      // lineItemsPageInfoもクリア
-      setLineItemsPageInfo({ hasNextPage: false, endCursor: null });
-      return;
-    }
-
-    const ac = new AbortController();
-    (async () => {
-      await loadShipment(selectedShipmentId, { signal: ac.signal });
-    })();
-
-    return () => ac.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isMultipleMode, selectedShipmentId, inbound.selectedShipmentIds, showImages, liteMode, loadMultipleShipments]);
-
-  // 商品リストの追加読み込み
-  const loadMoreLineItems_ = useCallback(async () => {
-    if (loadingMore || !lineItemsPageInfo?.hasNextPage || !lineItemsPageInfo?.endCursor || !selectedShipmentId || !locationGid) return;
-
-    setLoadingMore(true);
-    const ac = new AbortController();
-    try {
-      const shipmentResult = await fetchInventoryShipmentEnriched(selectedShipmentId, {
-        includeImages: showImages && !liteMode,
-        after: lineItemsPageInfo.endCursor,
-        signal: ac.signal,
-      });
-
-      const newShip = shipmentResult || {};
-      const newLineItems = Array.isArray(newShip?.lineItems) ? newShip.lineItems : [];
-      const newPageInfo = newShip?.pageInfo || { hasNextPage: false, endCursor: null };
-
-      // 監査ログの over（過剰分）を「明細（SKU行）」にも反映するために取得
-      let overByInventoryItemId = new Map();
-      try {
-        if (locationGid) {
-          const audit = await readInboundAuditLog();
-          overByInventoryItemId = buildInboundOverItemIndex_(audit, {
-            locationId: locationGid,
-            shipmentId: newShip?.id || selectedShipmentId,
-          });
-        }
-      } catch (_) {
-        overByInventoryItemId = new Map();
-      }
-
-      // 新しい行を作成
-      const newBaseRows = newLineItems.map((li) => {
-        const plannedQty = Number(li.quantity ?? 0);
-        const alreadyAcceptedQty = Math.max(0, Number(li.acceptedQuantity ?? 0));
-        const alreadyRejectedQty = Math.max(0, Number(li.rejectedQuantity ?? 0));
-
-        const inventoryItemId = li.inventoryItemId;
-        const overAcceptedQty = Math.max(
-          0,
-          Math.floor(Number(inventoryItemId ? overByInventoryItemId.get(String(inventoryItemId)) || 0 : 0))
-        );
-        // 修正：acceptedQuantityは既に過剰分を含んでいるため、監査ログの過剰分は加算しない
-        const alreadyAcceptedTotalQty = alreadyAcceptedQty;
-        const initialReceiveQty = alreadyAcceptedTotalQty;
-
-        return {
-          key: li.id,
-          shipmentLineItemId: li.id,
-          inventoryItemId: li.inventoryItemId,
-          title: li.title || li.sku || li.inventoryItemId || "(unknown)",
-          sku: li.sku || "",
-          barcode: li.barcode || "",
-          imageUrl: li.imageUrl || "",
-          plannedQty,
-          alreadyAcceptedQty,
-          alreadyRejectedQty,
-          overAcceptedQty,
-          alreadyAcceptedTotalQty,
-          receiveQty: initialReceiveQty,
-        };
-      });
-
-      // 既存のrowsに追加（同一shipmentLineItemIdは上書きしない）
-      //    rowsRef.currentを使用してstale closureを避ける
-      const existingMap = new Map();
-      const currentRows = rowsRef.current || [];
-      currentRows.forEach((r) => {
-        if (r.shipmentLineItemId) existingMap.set(r.shipmentLineItemId, r);
-      });
-
-      newBaseRows.forEach((r) => {
-        if (!existingMap.has(r.shipmentLineItemId)) {
-          existingMap.set(r.shipmentLineItemId, r);
-        }
-      });
-
-      setRows(Array.from(existingMap.values()));
-      setLineItemsPageInfo(newPageInfo);
-    } catch (e) {
-      toast(`追加読み込みエラー: ${toUserMessage(e)}`);
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [loadingMore, lineItemsPageInfo, selectedShipmentId, showImages, liteMode, locationGid]);
-
-  useEffect(() => {
-    let alive = true;
-
-    (async () => {
-      const q = String(debouncedAddQuery || "").trim();
-
-      // 1文字未満は候補を消す
-      if (q.length < 1) {
-        if (alive) {
-          setAddCandidates([]);
-          setAddCandidatesDisplayLimit(20); // 検索クリア時に表示件数もリセット
-        }
-        return;
-      }
-
-      try {
-        if (alive) setAddLoading(true);
-
-        const searchLimit = Math.max(10, Math.min(50, Number(appState?.outbound?.settings?.searchList?.initialLimit ?? 50)));
-        const list = await searchVariants(q, {
-          first: searchLimit,
-          includeImages: Boolean(showImages && !liteMode),
-        });
-
-        if (!alive) return;
-        setAddCandidates(Array.isArray(list) ? list : []);
-        setAddCandidatesDisplayLimit(20); // 新しい検索時は表示件数をリセット
-      } catch (e) {
-        if (!alive) return;
-        setAddCandidates([]);
-        setAddCandidatesDisplayLimit(20);
-      } finally {
-        if (alive) setAddLoading(false);
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
-  }, [debouncedAddQuery, showImages, liteMode]);
-
-  // 受領入力の安全クランプ：下限=既受領（減らせない）/ 上限は設けない（予定超過を許可）
-  const clampReceiveQty_ = (r, n) => {
-    const min = Math.max(0, Math.floor(Number(r?.alreadyAcceptedTotalQty ?? (Number(r?.alreadyAcceptedQty || 0) + Number(r?.overAcceptedQty || 0)))));
-    const v = Math.max(min, Math.floor(Number(n || 0)));
-    return v;
-  };
-
-  const setAllToPlanned = useCallback(() => {
-    if (readOnlyRef.current) return denyEdit_();
-    setRows((prev) =>
-      prev.map((r) => ({ ...r, receiveQty: clampReceiveQty_(r, Number(r.plannedQty || 0)) }))
-    );
-    toast("全行を予定数でセットしました");
-  }, []);
-
-  const resetAllCounts = useCallback(() => {
-    if (readOnlyRef.current) return denyEdit_();
-    setRows((prev) => prev.map((r) => ({ ...r, receiveQty: clampReceiveQty_(r, 0) })));
-    setExtras([]);
-    setReason("");
-    setNote("");
-    setAckWarning(false);
-    toast("入庫数をリセットしました");
-  }, []);
-
-  const setRowQty = (key, value) => {
-    if (readOnlyRef.current) return denyEdit_();
-    const k = String(key || "");
-    const n = Math.max(0, Number(value || 0));
-
-    setRows((prev) =>
-      prev.map((r) =>
-        String(r.key) === k || String(r.shipmentLineItemId) === k
-          ? { ...r, receiveQty: clampReceiveQty_(r, n) }
-          : r
-      )
-    );
-  };
-
-  const incRow = (key, delta) => {
-    if (readOnlyRef.current) return denyEdit_();
-    setRows((prev) =>
-      prev.map((r) =>
-        r.key === key
-          ? { ...r, receiveQty: clampReceiveQty_(r, Number(r.receiveQty || 0) + delta) }
-          : r
-      )
-    );
-  };
-
-  const setExtraQty = (key, value) => {
-    if (readOnlyRef.current) return denyEdit_();
-    const n = Math.max(0, Number(value || 0));
-    setExtras((prev) =>
-      prev
-        .map((x) => (x.key === key ? { ...x, receiveQty: n } : x))
-        .filter((x) => Number(x.receiveQty || 0) > 0)
-    );
-  };
-
-  const incExtra = (key, delta) => {
-    if (readOnlyRef.current) return denyEdit_();
-    setExtras((prev) =>
-      prev
-        .map((x) => (x.key === key ? { ...x, receiveQty: Math.max(0, Number(x.receiveQty || 0) + delta) } : x))
-        .filter((x) => Number(x.receiveQty || 0) > 0)
-    );
-  };
-
-  // 同一行加算（inventoryItemId優先） ※ rows/extras は ref で最新参照
-  const addOrIncrementByResolved = useCallback((resolved, delta = 1, opts = {}) => {
-    if (readOnlyRef.current) return denyEdit_();
-    const inventoryItemId = resolved?.inventoryItemId;
-    if (!inventoryItemId) return toast("inventoryItemId が取得できませんでした");
-
-    const toastOnExtra = !!opts.toastOnExtra;
-
-    const curRows = rowsRef.current || [];
-    const curExtras = extrasRef.current || [];
-
-    const hitRow = curRows.find((r) => r.inventoryItemId === inventoryItemId);
-    if (hitRow) {
-      incRow(hitRow.key, delta);
-      return;
-    }
-
-    const hitExtra = curExtras.find((x) => x.inventoryItemId === inventoryItemId);
-    if (hitExtra) {
-      incExtra(hitExtra.key, delta);
-
-      if (toastOnExtra) {
-        const title =
-          String(hitExtra.title || "").trim() ||
-          `${resolved.productTitle || ""} / ${resolved.variantTitle || ""}`.trim() ||
-          resolved.sku ||
-          inventoryItemId;
-
-        toast(`予定外入荷に追加：${title}（+${delta}）`);
-      }
-
-      return;
-    }
-
-    const key = `${Date.now()}-${Math.random()}`;
-
-    const title =
-      `${resolved.productTitle || ""} / ${resolved.variantTitle || ""}`.trim() ||
-      resolved.sku ||
-      inventoryItemId;
-
-    setExtras((prev) => [
-      {
-        key,
-        inventoryItemId,
-        variantId: resolved.variantId,
-        title,
-        sku: resolved.sku || "",
-        barcode: resolved.barcode || "",
-        imageUrl: resolved.imageUrl || "",
-        receiveQty: Math.max(0, delta),
-      },
-      ...prev,
-    ]);
-
-    if (toastOnExtra) {
-      toast(`予定外入荷に追加：${title}（+${delta}）`);
-    }
-  }, []);
-
-  const waitForOk = async (title, msg) => {
-    scanPausedRef.current = true;
-    setScanDisabled(true);
-
-    if (dialog?.alert) {
-      await dialog.alert({
-        type: "error",
-        title: String(title || "スキャンエラー"),
-        content: String(msg || ""),
-        actionText: "OK",
-      });
-    } else {
-      toast(String(msg || "エラー"));
-    }
-
-    setScanDisabled(false);
-    scanPausedRef.current = false;
-  };
-
-  const kickProcessScanQueue = () => {
-    if (scanProcessingRef.current) return;
-    if (scanPausedRef.current) return;
-
-    scanProcessingRef.current = true;
-
-    (async () => {
-      try {
-        while (scanQueueRef.current.length > 0) {
-          if (!mountedRef.current) break;
-          if (scanPausedRef.current) break;
-
-          const code = String(scanQueueRef.current.shift() || "").trim();
-          if (!code) continue;
-
-          setScanQueueLen(scanQueueRef.current.length);
-
-          if (!shipment?.id) {
-            await waitForOk("スキャンできません", "先にShipmentを読み込んでください。");
-            continue;
-          }
-
-          let resolved = null;
-          try {
-            resolved = await resolveVariantByCode(code, { includeImages: showImages && !liteMode });
-          } catch (e) {
-            await waitForOk("スキャン検索エラー", `検索に失敗しました: ${code}\n${toUserMessage(e)}`);
-            continue;
-          }
-
-          if (!resolved?.variantId) {
-            await waitForOk("商品が見つかりません", `商品が見つかりません: ${code}`);
-            continue;
-          }
-
-          addOrIncrementByResolved(resolved, 1);
-
-          const now = Date.now();
-          const arr = scanProcessedTimestampsRef.current.filter((t) => now - t <= 1000);
-          arr.push(now);
-          scanProcessedTimestampsRef.current = arr;
-          setScanRps(arr.length);
-        }
-      } finally {
-        scanProcessingRef.current = false;
-        if (!scanPausedRef.current && scanQueueRef.current.length > 0) kickProcessScanQueue();
-      }
-    })();
-  };
-
-  // スキャン確定（入力フィールド用）
-  const scanFinalizeSoon = (nextValue) => {
-    const next = String(nextValue ?? "");
-    lastScanValueRef.current = next;
-    lastScanChangeAtRef.current = Date.now();
-
-    try {
-      if (scanFinalizeTimerRef.current) clearTimeout(scanFinalizeTimerRef.current);
-    } catch {}
-
-    const FINALIZE_MS = 180;
-
-    scanFinalizeTimerRef.current = setTimeout(() => {
-      if (scanDisabledRef.current) return;
-
-      const latest = String(lastScanValueRef.current || "").trim();
-      if (!latest) return;
-      if (latest.length < 6) return;
-      if (Date.now() - (lastScanChangeAtRef.current || 0) < FINALIZE_MS - 5) return;
-
-      setScanValue("");
-      lastScanValueRef.current = "";
-
-      scanQueueRef.current.push(latest);
-      setScanQueueLen(scanQueueRef.current.length);
-      kickProcessScanQueue();
-    }, FINALIZE_MS);
-  };
-
-  // 外部スキャン（SCAN_QUEUE_KEY）を取り出して scanQueueRef に合流（100msで1件ずつ）
-  useEffect(() => {
-    let stop = false;
-
-    const tick = async () => {
-      if (stop) return;
-      if (!SHOPIFY?.storage?.get || !SHOPIFY?.storage?.set) return;
-
-      const q = (await SHOPIFY.storage.get(SCAN_QUEUE_KEY)) || {};
-      const list = Array.isArray(q.items) ? q.items : [];
-      if (list.length === 0) return;
-
-      const head = String(list[0] || "").trim();
-      const rest = list.slice(1);
-
-      // lastV/lastT を壊さない（...q を維持）
-      await SHOPIFY.storage.set(SCAN_QUEUE_KEY, { ...q, items: rest, updatedAt: Date.now() });
-
-      if (!head) return;
-
-      scanQueueRef.current.push(head);
-      setScanQueueLen(scanQueueRef.current.length);
-      kickProcessScanQueue();
-    };
-
-    const t = setInterval(() => {
-      tick().catch(() => {});
-    }, 100);
-
-    return () => {
-      stop = true;
-      clearInterval(t);
-    };
-  }, [shipment?.id, showImages, liteMode]);
-
-  const plannedTotal = rows.reduce((a, r) => a + Number(r.plannedQty || 0), 0);
-  const receiveTotal = rows.reduce((a, r) => a + Number(r.receiveQty || 0), 0);
-
-  const overRows = rows
-    .map((r) => {
-      const planned = Number(r.plannedQty || 0);
-      const want = Number(r.receiveQty || 0);
-      const over = Math.max(0, want - planned);
-      return over > 0
-        ? { shipmentLineItemId: r.shipmentLineItemId, title: r.title, overQty: over, inventoryItemId: r.inventoryItemId }
-        : null;
-    })
-    .filter(Boolean);
-
-  const shortageRows = rows
-    .map((r) => {
-      const planned = Number(r.plannedQty || 0);
-      const received = Number(r.receiveQty || 0);
-      const shortage = Math.max(0, planned - received);
-      return shortage > 0
-        ? {
-            shipmentLineItemId: r.shipmentLineItemId,
-            title: r.title,
-            shortageQty: shortage,
-            inventoryItemId: r.inventoryItemId,
-          }
-        : null;
-    })
-    .filter(Boolean);
-
-  const overQtyTotal = overRows.reduce((a, x) => a + Number(x.overQty || 0), 0);
-  const extrasQtyTotal = extras.reduce((a, x) => a + Number(x.receiveQty || 0), 0);
-
-  // 追加：不足（予定 > 受領 の差分合計）
-  const shortageQtyTotal = (Array.isArray(rows) ? rows : []).reduce((a, r) => {
-    const planned = Number(r.plannedQty || 0);
-    const received = Number(r.receiveQty || 0);
-    return a + Math.max(0, planned - received);
-  }, 0);
-
-  // 警告：予定外 / 超過 / 不足 のいずれかがあれば warning 扱い
-  const hasWarning =
-    overRows.length > 0 ||
-    extras.length > 0 ||
-    shortageQtyTotal > 0;
-
-  // GID/文字列差を吸収（末尾IDで一致させる）
-  const normalizeId_ = (v) => String(v || "").trim().split("/").pop();
-
-  // shipmentId（選択中）から、それを含む Transfer を逆引き（出庫元/入庫先/Transfer名を確実に出す）
-  const transferForShipment = useMemo(() => {
-    const sidRaw = String(shipment?.id || selectedShipmentId || "").trim();
-    if (!sidRaw) return null;
-
-    const sidNorm = normalizeId_(sidRaw);
-
-    const p = Array.isArray(pendingTransfers) ? pendingTransfers : [];
-    const a = Array.isArray(allTransfers) ? allTransfers : [];
-
-    // pending優先でユニーク化
-    const merged = [];
-    const seen = new Set();
-    [...p, ...a].forEach((t) => {
-      const id = String(t?.id || "").trim();
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-      merged.push(t);
-    });
-
-    return (
-      merged.find((t) => {
-        const ships = Array.isArray(t.shipments) ? t.shipments : [];
-        return ships.some((s) => {
-          const idRaw = String(s?.id || "").trim();
-          if (!idRaw) return false;
-          return idRaw === sidRaw || normalizeId_(idRaw) === sidNorm;
-        });
-      }) || null
-    );
-  }, [pendingTransfers, allTransfers, shipment?.id, selectedShipmentId]);
-
-  const readOnly = useMemo(() => {
-    // 1) shipment 自体が RECEIVED なら確定で読み取り専用
-    if (String(shipment?.status || "").toUpperCase() === "RECEIVED") return true;
-
-    // 2) 遷移元で readOnly を持ってきている場合
-    if (!!inbound?.selectedReadOnly) return true;
-
-    // 3) transfer の total/received で完了判定
-    const total = Number(transferForShipment?.totalQuantity ?? inbound?.selectedTransferTotalQuantity ?? 0);
-    const received = Number(
-      transferForShipment?.receivedQuantityDisplay ??
-        transferForShipment?.receivedQuantity ??
-        inbound?.selectedTransferReceivedQuantity ??
-        0
-    );
-
-    if (total > 0 && received >= total) return true;
-
-    return false;
-  }, [
-    shipment?.status,
-    inbound?.selectedReadOnly,
-    inbound?.selectedTransferTotalQuantity,
-    inbound?.selectedTransferReceivedQuantity,
-    transferForShipment?.totalQuantity,
-    transferForShipment?.receivedQuantity,
-  ]);
-
-  useEffect(() => {
-    readOnlyRef.current = !!readOnly;
-
-    // readOnly が解除されたら次回また toast 出せるように戻す
-    if (!readOnly) toastReadOnlyOnceRef.current = false;
-  }, [readOnly]);
-
-  // 下書き（自動保存）：Transfer単位で保存（transferIdが無ければshipmentIdでフォールバック）
-  // まとめて表示モードでも動作（transferIdで保存されるため、複数Shipmentでも1つの下書きとして保存）
-  useEffect(() => {
-    if (!locationGid) return;
-    if (shipmentLoading) return; // load中に “空保存” して上書きしない
-    if (readOnlyRef.current) return;
-    
-    // まとめて表示モードの場合：shipment?.idがなくても、transferIdがあれば保存可能
-    const transferId = String(inbound?.selectedTransferId || "").trim();
-    const shipmentId = String(shipment?.id || "").trim();
-    
-    // まとめて表示モードの場合：transferIdがあれば保存可能（shipment?.idは最初のShipmentのみ）
-    if (!transferId && !shipmentId) return; // transferIdもshipmentIdもない場合はスキップ
-
-    const timer = setTimeout(() => {
-      (async () => {
-        try {
-          const payload = {
-            savedAt: new Date().toISOString(),
-            transferId: transferId || null,
-            shipmentId: shipmentId || (isMultipleMode && Array.isArray(inbound.selectedShipmentIds) && inbound.selectedShipmentIds.length > 0 ? inbound.selectedShipmentIds[0] : ""),
-            rows: (rowsRef.current || []).map((r) => ({
-              shipmentLineItemId: r.shipmentLineItemId,
-              shipmentId: r.shipmentId || null, // まとめて表示モード用：shipmentIdも保存
-              receiveQty: Number(r.receiveQty || 0),
-            })),
-            extras: Array.isArray(extrasRef.current) ? extrasRef.current : [],
-            onlyUnreceived: !!onlyUnreceived,
-            reason: String(reason || ""),
-            note: String(note || ""),
-          };
-
-          const ok = await saveInboundDraft({
-            locationGid,
-            transferId,
-            shipmentId: payload.shipmentId,
-            payload,
-          });
-
-          if (ok && mountedRef.current) {
-            setDraftSavedAt(payload.savedAt);
-          }
-        } catch {
-          // noop（保存失敗で画面を止めない）
-        }
-      })();
-    }, 300);
-
-    return () => clearTimeout(timer);
-  }, [
-    locationGid,
-    shipment?.id,
-    shipmentLoading,
-    inbound?.selectedTransferId,
-    inbound?.selectedShipmentIds,
-    isMultipleMode,
-    onlyUnreceived,
-    reason,
-    note,
-    rows,
-    extras,
-  ]);
-
-  // 確定できる条件（Shipmentあり + 処理中でない + スキャン停止でない）
-  const canConfirm = !!shipment?.id && !receiveSubmitting && !scanDisabled && !readOnly;
-
-  const warningReady = !hasWarning ? true : !!ackWarning; // 警告がある時だけ確認(ack)必須
-
-  // モーダルを開ける条件（確定可能 + warning条件が揃っている）
-  const canOpenConfirm = canConfirm;
-
-  // 表示対象行（未受領のみフィルタ）
-  const visibleRows = useMemo(() => {
-    const base = Array.isArray(rows) ? rows : [];
-    if (!onlyUnreceived) return base;
-
-    return base.filter((r) => {
-      const planned = Number(r.plannedQty || 0);
-      const rejected = Number(r.alreadyRejectedQty || 0);
-      const acceptedTarget = Number(r.receiveQty || 0);
-      const remaining = Math.max(0, planned - rejected - acceptedTarget);
-      return remaining > 0;
-    });
-  }, [rows, onlyUnreceived]);
-
-  // 表示する入庫ID：#T00... を優先（なければ #末尾8桁フォールバック）
-  const headNo = useMemo(() => {
-    const raw = String(
-      transferForShipment?.name || inbound?.selectedTransferName || ""
-    ).trim();
-
-    const m = raw.match(/T\d+/i);
-    if (m) return `#${String(m[0]).toUpperCase()}`;
-    if (raw) return raw.startsWith("#") ? raw : `#${raw}`;
-
-    const s = String(shipment?.id || selectedShipmentId || "").trim();
-    return s ? `#${s.slice(-8)}` : "—";
-  }, [transferForShipment?.name, inbound?.selectedTransferName, shipment?.id, selectedShipmentId]);
-
-  // 出庫元名：Transferの originName を最優先（shipment側に無いのでここが本命）
-  const originName = useMemo(() => {
-    const n = String(
-      transferForShipment?.originName || inbound?.selectedOriginName || ""
-    ).trim();
-    return n || "—";
-  }, [transferForShipment?.originName, inbound?.selectedOriginName]);
-
-  // 入庫先名：Transferの destinationName を最優先。無ければ現在ロケの名前へ
-  const inboundTo = useMemo(() => {
-    const n = String(
-      transferForShipment?.destinationName || inbound?.selectedDestinationName || ""
-    ).trim();
-    if (n) return n;
-
-    const fallback = getLocationName_(locationGid, locIndex.byId);
-    return String(fallback || "").trim() || "—";
-  }, [transferForShipment?.destinationName, inbound?.selectedDestinationName, locationGid, locIndex.byId]);
-
-  // 処理ログのstate定義（receiveConfirmより前に定義する必要がある）
-  const [processLog, setProcessLog] = useState([]);
-
-  const receiveConfirm = useCallback(async ({ finalize = true } = {}) => {
-    if (readOnly) {
-      toast("この入庫は処理済みのため編集できません");
-      return false;
-    }
-    if (!shipment?.id) return false;
-    if (!locationGid) {
-      toast("現在店舗（origin location）が取得できませんでした");
-      return false;
-    }
-
-    // 警告が出ている場合：理由は不要、確認（ackWarning）だけ必須
-    if (hasWarning && !ackWarning) {
-      toast("差異があります。内容を確認してから確定してください。");
-      return false;
-    }
-
-    if (receiveLockRef.current) return false;
-    receiveLockRef.current = true;
-    setReceiveSubmitting(true);
-    
-    // 処理ログをリセット（デバッグ用、必要に応じてコメントアウト可能）
-    // setProcessLog([]);
-    // const processLogArray = [];
-    // const addProcessLog = (message) => {
-    //   const timestamp = new Date().toISOString();
-    //   processLogArray.push({ timestamp, message });
-    //   // 最新のログをstateに保存（表示用）
-    //   setProcessLog([...processLogArray]);
-    // };
-    // ログ機能を無効化（メモ保存処理は継続）
-    const addProcessLog = () => {}; // 空関数（ログを記録しない）
-
-    try {
-      // ステップ0: 確定処理の前に、メモまたは予定外商品がある場合は管理画面メモを先に更新
-      // （確定後はTransferのステータスが変わり、noteが編集できなくなる可能性があるため）
-      const transferId = String(
-        transferForShipment?.id || 
-        inbound?.selectedTransferId || 
-        ""
-      ).trim();
-
-      addProcessLog(`開始: transferId=${transferId || "なし"}`);
-
-      if (transferId) {
-        // メモまたは予定外商品の情報を準備（確定処理前に取得）
-        const noteText = String(note || "").trim();
-        const hasNote = noteText.length > 0;
-        
-        addProcessLog(`メモチェック: hasNote=${hasNote}, noteText="${noteText.slice(0, 50)}"`);
-        
-        // 予定外商品と予定超過の情報を準備（確定処理前に取得）
-        // 注意: この時点では確定処理前なので、実際の確定結果はまだ分からない
-        // そのため、現在の画面の状態から情報を取得
-        const overForLog = (overRows || [])
-          .map((x) => ({
-            inventoryItemId: String(x?.inventoryItemId || "").trim(),
-            qty: Math.max(0, Math.floor(Number(x?.overQty || 0))),
-            title: String(x?.title || "").trim(),
-            sku: String(x?.sku || "").trim(),
-          }))
-          .filter((x) => x.inventoryItemId && x.qty > 0);
-
-        const extrasMap = new Map();
-        (extras || []).forEach((x) => {
-          const id = String(x?.inventoryItemId || "").trim();
-          if (id) {
-            extrasMap.set(id, {
-              title: String(x?.title || x?.sku || x?.inventoryItemId || "(unknown)").trim(),
-              inventoryItemId: id,
-              sku: String(x?.sku || "").trim(),
-              barcode: String(x?.barcode || "").trim(),
-              imageUrl: String(x?.imageUrl || "").trim(),
-            });
-          }
-        });
-
-        const extrasForLog = (extras || [])
-          .map((x) => {
-            const id = String(x?.inventoryItemId || "").trim();
-            const meta = extrasMap.get(id) || {};
-            return {
-              inventoryItemId: id,
-              qty: Math.max(0, Math.floor(Number(x?.receiveQty || 0))),
-              title: meta.title || id || "(unknown)",
-              sku: meta.sku || "",
-              barcode: meta.barcode || "",
-              imageUrl: meta.imageUrl || "",
-            };
-          })
-          .filter((x) => x.inventoryItemId && x.qty > 0);
-
-        const hasOver = Array.isArray(overForLog) && overForLog.length > 0;
-        const hasExtras = Array.isArray(extrasForLog) && extrasForLog.length > 0;
-        const hasSomething = hasNote || hasOver || hasExtras;
-
-        addProcessLog(`情報チェック: hasOver=${hasOver}, hasExtras=${hasExtras}, hasSomething=${hasSomething}`);
-
-        if (hasSomething) {
-          try {
-            addProcessLog("メモ更新処理を開始");
-            const noteLine = buildInboundNoteLine_({
-              shipmentId: shipment?.id,
-              locationId: locationGid,
-              finalize,
-              note: noteText,
-              over: overForLog,
-              extras: extrasForLog,
-            });
-
-            addProcessLog(`メモ内容生成: length=${noteLine.length}, preview="${noteLine.slice(0, 100)}"`);
-
-            // メモ内容が空でないことを確認
-            if (String(noteLine || "").trim()) {
-              const ok = await appendInventoryTransferNote_({
-                transferId,
-                line: noteLine,
-                processLogCallback: addProcessLog, // ログコールバックを渡す
-              });
-              if (!ok) {
-                addProcessLog("メモ更新失敗（確定処理は続行）");
-                toast("管理画面メモへの追記に失敗しました（確定処理は続行します）");
-                debug("appendInventoryTransferNote_ 失敗: transferId=", transferId, "noteLine=", noteLine.slice(0, 200));
-              } else {
-                addProcessLog("メモ更新成功");
-                debug("管理画面メモへの追記成功（確定処理前）: transferId=", transferId);
-              }
-            } else {
-              addProcessLog("メモ内容が空のためスキップ");
-            }
-          } catch (e) {
-            addProcessLog(`メモ更新例外: ${String(e?.message || e)}`);
-            toast(`管理画面メモへの追記エラー: ${String(e?.message || e)}（確定処理は続行します）`);
-            debug("appendInventoryTransferNote_ failed (before finalize)", e);
-            // メモ更新の失敗で確定処理を止めない
-          }
-        } else {
-          addProcessLog("メモ・予定外商品なしのためスキップ");
-        }
-      } else {
-        addProcessLog("transferIdが取得できずスキップ");
-      }
-
-      // 0) shortage（不足）を payload 化（※完了(finalize)のときだけ REJECT で送る）
-      //    ✅ delta=0 でも「不足がある」なら「完了」は確定できる
-      // Phase 3-3: extraDeltasMerged / rejectedDeltas は single/multiple 共通で使用するため外側で宣言
-      let extraDeltasMerged;
-      let rejectedDeltas = [];
-
-      // 2) 予定外入荷（extras）: receiveQty で保持（single/multiple 共通）
-      const extraDeltas = (extras || [])
-        .map((x) => ({
-          inventoryItemId: String(x?.inventoryItemId || "").trim(),
-          delta: Math.max(0, Math.floor(Number(x?.receiveQty || 0))),
-        }))
-        .filter((x) => x.inventoryItemId && x.delta > 0);
-
-      if (!isMultipleMode) {
-        // ---------- 1シップメント（既存ロジック・変更なし） ----------
-        const rejectedItems = finalize
-          ? (shortageRows || [])
-              .map((r) => ({
-                shipmentLineItemId: String(r.shipmentLineItemId || "").trim(),
-                quantity: Math.max(0, Math.floor(Number(r.shortageQty || 0))),
-                reason: "REJECTED",
-              }))
-              .filter((x) => x.shipmentLineItemId && x.quantity > 0)
-          : [];
-
-        const plannedItems = rows
-          .map((r) => {
-            const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
-            const targetAccepted = Math.max(0, Math.floor(Number(r.receiveQty || 0)));
-            const alreadyAccepted = Math.max(0, Math.floor(Number(r.alreadyAcceptedQty || 0)));
-            const alreadyOver = Math.max(0, Math.floor(Number(r.overAcceptedQty || 0)));
-            const alreadyTotal = alreadyAccepted + alreadyOver;
-            const delta = Math.max(0, targetAccepted - alreadyTotal);
-            return { shipmentLineItemId, quantity: delta };
-          })
-          .filter((x) => x.shipmentLineItemId && x.quantity > 0);
-
-        const hasAnyAction = plannedItems.length > 0 || extraDeltas.length > 0 || rejectedItems.length > 0;
-        if (!hasAnyAction) {
-          toast(finalize ? "送信する差分がありません" : "一部入庫として送る差分がありません");
-          return false;
-        }
-
-        extraDeltasMerged = extraDeltas;
-
-        if (plannedItems.length > 0) {
-          try {
-            await receiveShipmentWithFallbackV2({
-              shipmentId: shipment.id,
-              items: plannedItems,
-            });
-          } catch (e) {
-            const msg = String(e?.message || e || "");
-            const looksQuantityError = /quantity|unreceived|exceed|max|greater|less/i.test(msg);
-            if (!looksQuantityError) throw e;
-
-            const overflowMap = new Map();
-            const cappedItems = rows
-              .map((r) => {
-                const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
-                const inventoryItemId = String(r.inventoryItemId || "").trim();
-                const planned = Math.max(0, Math.floor(Number(r.plannedQty || 0)));
-                const alreadyRejected = Math.max(0, Math.floor(Number(r.alreadyRejectedQty || 0)));
-                const alreadyAccepted = Math.max(0, Math.floor(Number(r.alreadyAcceptedQty || 0)));
-                const alreadyOver = Math.max(0, Math.floor(Number(r.overAcceptedQty || 0)));
-                const alreadyTotal = alreadyAccepted + alreadyOver;
-                const targetAccepted = Math.max(0, Math.floor(Number(r.receiveQty || 0)));
-                const wantDelta = Math.max(0, targetAccepted - alreadyTotal);
-                const remainingReceivable = Math.max(0, planned - alreadyRejected - alreadyAccepted);
-                const deltaPlanned = Math.min(remainingReceivable, wantDelta);
-                const overflow = Math.max(0, wantDelta - deltaPlanned);
-                if (overflow > 0 && inventoryItemId) {
-                  overflowMap.set(inventoryItemId, (overflowMap.get(inventoryItemId) || 0) + overflow);
-                }
-                return { shipmentLineItemId, quantity: deltaPlanned };
-              })
-              .filter((x) => x.shipmentLineItemId && x.quantity > 0);
-
-            if (cappedItems.length > 0) {
-              await receiveShipmentWithFallbackV2({
-                shipmentId: shipment.id,
-                items: cappedItems,
-              });
-            }
-
-            if (overflowMap.size > 0) {
-              const m = new Map();
-              (extraDeltas || []).forEach((d) => {
-                const k = String(d.inventoryItemId || "").trim();
-                const v = Math.max(0, Math.floor(Number(d.delta || 0)));
-                if (!k || v <= 0) return;
-                m.set(k, (m.get(k) || 0) + v);
-              });
-              overflowMap.forEach((v, k) => {
-                const kk = String(k || "").trim();
-                const vv = Math.max(0, Math.floor(Number(v || 0)));
-                if (!kk || vv <= 0) return;
-                m.set(kk, (m.get(kk) || 0) + vv);
-              });
-              extraDeltasMerged = Array.from(m.entries()).map(([inventoryItemId, delta]) => ({
-                inventoryItemId,
-                delta,
-              }));
-            }
-          }
-        }
-
-        if (finalize && rejectedItems.length > 0) {
-          await receiveShipmentWithFallbackV2({
-            shipmentId: shipment.id,
-            items: rejectedItems,
-          });
-
-          const originLocationId = transferForShipment?.originLocationId ||
-            transferForShipment?.origin?.location?.id ||
-            null;
-
-          if (originLocationId) {
-            rejectedDeltas = rejectedItems
-              .map((rejected) => {
-                const row = rows.find((r) => String(r.shipmentLineItemId || "").trim() === String(rejected.shipmentLineItemId || "").trim());
-                if (!row) return null;
-                return {
-                  inventoryItemId: String(row.inventoryItemId || "").trim(),
-                  delta: Math.max(0, Math.floor(Number(rejected.quantity || 0))),
-                  sku: String(row.sku || "").trim(),
-                  title: String(row.title || "").trim(),
-                };
-              })
-              .filter((d) => d && d.inventoryItemId && d.delta > 0);
-
-            if (rejectedDeltas.length > 0) {
-              const inventoryItemIds = rejectedDeltas.map((d) => d.inventoryItemId);
-              await ensureInventoryActivatedAtLocation({
-                locationId: originLocationId,
-                inventoryItemIds,
-                debug,
-              });
-              await adjustInventoryAtLocationWithFallback({
-                locationId: originLocationId,
-                deltas: rejectedDeltas.map((d) => ({
-                  inventoryItemId: d.inventoryItemId,
-                  delta: d.delta,
-                })),
-              });
-            }
-          }
-        }
-      } else {
-        // ---------- Phase 3-3: 複数シップメント同時受領 ----------
-        const rowByLineId = new Map();
-        (rows || []).forEach((r) => {
-          const lid = String(r.shipmentLineItemId || "").trim();
-          if (lid) rowByLineId.set(lid, r);
-        });
-
-        const byShipment = new Map();
-        (rows || []).forEach((r) => {
-          const sid = String(r.shipmentId || "").trim();
-          if (!sid) return;
-          if (!byShipment.has(sid)) byShipment.set(sid, []);
-          byShipment.get(sid).push(r);
-        });
-
-        let hasAnyPlanned = false;
-        let hasAnyRejected = false;
-        const plannedByShip = new Map();
-        const rejectedByShip = new Map();
-
-        byShipment.forEach((sRows, sid) => {
-          const plannedItems = sRows
-            .map((r) => {
-              const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
-              const targetAccepted = Math.max(0, Math.floor(Number(r.receiveQty || 0)));
-              const alreadyAccepted = Math.max(0, Math.floor(Number(r.alreadyAcceptedQty || 0)));
-              const alreadyOver = Math.max(0, Math.floor(Number(r.overAcceptedQty || 0)));
-              const alreadyTotal = alreadyAccepted + alreadyOver;
-              const delta = Math.max(0, targetAccepted - alreadyTotal);
-              return { shipmentLineItemId, quantity: delta };
-            })
-            .filter((x) => x.shipmentLineItemId && x.quantity > 0);
-
-          if (plannedItems.length > 0) hasAnyPlanned = true;
-          plannedByShip.set(sid, plannedItems);
-
-          const shipShortage = (shortageRows || []).filter((sr) => {
-            const row = rowByLineId.get(String(sr.shipmentLineItemId || "").trim());
-            return row && String(row.shipmentId || "").trim() === sid;
-          });
-          const rejectedItems = finalize
-            ? shipShortage
-                .map((r) => ({
-                  shipmentLineItemId: String(r.shipmentLineItemId || "").trim(),
-                  quantity: Math.max(0, Math.floor(Number(r.shortageQty || 0))),
-                  reason: "REJECTED",
-                }))
-                .filter((x) => x.shipmentLineItemId && x.quantity > 0)
-            : [];
-          if (rejectedItems.length > 0) hasAnyRejected = true;
-          rejectedByShip.set(sid, rejectedItems);
-        });
-
-        const hasAnyAction = hasAnyPlanned || extraDeltas.length > 0 || (finalize && hasAnyRejected);
-        if (!hasAnyAction) {
-          toast(finalize ? "送信する差分がありません" : "一部入庫として送る差分がありません");
-          return false;
-        }
-
-        const overflowMap = new Map();
-
-        for (const [sid, sRows] of byShipment) {
-          const plannedItems = plannedByShip.get(sid) || [];
-          if (plannedItems.length === 0) continue;
-
-          try {
-            await receiveShipmentWithFallbackV2({
-              shipmentId: sid,
-              items: plannedItems,
-            });
-          } catch (e) {
-            const msg = String(e?.message || e || "");
-            const looksQuantityError = /quantity|unreceived|exceed|max|greater|less/i.test(msg);
-            if (!looksQuantityError) throw e;
-
-            const cappedItems = sRows
-              .map((r) => {
-                const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
-                const inventoryItemId = String(r.inventoryItemId || "").trim();
-                const planned = Math.max(0, Math.floor(Number(r.plannedQty || 0)));
-                const alreadyRejected = Math.max(0, Math.floor(Number(r.alreadyRejectedQty || 0)));
-                const alreadyAccepted = Math.max(0, Math.floor(Number(r.alreadyAcceptedQty || 0)));
-                const alreadyOver = Math.max(0, Math.floor(Number(r.overAcceptedQty || 0)));
-                const alreadyTotal = alreadyAccepted + alreadyOver;
-                const targetAccepted = Math.max(0, Math.floor(Number(r.receiveQty || 0)));
-                const wantDelta = Math.max(0, targetAccepted - alreadyTotal);
-                const remainingReceivable = Math.max(0, planned - alreadyRejected - alreadyAccepted);
-                const deltaPlanned = Math.min(remainingReceivable, wantDelta);
-                const overflow = Math.max(0, wantDelta - deltaPlanned);
-                if (overflow > 0 && inventoryItemId) {
-                  overflowMap.set(inventoryItemId, (overflowMap.get(inventoryItemId) || 0) + overflow);
-                }
-                return { shipmentLineItemId, quantity: deltaPlanned };
-              })
-              .filter((x) => x.shipmentLineItemId && x.quantity > 0);
-
-            if (cappedItems.length > 0) {
-              await receiveShipmentWithFallbackV2({
-                shipmentId: sid,
-                items: cappedItems,
-              });
-            }
-          }
-        }
-
-        for (const [sid, rejectedItems] of rejectedByShip) {
-          if (!finalize || rejectedItems.length === 0) continue;
-          await receiveShipmentWithFallbackV2({
-            shipmentId: sid,
-            items: rejectedItems,
-          });
-        }
-
-        const rawRejected = [];
-        const originLocationId = transferForShipment?.originLocationId ||
-          transferForShipment?.origin?.location?.id ||
-          null;
-        if (originLocationId && finalize) {
-          for (const [, rej] of rejectedByShip) {
-            for (const rejected of rej) {
-              const row = rowByLineId.get(String(rejected.shipmentLineItemId || "").trim());
-              if (!row) continue;
-              rawRejected.push({
-                inventoryItemId: String(row.inventoryItemId || "").trim(),
-                delta: Math.max(0, Math.floor(Number(rejected.quantity || 0))),
-                sku: String(row.sku || "").trim(),
-                title: String(row.title || "").trim(),
-              });
-            }
-          }
-          const merged = new Map();
-          rawRejected.filter((d) => d.inventoryItemId && d.delta > 0).forEach((d) => {
-            const k = d.inventoryItemId;
-            const prev = merged.get(k);
-            if (prev) {
-              prev.delta += d.delta;
-            } else {
-              merged.set(k, { ...d });
-            }
-          });
-          rejectedDeltas = Array.from(merged.values());
-          if (rejectedDeltas.length > 0) {
-            const inventoryItemIds = rejectedDeltas.map((d) => d.inventoryItemId);
-            await ensureInventoryActivatedAtLocation({
-              locationId: originLocationId,
-              inventoryItemIds,
-              debug,
-            });
-            await adjustInventoryAtLocationWithFallback({
-              locationId: originLocationId,
-              deltas: rejectedDeltas.map((d) => ({
-                inventoryItemId: d.inventoryItemId,
-                delta: d.delta,
-              })),
-            });
-          }
-        }
-
-        if (overflowMap.size > 0) {
-          const m = new Map();
-          (extraDeltas || []).forEach((d) => {
-            const k = String(d.inventoryItemId || "").trim();
-            const v = Math.max(0, Math.floor(Number(d.delta || 0)));
-            if (!k || v <= 0) return;
-            m.set(k, (m.get(k) || 0) + v);
-          });
-          overflowMap.forEach((v, k) => {
-            const kk = String(k || "").trim();
-            const vv = Math.max(0, Math.floor(Number(v || 0)));
-            if (!kk || vv <= 0) return;
-            m.set(kk, (m.get(kk) || 0) + vv);
-          });
-          extraDeltasMerged = Array.from(m.entries()).map(([inventoryItemId, delta]) => ({
-            inventoryItemId,
-            delta,
-          }));
-        } else {
-          extraDeltasMerged = extraDeltas;
-        }
-      }
-
-      // 4) extras（＋予定超過fallback分）がある場合は、入庫ロケーションに在庫を加算（Activate → Adjust）
-      // 同時に出庫元ロケーションの在庫をマイナス処理（single/multiple 共通）
-      if (extraDeltasMerged.length > 0) {
-        const inventoryItemIds = extraDeltasMerged.map((d) => d.inventoryItemId);
-
-        // 入庫先に在庫を追加
-        const act = await ensureInventoryActivatedAtLocation({
-          locationId: locationGid,
-          inventoryItemIds,
-          debug,
-        });
-
-        if (!act?.ok) {
-          const msg =
-            (act?.errors || [])
-              .map((e) => `${e.inventoryItemId}: ${e.message}`)
-              .filter(Boolean)
-              .join("\n") || "在庫の有効化に失敗しました";
-          throw new Error(msg);
-        }
-
-        await adjustInventoryAtLocationWithFallback({
-          locationId: locationGid,
-          deltas: extraDeltasMerged,
-        });
-        
-        // 出庫元の在庫をマイナス処理
-        const originLocationId = transferForShipment?.originLocationId || 
-          transferForShipment?.origin?.location?.id || 
-          null;
-        
-        if (!originLocationId) {
-          toast("警告: 出庫元のlocationIdが取得できませんでした（出庫元の在庫調整をスキップします）");
-        } else {
-          // 出庫元でも在庫を有効化（必要に応じて）
-          await ensureInventoryActivatedAtLocation({
-            locationId: originLocationId,
-            inventoryItemIds,
-            debug,
-          });
-          
-          // 出庫元の在庫をマイナス（deltaを負の値にする）
-          const originDeltas = extraDeltasMerged.map((d) => ({
-            inventoryItemId: d.inventoryItemId,
-            delta: -Math.max(0, Math.floor(Number(d.delta || 0))), // マイナス値
-          }));
-          
-          await adjustInventoryAtLocationWithFallback({
-            locationId: originLocationId,
-            deltas: originDeltas,
-          });
-          
-          debug("出庫元の在庫調整完了:", {
-            originLocationId,
-            deltas: originDeltas,
-          });
-        }
-      }
-
-      // 5) 監査ログ（任意）
-      if (typeof appendInboundAuditLog === "function") {
-        try {
-          const reasonText = String(reason || "").trim();
-          const noteText = String(note || "").trim();
-
-          // overRows は「この確定で発生した過剰分（planned超え）」の増分
-          // extraDeltasMerged は「予定外入荷 + 過剰fallback」を含む場合がある
-          const overForLog = (overRows || [])
-            .map((x) => ({
-              inventoryItemId: String(x?.inventoryItemId || "").trim(),
-              qty: Math.max(0, Math.floor(Number(x?.overQty || 0))),
-              title: String(x?.title || "").trim(),
-            }))
-            .filter((x) => x.inventoryItemId && x.qty > 0);
-
-          // extrasForLog に title, sku, barcode, imageUrl を追加（履歴表示用・管理画面メモ用）
-          const extrasMap = new Map();
-          (extras || []).forEach((x) => {
-            const id = String(x?.inventoryItemId || "").trim();
-            if (id) {
-              extrasMap.set(id, {
-                title: String(x?.title || x?.sku || x?.inventoryItemId || "(unknown)").trim(),
-                inventoryItemId: id,
-                sku: String(x?.sku || "").trim(),
-                barcode: String(x?.barcode || "").trim(),
-                imageUrl: String(x?.imageUrl || "").trim(),
-              });
-            }
-          });
-
-          const extrasForLog = (extraDeltasMerged || [])
-            .map((d) => {
-              const id = String(d?.inventoryItemId || "").trim();
-              const meta = extrasMap.get(id) || {};
-              return {
-                inventoryItemId: id,
-              qty: Math.max(0, Math.floor(Number(d?.delta || 0))),
-                title: meta.title || id || "(unknown)",
-                sku: meta.sku || "",
-                barcode: meta.barcode || "",
-                imageUrl: meta.imageUrl || "",
-              };
-            })
-            .filter((x) => x.inventoryItemId && x.qty > 0);
-
-          await appendInboundAuditLog({
-            shipmentId: shipment.id,
-            locationId: locationGid,
-            reason: reasonText,
-            note: noteText,
-            over: overForLog,
-            extras: extrasForLog,
-          });
-        } catch (e) {
-          toast(`履歴ログ保存に失敗: ${String(e?.message || e)}（write_metafields 等を確認）`);
-          debug("appendInboundAuditLog failed", e);
-        }
-      }
-
-      // 在庫調整履歴をメモに追加（確定処理後に実行）
-      if (transferId && (rejectedDeltas.length > 0 || extraDeltasMerged.length > 0)) {
-        try {
-          const adjustments = [];
-          
-          // 拒否入庫による出庫元への在庫戻し
-          if (rejectedDeltas.length > 0) {
-            const originLocationId = transferForShipment?.originLocationId || 
-              transferForShipment?.origin?.location?.id || 
-              null;
-            const originLocationName = transferForShipment?.originName || 
-              transferForShipment?.origin?.name || 
-              "出庫元";
-            
-            rejectedDeltas.forEach((d) => {
-              adjustments.push({
-                locationName: originLocationName,
-                locationId: originLocationId,
-                inventoryItemId: d.inventoryItemId,
-                sku: d.sku,
-                title: d.title,
-                delta: d.delta, // プラス値（戻す）
-              });
-            });
-          }
-          
-          // 予定外入庫・過剰入庫による在庫調整
-          if (extraDeltasMerged.length > 0) {
-            const originLocationId = transferForShipment?.originLocationId || 
-              transferForShipment?.origin?.location?.id || 
-              null;
-            const originLocationName = transferForShipment?.originName || 
-              transferForShipment?.origin?.name || 
-              "出庫元";
-            const destinationLocationName = transferForShipment?.destinationName || 
-              transferForShipment?.destination?.name || 
-              "入庫先";
-            
-            // extrasMapを再構築（在庫調整履歴用）
-            const extrasMapForAdjustment = new Map();
-            (extras || []).forEach((x) => {
-              const id = String(x?.inventoryItemId || "").trim();
-              if (id) {
-                extrasMapForAdjustment.set(id, {
-                  title: String(x?.title || x?.sku || x?.inventoryItemId || "(unknown)").trim(),
-                  inventoryItemId: id,
-                  sku: String(x?.sku || "").trim(),
-                  barcode: String(x?.barcode || "").trim(),
-                });
-              }
-            });
-            
-            // 入庫先への追加
-            extraDeltasMerged.forEach((d) => {
-              const meta = extrasMapForAdjustment.get(d.inventoryItemId) || {};
-              adjustments.push({
-                locationName: destinationLocationName,
-                locationId: locationGid,
-                inventoryItemId: d.inventoryItemId,
-                sku: meta.sku || "",
-                title: meta.title || d.inventoryItemId || "不明",
-                delta: Math.max(0, Math.floor(Number(d.delta || 0))), // プラス値
-              });
-            });
-            
-            // 出庫元からの減算
-            if (originLocationId) {
-              extraDeltasMerged.forEach((d) => {
-                const meta = extrasMapForAdjustment.get(d.inventoryItemId) || {};
-                adjustments.push({
-                  locationName: originLocationName,
-                  locationId: originLocationId,
-                  inventoryItemId: d.inventoryItemId,
-                  sku: meta.sku || "",
-                  title: meta.title || d.inventoryItemId || "不明",
-                  delta: -Math.max(0, Math.floor(Number(d.delta || 0))), // マイナス値
-                });
-              });
-            }
-          }
-          
-          if (adjustments.length > 0) {
-            const adjustmentNote = buildInboundNoteLine_({
-          shipmentId: shipment?.id,
-          locationId: locationGid,
-          finalize,
-              note: "",
-              over: [],
-              extras: [],
-              inventoryAdjustments: adjustments,
-            });
-            
-            await appendInventoryTransferNote_({
-            transferId,
-              line: adjustmentNote,
-          });
-        }
-      } catch (e) {}
-      }
-
-      toast(finalize ? "入庫を完了しました" : "一部入庫を確定しました");
-
-      // 確定後：下書きをリセット（次回に残さない）
-      try {
-        await clearInboundDraft({
-          locationGid,
-          transferId: String(inbound?.selectedTransferId || "").trim(),
-          shipmentId: shipment.id,
-        });
-      } catch (_) {}
-      setDraftSavedAt(null);
-
-      // 6) 画面更新
-      try {
-        await refreshPending();
-      } catch (_) {}
-
-      try {
-        if (!isMultipleMode) {
-          await loadShipmentById(shipment.id);
-        } else {
-          const ids = Array.isArray(inbound?.selectedShipmentIds) ? inbound.selectedShipmentIds : [];
-          if (ids.length > 0) await loadMultipleShipments(ids);
-        }
-      } catch (_) {}
-
-      // Phase 1.3: 確定後の遷移制御（シップメント選択モードの場合のみ）
-      // まとめて表示（multiple mode）の時は既存の動作を維持（onAfterReceive を呼ばない）
-      if (!isMultipleMode && typeof onAfterReceive === "function") {
-        const transferId = String(
-          transferForShipment?.id || 
-          inbound?.selectedTransferId || 
-          ""
-        ).trim();
-        if (transferId) {
-          // 非同期で実行（await しない - 遷移処理なので）
-          onAfterReceive(transferId).catch(() => {});
-          return true;
-        }
-      }
-
-      return true;
-    } catch (e) {
-      const msg = toUserMessage(e);
-
-      // まず必ず可視化（POSで modal を await すると“確定中..”で固まることがある）
-      toast(`入庫確定エラー: ${msg}`);
-
-      // dialog は “await しない” （表示できれば出す、できなくても処理は戻す）
-      try {
-        dialog?.alert?.({
-          type: "error",
-          title: "入庫確定に失敗しました",
-          content: msg,
-          actionText: "OK",
-        });
-      } catch (_) {}
-
-      return false;
-    } finally {
-      setReceiveSubmitting(false);
-      receiveLockRef.current = false;
-    }
-  }, [
-    shipment?.id,
-    locationGid,
-    rows,
-    extras,
-    hasWarning,
-    reason,
-    ackWarning,
-    inbound?.selectedTransferId,
-    inbound?.selectedShipmentIds,
-    transferForShipment?.id,
-    note,
-    dialog,
-    refreshPending,
-    loadShipmentById,
-    loadMultipleShipments,
-    isMultipleMode,
-    onAfterReceive, // Phase 1.3: 確定後の遷移制御
-    overRows,
-    setProcessLog,
-    shortageRows,
-    readOnly,
-    scanDisabled,
-  ]);
-
-  const headerNode = useMemo(() => {
-    if (!setHeader) return null;
-
-    const q = String(addQuery || "");
-    const showResults = q.trim().length >= 1;
-
-    return (
-      <s-box padding="small">
-        <s-stack gap="tight">
-          <s-stack
-            direction="inline"
-            justifyContent="space-between"
-            alignItems="flex-start"
-            gap="small"
-            style={{ width: "100%", flexWrap: "nowrap" }}
-          >
-            {/* 左：縮められる（minWidth:0 + flex が重要） */}
-            <s-stack gap="none" style={{ minWidth: 0, flex: "1 1 auto" }}>
-              {/* 1行目：#T0000（太字） */}
-              <s-text
-                emphasis="bold"
-                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-              >
-                {headNo}
-              </s-text>
-
-              {/* 2行目：出庫元（省略表示） */}
-              <s-text
-                size="small"
-                tone="subdued"
-                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-              >
-                出庫元：{originName}
-              </s-text>
-
-              {/* 3行目：入庫先（省略表示） */}
-              <s-text
-                size="small"
-                tone="subdued"
-                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-              >
-                入庫先：{inboundTo}
-              </s-text>
-              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                配送業者: {String(shipment?.tracking?.company || "").trim() || ""}
-              </s-text>
-              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                配送番号: {String(shipment?.tracking?.trackingNumber || "").trim() || ""}
-              </s-text>
-              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                予定日: {shipment?.tracking?.arrivesAt ? String(shipment.tracking.arrivesAt).trim().slice(0, 10) : ""}
-              </s-text>
-            </s-stack>
-
-            {/* 右：絶対に折り返さない */}
-            <s-stack
-              direction="inline"
-              gap="small"
-              alignItems="center"
-              style={{ flex: "0 0 auto", flexWrap: "nowrap", whiteSpace: "nowrap" }}
-            >
-              {onToggleLiteMode ? (
-                <s-button
-                  kind="secondary"
-                  tone={liteMode ? "critical" : undefined}
-                  onClick={onToggleLiteMode}
-                  style={{ paddingInline: 8, whiteSpace: "nowrap" }}
-                >
-                  軽量
-                </s-button>
-              ) : null}
-
-              <s-button
-                onClick={setAllToPlanned}
-                disabled={!shipment?.id || readOnly}
-                style={{ paddingInline: 8, whiteSpace: "nowrap" }}
-              >
-                全入庫
-              </s-button>
-
-              <s-button
-                onClick={resetAllCounts}
-                disabled={!shipment?.id || readOnly}
-                style={{ paddingInline: 8, whiteSpace: "nowrap" }}
-              >
-                リセット
-              </s-button>
-            </s-stack>
-          </s-stack>
-
-          {/* リスト外追加（検索） */}
-          <s-box inlineSize="100%" paddingBlockStart="small-200">
-            <s-text-field
-              label="検索"
-              labelHidden
-              placeholder="商品名 / SKU / バーコード"
-              value={q}
-              onInput={(v) => setAddQuery(readValue(v))}
-              onChange={(v) => setAddQuery(readValue(v))}
-            >
-              {q ? (
-                <s-button slot="accessory" kind="secondary" tone="critical" onClick={clearAddSearch}>
-                  ✕
-                </s-button>
-              ) : null}
-            </s-text-field>
-          </s-box>
-
-          {showResults ? (
-            <s-text tone="subdued" size="small">
-              検索結果：{addLoading ? "…" : addCandidates.length}件
-            </s-text>
-          ) : null}
-
-          {addLoading ? <s-text tone="subdued" size="small">検索中...</s-text> : null}
-
-        </s-stack>
-      </s-box>
-    );
-  }, [
-    setHeader,
-    addQuery,
-    addLoading,
-    addCandidates,
-    headNo,
-    originName,
-    inboundTo,
-    liteMode,
-    onToggleLiteMode,
-    shipment?.id,
-    setAllToPlanned,
-    resetAllCounts,
-    clearAddSearch,
-    addOrIncrementByResolved,
-    showImages,
-  ]);
-
-  useEffect(() => {
-    if (!setHeader) return;
-    setHeader(headerNode);
-    return () => setHeader(null);
-  }, [setHeader, headerNode]);
-
-  // 下部固定フッター（戻る + 中央2行 + 確定）
-  const footerLine1 = shipment?.id
-    ? `予定 ${plannedTotal} / 入庫 ${receiveTotal}`
-    : "未選択";
-
-  const footerLine2 = shipment?.id
-    ? `予定外 ${extrasQtyTotal} / 超過 ${overQtyTotal} / 不足 ${shortageQtyTotal}`
-    : "";
-
-  const hasStatusIssue = (extrasQtyTotal + overQtyTotal + shortageQtyTotal) > 0;
-
-  useEffect(() => {
-    setFooter?.(
-      <s-box
-        padding="base"
-        border="base"
-        style={{
-          position: "sticky",
-          bottom: 0,
-          background: "var(--s-color-bg)",
-          zIndex: 10,
-        }}
-      >
-        <s-stack gap="extra-tight">
-          <s-stack
-            direction="inline"
-            gap="base"
-            alignItems="center"
-            justifyContent="space-between"
-            style={{ width: "100%", flexWrap: "nowrap" }}
-          >
-            <s-box style={{ flex: "0 0 auto" }}>
-              <s-button onClick={onBack} disabled={receiveSubmitting}>
-                戻る
-              </s-button>
-            </s-box>
-
-            {/* ✅ 中央：2行（予定/受領 + 状態） */}
-            <s-box style={{ flex: "1 1 auto", minWidth: 0, paddingInline: 8 }}>
-              <s-stack gap="none" alignItems="center">
-                <s-text alignment="center" size="small" tone="subdued">
-                  {footerLine1}
-                </s-text>
-
-                {footerLine2 ? (
-                  <s-text alignment="center" size="small" tone={hasWarning ? "critical" : "subdued"}>
-                    {footerLine2}
-                  </s-text>
-                ) : null}
-
-                {liteMode ? (
-                  <s-text alignment="center" size="small" tone="subdued">
-                    軽量ON
-                  </s-text>
-                ) : null}
-              </s-stack>
-            </s-box>
-
-            <s-box style={{ flex: "0 0 auto" }}>
-              <s-button
-                tone={hasWarning ? "critical" : "success"}
-                command="--show"
-                commandFor={CONFIRM_RECEIVE_MODAL_ID}
-                disabled={!canOpenConfirm}
-              >
-                {receiveSubmitting ? "確定中..." : "確定"}
-              </s-button>
-            </s-box>
-          </s-stack>
-
-          {shipmentLoading ? <s-text size="small" tone="subdued">Shipment 読み込み中...</s-text> : null}
-          {shipmentError ? <s-text size="small" tone="critical">{shipmentError}</s-text> : null}
-        </s-stack>
-      </s-box>
-    );
-
-    return () => setFooter?.(null);
-  }, [
-    setFooter,
-    onBack,
-    footerLine1,
-    footerLine2,
-    hasWarning,
-    canOpenConfirm,
-    receiveSubmitting,
-    shipmentLoading,
-    shipmentError,
-    liteMode,
-  ]);
-
-  const renderExtras_ = () => {
-    // 予定外履歴がある場合は「予定外追加はありません」を非表示
-    const hasExtrasHistory = Array.isArray(extrasHistory) && extrasHistory.length > 0;
-    
-    if (!Array.isArray(extras) || extras.length === 0) {
-      // 履歴がある場合は何も表示しない（履歴セクションで表示される）
-      if (hasExtrasHistory) {
-        return null;
-      }
-      return <s-text tone="subdued" size="small">予定外追加はありません</s-text>;
-    }
-
-    // 現在の予定外追加がある場合は表示（履歴と混在する可能性があるが、現在の追加を優先）
-
-    return (
-      <s-stack gap="none">
-        {extras.map((x) => {
-          const received = Number(x?.receiveQty || 0);
-
-          const sku = String(x?.sku || "").trim();
-          const barcode = String(x?.barcode || "").trim();
-
-          // Shipment内の skuLine と同じ作り（SKU/JAN をここで確実に定義）
-          const skuLine = sku
-            ? `SKU:${sku}${barcode ? ` / JAN:${barcode}` : ""}`
-            : barcode
-            ? `JAN:${barcode}`
-            : "";
-
-          // 下段左：予定外は「予定外 / 入庫 n」にする（要件に合わせて文言はここで調整）
-          const bottomLeft = `予定外 / 入庫 ${received}`;
-          const bottomLeftTone = received > 0 ? "critical" : "subdued";
-
-          return (
-            <InboundAddedLineRow
-              key={x.key}
-              row={{
-                title: x.title || x.sku || x.inventoryItemId || "(unknown)",
-                imageUrl: x.imageUrl || "",
-              }}
-              showImages={showImages}
-              dialog={dialog}
-              qty={received}
-              modalKey={x.key}
-              skuLine={skuLine}
-              bottomLeft={bottomLeft}
-              bottomLeftTone={bottomLeftTone}
-              onDec={() => setExtraQty(x.key, Math.max(0, received - 1))}
-              onInc={() => setExtraQty(x.key, received + 1)}
-              onSetQty={(n) => setExtraQty(x.key, n)}
-              minQty={1}
-              onRemove={() => setExtraQty(x.key, 0)}
-            />
-          );
-        })}
-      </s-stack>
-    );
-  };
-
-  // 予定外入庫の履歴を表示する関数
-  const [extrasHistory, setExtrasHistory] = useState([]);
-  const [extrasHistoryLoading, setExtrasHistoryLoading] = useState(false);
-  const [confirmMemo, setConfirmMemo] = useState(null);
-  // processLogはreceiveConfirmより前に定義済み（重複定義を避ける）
-
-  const loadExtrasHistory = useCallback(async () => {
-    if (!shipment?.id || !locationGid) {
-      setExtrasHistory([]);
-      setConfirmMemo(null);
-      return;
-    }
-
-    setExtrasHistoryLoading(true);
-    try {
-      const audit = await readInboundAuditLog();
-      const shipmentId = String(shipment.id || "").trim();
-
-      // このshipmentに関連する履歴エントリを取得
-      const auditEntries = (audit || [])
-        .filter((e) => {
-          const sid = String(e?.shipmentId || "").trim();
-          const loc = String(e?.locationId || "").trim();
-          return sid === shipmentId && loc === String(locationGid || "").trim();
-        })
-        .sort((a, b) => {
-          // 最新のエントリを優先（日時でソート）
-          const aTime = new Date(a?.at || a?.createdAt || 0).getTime();
-          const bTime = new Date(b?.at || b?.createdAt || 0).getTime();
-          return bTime - aTime;
-        });
-
-      // 最新の確定時メモを取得
-      const latestEntry = auditEntries[0];
-      if (latestEntry && String(latestEntry?.note || "").trim()) {
-        setConfirmMemo(String(latestEntry.note).trim());
-      } else {
-        setConfirmMemo(null);
-      }
-
-      // 予定外入庫の履歴を抽出
-      const historyEntries = auditEntries
-        .flatMap((e) => {
-          const extrasArr = Array.isArray(e?.extras) ? e.extras : [];
-          return extrasArr.map((x) => ({
-            ...x,
-            at: e?.at || e?.createdAt || "",
-            note: e?.note || "",
-            reason: e?.reason || "",
-          }));
-        })
-        .filter((x) => x.inventoryItemId && x.qty > 0);
-
-      setExtrasHistory(historyEntries);
-    } catch (e) {
-      setExtrasHistory([]);
-      setConfirmMemo(null);
-    } finally {
-      setExtrasHistoryLoading(false);
-    }
-  }, [shipment?.id, locationGid]);
-
-  useEffect(() => {
-    if (shipment?.id && locationGid) {
-      loadExtrasHistory();
-    }
-  }, [shipment?.id, locationGid, loadExtrasHistory]);
-
-  const renderExtrasHistory_ = () => {
-    if (extrasHistoryLoading) {
-      return <s-text tone="subdued" size="small">履歴を読み込み中...</s-text>;
-    }
-
-    if (!Array.isArray(extrasHistory) || extrasHistory.length === 0) {
-      return null;
-    }
-
-    const formatDate = (iso) => {
-      const s = String(iso || "").trim();
-      if (!s) return "";
-      try {
-        const d = new Date(s);
-        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-      } catch {
-        return s.slice(0, 16);
-      }
-    };
-
-    // 履歴を入庫リストと同じスタイルで表示（タイトルなし、パディングなし、日時なし）
-    return (
-      <s-stack gap="none">
-        {extrasHistory.map((h, idx) => {
-          // title から商品名とバリアント名を抽出
-          const titleRaw = String(h.title || h.inventoryItemId || "(unknown)").trim();
-          const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-          const productTitle = parts[0] || titleRaw;
-          const variantTitle = parts.length >= 2 ? parts.slice(1).join(" / ") : "";
-
-          // SKU情報（履歴データに含まれている場合）
-          const sku = String(h.sku || "").trim();
-          const barcode = String(h.barcode || "").trim();
-          const skuLine = sku
-            ? `SKU:${sku}${barcode ? ` / JAN:${barcode}` : ""}`
-            : barcode
-            ? `JAN:${barcode}`
-            : "";
-
-          // 画像URL（履歴データに含まれている場合、なければ空）
-          const imageUrl = String(h.imageUrl || "").trim();
-
-          // 下段左：確定前と同じ「予定外 / 入庫 n」
-          const received = Number(h.qty || 0);
-          const bottomLeft = `予定外 / 入庫 ${received}`;
-          const bottomLeftTone = received > 0 ? "critical" : "subdued";
-
-          return (
-            <InboundAddedLineRow
-              key={`history-${idx}-${h.inventoryItemId || idx}`}
-              row={{
-                title: titleRaw,
-                productTitle,
-                variantTitle,
-                imageUrl,
-                inventoryItemId: h.inventoryItemId,
-              }}
-              showImages={showImages}
-              dialog={dialog}
-              qty={received}
-              modalKey={`history-${idx}`}
-              skuLine={skuLine}
-              bottomLeft={bottomLeft}
-              bottomLeftTone={bottomLeftTone}
-              // 履歴は編集不可
-              onDec={null}
-              onInc={null}
-              onSetQty={null}
-              onRemove={null}
-            />
-          );
-        })}
-      </s-stack>
-    );
-  };
-
-  // 確定時メモを表示する関数（履歴から取得）
-  const renderConfirmMemo_ = () => {
-    if (extrasHistoryLoading || !confirmMemo) {
-      return null;
-    }
-
-    // パディングを予定外入荷のタイトルや商品リストに合わせる（padding="small"を削除）
-    return (
-      <s-stack gap="small">
-        <s-text emphasis="bold" size="small">確定時メモ</s-text>
-        <s-text tone="subdued" size="small" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-          {confirmMemo}
-        </s-text>
-      </s-stack>
-    );
-  };
-
-  // 処理ログを表示する関数
-  const renderProcessLog_ = () => {
-    if (!Array.isArray(processLog) || processLog.length === 0) {
-      return null;
-    }
-
-    return (
-      <s-stack gap="small">
-        <s-text emphasis="bold" size="small">処理ログ</s-text>
-        <s-box padding="small" style={{ backgroundColor: "var(--s-color-bg-surface-secondary)", borderRadius: 4 }}>
-          <s-stack gap="extra-tight">
-            {processLog.map((log, idx) => {
-              const time = new Date(log.timestamp);
-              const timeStr = `${String(time.getHours()).padStart(2, "0")}:${String(time.getMinutes()).padStart(2, "0")}:${String(time.getSeconds()).padStart(2, "0")}`;
-              return (
-                <s-text key={idx} tone="subdued" size="small" style={{ fontFamily: "monospace" }}>
-                  [{timeStr}] {log.message}
-                </s-text>
-              );
-            })}
-          </s-stack>
-        </s-box>
-      </s-stack>
-    );
-  };
-
-  // ▼ 入庫候補（検索結果）用：在庫キャッシュ（上位だけプリフェッチ）
-  const CANDIDATE_STOCK_PREFETCH_LIMIT = 8;
-
-  const [inbCandidateStockVersion, setInbCandidateStockVersion] = useState(0);
-  const inbCandidateStockCacheRef = useRef(new Map());
-  const inbCandidateStockFetchedRef = useRef(new Set());
-
-  const bumpInbCandidateStock = useCallback(() => {
-    setInbCandidateStockVersion((x) => x + 1);
-  }, []);
-
-  const getInbCandidateStock = useCallback((key) => {
-    return inbCandidateStockCacheRef.current.get(String(key || ""));
-  }, []);
-
-  const ensureInbCandidateStock = useCallback(
-    async (key, variantId) => {
-      const k = String(key || "").trim();
-      const vId = String(variantId || "").trim();
-      if (!k || !vId || !locationGid) return;
-      if (inbCandidateStockFetchedRef.current.has(k)) return;
-
-      inbCandidateStockFetchedRef.current.add(k);
-
-      // 先に loading を入れて描画更新
-      inbCandidateStockCacheRef.current.set(k, { loading: true, available: null, error: null });
-      bumpInbCandidateStock();
-
-      try {
-        const r = await fetchVariantAvailable({ variantGid: vId, locationGid });
-        const available = Number.isFinite(Number(r?.available)) ? Number(r.available) : null;
-        inbCandidateStockCacheRef.current.set(k, { loading: false, available, error: null });
-      } catch (e) {
-        inbCandidateStockCacheRef.current.set(k, { loading: false, available: null, error: e });
-      } finally {
-        bumpInbCandidateStock();
-      }
-    },
-    [locationGid, bumpInbCandidateStock]
-  );
-
-  // =========================
-  // Inbound 検索結果行（出庫の CandidateRow と同じ配置）
-  //  - 1行目：商品情報（SKU/JAN までここに出す）
-  //  - 2行目：左に在庫、右に「数量ボタン + ＋」
-  // =========================
-  const InboundCandidateRow = ({ c, idx }) => {
-    const vid = String(c?.variantId || "").trim();
-    if (!vid) return null;
-
-    const productTitle = String(c?.productTitle || "").trim();
-    const variantTitle = String(c?.variantTitle || "").trim();
-    const sku = String(c?.sku || "").trim();
-    const barcode = String(c?.barcode || "").trim();
-
-    // 1段目の3行目（SKU/JAN をここに寄せる）
-    const skuLine = `${sku ? `SKU: ${sku}` : ""}${barcode ? `${sku ? " / " : ""}JAN: ${barcode}` : ""}`.trim();
-
-    const shownQty = Math.max(0, Number(addQtyById[vid] || 0));
-    const [text, setText] = useState(String(shownQty > 0 ? shownQty : 1));
-
-    useEffect(() => {
-      setText(String(shownQty > 0 ? shownQty : 1));
-    }, [shownQty]);
-
-    // すべての候補に対して在庫を取得
-    useEffect(() => {
-      // state を使って再描画が走るための参照（preact対策）
-      void inbCandidateStockVersion;
-
-      // 制限を外してすべての候補に対して在庫を取得
-        ensureInbCandidateStock(vid, vid);
-    }, [vid, ensureInbCandidateStock, inbCandidateStockVersion]);
-
-    const stock = getInbCandidateStock(vid);
-    const stockText =
-      stock?.loading ? "在庫: …" : `在庫: ${Number.isFinite(Number(stock?.available)) ? Number(stock.available) : "—"}`;
-
-    const modalId = toSafeId(`INB_CAND_QTY_${vid}`);
-
-    const clampAdd = (s) => {
-      const x = Number(String(s || "").replace(/[^\d]/g, ""));
-      if (!Number.isFinite(x)) return 1;
-      return Math.max(1, Math.min(999999, Math.floor(x)));
-    };
-
-    // addOrIncrementByResolved が期待する形に揃える
-    const resolved = {
-      variantId: vid,
-      inventoryItemId: c?.inventoryItemId,
-      productTitle,
-      variantTitle,
-      sku,
-      barcode,
-      imageUrl: c?.imageUrl || "",
-    };
-
-    // 次回の初期値として保持（出庫の挙動に寄せる）
-    const commitAddByQty = () => {
-      const next = clampAdd(text);
-
-      addOrIncrementByResolved(resolved, next, { toastOnExtra: true });
-
-      // 出庫と同じ：右の数字ボタンは累積で増やす
-      setAddQtyById((prev) => {
-        const cur = Number(prev?.[vid] || 0);
-        return { ...prev, [vid]: cur + next };
-      });
-    };
-
-    const addOne = () => {
-      addOrIncrementByResolved(resolved, 1, { toastOnExtra: true });
-
-      // 出庫と同じ：右の数字ボタンも増やす
-      setAddQtyById((prev) => {
-        const cur = Number(prev?.[vid] || 0);
-        return { ...prev, [vid]: cur + 1 };
-      });
-    };
-
-    return (
-    <s-box padding="none">
-        <StockyRowShell key={vid}>
-          <s-stack gap="extra-tight">
-            {/* 1行目：商品情報（SKU/JAN を line3 に） */}
-            <s-box style={{ width: "100%" }}>
-              <ItemLeftCompact
-                showImages={showImages && !liteMode}
-                imageUrl={c?.imageUrl || ""}
-                productTitle={productTitle || "(no title)"}
-                variantTitle={variantTitle}
-                line3={skuLine}
-              />
-            </s-box>
-
-            {/* 2行目：左に在庫、右に「数量 + ＋」 */}
-            <s-box inlineSize="100%">
-              <s-stack
-                direction="inline"
-                gap="base"
-                justifyContent="space-between"
-                alignItems="center"
-                style={{ width: "100%", flexWrap: "nowrap" }}
-              >
-                <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
-                  <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                    {stockText}
-                  </s-text>
-                </s-box>
-
-                <s-box style={{ flex: "0 0 auto" }}>
-                  {(() => {
-                    const valueWidth = calcQtyWidthPx_(shownQty);
-                    const plusWidth = 44;
-
-                    return (
-                      <s-stack
-                        direction="inline"
-                        gap="extra-tight"
-                        alignItems="center"
-                        justifyContent="end"
-                        style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}
-                      >
-                        <s-box inlineSize={`${valueWidth}px`}>
-                          <s-button
-                            command="--show"
-                            commandFor={modalId}
-                            onClick={() => setText(String(shownQty > 0 ? shownQty : 1))}
-                            style={{ width: "100%", whiteSpace: "nowrap" }}
-                          >
-                            {shownQty}
-                          </s-button>
-                        </s-box>
-
-                        <s-box inlineSize={`${plusWidth}px`}>
-                          <s-button
-                            tone="success"
-                            onClick={addOne}
-                            onPress={addOne}
-                            style={{ width: "100%", whiteSpace: "nowrap" }}
-                          >
-                            +
-                          </s-button>
-                        </s-box>
-                      </s-stack>
-                    );
-                  })()}
-                </s-box>
-              </s-stack>
-            </s-box>
-          </s-stack>
-
-          {/* 数量入力モーダル */}
-          <s-modal id={modalId} heading="数量を指定して追加">
-            <s-box padding="base" paddingBlockEnd="none">
-              <s-stack gap="base">
-                <s-text tone="subdued" size="small">
-                  数量を入力して「追加」を押してください（1〜999999）
-                </s-text>
-
-                <s-text-field
-                  label="数量"
-                  value={text}
-                  inputMode="numeric"
-                  placeholder="例: 20"
-                  onInput={(e) => setText(String(e?.target?.value ?? e ?? ""))}
-                  onChange={(e) => setText(String(e?.target?.value ?? e ?? ""))}
-                />
-
-                {/* ✅ 戻るボタン（モーダル内に配置、slotを使わない） */}
-                <s-divider />
-                <s-box>
-                  <s-button
-                    command="--hide"
-                    commandFor={modalId}
-                    onClick={() => {
-                      // 何も実行せずにモーダルを閉じる
-                    }}
-                  >
-                    戻る
-                  </s-button>
-                </s-box>
-              </s-stack>
-            </s-box>
-
-            <s-button
-              slot="primary-action"
-              tone="success"
-              command="--hide"
-              commandFor={modalId}
-              onClick={commitAddByQty}
-              onPress={commitAddByQty}
-            >
-              追加
-            </s-button>
-          </s-modal>
-        </StockyRowShell>
-        <s-divider />
-      </s-box>
-    );
-  };
-
-  const warningAreaNode = !hasWarning ? null : (
-    <s-stack gap="small">
-      <s-text tone="critical" emphasis="bold">
-        予定差異があります（予定外/超過/不足）
-      </s-text>
-
-      <s-text-field
-        label="メモ（任意）"
-        placeholder="例: 発注数誤り / 同梱漏れで追加到着 / 破損 など"
-        value={String(note || "")}
-        onInput={(v) => setNote(readValue(v))}
-        onChange={(v) => setNote(readValue(v))}
-      />
-
-      <s-divider />
-
-      <s-stack gap="small" alignItems="center" justifyContent="start">
-        <s-button tone={ackWarning ? "success" : "critical"} onClick={() => setAckWarning((x) => !x)}>
-          {ackWarning ? "OK" : "内容を確認しました（必須）"}
-        </s-button>
-
-        <s-text tone="subdued" size="small">
-          ※ チェックがONでないと「確定」できません
-        </s-text>
-      </s-stack>
-    </s-stack>
-  );
-
-  if (!selectedShipmentId) {
-    return (
-      <s-box padding="base">
-        <s-stack gap="base">
-          <s-text tone="subdued">Shipment が未選択です。前の画面で選択してください。</s-text>
-
-          <s-divider />
-
-          <s-button onClick={refreshPending} disabled={pendingLoading}>
-            {pendingLoading ? "取得中..." : "入庫予定一覧を更新（任意）"}
-          </s-button>
-
-          {pendingTransfers.length > 0 ? (
-            <s-stack gap="base">
-              <s-text emphasis="bold">入庫予定（Transfer）</s-text>
-              {pendingTransfers.slice(0, 8).map((t) => (
-                <s-text key={t.id} tone="subdued" size="small">
-                  ・{t.name ? `${t.name} / ` : ""}{String(t.id).slice(-12)}（{t.status ?? "-"}）
-                </s-text>
-              ))}
-              {pendingTransfers.length > 8 ? (
-                <s-text tone="subdued" size="small">…他 {pendingTransfers.length - 8} 件</s-text>
-              ) : null}
-            </s-stack>
-          ) : null}
-        </s-stack>
-      </s-box>
-    );
-  }
-
-  return (
-    <s-stack gap="base">
-      {/* ✅ 検索結果（出庫式の候補リスト：全件表示 / 最大50件） */}
-      {String(addQuery || "").trim().length >= 1 ? (
-        <s-box padding="base">
-          <s-stack gap="extra-tight">
-            <s-text size="small" tone="subdued">
-              検索リスト 候補： {addLoading ? "..." : addCandidates.length}件
-            </s-text>
-
-            {addCandidates.length > 0 ? (
-              <>
-                {addCandidates.slice(0, addCandidatesDisplayLimit).map((c, idx) => {
-                  const stableKey = String(
-                    c?.variantId ||
-                      c?.inventoryItemId ||
-                      c?.sku ||
-                      c?.barcode ||
-                      `${c?.productTitle}__${c?.variantTitle}`
-                  );
-                  return <InboundCandidateRow key={stableKey} c={c} idx={idx} />;
-                })}
-                
-                {/* ✅ 「さらに表示」ボタン */}
-                {addCandidates.length > addCandidatesDisplayLimit ? (
-                  <s-box padding="small">
-                    <s-button kind="secondary" onClick={handleShowMoreAddCandidates} onPress={handleShowMoreAddCandidates}>
-                      さらに表示（残り {addCandidates.length - addCandidatesDisplayLimit}件）
-                    </s-button>
-                  </s-box>
-                ) : null}
-              </>
-            ) : addLoading ? (
-              <s-text tone="subdued" size="small">
-                検索中...
-              </s-text>
-            ) : (
-              <s-text tone="subdued" size="small">
-                該当なし
-              </s-text>
-            )}
-          </s-stack>
-        </s-box>
-      ) : null}
-
-      {shipment ? (
-        <s-box key="shipment_list" padding="small">
-          <s-stack gap="small">
-            <s-text emphasis="bold">入庫リスト</s-text>
-            {/* ✅ 未読み込み商品リストがある場合は最上部に表示 */}
-            {lineItemsPageInfo?.hasNextPage && typeof loadMoreLineItems_ === "function" ? (
-              <s-box padding="base">
-                <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-                  <s-text tone="subdued" size="small">
-                    未読み込み商品リストがあります。（要読込）
-                  </s-text>
-                  <s-button
-                    kind="secondary"
-                    onClick={loadMoreLineItems_}
-                    onPress={loadMoreLineItems_}
-                    disabled={loadingMore}
-                  >
-                    {loadingMore ? "読み込み中..." : "読込"}
-                  </s-button>
-                </s-stack>
-              </s-box>
-            ) : null}
-            {/* ✅ Phase 1.4: 複数Shipmentモードの場合、シップメントごとにグループ化して表示 */}
-            {isMultipleMode ? (
-              (() => {
-                // シップメントごとにグループ化
-                const groupedByShipment = new Map();
-                visibleRows.forEach((row) => {
-                  const shipmentId = row.shipmentId || "";
-                  const shipmentLabel = row.shipmentLabel || "";
-                  if (!groupedByShipment.has(shipmentId)) {
-                    groupedByShipment.set(shipmentId, {
-                      shipmentId,
-                      shipmentLabel,
-                      rows: [],
-                    });
-                  }
-                  groupedByShipment.get(shipmentId).rows.push(row);
-                });
-
-                return (
-                  <s-stack gap="base">
-                    {Array.from(groupedByShipment.values()).map((group, index) => (
-                      <s-box key={group.shipmentId || index}>
-                        <s-stack gap="tight">
-                          {/* ✅ シップメントタイトル */}
-                          <s-box padding="small" style={{ backgroundColor: "var(--s-color-bg-surface-secondary)", borderRadius: 4 }}>
-                            <s-text emphasis="bold" size="small">
-                              {group.shipmentLabel || `配送${index + 1}`}
-                            </s-text>
-                          </s-box>
-                          {/* ✅ シップメントの明細 */}
-                          {renderInboundShipmentItems_({ rows: group.rows, showImages, dialog, setRowQty })}
-                        </s-stack>
-                        {index < groupedByShipment.size - 1 ? <s-divider /> : null}
-                      </s-box>
-                    ))}
-                  </s-stack>
-                );
-              })()
-            ) : (
-              renderInboundShipmentItems_({ rows: visibleRows, showImages, dialog, setRowQty })
-            )}
-          </s-stack>
-        </s-box>
-      ) : (
-        <s-box padding="base">
-          <s-text tone="subdued">Shipmentを読み込むと、ここに明細が出ます</s-text>
-        </s-box>
-      )}
-
-      {/* ✅ 入庫：確定 confirm（出庫と同じ commandFor 方式 / 二重定義しない） */}
-      <s-modal id={CONFIRM_RECEIVE_MODAL_ID} heading="入庫を確定しますか？">
-          <s-box
-            padding="none"
-            style={{ paddingInline: 8, paddingBlockStart: 8, paddingBlockEnd: 0, maxHeight: "60vh", overflowY: "auto" }}
-          >
-          <s-stack gap="small">
-            {/* ✅ 残したいサマリー */}
-            <s-stack gap="extra-tight">
-              <s-text size="small" tone="subdued">
-                予定 {plannedTotal} / 入庫 {receiveTotal}
-              </s-text>
-
-              <s-text size="small" tone="subdued">
-                予定外 {extrasQtyTotal} / 超過 {overQtyTotal} / 不足 {shortageQtyTotal}
-              </s-text>
-
-              {hasWarning ? (
-                <s-text size="small" tone="critical">
-                  ※ 予定外/超過/不足 があります。
-                </s-text>
-              ) : null}
-            </s-stack>
-
-            {/* ✅ 明細（不足/予定外/超過の件数＋行） */}
-            {shortageRows.length > 0 ? (
-              <s-stack gap="extra-tight">
-                <s-text size="small" tone="critical">
-                  不足（{shortageRows.length}件）
-                </s-text>
-
-                {shortageRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => (
-                  <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={oneLineStyle}>
-                    ・{x.title}：-{Number(x.shortageQty || 0)}
-                  </s-text>
-                ))}
-
-              {shortageRows.length > DIFF_PREVIEW_LIMIT ? (
-                <s-text size="small" tone="subdued">
-                  …他 {shortageRows.length - DIFF_PREVIEW_LIMIT} 件
-                </s-text>
-              ) : null}
-              </s-stack>
-            ) : null}
-
-            {extras.length > 0 ? (
-              <s-stack gap="extra-tight">
-                <s-text size="small" tone="critical">
-                  予定外（{extras.length}件）
-                </s-text>
-
-                {extras.slice(0, DIFF_PREVIEW_LIMIT).map((x) => (
-                  <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={oneLineStyle}>
-                    ・{x.title || x.sku || x.inventoryItemId || "(unknown)"}：{Number(x.receiveQty || 0)}
-                  </s-text>
-                ))}
-
-                {extras.length > DIFF_PREVIEW_LIMIT ? (
-                  <s-text size="small" tone="subdued">
-                    …他 {extras.length - DIFF_PREVIEW_LIMIT} 件
-                  </s-text>
-                ) : null}
-              </s-stack>
-            ) : null}
-
-            {overRows.length > 0 ? (
-              <s-stack gap="extra-tight">
-                <s-text size="small" tone="critical">
-                  超過（{overRows.length}件）
-                </s-text>
-
-                {overRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => (
-                  <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={oneLineStyle}>
-                    ・{x.title}：+{Number(x.overQty || 0)}
-                  </s-text>
-                ))}
-
-                {overRows.length > DIFF_PREVIEW_LIMIT ? (
-                  <s-text size="small" tone="subdued">
-                    …他 {overRows.length - DIFF_PREVIEW_LIMIT} 件
-                  </s-text>
-              ) : null}
-              </s-stack>
-            ) : null}
-
-            {/* ✅ 入力UI（集約） */}
-            {hasWarning ? (
-              <>
-                <s-divider />
-                {warningAreaNode}
-              </>
-            ) : null}
-
-            {/* ✅ 戻るボタン（モーダル内に配置、slotを使わない） */}
-            <s-divider />
-            <s-box>
-              <s-button
-                command="--hide"
-                commandFor={CONFIRM_RECEIVE_MODAL_ID}
-                onClick={() => {
-                  // 何も実行せずにモーダルを閉じる
-                }}
-              >
-                戻る
-              </s-button>
-            </s-box>
-          </s-stack>
-        </s-box>
-
-        <s-button
-          slot="secondary-actions"
-          tone={hasWarning ? "critical" : "success"}
-          disabled={!canConfirm || !warningReady || receiveSubmitting}
-          onClick={async () => {
-            const ok = await receiveConfirm({ finalize: false });
-            if (ok) hideReceiveConfirmRef.current?.click?.();
-          }}
-          onPress={async () => {
-            const ok = await receiveConfirm({ finalize: false });
-            if (ok) hideReceiveConfirmRef.current?.click?.();
-          }}
-        >
-          一部入庫（一時保存）
-        </s-button>
-
-        <s-button
-          slot="primary-action"
-          tone={hasWarning ? "critical" : "success"}
-          disabled={!canConfirm || !warningReady || receiveSubmitting}
-          onClick={async () => {
-            const ok = await receiveConfirm({ finalize: true });
-            if (ok) hideReceiveConfirmRef.current?.click?.();
-          }}
-          onPress={async () => {
-            const ok = await receiveConfirm({ finalize: true });
-            if (ok) hideReceiveConfirmRef.current?.click?.();
-          }}
-        >
-          確定する
-        </s-button>
-      </s-modal>
-
-      {shipment ? (
-        <s-box key="extras_area" padding="small">
-          <s-stack gap="small">
-              <s-text emphasis="bold">予定外入荷（リストにない商品）</s-text>
-
-            {renderExtras_()}
-
-            {/* ✅ 予定外入庫の履歴を表示（タイトルなし、入庫リストと同じスタイル） */}
-            {renderExtrasHistory_()}
-
-            {/* ✅ 確定時メモを表示（履歴から取得） */}
-            {renderConfirmMemo_()}
-
-            {/* ✅ 処理ログを表示（デバッグ用、必要に応じてコメントアウト可能） */}
-            {/* {renderProcessLog_()} */}
-          </s-stack>
-        </s-box>
-      ) : null}
-    </s-stack>
-  );
-}
-
-/* =========================
-   ✅ InboundAddedLineRow（2行構成：SKUは上段、予定/受領は下段左）
-*/
-function InboundAddedLineRow({
-  row,
-  showImages,
-  dialog,
-  qty,
-  modalKey,
-  skuLine,
-  bottomLeft,
-  bottomLeftTone,
-  onDec,
-  onInc,
-  onSetQty,
-  onRemove,
-  minQty,
-}) {
-  const rawLabel = String(row?.label || row?.title || "").trim();
-  const parts = rawLabel ? rawLabel.split("/").map((s) => s.trim()).filter(Boolean) : [];
-
-  const productTitle = String(row?.productTitle || "").trim() || parts[0] || rawLabel || "(unknown)";
-  const variantTitle =
-    String(row?.variantTitle || "").trim() || (parts.length >= 2 ? parts.slice(1).join(" / ") : "");
-
-  const q = Math.max(0, Number(qty ?? row?.qty ?? 0));
-
-  const keyBase =
-    modalKey ||
-    row?.key ||
-    row?.shipmentLineItemId ||
-    row?.inventoryItemId ||
-    row?.variantId ||
-    rawLabel ||
-    "row";
-
-  const modalId = `qty-in-${toSafeId(keyBase)}`;
-
-  return (
-    <s-box padding="none">
-      <StockyRowShell>
-        <s-stack gap="extra-tight" inlineSize="100%">
-          {/* 上段：情報（画像＋商品名＋オプション＋SKU） */}
-          <s-box inlineSize="100%">
-            <ItemLeftCompact
-              showImages={showImages}
-              imageUrl={row?.imageUrl || ""}
-              productTitle={productTitle}
-              variantTitle={variantTitle}
-              line3={String(skuLine || "").trim()}
-            />
-          </s-box>
-
-          {/* 下段：左=予定/受領（or予定外）、右=数量ボタン */}
-          <s-box inlineSize="100%">
-            <s-stack
-              direction="inline"
-              gap="base"
-              alignItems="center"
-              justifyContent="space-between"
-              style={{ width: "100%", flexWrap: "nowrap" }}
-            >
-              <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
-                <s-text
-                  tone={bottomLeftTone === "critical" ? "critical" : "subdued"}
-                  size="small"
-                  style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-                >
-                  {String(bottomLeft || "").trim() || " "}
-                </s-text>
-              </s-box>
-
-              {/* ✅ 履歴表示の場合は数量コントロールを非表示（数量テキストも非表示：左の予定外/受領と重複するため） */}
-              {onDec !== null || onInc !== null || onSetQty !== null || onRemove !== null ? (
-              <s-box style={{ flex: "0 0 auto" }}>
-                <QtyControlCompact_3Buttons
-                  value={q}
-                  min={Number.isFinite(Number(minQty)) ? Number(minQty) : 0}
-                  modalId={modalId}
-                  onDec={onDec}
-                  onInc={onInc}
-                  onSetQty={onSetQty}
-                  onRemove={typeof onRemove === "function" ? onRemove : null}
-                />
-              </s-box>
-              ) : null}
-            </s-stack>
-          </s-box>
-        </s-stack>
-      </StockyRowShell>
-      <s-divider />
-    </s-box>
-  );
-}
-
-/* =========================
 /* Search/Inventory */
 
 // 大規模カタログ対策：短いフリーテキスト検索を抑制して固まりを回避
@@ -11615,6 +8587,24 @@ async function fetchVariantAvailable({ variantGid, locationGid }) {
   return { inventoryItemId: data?.productVariant?.inventoryItem?.id, available };
 }
 
+/** inventoryItemId とロケーションで在庫数（available）を取得（履歴詳細の在庫表示用） */
+async function fetchInventoryItemAvailable({ inventoryItemId, locationGid }) {
+  if (!inventoryItemId || !locationGid) return { available: null };
+  const query = `#graphql
+    query InvItemLevel($id: ID!, $loc: ID!) {
+      inventoryItem(id: $id) {
+        id
+        inventoryLevel(locationId: $loc) {
+          quantities(names: ["available"]) { name quantity }
+        }
+      }
+    }`;
+  const data = await adminGraphql(query, { id: inventoryItemId, loc: locationGid });
+  const level = data?.inventoryItem?.inventoryLevel;
+  const available = level?.quantities?.find((x) => x.name === "available")?.quantity ?? null;
+  return { available };
+}
+
 /* =========================
    Ensure destination has inventory levels (Outbound/Inbound extras)
 */
@@ -11689,7 +8679,8 @@ async function ensureInventoryActivatedAtLocation({
 
           // 初期数量を設定（渡されていれば使う）
     if (
-      initialAvailableByInventoryItemId &&
+      initialAvailableByInventoryItemId != null &&
+      typeof initialAvailableByInventoryItemId === "object" &&
       Object.prototype.hasOwnProperty.call(initialAvailableByInventoryItemId, inventoryItemId)
     ) {
       const n = Number(initialAvailableByInventoryItemId[inventoryItemId]);
@@ -11936,8 +8927,16 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
         origin { name location { id name } }
         destination { name location { id name } }
 
-        shipments(first: 10) {
-          nodes { id status }
+        shipments(first: 50) {
+          nodes {
+            id
+            status
+            lineItems(first: 250) {
+              nodes {
+                quantity
+              }
+            }
+          }
         }
 
         lineItems(first: 250) {
@@ -11975,7 +8974,16 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
     destinationName: String(t?.destination?.name || ""),
     destinationLocationId: String(t?.destination?.location?.id || ""),
 
-    shipments: shipmentNodes.map((s) => ({ id: String(s.id || ""), status: String(s.status || "") })),
+    shipments: shipmentNodes.map((s) => {
+      const lineItems = Array.isArray(s?.lineItems?.nodes) ? s.lineItems.nodes : [];
+      const qty = lineItems.reduce((sum, li) => sum + Math.max(0, Number(li?.quantity ?? 0)), 0);
+      return {
+        id: String(s.id || ""),
+        status: String(s.status || ""),
+        lineItems,
+        totalQuantity: qty,
+      };
+    }),
     lineItems: lineNodes.map((li) => ({
       id: String(li.id || ""),
       title: String(li.title || ""),
@@ -12074,6 +9082,22 @@ async function createInventoryShipmentInTransit({ movementId, lineItems, trackin
 
   assertNoUserErrors(data?.inventoryShipmentCreateInTransit, "inventoryShipmentCreateInTransit", lineItemsMeta);
   return data.inventoryShipmentCreateInTransit.inventoryShipment;
+}
+
+/** 既存 Transfer に DRAFT シップメントを追加（movementId = Transfer ID） */
+async function createInventoryShipmentDraft({ movementId, lineItems, lineItemsMeta }) {
+  const mutation = `#graphql
+    mutation ShipmentCreateDraft($input: InventoryShipmentCreateInput!) {
+      inventoryShipmentCreate(input: $input) {
+        inventoryShipment { id status }
+        userErrors { field message }
+      }
+    }`;
+  const data = await adminGraphql(mutation, {
+    input: { movementId, lineItems },
+  });
+  assertNoUserErrors(data?.inventoryShipmentCreate, "inventoryShipmentCreate", lineItemsMeta);
+  return data.inventoryShipmentCreate.inventoryShipment;
 }
 
 async function fetchTransfer(id) {
@@ -12408,7 +9432,6 @@ async function fetchTransfersForDestinationAll(destinationLocationGid, opts = {}
       totalQuantity: t.totalQuantity ?? 0,
       receivedQuantity,
 
-      // 追加：過剰分（監査ログで後から上書き）
       overQuantity: 0,
       receivedQuantityDisplay: receivedQuantity,
 
@@ -12499,7 +9522,7 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
             receivedQuantity
             origin { name location { id name } }
             destination { name location { id name } }
-          shipments(first: 10) {
+          shipments(first: 50) {
             nodes {
               id
               status
@@ -12547,7 +9570,6 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
       totalQuantity: t.totalQuantity ?? 0,
       receivedQuantity,
 
-      // 追加：過剰分・予定外分・拒否分（監査ログで後から上書き）
       overQuantity: 0,
       extrasQuantity: 0,
       rejectedQuantity: 0,
@@ -12627,7 +9649,6 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
           id: li.id,
           quantity: Number(li.quantity ?? 0),
 
-          // 追加：Shopify側の受領/却下/未受領
           acceptedQuantity: Number(li.acceptedQuantity ?? 0),
           rejectedQuantity: Number(li.rejectedQuantity ?? 0),
           unreceivedQuantity: Number(li.unreceivedQuantity ?? 0),
@@ -12704,7 +9725,6 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
         id: li.id,
         quantity: Number(li.quantity ?? 0),
 
-        // 追加：Shopify側の受領/却下/未受領
         acceptedQuantity: Number(li.acceptedQuantity ?? 0),
         rejectedQuantity: Number(li.rejectedQuantity ?? 0),
         unreceivedQuantity: Number(li.unreceivedQuantity ?? 0),
@@ -12843,9 +9863,49 @@ async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
 }
 
 /* =========================
+/* Log inventory change to app API (so history shows correct activity) */
+
+async function logInventoryChangeToApi({ activity, locationId, locationName, deltas, sourceId, lineItems }) {
+  const session = SHOPIFY?.session;
+  if (!session?.getSessionToken || !deltas?.length || !sourceId) return;
+  try {
+    const token = await session.getSessionToken();
+    if (!token) return;
+    const { getAppUrl } = await import("../../../common/appUrl.js");
+    const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock-public.onrender.com
+    const apiUrl = `${appUrl}/api/log-inventory-change`;
+    const timestamp = new Date().toISOString();
+    for (const d of deltas) {
+      if (!d?.inventoryItemId || Number(d?.delta || 0) === 0) continue;
+      const li = lineItems?.find((l) => String(l?.inventoryItemId || "").trim() === d.inventoryItemId);
+      const logData = {
+        inventoryItemId: d.inventoryItemId,
+        variantId: li?.variantId ?? d.variantId ?? null,
+        sku: li?.sku ?? d.sku ?? "",
+        locationId,
+        locationName: locationName || locationId,
+        activity,
+        delta: Number(d.delta),
+        quantityAfter: d.quantityAfter ?? null,
+        sourceId,
+        timestamp,
+      };
+      const res = await fetch(apiUrl, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(logData),
+      });
+      if (!res.ok) console.warn(`[ModalOutbound] log-inventory-change failed: ${res.status}`);
+    }
+  } catch (e) {
+    console.warn("[ModalOutbound] logInventoryChangeToApi:", e);
+  }
+}
+
+/* =========================
 /* Adjust inventory */
 
-async function adjustInventoryAtLocationWithFallback({ locationId, deltas }) {
+async function adjustInventoryAtLocationWithFallback({ locationId, deltas, referenceDocumentUri }) {
   // プラス値もマイナス値も処理できるように、delta !== 0 でフィルター
   const changes = (deltas ?? [])
     .filter((x) => x?.inventoryItemId && Number(x?.delta || 0) !== 0)
@@ -12853,8 +9913,26 @@ async function adjustInventoryAtLocationWithFallback({ locationId, deltas }) {
 
   if (!locationId || changes.length === 0) return null;
 
+  // referenceDocumentUriを生成（転送IDが指定されている場合）
+  const uri = referenceDocumentUri ? `gid://stock-transfer-pos/OutboundTransfer/${referenceDocumentUri}` : null;
+
   // 1) try: inventoryAdjustQuantities（差分加算）
   try {
+    const input = {
+      reason: "correction",
+      name: "available",
+      changes: changes.map((c) => ({
+        inventoryItemId: c.inventoryItemId,
+        locationId,
+        delta: c.delta,
+      })),
+    };
+    
+    // referenceDocumentUriが指定されている場合は追加
+    if (uri) {
+      input.referenceDocumentUri = uri;
+    }
+
     const m1 = `#graphql
       mutation Adjust($input: InventoryAdjustQuantitiesInput!) {
         inventoryAdjustQuantities(input: $input) {
@@ -12864,15 +9942,7 @@ async function adjustInventoryAtLocationWithFallback({ locationId, deltas }) {
       }`;
 
     const d1 = await adminGraphql(m1, {
-      input: {
-        reason: "correction",
-        name: "available",
-        changes: changes.map((c) => ({
-          inventoryItemId: c.inventoryItemId,
-          locationId,
-          delta: c.delta,
-        })),
-      },
+      input,
     });
 
     assertNoUserErrors(d1?.inventoryAdjustQuantities, "inventoryAdjustQuantities");
@@ -12919,12 +9989,19 @@ async function adjustInventoryAtLocationWithFallback({ locationId, deltas }) {
       }
     }`;
 
+  const input2 = {
+    name: "available",
+    reason: "correction",
+    quantities,
+  };
+  
+  // referenceDocumentUriが指定されている場合は追加（fallbackでも設定）
+  if (uri) {
+    input2.referenceDocumentUri = uri;
+  }
+
   const d2 = await adminGraphql(m2, {
-    input: {
-      name: "available",
-      reason: "correction",
-      quantities,
-    },
+    input: input2,
   });
 
   assertNoUserErrors(d2?.inventorySetQuantities, "inventorySetQuantities");
@@ -13736,376 +10813,4 @@ function StockLineRow({ row, showImages, dialog, right, onSetQty }) {
       <s-divider />
     </RowShell>
   );
-}
-
-/* ===== 入庫（Shipment内）描画 ===== */
-function renderInboundShipmentItems_({ rows, showImages, dialog, setRowQty }) {
-  if (!Array.isArray(rows) || rows.length === 0) {
-    return <s-text tone="subdued">lineItems がありません</s-text>;
-  }
-
-  return (
-    <s-stack gap="none">
-      {rows.map((r) => {
-        const planned = Number(r?.plannedQty ?? 0);
-        const received = Number(r?.receiveQty ?? 0);
-
-        const sku = String(r?.sku || "").trim();
-        const barcode = String(r?.barcode || "").trim();
-
-        const skuLine = sku
-          ? `SKU:${sku}${barcode ? ` / JAN:${barcode}` : ""}`
-          : barcode
-          ? `JAN:${barcode}`
-          : "";
-
-        const bottomLeft = `予定 ${planned} / 入庫 ${received}`;
-
-        // 予定と入庫に差がある行は赤色で表示（編集前・未カウント（0）でも差があれば赤）
-        const hasDiff = planned !== received;
-        const bottomLeftTone = hasDiff ? "critical" : "subdued";
-
-        return (
-          <InboundAddedLineRow
-            key={r.key}
-            row={r}
-            showImages={showImages}
-            dialog={dialog}
-            qty={received}
-            modalKey={r.key}
-            skuLine={skuLine}
-            bottomLeft={bottomLeft}
-            bottomLeftTone={bottomLeftTone}
-            onDec={() => setRowQty(r.key, Math.max(0, received - 1))}
-            onInc={() => setRowQty(r.key, received + 1)}
-            onSetQty={(n) => setRowQty(r.key, n)}
-          />
-        );
-      })}
-    </s-stack>
-  );
-}
-
-/* =========================
-   UI parts (Thumb / ItemLeft) - s-image版
-*/
-
-function safeImageSrc_(maybeUrl) {
-  const u = typeof maybeUrl === "string" ? maybeUrl.trim() : "";
-  if (!u) return "";
-
-  // //cdn.shopify.com/... を https に
-  if (u.startsWith("//")) return `https:${u}`;
-
-  // だいたい https しか通さない（POS内での安全策）
-  if (u.startsWith("https://")) return u;
-
-  // http は混在で落ちることがあるので弾く（必要なら許可に変えてOK）
-  if (u.startsWith("http://")) return "";
-
-  return u;
-}
-
-function Thumb({ imageUrl, sizePx = 44 }) {
-  const src = safeImageSrc_(imageUrl);
-  if (!src) return null;
-
-  const n = Number(sizePx) || 44;
-  const size = `${n}px`;
-
-  return (
-    <s-box inlineSize={size} blockSize={size}>
-      <s-image
-        src={src}
-        alt=""
-        inlineSize="fill"
-        objectFit="cover"
-      />
-    </s-box>
-  );
-}
-
-// 画像URL決定（超安全版）
-function getDisplayImageUrl_(maybeUrl) {
-  const u = typeof maybeUrl === "string" ? maybeUrl.trim() : "";
-  return u;
-}
-
-function clampInt_(v, min = 0, max = 999999) {
-  const n = Number(String(v ?? "").trim());
-  if (!Number.isFinite(n)) return null;
-  const i = Math.floor(n);
-  return Math.max(min, Math.min(max, i));
-}
-
-function sumQty_(lines, key = "qty") {
-  return (Array.isArray(lines) ? lines : []).reduce((a, x) => a + Number(x?.[key] || 0), 0);
-}
-
-/** ✅ Stocky風：上部サマリー（最小情報） */
-function ListSummaryBar({ left, right }) {
-  return (
-    <s-stack
-      direction="inline"
-      gap="none"
-      alignItems="center"
-      justifyContent="space-between"
-      style={{ width: "100%" }}
-    >
-      <s-box style={{ minWidth: 0, flex: "1 1 auto" }}>
-        <s-text size="small" tone="subdued">
-          {left}
-        </s-text>
-      </s-box>
-
-      <s-box style={{ minWidth: 0, flex: "0 0 auto" }}>
-        <s-text size="small" tone="subdued">
-          {right}
-        </s-text>
-      </s-box>
-    </s-stack>
-  );
-}
-
-/** ✅ 左：画像 + テキスト（自然折り返しで、右ボタンを落とさない） */
-function ItemLeftCompact({ showImages, imageUrl, productTitle, variantTitle, line3 }) {
-  const clip_ = (s, max) => {
-    const t = String(s || "").trim();
-    if (!t) return "";
-    return t.length > max ? t.slice(0, max - 1) + "…" : t;
-  };
-
-  // ここで確実に短くする（環境差ゼロ）
-  const pRaw = String(productTitle || "").trim() || "(unknown)";
-  const vRaw = String(variantTitle || "").trim();
-
-  //const p = clip_(pRaw, 34);         // 商品名
-  const p = pRaw;
-  const v = vRaw;                   // option解析用は生でOK
-
-  const options = normalizeVariantOptions_(pRaw, v);
-  const optionsLine = formatOptionsLine_(options);
-
-  const optText = String(optionsLine || "").trim();
-  const line3Text = String(line3 || "").trim();
-
-  const Line = ({ children, strong = false, subdued = false }) => (
-    <s-text
-      type={strong ? "strong" : subdued ? "small" : "generic"}
-      tone={subdued ? "subdued" : "auto"}
-      style={{
-        display: "block",
-        whiteSpace: "normal",        // 折り返す
-        overflow: "visible",         // 切らない
-        wordBreak: "break-word",     // 長い英数字も折る
-      }}
-    >
-      {children}
-    </s-text>
-  );
-
-  return (
-    <s-stack direction="inline" gap="base" alignItems="center" justifyContent="start">
-      {showImages ? (
-        <s-box inlineSize="44px" blockSize="44px" padding="none">
-          <Thumb imageUrl={imageUrl || ""} sizePx={44} />
-        </s-box>
-      ) : null}
-
-      <s-box minInlineSize="0">
-        <s-stack gap="extra-tight">
-          <Line strong>{p}</Line>
-          {optText ? <Line subdued>{optText}</Line> : null}
-          {line3Text ? <Line subdued>{line3Text}</Line> : null}
-        </s-stack>
-      </s-box>
-    </s-stack>
-  );
-}
-
-// 数量コントロール（+/- と 数字タップでモーダル入力）
-// - dialog.input を使わず、Polaris web components の commandFor で確実に開く
-export function QtyControlCompact({
-  value,
-  min = 0,
-  max = 999999,
-  title = "数量",
-  onChange,
-  step = 1,
-  modalId,
-}) {
-  const v = Number.isFinite(Number(value)) ? Number(value) : min;
-
-  const id = useMemo(() => {
-    if (modalId) return String(modalId);
-    return `qty-modal-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  }, [modalId]);
-
-  const [text, setText] = useState(String(v));
-
-  useEffect(() => {
-    setText(String(v));
-  }, [v]);
-
-  const clamp = (n) => Math.min(max, Math.max(min, n));
-
-  const commit = () => {
-    const raw = String(text ?? "").trim();
-    const n = clamp(Number(raw === "" ? min : raw));
-    onChange?.(Number.isFinite(n) ? n : min);
-  };
-
-  const decDisabled = v <= min;
-
-  // 桁数に応じて「数字ボタンの幅」を少しだけ可変に（崩れ防止）
-  const digits = String(v).length;
-  const valueWidth =
-    digits <= 2 ? 52 :
-    digits === 3 ? 64 :
-    digits === 4 ? 72 : 84;
-
-  return (
-    <>
-      <s-stack
-        direction="inline"
-        gap="extra-tight"
-        alignItems="center"
-        justifyContent="end"
-        style={{ flexWrap: "nowrap" }}   // 折り返しを防ぐ
-      >
-        <s-box inlineSize="44px" style={{ flex: "0 0 auto" }}>
-          <s-button
-            onClick={() => onChange?.(clamp(v - step))}
-            disabled={decDisabled}
-            style={{ width: "100%" }}
-          >
-            -
-          </s-button>
-        </s-box>
-
-        <s-box inlineSize={`${valueWidth}px`} style={{ flex: "0 0 auto" }}>
-          <s-button
-            command="--show"
-            commandFor={id}
-            onClick={() => setText(String(v))}
-            style={{ width: "100%" }}   // 数字ボタンを固定幅に
-          >
-            {v}
-          </s-button>
-        </s-box>
-
-        <s-box inlineSize="44px" style={{ flex: "0 0 auto" }}>
-          <s-button
-            onClick={() => onChange?.(clamp(v + step))}
-            style={{ width: "100%" }}
-          >
-            +
-          </s-button>
-        </s-box>
-      </s-stack>
-
-      <s-modal id={id} heading={title}>
-        <s-box padding="base" paddingBlockEnd="none">
-          <s-stack gap="base">
-            <s-text tone="subdued" size="small">
-              数量を入力してください（{min}〜{max}）
-            </s-text>
-
-            <s-text-field
-              label="数量"
-              value={text}
-              inputMode="numeric"
-              placeholder="例: 20"
-              onInput={(e) => setText(String(e?.target?.value ?? e ?? ""))}
-              onChange={(e) => setText(String(e?.target?.value ?? e ?? ""))}
-            />
-
-            {/* ✅ 戻るボタン（モーダル内に配置、slotを使わない） */}
-            <s-divider />
-            <s-box>
-              <s-button
-                command="--hide"
-                commandFor={id}
-                onClick={() => {
-                }}
-              >
-                戻る
-              </s-button>
-            </s-box>
-          </s-stack>
-        </s-box>
-
-        <s-button
-          slot="primary-action"
-          tone="success"
-          command="--hide"
-          commandFor={id}
-          onClick={commit}
-        >
-          OK
-        </s-button>
-      </s-modal>
-    </>
-  );
-}
-
-function StockyRowShell({ children }) {
-  return (
-    <s-box
-      paddingInline="none"
-      paddingBlockStart="small-100"
-      paddingBlockEnd="small-200"
-    >
-      {children}
-    </s-box>
-  );
-}
-
-/* UI parts (ItemLeft)*/
-
-function ItemLeft(props) {
-  const showImages = !!(props.showImages ?? props.showImage);
-
-  const title =
-    (typeof props.title === "string" && props.title.trim()) ||
-    `${props.productTitle || ""}${props.variantTitle ? ` / ${props.variantTitle}` : ""}`.trim() ||
-    props.sku ||
-    props.inventoryItemId ||
-    "(unknown)";
-
-  const meta1 =
-    (typeof props.meta1 === "string" && props.meta1) ||
-    ((props.sku || props.barcode)
-      ? `${props.sku ? `SKU: ${props.sku}` : ""}${props.sku && props.barcode ? " / " : ""}${props.barcode ? `barcode: ${props.barcode}` : ""}`
-      : "");
-
-  const meta2 =
-    (typeof props.meta2 === "string" && props.meta2) ||
-    (props.plannedQty != null || props.receivedQty != null
-      ? `予定 ${props.plannedQty ?? 0} / 入庫 ${props.receivedQty ?? 0}`
-      : "");
-
-  return (
-    <s-stack direction="inline" gap="base" alignItems="center" justifyContent="start">
-      {showImages ? <Thumb imageUrl={props.imageUrl || ""} sizePx={56} /> : null}
-
-      <s-stack gap="extra-tight">
-        <s-text emphasis="bold">{title}</s-text>
-
-        {meta1 ? <s-text tone="subdued" size="small">{meta1}</s-text> : null}
-        {meta2 ? <s-text tone="subdued" size="small">{meta2}</s-text> : null}
-      </s-stack>
-    </s-stack>
-  );
-}
-
-/* debounce */
-
-function useDebounce(value, ms) {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
 }

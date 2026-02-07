@@ -1,0 +1,16 @@
+api_version = "2025-10"
+
+[[extensions]]
+uid = "c130fca1-ced8-a1d8-5f88-a909273dd6779df5a0ae"
+type = "ui_extension"
+name = "在庫調整（ロス・棚卸）"
+handle = "stock-transfer-loss"
+description = "在庫調整（ロス・棚卸）"
+
+[[extensions.targeting]]
+target = "pos.home.tile.render"
+module = "./src/Tile.jsx"
+
+[[extensions.targeting]]
+target = "pos.home.modal.render"
+module = "./src/Modal.jsx"

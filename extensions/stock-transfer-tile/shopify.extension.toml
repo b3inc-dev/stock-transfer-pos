@@ -1,11 +1,11 @@
-api_version = "2025-10"
+api_version = "2026-01"
 
 [[extensions]]
 uid = "5d4fd9c8-9ffe-27f5-b3a1-c7f81186bbf83c90721a"
 type = "ui_extension"
-name = "在庫処理（出庫・入庫）"
+name = "出庫 / 在庫処理"
 handle = "stock-transfer-tile"
-description = "在庫処理（出庫・入庫）"
+description = "出庫 / 在庫処理"
 
 [[extensions.targeting]]
 target = "pos.home.tile.render"
@@ -13,4 +13,4 @@ module = "./src/Tile.jsx"
 
 [[extensions.targeting]]
 target = "pos.home.modal.render"
-module = "./src/Modal.jsx"
+module = "./src/ModalOutbound.jsx"
