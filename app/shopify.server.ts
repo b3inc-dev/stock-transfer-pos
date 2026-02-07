@@ -27,6 +27,9 @@ const shopify = shopifyApp({
 // shopifyオブジェクトの構造を確認（デバッグ用）
 console.log("[shopify.server] shopify object keys:", Object.keys(shopify));
 console.log("[shopify.server] shopify.clients:", typeof shopify.clients, !!shopify.clients);
+// POS トークン検証 401 の切り分け: シークレットがランタイムで読めているか（値は出さない）
+const secret = process.env.SHOPIFY_API_SECRET;
+console.log("[shopify.server] SHOPIFY_API_SECRET at startup:", secret ? `set (length=${secret.length})` : "NOT SET");
 
 export default shopify;
 export const apiVersion = ApiVersion.October25;
