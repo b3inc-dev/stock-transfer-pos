@@ -28,15 +28,13 @@ api_version = "2026-01"
   topics = [ "inventory_levels/update" ]
   uri = "/webhooks/inventory_levels/update"
 
-  # 開発環境では保護された顧客データを含むwebhookは使用できないため、一時的にコメントアウト
-  # 本番環境では shopify app deploy 実行時に自動的に有効化される
-  # [[webhooks.subscriptions]]
-  # topics = [ "orders/updated" ]
-  # uri = "/webhooks/orders/updated"
+  [[webhooks.subscriptions]]
+  topics = [ "orders/updated" ]
+  uri = "/webhooks/orders/updated"
 
-  # [[webhooks.subscriptions]]
-  # topics = [ "refunds/create" ]
-  # uri = "/webhooks/refunds/create"
+  [[webhooks.subscriptions]]
+  topics = [ "refunds/create" ]
+  uri = "/webhooks/refunds/create"
 
 [access.admin]
 direct_api_mode = "offline"

@@ -125,9 +125,12 @@ export async function action({ request }: ActionFunctionArgs) {
           sourceType: activity,
           sourceId: sourceId || null,
           adjustmentGroupId: adjustmentGroupId || null,
+          // Webhook が先に保存したとき delta が null になり「変動数: -」になるため、API で上書きする
+          ...(delta !== undefined && delta !== null ? { delta: Number(delta) } : {}),
+          ...(quantityAfter !== undefined && quantityAfter !== null ? { quantityAfter: Number(quantityAfter) } : {}),
         },
       });
-      console.log(`[api.log-inventory-change] Updated admin_webhook to ${activity} (id=${recentAdminLog.id}, item=${rawItemId}, location=${rawLocId}, quantityAfter=${qtyAfter})`);
+      console.log(`[api.log-inventory-change] Updated admin_webhook to ${activity} (id=${recentAdminLog.id}, item=${rawItemId}, location=${rawLocId}, quantityAfter=${qtyAfter}, delta=${delta})`);
       return new Response(
         JSON.stringify({ ok: true, updated: true, id: recentAdminLog.id }),
         { headers: { "Content-Type": "application/json" } }
