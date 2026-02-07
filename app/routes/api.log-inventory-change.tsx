@@ -9,6 +9,16 @@ import { getDateInShopTimezone } from "../utils/timezone";
 
 const API_VERSION = "2025-10";
 
+// dest が "https://xxx.myshopify.com" のときホスト名だけにする（findSessionsByShop は "xxx.myshopify.com" で保存されている）
+function shopFromDest(dest: string): string {
+  try {
+    const u = new URL(dest);
+    return u.hostname;
+  } catch {
+    return dest;
+  }
+}
+
 // HMAC キーを秘密鍵文字列から作成（Shopify の decodeSessionToken と同じ方式）
 function secretToKey(secret: string): Uint8Array {
   const key = new Uint8Array(secret.length);
@@ -103,13 +113,14 @@ export async function action({ request }: ActionFunctionArgs) {
         throw err;
       }
     }
-    const shop = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as any).dest;
-    if (!shop) {
+    const dest = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as any).dest;
+    if (!dest) {
       return new Response(
         JSON.stringify({ ok: false, error: "No shop in session token" }),
         { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
+    const shop = shopFromDest(dest);
 
     // オフラインセッションを取得（Admin API と DB 用）
     const sessions = await (sessionStorage as any).findSessionsByShop(shop);
