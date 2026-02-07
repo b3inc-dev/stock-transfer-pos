@@ -1,7 +1,7 @@
 // app/routes/api.log-inventory-change.tsx
 // POS UI Extensionから在庫変動ログを記録するAPIエンドポイント
 
-import type { ActionFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
@@ -17,6 +17,21 @@ function toRawId(id: string | number | null | undefined): string {
   return s;
 }
 
+// CORS プリフライト（OPTIONS）用。POS から fetch する前に OPTIONS が飛び、これが 400 だと POST が送られない
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Max-Age": "86400",
+};
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+  return new Response(null, { status: 405, headers: CORS_HEADERS });
+}
+
 export async function action({ request }: ActionFunctionArgs) {
   try {
     const authResult = await authenticate.public(request);
@@ -25,10 +40,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!session) {
       return new Response(
         JSON.stringify({ ok: false, error: "No session found" }),
-        { 
-          status: 401,
-          headers: { "Content-Type": "application/json" }
-        }
+        { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
 
@@ -50,10 +62,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!inventoryItemId || !locationId || !activity) {
       return new Response(
         JSON.stringify({ ok: false, error: "Missing required fields" }),
-        { 
-          status: 400,
-          headers: { "Content-Type": "application/json" }
-        }
+        { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
 
@@ -93,51 +102,49 @@ export async function action({ request }: ActionFunctionArgs) {
     if (existingLog) {
       return new Response(
         JSON.stringify({ ok: true, message: "Log already exists", id: existingLog.id }),
-        { 
-          headers: { "Content-Type": "application/json" }
-        }
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
 
-    // Webhook が先に届いて「管理」で保存されている場合、同じ変動として種別を上書きする（履歴でロス・仕入等と表示するため）
+    // Webhook が先に届いて「管理」で保存されている場合、同じ変動として種別・変動数を上書きする。
+    // quantityAfter は検索条件に含めない（拡張側と Webhook で微妙にずれるとヒットしないため）。同一 item+location+時間帯の直近1件を更新する。
     const ts = timestamp ? new Date(timestamp) : new Date();
-    const recentFrom = new Date(ts.getTime() - 5 * 60 * 1000); // 5分前まで遡る
-    const recentTo = new Date(ts.getTime() + 2 * 60 * 1000);   // 2分後まで（Webhook遅延を考慮）
+    const recentFrom = new Date(ts.getTime() - 10 * 60 * 1000); // 10分前まで遡る
+    const recentTo = new Date(ts.getTime() + 5 * 60 * 1000);    // 5分後まで（Webhook/API 遅延を考慮）
     const rawItemId = toRawId(inventoryItemId);
     const rawLocId = toRawId(locationId);
-    const qtyAfter = quantityAfter !== undefined && quantityAfter !== null ? Number(quantityAfter) : null;
     const recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
       where: {
         shop: session.shop,
         inventoryItemId: rawItemId,
         locationId: rawLocId,
-        quantityAfter: qtyAfter,
         activity: "admin_webhook",
         timestamp: { gte: recentFrom, lte: recentTo },
       },
       orderBy: { timestamp: "desc" },
     });
     if (recentAdminLog) {
+      // 拡張から受け取った数量（delta・quantityAfter）を相違なく反映する
+      const updateData: Record<string, unknown> = {
+        activity,
+        sourceType: activity,
+        sourceId: sourceId || null,
+        adjustmentGroupId: adjustmentGroupId || null,
+      };
+      if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
+      if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
       await (db as any).inventoryChangeLog.update({
         where: { id: recentAdminLog.id },
-        data: {
-          activity,
-          sourceType: activity,
-          sourceId: sourceId || null,
-          adjustmentGroupId: adjustmentGroupId || null,
-          // Webhook が先に保存したとき delta が null になり「変動数: -」になるため、API で上書きする
-          ...(delta !== undefined && delta !== null ? { delta: Number(delta) } : {}),
-          ...(quantityAfter !== undefined && quantityAfter !== null ? { quantityAfter: Number(quantityAfter) } : {}),
-        },
+        data: updateData,
       });
-      console.log(`[api.log-inventory-change] Updated admin_webhook to ${activity} (id=${recentAdminLog.id}, item=${rawItemId}, location=${rawLocId}, quantityAfter=${qtyAfter}, delta=${delta})`);
+      console.log(`[api.log-inventory-change] Updated admin_webhook to ${activity} (id=${recentAdminLog.id}, item=${rawItemId}, location=${rawLocId}, delta=${delta}, quantityAfter=${quantityAfter})`);
       return new Response(
         JSON.stringify({ ok: true, updated: true, id: recentAdminLog.id }),
-        { headers: { "Content-Type": "application/json" } }
+        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
 
-    // 在庫変動ログを保存
+    // 在庫変動ログを保存（変動数は拡張から受け取った値をそのまま反映）
     const log = await (db as any).inventoryChangeLog.create({
       data: {
         shop: session.shop,
@@ -149,7 +156,7 @@ export async function action({ request }: ActionFunctionArgs) {
         locationId,
         locationName: locationName || locationId,
         activity,
-        delta: delta !== undefined ? delta : null,
+        delta: delta !== undefined && delta !== null ? Number(delta) : null,
         quantityAfter: quantityAfter !== undefined ? quantityAfter : null,
         sourceType: activity,
         sourceId: sourceId || null,
@@ -161,18 +168,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return new Response(
       JSON.stringify({ ok: true, id: log.id }),
-      { 
-        headers: { "Content-Type": "application/json" }
-      }
+      { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   } catch (e: any) {
     console.error("[api.log-inventory-change] Error:", e);
     return new Response(
       JSON.stringify({ ok: false, error: e?.message || "Unknown error", stack: e?.stack }),
-      { 
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      }
+      { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
 }

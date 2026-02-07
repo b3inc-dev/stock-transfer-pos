@@ -352,7 +352,7 @@ export function OrderConditions({
                     <s-text>仕入先: {finalDestinationName || "未選択"}</s-text>
                     {destinationRequired && (
                       <s-badge
-                        tone={finalDestinationName.trim() ? "success" : "critical"}
+                        tone={finalDestinationName.trim() ? "info" : "critical"}
                       >
                         {finalDestinationName.trim() ? "選択中" : "必須"}
                       </s-badge>
@@ -391,7 +391,7 @@ export function OrderConditions({
                         filteredDestinations.map((d) => (
                           <s-button
                             key={d.id}
-                            tone={d.id === destinationId ? "success" : undefined}
+                            tone={d.id === destinationId ? "info" : undefined}
                             onClick={() => {
                               setDestinationId(d.id);
                               setDestinationName(d.name);
@@ -410,7 +410,7 @@ export function OrderConditions({
                         <>
                           <s-button
                             kind="secondary"
-                            tone={showDestinationCustomInput ? "success" : undefined}
+                            tone={showDestinationCustomInput ? "info" : undefined}
                             onClick={() => {
                               setShowDestinationCustomInput(!showDestinationCustomInput);
                               if (!showDestinationCustomInput) {

@@ -226,6 +226,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const locationMap = new Map<string, DailyInventorySnapshot>();
     
     for (const item of allItems) {
+      // 金額が0になる要因: unitCost未設定→原価0。variantがnull→価格0。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
       const unitCost = parseFloat(item.unitCost?.amount ?? "0");
       const variant = item.variant;
       const retailPrice = parseFloat(variant?.price ?? "0");

@@ -148,10 +148,11 @@ export async function action({ request }: ActionFunctionArgs) {
         const admin = shopify.clients.Graphql({ session });
         
         // 既存のスナップショットを読み取る
-        const snapshotsResp = await admin.request({ data: GET_SNAPSHOTS_QUERY });
-        const snapshotsData = await snapshotsResp.json();
-        
-        if (snapshotsData.errors) {
+        // request の正しい形式: 第1引数＝クエリ文字列、第2引数＝{ variables }。{ data, variables } だと query がオブジェクトになり API が variant/unitCost を返さない
+        const snapshotsResp = await admin.request(GET_SNAPSHOTS_QUERY);
+        const snapshotsData = snapshotsResp && typeof snapshotsResp.json === "function" ? await snapshotsResp.json() : snapshotsResp;
+
+        if (snapshotsData?.errors) {
           errors.push(`${sessionRecord.shop}: ${snapshotsData.errors.map((e: any) => e.message).join(", ")}`);
           continue;
         }
@@ -189,10 +190,10 @@ export async function action({ request }: ActionFunctionArgs) {
         let cursor: string | null = null;
 
         while (hasNextPage) {
-          const resp = await admin.request({ data: INVENTORY_ITEMS_QUERY, variables: { first: 50, after: cursor } });
-          const data = await resp.json();
-          
-          if (data.errors) {
+          const resp = await admin.request(INVENTORY_ITEMS_QUERY, { variables: { first: 50, after: cursor } });
+          const data = resp && typeof resp.json === "function" ? await resp.json() : resp;
+
+          if (data?.errors) {
             errors.push(`${sessionRecord.shop}: ${data.errors.map((e: any) => e.message).join(", ")}`);
             break;
           }
@@ -209,6 +210,7 @@ export async function action({ request }: ActionFunctionArgs) {
         const locationMap = new Map<string, DailyInventorySnapshot>();
         
         for (const item of allItems) {
+          // 金額が0になる要因: unitCost未設定→原価0。variantがnull（削除済み商品の在庫等）→価格0。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
           const unitCost = parseFloat(item.unitCost?.amount ?? "0");
           const variant = item.variant;
           const retailPrice = parseFloat(variant?.price ?? "0");
@@ -250,8 +252,7 @@ export async function action({ request }: ActionFunctionArgs) {
         updatedSnapshots.push(...yesterdaySnapshots);
 
         // Metafieldに保存
-        const saveResp = await admin.request({
-          data: SAVE_SNAPSHOTS_MUTATION,
+        const saveResp = await admin.request(SAVE_SNAPSHOTS_MUTATION, {
           variables: {
             metafields: [
               {
@@ -268,7 +269,7 @@ export async function action({ request }: ActionFunctionArgs) {
           },
         });
 
-        const saveData = await saveResp.json();
+        const saveData = saveResp && typeof saveResp.json === "function" ? await saveResp.json() : saveResp;
         const userErrors = saveData?.data?.metafieldsSet?.userErrors ?? [];
 
         if (userErrors.length > 0) {

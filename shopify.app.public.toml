@@ -28,13 +28,15 @@ api_version = "2026-01"
   topics = [ "inventory_levels/update" ]
   uri = "/webhooks/inventory_levels/update"
 
-  [[webhooks.subscriptions]]
-  topics = [ "orders/updated" ]
-  uri = "/webhooks/orders/updated"
+  # 保護された顧客データを含む Webhook。未承認アプリではデプロイ時にエラーになるためコメントアウト。
+  # 承認後はコメントを外して deploy する。https://shopify.dev/docs/apps/launch/protected-customer-data
+  # [[webhooks.subscriptions]]
+  # topics = [ "orders/updated" ]
+  # uri = "/webhooks/orders/updated"
 
-  [[webhooks.subscriptions]]
-  topics = [ "refunds/create" ]
-  uri = "/webhooks/refunds/create"
+  # [[webhooks.subscriptions]]
+  # topics = [ "refunds/create" ]
+  # uri = "/webhooks/refunds/create"
 
 [access.admin]
 direct_api_mode = "offline"
