@@ -75,6 +75,31 @@
 
 ---
 
+## POST /api/log-inventory-change が 401 になる場合
+
+POS から在庫変動を送ったときに **POST /api/log-inventory-change** が **401 Unauthorized** で返ると、アクティビティ・変動量が記録されず、後から届く Webhook だけが「管理」で保存されます。
+
+### ログで切り分け
+
+| ログメッセージ | 意味 | 対処 |
+|----------------|------|------|
+| `[api.log-inventory-change] No Authorization Bearer header` | POS がトークンを送っていない | 拡張側で `session.getSessionToken()` が取れているか、`Authorization: Bearer ${token}` を付けて fetch しているか確認。 |
+| `[api.log-inventory-change] POS auth failed: Session token invalid...` | トークンは送っているが検証に失敗 | **Render の環境変数**を確認（下記）。 |
+
+### 対処: Render の SHOPIFY_API_KEY / SHOPIFY_API_SECRET
+
+- POS が使っている **Shopify アプリ**（ストアにインストールされているアプリ）と、**Render で動かしているアプリ**が **同じ**である必要があります。
+- **本番用アプリ**（Partner ダッシュボードの「本番」アプリ）で POS を使っているなら、Render の環境変数は **その本番アプリの API キー・API シークレット**にしてください。
+- **開発用アプリ**のキーを Render に設定したままになっていると、POS のセッショントークン（本番アプリで署名されている）の検証に失敗し、401 になります。
+
+**確認手順**
+
+1. [Partner Dashboard](https://partners.shopify.com) → 該当アプリ（本番）→ **設定** などで **API キー** と **API シークレット** を確認。
+2. [Render Dashboard](https://dashboard.render.com) → 該当サービス（pos-stock）→ **Environment** で **SHOPIFY_API_KEY** と **SHOPIFY_API_SECRET** が上記と一致しているか確認。
+3. 変更した場合は **Save** し、サービスを **再デプロイ**（または自動で再デプロイされるのを待つ）。
+
+---
+
 ## デプロイ後に過去の履歴変動が消える理由
 
 - 在庫変動履歴は **Prisma の InventoryChangeLog** に保存されており、現在 **SQLite**（`file:dev.sqlite`）を使っています。

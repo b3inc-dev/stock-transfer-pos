@@ -52,9 +52,8 @@ export async function action({ request }: ActionFunctionArgs) {
       const auth = await authenticate.pos(request);
       sessionToken = auth.sessionToken;
     } catch (err: any) {
-      if (err instanceof Response && err.status === 401) {
-        console.warn("[api.log-inventory-change] Session token invalid or expired. Check Render env: SHOPIFY_API_KEY / SHOPIFY_API_SECRET must match the app used by POS.");
-      }
+      const is401 = err?.status === 401 || (err instanceof Response && err.status === 401);
+      console.warn("[api.log-inventory-change] POS auth failed:", is401 ? "Session token invalid. Render の SHOPIFY_API_KEY / SHOPIFY_API_SECRET を、POS が使うアプリのものと一致させてください。" : String(err?.message || err));
       throw err;
     }
     const shop = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as any).dest;
