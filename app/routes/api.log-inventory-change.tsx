@@ -2,23 +2,31 @@
 // POS UI Extensionから在庫変動ログを記録するAPIエンドポイント
 
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
 
 const API_VERSION = "2025-10";
 
-// POS トークンを自前で検証（authenticate.pos が 401 になる場合の切り分け・代替用）
+// HMAC キーを秘密鍵文字列から作成（Shopify の decodeSessionToken と同じ方式）
+function secretToKey(secret: string): Uint8Array {
+  const key = new Uint8Array(secret.length);
+  for (let i = 0; i < secret.length; i++) key[i] = secret.charCodeAt(i);
+  return key;
+}
+
+// POS トークンを jose で検証（authenticate.pos が 401 になる場合の代替用・ビルドで内部パスを参照しない）
 async function decodePOSToken(token: string): Promise<{ dest?: string } | null> {
-  const apiKey = process.env.SHOPIFY_API_KEY;
   const apiSecretKey = process.env.SHOPIFY_API_SECRET || "";
   if (!apiSecretKey) return null;
   try {
-    const mod = await import("@shopify/shopify-api/dist/cjs/lib/session/decode-session-token.js");
-    const createDecoder = mod.decodeSessionToken as (config: { apiKey?: string; apiSecretKey: string }) => (t: string, o?: { checkAudience?: boolean }) => Promise<{ dest?: string }>;
-    const decode = createDecoder({ apiKey, apiSecretKey });
-    const payload = await decode(token, { checkAudience: false });
-    return payload;
+    const key = secretToKey(apiSecretKey);
+    const { payload } = await jwtVerify(token, key, {
+      algorithms: ["HS256"],
+      clockTolerance: 10,
+    });
+    return payload as { dest?: string };
   } catch (e: any) {
     console.warn("[api.log-inventory-change] decodeSessionToken error:", e?.message || String(e));
     return null;
