@@ -8,6 +8,23 @@ import { getDateInShopTimezone } from "../utils/timezone";
 
 const API_VERSION = "2025-10";
 
+// POS トークンを自前で検証（authenticate.pos が 401 になる場合の切り分け・代替用）
+async function decodePOSToken(token: string): Promise<{ dest?: string } | null> {
+  const apiKey = process.env.SHOPIFY_API_KEY;
+  const apiSecretKey = process.env.SHOPIFY_API_SECRET || "";
+  if (!apiSecretKey) return null;
+  try {
+    const mod = await import("@shopify/shopify-api/dist/cjs/lib/session/decode-session-token.js");
+    const createDecoder = mod.decodeSessionToken as (config: { apiKey?: string; apiSecretKey: string }) => (t: string, o?: { checkAudience?: boolean }) => Promise<{ dest?: string }>;
+    const decode = createDecoder({ apiKey, apiSecretKey });
+    const payload = await decode(token, { checkAudience: false });
+    return payload;
+  } catch (e: any) {
+    console.warn("[api.log-inventory-change] decodeSessionToken error:", e?.message || String(e));
+    return null;
+  }
+}
+
 // Webhook は数値IDで保存するため、GID の場合は末尾の数値に正規化して照合する
 function toRawId(id: string | number | null | undefined): string {
   if (id == null) return "";
@@ -46,10 +63,10 @@ export async function action({ request }: ActionFunctionArgs) {
         { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
 
     // デバッグ: トークン payload を検証せずに読んで aud/iss/dest をログ（本番アプリ経由でも 401 になる場合の切り分け用）
     try {
-      const token = authHeader.replace(/^Bearer\s+/i, "").trim();
       const parts = token.split(".");
       if (parts.length === 3) {
         const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
@@ -66,15 +83,18 @@ export async function action({ request }: ActionFunctionArgs) {
       /* ignore decode errors */
     }
 
-    // POS UI Extension からのリクエストは authenticate.pos で検証する（authenticate.public は存在しない）
-    let sessionToken: { dest?: string };
-    try {
-      const auth = await authenticate.pos(request);
-      sessionToken = auth.sessionToken;
-    } catch (err: any) {
-      const is401 = err?.status === 401 || (err instanceof Response && err.status === 401);
-      console.warn("[api.log-inventory-change] POS auth failed:", is401 ? "Session token invalid. Render の SHOPIFY_API_KEY / SHOPIFY_API_SECRET を、POS が使うアプリのものと一致させてください。" : String(err?.message || err));
-      throw err;
+    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    // 先に自前 decode を試す（成功すれば authenticate.pos の 401 を回避し、失敗時はエラー内容をログに出す）
+    let sessionToken: { dest?: string } | null = await decodePOSToken(token);
+    if (!sessionToken?.dest) {
+      try {
+        const auth = await authenticate.pos(request);
+        sessionToken = auth.sessionToken;
+      } catch (err: any) {
+        const is401 = err?.status === 401 || (err instanceof Response && err.status === 401);
+        console.warn("[api.log-inventory-change] POS auth failed:", is401 ? "Session token invalid. 上記の decodeSessionToken error を確認してください。" : String(err?.message || err));
+        throw err;
+      }
     }
     const shop = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as any).dest;
     if (!shop) {
