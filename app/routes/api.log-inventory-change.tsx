@@ -91,7 +91,6 @@ export async function action({ request }: ActionFunctionArgs) {
       /* ignore decode errors */
     }
 
-    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
     // 先に自前 decode を試す（成功すれば authenticate.pos の 401 を回避し、失敗時はエラー内容をログに出す）
     let sessionToken: { dest?: string } | null = await decodePOSToken(token);
     if (!sessionToken?.dest) {
