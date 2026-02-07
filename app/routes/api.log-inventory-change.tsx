@@ -2,9 +2,11 @@
 // POS UI Extensionから在庫変動ログを記録するAPIエンドポイント
 
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { authenticate } from "../shopify.server";
+import { authenticate, sessionStorage } from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
+
+const API_VERSION = "2025-10";
 
 // Webhook は数値IDで保存するため、GID の場合は末尾の数値に正規化して照合する
 function toRawId(id: string | number | null | undefined): string {
@@ -34,15 +36,43 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const authResult = await authenticate.public(request);
-    const { admin, session } = authResult;
-
-    if (!session) {
+    // POS UI Extension からのリクエストは authenticate.pos で検証する（authenticate.public は存在しない）
+    const { sessionToken } = await authenticate.pos(request);
+    const shop = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as any).dest;
+    if (!shop) {
       return new Response(
-        JSON.stringify({ ok: false, error: "No session found" }),
+        JSON.stringify({ ok: false, error: "No shop in session token" }),
         { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
+
+    // オフラインセッションを取得（Admin API と DB 用）
+    const sessions = await (sessionStorage as any).findSessionsByShop(shop);
+    const session = sessions?.find((s: any) => s.isOnline === false) ?? sessions?.[0];
+    if (!session) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "No session found for shop" }),
+        { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+
+    const shopDomain = session.shop;
+    const accessToken = session.accessToken;
+    const admin = {
+      request: async (options: { data: string; variables?: any }) => {
+        return fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": accessToken,
+          },
+          body: JSON.stringify({
+            query: options.data.replace(/^#graphql\s*/m, "").trim(),
+            variables: options.variables || {},
+          }),
+        });
+      },
+    };
 
     const body = await request.json();
     const {
@@ -144,16 +174,16 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    // 在庫変動ログを保存（変動数は拡張から受け取った値をそのまま反映）
+    // 在庫変動ログを保存（変動数は拡張から受け取った値をそのまま反映）。IDはraw形式で統一（Webhook・検索と一致）
     const log = await (db as any).inventoryChangeLog.create({
       data: {
         shop: session.shop,
         timestamp: timestamp ? new Date(timestamp) : new Date(),
         date,
-        inventoryItemId,
+        inventoryItemId: rawItemIdLog,
         variantId: variantId || null,
         sku: sku || "",
-        locationId,
+        locationId: rawLocIdLog,
         locationName: locationName || locationId,
         activity,
         delta: delta !== undefined && delta !== null ? Number(delta) : null,
