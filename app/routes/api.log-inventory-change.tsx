@@ -36,8 +36,27 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
+    // 401 の原因切り分け: トークン未送信 vs トークン検証失敗（秘密鍵不一致など）
+    const hasAuth = request.headers.get("authorization")?.startsWith("Bearer ");
+    if (!hasAuth) {
+      console.warn("[api.log-inventory-change] No Authorization Bearer header");
+      return new Response(
+        JSON.stringify({ ok: false, error: "Missing session token" }),
+        { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+
     // POS UI Extension からのリクエストは authenticate.pos で検証する（authenticate.public は存在しない）
-    const { sessionToken } = await authenticate.pos(request);
+    let sessionToken: { dest?: string };
+    try {
+      const auth = await authenticate.pos(request);
+      sessionToken = auth.sessionToken;
+    } catch (err: any) {
+      if (err instanceof Response && err.status === 401) {
+        console.warn("[api.log-inventory-change] Session token invalid or expired. Check Render env: SHOPIFY_API_KEY / SHOPIFY_API_SECRET must match the app used by POS.");
+      }
+      throw err;
+    }
     const shop = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as any).dest;
     if (!shop) {
       return new Response(
