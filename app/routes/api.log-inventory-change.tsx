@@ -37,13 +37,33 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   try {
     // 401 の原因切り分け: トークン未送信 vs トークン検証失敗（秘密鍵不一致など）
-    const hasAuth = request.headers.get("authorization")?.startsWith("Bearer ");
+    const authHeader = request.headers.get("authorization");
+    const hasAuth = authHeader?.startsWith("Bearer ");
     if (!hasAuth) {
       console.warn("[api.log-inventory-change] No Authorization Bearer header");
       return new Response(
         JSON.stringify({ ok: false, error: "Missing session token" }),
         { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
+    }
+
+    // デバッグ: トークン payload を検証せずに読んで aud/iss/dest をログ（本番アプリ経由でも 401 になる場合の切り分け用）
+    try {
+      const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+      const parts = token.split(".");
+      if (parts.length === 3) {
+        const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        const payload = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+        console.warn("[api.log-inventory-change] Token payload (unverified):", {
+          aud: payload.aud,
+          iss: payload.iss,
+          dest: payload.dest,
+          exp: payload.exp,
+          apiKey: process.env.SHOPIFY_API_KEY ? `${process.env.SHOPIFY_API_KEY.slice(0, 8)}...` : "(not set)",
+        });
+      }
+    } catch (_) {
+      /* ignore decode errors */
     }
 
     // POS UI Extension からのリクエストは authenticate.pos で検証する（authenticate.public は存在しない）
