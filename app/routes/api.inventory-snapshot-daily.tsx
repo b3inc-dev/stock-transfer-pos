@@ -11,6 +11,7 @@ const INVENTORY_INFO_NS = "inventory_info";
 const DAILY_SNAPSHOTS_KEY = "daily_snapshots";
 
 // 在庫アイテムを取得するGraphQLクエリ
+// variant は deprecated のため variants(first:1) も取得し、価格が取れない場合のフォールバックにする
 const INVENTORY_ITEMS_QUERY = `#graphql
   query InventoryItemsForSnapshot($first: Int!, $after: String) {
     inventoryItems(first: $first, after: $after) {
@@ -48,6 +49,14 @@ const INVENTORY_ITEMS_QUERY = `#graphql
             product {
               id
               title
+            }
+          }
+          variants(first: 1) {
+            edges {
+              node {
+                price
+                compareAtPrice
+              }
             }
           }
         }
@@ -173,7 +182,10 @@ export async function action({ request }: ActionFunctionArgs) {
         const snapshotsData = snapshotsResp && typeof snapshotsResp.json === "function" ? await snapshotsResp.json() : snapshotsResp;
 
         if (snapshotsData?.errors) {
-          errors.push(`${sessionRecord.shop}: ${snapshotsData.errors.map((e: any) => e.message).join(", ")}`);
+          const errList = Array.isArray(snapshotsData.errors)
+            ? snapshotsData.errors.map((e: any) => e?.message ?? String(e))
+            : [String(snapshotsData.errors)];
+          errors.push(`${sessionRecord.shop}: ${errList.join(", ")}`);
           continue;
         }
         
@@ -219,7 +231,10 @@ export async function action({ request }: ActionFunctionArgs) {
           const data = resp && typeof resp.json === "function" ? await resp.json() : resp;
 
           if (data?.errors) {
-            errors.push(`${sessionRecord.shop}: ${data.errors.map((e: any) => e.message).join(", ")}`);
+            const errList = Array.isArray(data.errors)
+              ? data.errors.map((e: any) => e?.message ?? String(e))
+              : [String(data.errors)];
+            errors.push(`${sessionRecord.shop}: ${errList.join(", ")}`);
             break;
           }
           
@@ -234,12 +249,20 @@ export async function action({ request }: ActionFunctionArgs) {
         // ロケーション別に集計
         const locationMap = new Map<string, DailyInventorySnapshot>();
         
+        // 価格を取得（Money は文字列 "123.45" のことも、オブジェクト { amount } のこともある）
+        const toAmount = (v: unknown): number => {
+          if (v == null) return 0;
+          if (typeof v === "string") return parseFloat(v) || 0;
+          if (typeof v === "object" && v !== null && "amount" in v) return parseFloat((v as { amount?: string }).amount ?? "0") || 0;
+          return 0;
+        };
+
         for (const item of allItems) {
-          // 金額が0になる要因: unitCost未設定→原価0。variantがnull（削除済み商品の在庫等）→価格0。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
-          const unitCost = parseFloat(item.unitCost?.amount ?? "0");
-          const variant = item.variant;
-          const retailPrice = parseFloat(variant?.price ?? "0");
-          const compareAtPrice = parseFloat(variant?.compareAtPrice ?? "0");
+          // 金額が0になる要因: unitCost未設定/権限不足→原価0。variant が null（deprecated や削除済み）→ variants(first:1) で補完。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
+          const unitCost = toAmount(item.unitCost?.amount ?? item.unitCost);
+          const variant = item.variant ?? item.variants?.edges?.[0]?.node ?? null;
+          const retailPrice = toAmount(variant?.price);
+          const compareAtPrice = toAmount(variant?.compareAtPrice);
           
           const levels = item.inventoryLevels?.edges ?? [];
           for (const levelEdge of levels) {

@@ -30,6 +30,12 @@
 
 あわせて、`request` の戻り値が Response ではなくオブジェクトの場合にも対応するため、`resp.json()` の代わりに「`resp.json` が関数なら `await resp.json()`、そうでなければ `resp` をそのまま使う」ようにレスポンスの取り扱いを統一した。
 
+**追加対応（2026-02-08）**: 「販売価格・値引き前価格・原価は登録されているのにスナップショットでは 0 になる」事象への対処。
+
+- **InventoryItem.variant が deprecated**: クエリに `variants(first: 1) { edges { node { price compareAtPrice } } }` を追加。集計時に `variant` が null の場合は `variants.edges[0].node` から価格を取得する。
+- **価格がオブジェクトで返る場合**: `parseFloat(variant?.price)` だと `price` が `{ amount: "123.00" }` のとき NaN になるため、文字列・オブジェクト両方に対応する `toAmount()` で集計するように変更。
+- 上記を `api.inventory-snapshot-daily.tsx` と `app.inventory-info.tsx` の両方に適用（日次API と「今日」表示で同じロジック）。
+
 ---
 
 ## 保存・集計の流れ
@@ -41,9 +47,8 @@
    `app/routes/api.inventory-snapshot-daily.tsx` および `app/routes/app.inventory-info.tsx` の loader（今日のリアルタイム表示）では、次のように計算している。
 
    - `quantity` = `inventoryLevel.quantities(name: "available")` の値（在庫数）
-   - `retailPrice` = `variant?.price ?? "0"` を `parseFloat`
-   - `compareAtPrice` = `variant?.compareAtPrice ?? "0"` を `parseFloat`
-   - `unitCost` = `item.unitCost?.amount ?? "0"` を `parseFloat`
+   - 価格元: `variant = item.variant ?? item.variants?.edges?.[0]?.node`（variant が null のときは variants(first:1) で補完）
+   - `retailPrice` / `compareAtPrice` / `unitCost` = `toAmount(…)` で取得（文字列 "123.45" とオブジェクト `{ amount: "123.45" }` の両方に対応）
    - ロケーションごとに  
      `totalQuantity += quantity`  
      `totalRetailValue += quantity * retailPrice`  
@@ -56,19 +61,24 @@
 
 ### 1. 原価（totalCostValue）が 0 になる
 
-- **原因**: 商品の**原価（コスト）をストアで設定していない**場合が多い。
-- Shopify の在庫アイテムには `unitCost` があり、管理画面の「原価」で設定する。未設定の場合は API でも `unitCost` が null/未設定となり、コードでは `"0"` として扱うため、**原価合計は常に 0** になる。
-- **対応**: 商品・在庫管理で原価を入力すると、次回以降の日次スナップショットから原価合計が反映される。コード側の不具合ではない。
+- **原因1**: 商品の**原価（コスト）をストアで設定していない**場合が多い。
+- Shopify の在庫アイテムには `unitCost`（MoneyV2）があり、管理画面の「原価」で設定する。未設定の場合は API でも `unitCost` が null/未設定となり、コードでは 0 として扱うため、**原価合計は 0** になる。
+- **原因2（権限）**: `InventoryItem.unitCost` は、**「商品コストを表示」権限（View product costs）** が必要。権限がないトークンで API を叩くと `unitCost` が返らず null になり、原価合計が 0 になる。Cron で使うオフラインアクセストークンに、ストア側でこの権限が付与されているか確認する。
+- **対応**: 商品・在庫管理で原価を入力し、アプリに「商品コストを表示」権限が付与されていれば、日次スナップショットに原価合計が反映される。
 
 ### 2. 販売価格合計・割引前価格合計（totalRetailValue / totalCompareAtPriceValue）が 0 になる
 
 - **原因候補**:
   1. **在庫アイテムに紐づく `variant` が null**  
      商品削除後も在庫レコードが残っている場合など、`inventoryItem.variant` が null になることがある。このとき `variant?.price` は undefined となり、`retailPrice` は 0 で集計される。
-  2. **バリアントに価格が設定されていない**  
+  2. **`InventoryItem.variant` が deprecated**  
+     Shopify Admin API では `InventoryItem.variant` は **非推奨（deprecated）**。API バージョンや条件によっては `variant` が返らず、価格が取れないことがある。→ **対応（2026-02-08）**: クエリで `variants(first: 1)` も取得し、`variant` が null のときは `variants.edges[0].node` から価格を取得するようにした。
+  3. **価格がオブジェクトで返る場合**  
+     `ProductVariant.price` / `compareAtPrice` は型上は Money（文字列）だが、実レスポンスが `{ amount: "123.00" }` のようにオブジェクトになることがある。`parseFloat(variant?.price)` だと NaN になり合計が 0 になる。→ **対応（2026-02-08）**: 文字列とオブジェクトの両方を受け付ける `toAmount()` で集計するようにした。
+  4. **バリアントに価格が設定されていない**  
      価格未設定のバリアントでは `variant.price` が null/空の可能性がある。
-  3. **GraphQL の取得範囲**  
-     現在のクエリでは `variant { id, sku, price, compareAtPrice, product { id, title } }` を取得している。通常はここで価格は取れるが、販売チャネル・Market によっては別価格になる場合があり、Admin API のデフォルト価格が想定と異なる可能性はある（多くの場合は 0 の主因にはならない）。
+  5. **GraphQL の取得範囲**  
+     販売チャネル・Market によっては別価格になる場合があり、Admin API のデフォルト価格が想定と異なる可能性はある（多くの場合は 0 の主因にはならない）。
 
 - **確認方法**:
   - 管理画面の「商品」で、対象ロケーションに在庫がある商品の「価格」が設定されているか確認する。
