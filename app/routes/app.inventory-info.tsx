@@ -327,8 +327,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
 
     let startDate = startDateParam || defaultStartForHistory;
-    const endDate = endDateParam || defaultEndForHistory;
+    let endDate = endDateParam || defaultEndForHistory;
 
+    // 開始日が終了日より後の場合は補正（URLやブックマークで逆転している場合）
+    if (startDate > endDate) {
+      startDate = endDate;
+    }
     // URLパラメータで指定された開始日がログの最初の日付より前の場合は調整
     if (firstChangeHistoryDate && startDate < firstChangeHistoryDate) {
       startDate = firstChangeHistoryDate;
@@ -680,12 +684,14 @@ export default function InventoryInfoPage() {
     refund: "返品",
   };
 
-  // 在庫変動履歴のフィルター変更処理
+  // 在庫変動履歴のフィルター変更処理（開始日 > 終了日の場合は補正）
   const handleChangeHistoryFilterChange = () => {
     const params = new URLSearchParams(searchParams);
     params.set("tab", "change-history");
-    params.set("startDate", changeHistoryStartDate);
-    params.set("endDate", changeHistoryEndDate);
+    const start = changeHistoryStartDate > changeHistoryEndDate ? changeHistoryEndDate : changeHistoryStartDate;
+    const end = changeHistoryStartDate > changeHistoryEndDate ? changeHistoryStartDate : changeHistoryEndDate;
+    params.set("startDate", start);
+    params.set("endDate", end);
     if (changeHistoryLocationFilters.size > 0) {
       params.set("changeHistoryLocationIds", Array.from(changeHistoryLocationFilters).join(","));
     } else {
@@ -996,7 +1002,10 @@ export default function InventoryInfoPage() {
                       fontSize: "14px",
                     }}
                   >
-                    {selectedDate}のスナップショットが見つかりませんでした。
+                    <div>{selectedDate}のスナップショットが見つかりませんでした。</div>
+                    <div style={{ marginTop: "8px", fontSize: "13px", opacity: 0.9 }}>
+                      過去日付のスナップショットは、Cronで毎日23:59（推奨）または0:00（ショップタイムゾーン）に自動保存されます。管理画面を開かなくても保存されます。CronはRender等で手動設定が必要です。
+                    </div>
                   </div>
                 )}
 

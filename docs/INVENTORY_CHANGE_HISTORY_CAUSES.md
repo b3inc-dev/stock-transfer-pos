@@ -81,10 +81,17 @@ POS から在庫変動を送ったときに **POST /api/log-inventory-change** �
 
 ### ログで切り分け
 
-| ログメッセージ | 意味 | 対処 |
+| ログメッセージ / レスポンス | 意味 | 対処 |
 |----------------|------|------|
 | `[api.log-inventory-change] No Authorization Bearer header` | POS がトークンを送っていない | 拡張側で `session.getSessionToken()` が取れているか、`Authorization: Bearer ${token}` を付けて fetch しているか確認。 |
 | `[api.log-inventory-change] POS auth failed: Session token invalid...` | トークンは送っているが検証に失敗 | **Render の環境変数**を確認（下記）。 |
+| レスポンス `error: "No session found for shop"`, `code: "NO_OFFLINE_SESSION"` | トークンは有効だが、DB にオフラインセッションがまだ無い | **管理画面でアプリを一度開く**（下記「初回セッション」）。 |
+
+### 対処: 初回セッション（No session found for shop）
+
+- **オフラインセッション**は、**管理画面でアプリを開いたとき**に OAuth が完了し、DB（PostgreSQL）に保存されます。
+- **2026年2月以降**: セッションが無くても **api** と **Webhook** は 401 にせず、最小限の情報で履歴に記録します（api は body と UTC、Webhook はペイロードとロケーションIDのみ。管理画面を開いたあとは従来どおりロケーション名・SKU・種別が入ります）。
+- それ以前の挙動: インストール直後や再デプロイ直後はセッションが無く、**POST /api/log-inventory-change** が 401（`NO_OFFLINE_SESSION`）になることがありました。**対処**: ストアの **管理画面**（Admin）で **アプリを一度開く**と、以降はセッション付きで処理されます。
 
 ### 対処: Render の SHOPIFY_API_KEY / SHOPIFY_API_SECRET
 

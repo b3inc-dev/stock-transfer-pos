@@ -81,6 +81,20 @@ export function formatDateTimeInShopTimezone(
 }
 
 /**
+ * 指定タイムゾーンでの「現在」の時（0-23）を返す。
+ * 日次スナップショットを「前日終了時点」として保存するため、深夜帯（0-5時）のみ保存許可するチェックに使用。
+ */
+export function getHourInShopTimezone(date: Date = new Date(), timezone: string = "UTC"): number {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    hour: "numeric",
+    hour12: false,
+  }).formatToParts(date);
+  const hour = parts.find((p) => p.type === "hour");
+  return hour ? parseInt(hour.value, 10) : 0;
+}
+
+/**
  * ショップのタイムゾーンを取得する関数（loader内で使用）
  * @param admin Shopify Admin APIクライアント
  * @returns タイムゾーン文字列（IANA形式）、取得失敗時は"UTC"

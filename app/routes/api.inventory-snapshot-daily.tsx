@@ -2,9 +2,10 @@
 // 日次スナップショット自動保存API（Cronジョブから呼び出し用）
 import type { ActionFunctionArgs } from "react-router";
 import { sessionStorage } from "../shopify.server";
-import shopify from "../shopify.server";
 import db from "../db.server";
-import { getDateInShopTimezone } from "../utils/timezone";
+import { getDateInShopTimezone, getHourInShopTimezone } from "../utils/timezone";
+
+const API_VERSION = "2025-10";
 
 const INVENTORY_INFO_NS = "inventory_info";
 const DAILY_SNAPSHOTS_KEY = "daily_snapshots";
@@ -144,9 +145,28 @@ export async function action({ request }: ActionFunctionArgs) {
           continue;
         }
 
-        // セッションからadminクライアントを作成
-        const admin = shopify.clients.Graphql({ session });
-        
+        // セッションからGraphQLクライアントを作成（shopify.clients は React Router 環境で undefined のため手動で fetch）
+        const shopDomain = session.shop;
+        const accessToken = session.accessToken || "";
+        const admin = {
+          request: async (queryOrOpts: string | { data?: string; variables?: any }, maybeVars?: any) => {
+            const queryStr = typeof queryOrOpts === "string" ? queryOrOpts : (queryOrOpts.data || "");
+            const variables = typeof queryOrOpts === "string" ? (maybeVars?.variables ?? maybeVars ?? {}) : (queryOrOpts.variables || {});
+            const res = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Shopify-Access-Token": accessToken,
+              },
+              body: JSON.stringify({
+                query: queryStr.replace(/^#graphql\s*/m, "").trim(),
+                variables: variables || {},
+              }),
+            });
+            return res;
+          },
+        };
+
         // 既存のスナップショットを読み取る
         // request の正しい形式: 第1引数＝クエリ文字列、第2引数＝{ variables }。{ data, variables } だと query がオブジェクトになり API が variant/unitCost を返さない
         const snapshotsResp = await admin.request(GET_SNAPSHOTS_QUERY);
@@ -173,18 +193,23 @@ export async function action({ request }: ActionFunctionArgs) {
           }
         }
 
-        // 前日のスナップショットを保存（ショップのタイムゾーンに基づく）
-        const yesterdayDate = new Date();
+        // 保存する日付: 23:00-23:59 に実行されたら「今日」、それ以外（0:00 実行など）は「前日」。前日分＝その日の終了時点の在庫。
+        const now = new Date();
+        const hourInShop = getHourInShopTimezone(now, shopTimezone);
+        const isEndOfDayRun = hourInShop === 23; // 23:59 実行 → その日の終了時点を「今日」の日付で保存
+        const yesterdayDate = new Date(now);
         yesterdayDate.setDate(yesterdayDate.getDate() - 1);
-        const yesterdayStr = getDateInShopTimezone(yesterdayDate, shopTimezone);
-        
-        // 既に前日のスナップショットが存在する場合はスキップ
-        const yesterdaySnapshotExists = savedSnapshots.snapshots.some((s) => s.date === yesterdayStr);
-        if (yesterdaySnapshotExists) {
-          continue; // 既に保存済みの場合はスキップ
+        const dateToSaveStr = isEndOfDayRun
+          ? getDateInShopTimezone(now, shopTimezone)   // 今日
+          : getDateInShopTimezone(yesterdayDate, shopTimezone); // 前日
+
+        // 既にその日付のスナップショットが存在する場合はスキップ（1日1回だけ保存、二重実行防止）
+        const existingForDate = savedSnapshots.snapshots.some((s) => s.date === dateToSaveStr);
+        if (existingForDate) {
+          continue;
         }
 
-        // 前日の在庫情報を取得
+        // その日付の在庫情報を取得
         const allItems: any[] = [];
         let hasNextPage = true;
         let cursor: string | null = null;
@@ -227,7 +252,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
             if (!locationMap.has(locationId)) {
               locationMap.set(locationId, {
-                date: yesterdayStr,
+                date: dateToSaveStr,
                 locationId,
                 locationName,
                 totalQuantity: 0,
@@ -245,11 +270,11 @@ export async function action({ request }: ActionFunctionArgs) {
           }
         }
 
-        const yesterdaySnapshots = Array.from(locationMap.values());
+        const newSnapshots = Array.from(locationMap.values());
 
-        // 既存のスナップショットから前日の日付のものを削除して、新しいものを追加
-        const updatedSnapshots = savedSnapshots.snapshots.filter((s) => s.date !== yesterdayStr);
-        updatedSnapshots.push(...yesterdaySnapshots);
+        // 既存のスナップショットから同じ日付のものを削除して、新しいものを追加
+        const updatedSnapshots = savedSnapshots.snapshots.filter((s) => s.date !== dateToSaveStr);
+        updatedSnapshots.push(...newSnapshots);
 
         // Metafieldに保存
         const saveResp = await admin.request(SAVE_SNAPSHOTS_MUTATION, {
@@ -276,7 +301,7 @@ export async function action({ request }: ActionFunctionArgs) {
           errors.push(`${sessionRecord.shop}: ${userErrors.map((e: any) => e.message).join(", ")}`);
         } else {
           processedCount++;
-          console.log(`Auto-saved snapshot for ${sessionRecord.shop} (${yesterdayStr})`);
+          console.log(`Auto-saved snapshot for ${sessionRecord.shop} (${dateToSaveStr}${isEndOfDayRun ? ", 23:59 run" : ", 0:00 run"})`);
         }
       } catch (error) {
         errors.push(`${sessionRecord.shop}: ${error instanceof Error ? error.message : String(error)}`);
