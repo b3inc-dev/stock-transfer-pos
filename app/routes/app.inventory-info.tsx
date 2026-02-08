@@ -27,7 +27,7 @@ export type InventorySnapshotsData = {
 };
 
 // 在庫アイテムを取得するGraphQLクエリ（inventoryItemsから取得）
-// variant は deprecated のため variants(first:1) も取得し、価格が取れない場合のフォールバックにする
+// 注: InventoryItem.variants は API バージョンにより存在しないため variant のみ使用
 const INVENTORY_ITEMS_QUERY = `#graphql
   query InventoryItemsForSnapshot($first: Int!, $after: String) {
     inventoryItems(first: $first, after: $after) {
@@ -65,14 +65,6 @@ const INVENTORY_ITEMS_QUERY = `#graphql
             product {
               id
               title
-            }
-          }
-          variants(first: 1) {
-            edges {
-              node {
-                price
-                compareAtPrice
-              }
             }
           }
         }
@@ -144,7 +136,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     
     if (locationsData.errors) {
       console.error("Locations query errors:", locationsData.errors);
-      throw new Error(`ロケーション取得エラー: ${locationsData.errors.map((e: any) => e.message).join(", ")}`);
+      const errList = Array.isArray(locationsData.errors)
+        ? locationsData.errors.map((e: any) => e?.message ?? String(e))
+        : [String(locationsData.errors)];
+      throw new Error(`ロケーション取得エラー: ${errList.join(", ")}`);
     }
     
     const locations = locationsData?.data?.locations?.nodes ?? [];
@@ -155,7 +150,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     
     if (snapshotsData.errors) {
       console.error("Snapshots query errors:", snapshotsData.errors);
-      throw new Error(`スナップショット取得エラー: ${snapshotsData.errors.map((e: any) => e.message).join(", ")}`);
+      const errList = Array.isArray(snapshotsData.errors)
+        ? snapshotsData.errors.map((e: any) => e?.message ?? String(e))
+        : [String(snapshotsData.errors)];
+      throw new Error(`スナップショット取得エラー: ${errList.join(", ")}`);
     }
     
     const shopId = snapshotsData?.data?.shop?.id;
@@ -220,7 +218,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
       
       if (data.errors) {
         console.error("InventoryItems query errors:", data.errors);
-        throw new Error(`在庫アイテム取得エラー: ${data.errors.map((e: any) => e.message).join(", ")}`);
+        const errList = Array.isArray(data.errors)
+          ? data.errors.map((e: any) => e?.message ?? String(e))
+          : [String(data.errors)];
+        throw new Error(`在庫アイテム取得エラー: ${errList.join(", ")}`);
       }
       
       const edges = data?.data?.inventoryItems?.edges ?? [];
@@ -243,9 +244,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const locationMap = new Map<string, DailyInventorySnapshot>();
     
     for (const item of allItems) {
-      // 金額が0になる要因: unitCost未設定/権限不足→原価0。variant が null（deprecated や削除済み）→ variants(first:1) で補完。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
+      // 金額が0になる要因: unitCost未設定/権限不足→原価0。variant が null（削除済み等）→価格0。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
       const unitCost = toAmount(item.unitCost?.amount ?? item.unitCost);
-      const variant = item.variant ?? item.variants?.edges?.[0]?.node ?? null;
+      const variant = item.variant ?? null;
       const retailPrice = toAmount(variant?.price);
       const compareAtPrice = toAmount(variant?.compareAtPrice);
       

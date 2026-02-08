@@ -11,7 +11,7 @@ const INVENTORY_INFO_NS = "inventory_info";
 const DAILY_SNAPSHOTS_KEY = "daily_snapshots";
 
 // 在庫アイテムを取得するGraphQLクエリ
-// variant は deprecated のため variants(first:1) も取得し、価格が取れない場合のフォールバックにする
+// 注: InventoryItem.variants は API バージョンにより存在しないため variant のみ使用
 const INVENTORY_ITEMS_QUERY = `#graphql
   query InventoryItemsForSnapshot($first: Int!, $after: String) {
     inventoryItems(first: $first, after: $after) {
@@ -49,14 +49,6 @@ const INVENTORY_ITEMS_QUERY = `#graphql
             product {
               id
               title
-            }
-          }
-          variants(first: 1) {
-            edges {
-              node {
-                price
-                compareAtPrice
-              }
             }
           }
         }
@@ -258,9 +250,9 @@ export async function action({ request }: ActionFunctionArgs) {
         };
 
         for (const item of allItems) {
-          // 金額が0になる要因: unitCost未設定/権限不足→原価0。variant が null（deprecated や削除済み）→ variants(first:1) で補完。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
+          // 金額が0になる要因: unitCost未設定/権限不足→原価0。variant が null（削除済み等）→価格0。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
           const unitCost = toAmount(item.unitCost?.amount ?? item.unitCost);
-          const variant = item.variant ?? item.variants?.edges?.[0]?.node ?? null;
+          const variant = item.variant ?? null;
           const retailPrice = toAmount(variant?.price);
           const compareAtPrice = toAmount(variant?.compareAtPrice);
           
