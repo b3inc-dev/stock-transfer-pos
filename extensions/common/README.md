@@ -2,7 +2,8 @@
 
 ## 概要
 
-POS 拡張がアプリの API（`/api/log-inventory-change` など）を呼ぶ際のベース URL を、**1箇所の設定ファイル**で管理します。
+- **appUrl.js**: POS 拡張がアプリの API（`/api/log-inventory-change` など）を呼ぶ際のベース URL を、1箇所で管理します。
+- **logInventoryChange.js**: 在庫変動を `api/log-inventory-change` に記録する**共通関数**です。出庫・入庫・ロス・棚卸・仕入の全フローでこの1つを使い、処理を統一しています。
 
 ## 設定ファイル
 

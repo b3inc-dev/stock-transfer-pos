@@ -1,7 +1,7 @@
 # 管理画面・ロス登録・棚卸 実装要件書
 
-**最終更新日**: 2026年2月7日（在庫変動履歴の種別振り分け・公開アプリ appUrl 統一・**api.log-inventory-change デバッグログ削除・リリース時必須対策の要件整理**まで反映済み）  
-**コード確認日**: 2026年2月（4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・POS拡張 description 更新・リスティングガイド・発注機能実装・仕入キャンセルモーダル・発注→仕入名称#P0000・CSVファイル名統一・loadItems JAN/オプション補完・仕入POS拡張・ロス区分設定・「その他」表示制御・選択中バッジ・在庫高表示（Phase 5-1）・在庫変動履歴（Phase 5-2）・在庫履歴のアクティビティ種別振り分け・Webhook二重記録防止・api/log-inventory-change による種別上書き・公開/自社用 appUrl 共通設定・**api.log-inventory-change デバッグログ削除・リリース時必須対策（本番DB永続化・初回管理画面オープン案内）の要件整理** 反映済み）
+**最終更新日**: 2026年2月10日（**在庫変動履歴：出庫確定・入庫通常受領で logInventoryChangeToApi 呼び出し追加・全確定処理のAPI呼び出し網羅・ドキュメント追加**まで反映済み）  
+**コード確認日**: 2026年2月（4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・POS拡張 description 更新・リスティングガイド・発注機能実装・仕入キャンセルモーダル・発注→仕入名称#P0000・CSVファイル名統一・loadItems JAN/オプション補完・仕入POS拡張・ロス区分設定・「その他」表示制御・選択中バッジ・在庫高表示（Phase 5-1）・在庫変動履歴（Phase 5-2）・在庫履歴のアクティビティ種別振り分け・Webhook二重記録防止・api/log-inventory-change による種別上書き・**出庫確定/入庫通常受領でのAPI呼び出し追加・全確定処理のAPI網羅確認**・公開/自社用 appUrl 共通設定・api.log-inventory-change デバッグログ削除・リリース時必須対策 反映済み）
 
 ---
 
@@ -31,7 +31,7 @@
 | 発注機能：発注先編集・原価・販売価格取得・CSV出力拡張 | ✅ 完了（商品リストモーダル内で発注先編集、原価・販売価格の自動取得・保存、CSV出力項目拡張） |
 | 仕入・発注：処理確定文言・CSV名・名称引き継ぎ・JAN/オプション | ✅ 完了（#P0000表示・CSVファイル名統一・発注→仕入名称・loadItemsでJAN/オプション補完）。残りはPOS仕入タイル（#B0000） |
 | 在庫変動履歴機能（Phase 5-2） | ✅ 完了（共通ユーティリティ・Webhook実装・一覧表示・CSV出力・UI調整） |
-| 在庫履歴のアクティビティ種別振り分け | ✅ 完了（管理/ロス/仕入/入出庫/棚卸/売上/返品。Webhook二重防止・api/log-inventory-change で種別記録・上書き） |
+| 在庫履歴のアクティビティ種別振り分け | ✅ 完了（管理/ロス/仕入/入出庫/棚卸/売上/返品。Webhook二重防止・api/log-inventory-change で種別記録・上書き。2026-02-10 に出庫確定・入庫通常受領でのAPI呼び出しを追加し全確定処理で網羅） |
 | 公開アプリ用 appUrl 統一・切り替え | ✅ 完了（extensions/common/appUrl.js で public/inhouse 切り替え、全POS拡張で参照） |
 | リリース時必須対策の要件整理 | ✅ 完了（RELEASE_REQUIREMENTS_PUBLIC_APP.md セクション5 に記載。デプロイで履歴が消えないよう本番DB永続化、管理画面を開かなくても動くよう初回オープン案内） |
 
@@ -66,6 +66,22 @@
 
 **任意で残っているもの**: 履歴タブのCSV案内文言の見直し。
 
+### 在庫情報の改善（2026-02-10 対応）
+
+在庫情報で発生していた問題と対応内容です。
+
+| 区分 | 問題 | 対応内容 |
+|------|------|----------|
+| **①在庫高** | 日付が変わるタイミングで自動保存されていない。管理画面を開いていなくても確実に保存したい。 | **Cron 必須**：`/api/inventory-snapshot-daily` を Render の Cron Job で毎日（例: 23:59）呼ぶ設定が必須。手順は `docs/CRON_JOB_SETUP_GUIDE.md` 参照。**フォールバック**：管理画面「在庫高」タブを開いたときに、前日分のスナップショットが無ければその場で1回だけ保存する `ensureYesterdaySnapshot` を追加（Cron が動いていない日も補完）。 |
+| **①在庫高** | 日付選択の枠がスマホで領域をはみ出している。 | 日付入力の親要素に `width: 100%`, `minWidth: 0`, `overflow: hidden` を指定し、領域内に収まるよう修正（`app.inventory-info.tsx`）。 |
+| **②変動履歴** | POS からの変動がロスしかアクティビティが振り分けられず、他が全て「管理」になる。参照IDも空。 | **原因**：①インストール後しばらく管理画面を開いていないとオフラインセッションが無く、POS から `api/log-inventory-change` が 401 で失敗する。②その場合、後から `inventory_levels/update` Webhook だけが記録され「管理」・参照IDなしになる。**対策**：利用手順で「初回は必ず1回管理画面でアプリを開く」を案内（上記「本番リリース時の2つの課題」と同一）。各 POS 確定処理では既に `api/log-inventory-change` と `sourceId` を渡す実装済み。詳細は `docs/INVENTORY_CHANGE_ACTIVITY_WHY_MANAGEMENT.md`・`docs/INVENTORY_HISTORY_ADMIN_AND_DELTA_CAUSE.md`。 |
+| **②変動履歴** | 履歴の項目を、商品名・オプションを含め他商品リスト・CSV と同等にしたい。「変動量」→「変動数」に変更したい。 | **一覧・CSV**：表示項目を「発生日時・商品名・SKU・オプション・ロケーション・アクティビティ・**変動数**・変動後数量・参照ID・備考」に変更。商品名・オプションはバリアントを GraphQL で一括取得して付与。CSV はオプションを「オプション1」「オプション2」「オプション3」列で出力。 |
+
+**メタフィールドから Render DB への方向性変更について**  
+在庫変動履歴は当初メタフィールドで検討していたが、データ量・検索要件のため **Prisma（Render の PostgreSQL 等）の `InventoryChangeLog`** で実装済み。在庫高の日次スナップショットは引き続き **Metafield** に保存（Cron またはフォールバックで保存）。処理の分岐は「スナップショット＝Metafield 読み書き」「変動履歴＝DB 読み書き」で整理されている。
+
+---
+
 **文言・UIトンマナの統一（必須）**  
 新規・既存を問わず、**文言（ラベル・ボタン・メッセージ・モーダル見出し等）およびUIのトーン＆マナー（レイアウト・表記・コンポーネントの使い方）は、同一機能や他画面（入出庫・ロス・棚卸・仕入・発注など）と必ず統一すること。** 例：商品リストモーダルの見出しは「商品リスト」に統一（機能名を冠しない）。ボタン表記・読み込み表示・ステータスバッジ・フッター配置などは、既存の直近の統一実装に合わせる。実装・修正時は他画面との整合を確認すること。
 
@@ -92,6 +108,7 @@
 | **微調整済み** | 棚卸ページ：上部メニュー下の余白を狭く（タブ＋区切り線を1ブロックにまとめて余白削減）。設定ページ：「破棄」「保存」ボタンを右寄せし、上下余白を抑えて浮き感を軽減 |
 
 **直近の主な更新（2026-02）**:
+- **在庫変動履歴：出庫・入庫の確定処理から確実に api/log-inventory-change を呼ぶよう修正（2026-02-10）**: ①**出庫**: POS「出庫タイル→出庫モーダルで確定」のメインフロー（`submitTransferCore`）では、Transfer 作成後に `logInventoryChangeToApi` を呼んでおらず「管理」のままだったため、Transfer 作成成功直後に `logInventoryChangeToApi`（`activity: outbound_transfer`）を呼ぶ処理を追加（`extensions/stock-transfer-tile/src/ModalOutbound.jsx`）。②**入庫**: 通常受領分（plannedItems / cappedItems）で `receiveShipmentWithFallbackV2` 後に API が呼ばれていなかったため、単一シップメント・複数シップメントの両方で受領後に `logInventoryChangeToApi`（`activity: inbound_transfer`）を呼ぶ処理を追加（`extensions/stock-transfer-inbound/src/screens/InboundListScreen.jsx`）。③**棚卸・仕入・ロス**は全確定処理で既に API を呼んでいることをコード上で確認済み。④**ドキュメント**: 「なぜロス以外が管理になるか」「種別を付けるには api/log-inventory-change を各確定処理で呼ぶ」旨を `docs/INVENTORY_CHANGE_ACTIVITY_WHY_MANAGEMENT.md` に新規作成。
 - **出庫マルチシップメント挙動の定義**: `docs/OUTBOUND_MULTI_SHIPMENT_BEHAVIOR.md` を作成。出庫リストの「確定する」「下書き保存」「配送準備完了にする」の挙動を明確化。Shopify Admin API 検証に基づき、既存 Transfer へのシップメント追加は `inventoryShipmentCreate`（下書き）または `inventoryShipmentCreateInTransit`（確定）で `movementId` に Transfer ID を渡すことで可能であることを確認。`READY_TO_SHIP` な Transfer の lineItems 更新は `inventoryTransferSetItems` で可能だが、`READY_TO_SHIP` から `DRAFT` への戻しは API がサポートしていないことを明記。UI では「編集」モーダルから「シップメントを確定」を削除し、出庫リストの「確定する」で Transfer またはシップメント全体の確定が行われるように簡素化。
 - **POS拡張の4分割**: 出庫・入庫・ロス・棚卸を各1拡張に分割（stock-transfer-tile=出庫のみ `ModalOutbound.jsx`、stock-transfer-inbound=入庫のみ、stock-transfer-loss=ロスのみ・棚卸関連ファイル削除、stock-transfer-stocktake=棚卸のみ・新規作成）。ビルドサイズ対策・単一機能化。4分割後の検証結果は `docs/EXTENSION_VERIFICATION_4SPLIT.md` に記載。
 - **出庫メニュー廃止**: タイルを開くと直接「出庫コンディション」画面を表示（MenuScreen を経由しない）。
@@ -172,6 +189,8 @@
 - **公開アプリ用 appUrl 設定・切り替え（2026-02-07）**: ①**共通設定**: `extensions/common/appUrl.js` を新規作成。`APP_MODE = "public"` で本番 `https://pos-stock.onrender.com`、`"inhouse"` で `https://stock-transfer-pos.onrender.com`。開発用 `DEV_APP_URL` はトンネル利用時に手動変更可。②**全POS拡張で参照**: ロス・仕入・入庫・出庫・棚卸・発注で `/api/log-inventory-change` 等のベース URL を `getAppUrl()` で取得。参照パスは `../../../../common/appUrl.js` 等で統一。③**公開開発**: 本番ビルド時は `getAppUrl()` を使用。Render への push と `shopify app deploy` で公開アプリとして利用可能。
 
 - **api.log-inventory-change デバッグログ削除（2026-02-07）**: 本番運用前に `app/routes/api.log-inventory-change.tsx` からデバッグ用ログを削除。①トークン payload の未検証デコード＋`console.warn`（aud/iss/dest 等）のブロック削除。②リクエスト受信時の `[api.log-inventory-change] Called: ...` および専用変数（rawItemIdLog / rawLocIdLog / qtyAfterLog）の削除。③`Updated admin_webhook to ...` の `console.log` 削除。認証エラー時の `No Authorization Bearer header`・`decodeSessionToken error`・`POS auth failed` は本番追跡のため残置。
+
+- **在庫変動履歴：全確定処理で log-inventory-change API 呼び出しを網羅（2026-02-10）**: 出庫・入庫・棚卸・仕入・ロスの**全ての確定処理**で `api/log-inventory-change` が呼ばれるよう補完・確認。**出庫**: `submitTransferCore` で Transfer 新規作成成功後に `logInventoryChangeToApi`（outbound_transfer）を追加。**入庫**: 通常受領（plannedItems/cappedItems）で API が未呼び出しだったため、単一・複数シップメント両方で受領後に呼び出しを追加（inbound_transfer）。**棚卸・仕入・ロス**: 既存で全パス呼び出し済みであることをコード確認。詳細は `docs/INVENTORY_CHANGE_ACTIVITY_WHY_MANAGEMENT.md` 参照。
 
 - **リリース時必須対策の要件整理（2026-02-07）**: デプロイで履歴が消える・管理画面を開かないとエラーになる問題の原因と対処を RELEASE_REQUIREMENTS_PUBLIC_APP.md の「5. 本番で必須の2つの対策」に記載。①**履歴が消える**: 本番は SQLite がエフェメラルなため、Render PostgreSQL または Supabase 等の永続DBを用意し DATABASE_URL 設定・Prisma 本番用設定・マイグレーション実施が必須。②**管理画面を開かないとエラー**: オフラインセッションは初回に管理画面でアプリを開いたときに保存されるため、インストール後「1回は管理画面でアプリを開く」旨を利用手順で案内する運用で対応。詳細・Prisma 設定例は RELEASE_REQUIREMENTS_PUBLIC_APP.md セクション5 参照。
 
@@ -291,6 +310,7 @@
 
 **別紙（新規・検討中の要件）**:
 - 在庫情報（在庫高/在庫変動履歴）: `docs/REQUIREMENTS_INVENTORY_INFO_AND_SETTINGS.md`
+- 在庫変動履歴で「管理」になる要因・種別の付け方: `docs/INVENTORY_CHANGE_ACTIVITY_WHY_MANAGEMENT.md`
 - 仕入/発注（POS/管理画面）: `docs/REQUIREMENTS_PURCHASE_AND_ORDER.md`
 
 ---

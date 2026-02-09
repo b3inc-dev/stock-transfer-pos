@@ -12,45 +12,37 @@ import {
 } from "./stocktakeApi.js";
 import { fetchSettings } from "./stocktakeApi.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
+import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 
-/** 棚卸確定時の在庫変動をアプリAPIに記録（履歴で種別が正しく表示されるようにする） */
+/** 棚卸確定時の在庫変動を共通関数で記録（履歴で種別が正しく表示されるようにする） */
+
 async function logInventoryCountToApi({ locationId, locationName, items, sourceId }) {
-  const session = SHOPIFY?.session;
-  if (!session?.getSessionToken || !items?.length || !sourceId) return;
-  try {
-    const token = await session.getSessionToken();
-    if (!token) return;
-    const { getAppUrl } = await import("../../../../common/appUrl.js");
-    const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock.onrender.com
-    const apiUrl = `${appUrl}/api/log-inventory-change`;
-    const timestamp = new Date().toISOString();
-    for (const l of items) {
-      const delta = Number(l.actualQuantity ?? 0) - Number(l.currentQuantity ?? 0);
-      if (!l?.inventoryItemId) continue;
-      const res = await fetch(apiUrl, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          inventoryItemId: l.inventoryItemId,
-          variantId: l.variantId ?? null,
-          sku: l.sku ?? "",
-          locationId,
-          locationName: locationName || locationId,
-          activity: "inventory_count",
-          delta,
-          quantityAfter: Number(l.actualQuantity ?? 0),
-          sourceId,
-          timestamp,
-        }),
-      });
-      if (!res.ok) console.warn("[InventoryCountList] log-inventory-change failed:", res.status);
-    }
-  } catch (e) {
-    console.warn("[InventoryCountList] logInventoryCountToApi:", e);
-  }
+  if (!items?.length) return;
+  const deltas = items
+    .filter((l) => l?.inventoryItemId)
+    .map((l) => {
+      const actual = Number(l.actualQuantity ?? 0);
+      const current = Number(l.currentQuantity ?? 0);
+      return {
+        inventoryItemId: l.inventoryItemId,
+        variantId: l.variantId ?? null,
+        sku: l.sku ?? "",
+        delta: actual - current,
+        quantityAfter: actual,
+      };
+    })
+    .filter((d) => d.delta !== 0);
+  if (deltas.length === 0) return;
+  await logInventoryChangeToApi({
+    activity: "inventory_count",
+    locationId,
+    locationName: locationName || locationId,
+    deltas,
+    sourceId: sourceId || null,
+  });
 }
 
 const SCAN_QUEUE_KEY = "stock_transfer_pos_inventory_count_scan_queue_v1";

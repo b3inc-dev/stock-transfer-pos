@@ -9,6 +9,7 @@ import {
   fetchSettings,
 } from "./purchaseApi.js";
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
+import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -854,47 +855,38 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         deltas,
         referenceDocumentUri: purchaseEntryId,
       });
-      // 在庫変動ログを直接記録（履歴で「仕入」と表示されるようにする）
+      // 在庫変動ログを共通関数で記録（履歴で「仕入」と表示されるようにする）
       try {
-        const session = SHOPIFY?.session;
-        if (session?.getSessionToken) {
-          const token = await session.getSessionToken();
-          if (token) {
-            const { getAppUrl } = await import("../../../../common/appUrl.js");
-            const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock.onrender.com
-            const apiUrl = `${appUrl}/api/log-inventory-change`;
-            for (const l of lines) {
-              const qty = Math.abs(Number(l.qty) || 0);
-              if (qty <= 0) continue;
-              let quantityAfter = null;
-              try {
-                const available = await fetchVariantAvailable({
-                  variantGid: l.variantId,
-                  locationGid: conds.locationId,
-                });
-                quantityAfter = available?.available ?? null;
-              } catch (e) {
-                console.warn("[PurchaseProductList] Failed to fetch available quantity:", e);
-              }
-              const res = await fetch(apiUrl, {
-                method: "POST",
-                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  inventoryItemId: l.inventoryItemId,
-                  variantId: l.variantId,
-                  sku: l.sku || "",
-                  locationId: conds.locationId,
-                  locationName: conds.locationName || "",
-                  activity: "purchase_entry",
-                  delta: qty,
-                  quantityAfter,
-                  sourceId: purchaseEntryId,
-                  timestamp: new Date().toISOString(),
-                }),
-              });
-              if (!res.ok) console.warn("[PurchaseProductList] log-inventory-change failed:", res.status);
-            }
+        const purchaseDeltas = [];
+        for (const l of lines) {
+          const qty = Math.abs(Number(l.qty) || 0);
+          if (qty <= 0) continue;
+          let quantityAfter = null;
+          try {
+            const available = await fetchVariantAvailable({
+              variantGid: l.variantId,
+              locationGid: conds.locationId,
+            });
+            quantityAfter = available?.available ?? null;
+          } catch (e) {
+            console.warn("[PurchaseProductList] Failed to fetch available quantity:", e);
           }
+          purchaseDeltas.push({
+            inventoryItemId: l.inventoryItemId,
+            variantId: l.variantId,
+            sku: l.sku || "",
+            delta: qty,
+            quantityAfter,
+          });
+        }
+        if (purchaseDeltas.length > 0) {
+          await logInventoryChangeToApi({
+            activity: "purchase_entry",
+            locationId: conds.locationId,
+            locationName: conds.locationName || "",
+            deltas: purchaseDeltas,
+            sourceId: purchaseEntryId,
+          });
         }
       } catch (e) {
         console.warn("[PurchaseProductList] Failed to log inventory change:", e);

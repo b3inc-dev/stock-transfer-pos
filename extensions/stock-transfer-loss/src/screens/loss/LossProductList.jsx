@@ -10,7 +10,7 @@ import {
 } from "./lossApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
-import { getAppUrl } from "../../../../common/appUrl.js";
+import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -827,64 +827,39 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       });
       const adjustmentGroupId = adjustmentGroup?.id || null;
       
-      // 在庫変動ログを直接記録（webhookが来る前に記録）
+      // 在庫変動ログを共通関数で記録（webhookが来る前に記録・他フローと同じ実装）
       try {
-        const session = SHOPIFY?.session;
-        if (session?.getSessionToken) {
-          const token = await session.getSessionToken();
-          if (token) {
-            const currentSession = session?.currentSession;
-            const shopDomain = currentSession?.shopDomain;
-            // 公開アプリ本番: getAppUrl() → https://pos-stock.onrender.com
-            const appUrl = getAppUrl();
-            
-            // 各商品についてログを記録
-            for (const l of lines) {
-              const qty = Math.abs(Number(l.qty) || 0);
-              if (qty <= 0) continue;
-              
-              // 現在の在庫数を取得（quantityAfter用）
-              let quantityAfter = null;
-              try {
-                const available = await fetchVariantAvailable({
-                  variantGid: l.variantId,
-                  locationGid: conds.locationId,
-                });
-                quantityAfter = available?.available ?? null;
-              } catch (e) {
-                console.warn("[LossProductList] Failed to fetch available quantity:", e);
-              }
-              
-              const logData = {
-                inventoryItemId: l.inventoryItemId,
-                variantId: l.variantId,
-                sku: l.sku || "",
-                locationId: conds.locationId,
-                locationName: conds.locationName || "",
-                activity: "loss_entry",
-                delta: -qty, // ロスはマイナス
-                quantityAfter,
-                sourceId: lossEntryId,
-                adjustmentGroupId,
-                timestamp: new Date().toISOString(),
-              };
-              
-              const apiUrl = `${appUrl}/api/log-inventory-change`;
-              const res = await fetch(apiUrl, {
-                method: "POST",
-                headers: {
-                  "Authorization": `Bearer ${token}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify(logData),
-              });
-              
-              if (!res.ok) {
-                const text = await res.text().catch(() => "");
-                console.warn(`[LossProductList] Failed to log inventory change: HTTP ${res.status}: ${text}`);
-              }
-            }
+        const lossDeltas = [];
+        for (const l of lines) {
+          const qty = Math.abs(Number(l.qty) || 0);
+          if (qty <= 0) continue;
+          let quantityAfter = null;
+          try {
+            const available = await fetchVariantAvailable({
+              variantGid: l.variantId,
+              locationGid: conds.locationId,
+            });
+            quantityAfter = available?.available ?? null;
+          } catch (e) {
+            console.warn("[LossProductList] Failed to fetch available quantity:", e);
           }
+          lossDeltas.push({
+            inventoryItemId: l.inventoryItemId,
+            variantId: l.variantId,
+            sku: l.sku || "",
+            delta: -qty,
+            quantityAfter,
+          });
+        }
+        if (lossDeltas.length > 0) {
+          await logInventoryChangeToApi({
+            activity: "loss_entry",
+            locationId: conds.locationId,
+            locationName: conds.locationName || "",
+            deltas: lossDeltas,
+            sourceId: lossEntryId,
+            adjustmentGroupId,
+          });
         }
       } catch (e) {
         console.warn("[LossProductList] Failed to log inventory change:", e);

@@ -136,6 +136,51 @@ curl -X POST "https://pos-stock.onrender.com/api/inventory-snapshot-daily" -H "A
 
 ---
 
+## 5.5 既存の Cron を直す場合（どこをどう修正するか）
+
+すでに Cron Job を作っているが、スナップショットが残らない・時刻がずれているときは、次の **2 点** を Render で修正してください。
+
+### 修正 1: Command（何を実行するか）
+
+**現在こうなっている場合**（例）:
+```bash
+npm install && npm run build && node ./src/services/inventory-snapshot-daily/src/index.js
+```
+→ このリポジトリ（stock-transfer-pos）では **Node スクリプトは使わず、Web サービスの API を curl で呼ぶ** 形にします。
+
+**修正手順**:
+1. Render ダッシュボードで **該当の Cron Job**（例: inventory-snapshot-daily）を開く。
+2. 左メニューで **「Settings」** をクリック。
+3. **「Build & Deploy」** または **「Command」** の欄を探す。
+4. **Command** を次の内容に **書き換える**（URL はご自身の Web サービスの URL に合わせる）:
+   ```bash
+   curl -X POST "https://pos-stock.onrender.com/api/inventory-snapshot-daily" -H "Authorization: Bearer $INVENTORY_SNAPSHOT_API_KEY"
+   ```
+5. 画面下の **「Save Changes」** をクリック。
+
+※ `pos-stock.onrender.com` の部分は、在庫アプリの **Web サービス** の URL に読み替えてください。
+
+### 修正 2: Schedule（いつ実行するか）
+
+**日本時間 23:59 に実行したいのに**、Schedule が **`59 23 * * *`（23:59 UTC）** になっている場合:
+- 23:59 UTC = 日本時間の **翌日 8:59** なので、意図とずれています。
+
+**修正手順**:
+1. 同じ Cron Job の **Settings** 画面で **「Schedule」** の欄を探す。
+2. cron 式を **`59 14 * * *`** に変更する（毎日 UTC 14:59 = 日本時間 23:59）。
+3. Render の UI が「At 02:59 PM UTC」のように表示されていれば正しいです。
+4. **「Save Changes」** をクリック。
+
+### あわせて確認すること
+
+| 確認場所 | 内容 |
+|----------|------|
+| **Cron Job の Environment** | `INVENTORY_SNAPSHOT_API_KEY` が 1 つ設定されているか。 |
+| **Web サービス（pos-stock 等）の Environment** | 上と **同じ値** の `INVENTORY_SNAPSHOT_API_KEY` が入っているか。ここに無いと API が 401 を返し、保存されません。 |
+| **初回利用** | 最低 1 ショップで、**管理画面でアプリを 1 回開いている**か。開いていないとセッションが無く、API は `processed: 0` で終了します。 |
+
+---
+
 ## 6. 動いているか確認する
 
 1. Render ダッシュボードで、今作った **Cron Job** のページを開く。

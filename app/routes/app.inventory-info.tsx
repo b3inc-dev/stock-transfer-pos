@@ -118,6 +118,21 @@ const SAVE_SNAPSHOTS_MUTATION = `#graphql
   }
 `;
 
+// 変動履歴一覧用：バリアントの商品名・オプション・JANを一括取得（最大250件/回）
+const VARIANTS_FOR_CHANGE_HISTORY_QUERY = `#graphql
+  query VariantsForChangeHistory($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on ProductVariant {
+        id
+        displayName
+        barcode
+        selectedOptions { name value }
+        product { title }
+      }
+    }
+  }
+`;
+
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
     const { admin, session } = await authenticate.admin(request);
@@ -160,9 +175,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const shopName = snapshotsData?.data?.shop?.name || "";
     const shopTimezone = snapshotsData?.data?.shop?.ianaTimezone || "UTC"; // デフォルトはUTC
     
-    // デバッグ: ショップのタイムゾーンを確認
-    console.log(`[inventory-info] shopTimezone=${shopTimezone}, shopName=${shopName}`);
-    
     const metafieldValue = snapshotsData?.data?.shop?.metafield?.value;
 
   let savedSnapshots: InventorySnapshotsData = { version: 1, snapshots: [] };
@@ -182,8 +194,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const now = new Date();
   const todayInShopTimezone = getDateInShopTimezone(now, shopTimezone);
   
-  // デバッグ: 計算結果を確認
-  console.log(`[inventory-info] now=${now.toISOString()}, shopTimezone=${shopTimezone}, todayInShopTimezone=${todayInShopTimezone}`);
   const selectedDate = url.searchParams.get("date") || todayInShopTimezone;
 
   // 今日の場合はリアルタイムで在庫情報を取得
@@ -193,6 +203,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // 最初のスナップショット日付を取得（インストール日以降の日付選択制限用）
   const snapshotDates = savedSnapshots.snapshots.map((s) => s.date).sort();
   const firstSnapshotDate = snapshotDates.length > 0 ? snapshotDates[0] : todayInShopTimezone;
+
+  // 前日の日付（フォールバック保存・「前日分があるか」判定用）
+  const [y, m, d] = todayInShopTimezone.split("-").map(Number);
+  const yesterdayDate = new Date(y, m - 1, d - 1);
+  const yesterdayDateStr = yesterdayDate.toISOString().slice(0, 10);
+  const hasYesterdaySnapshot = savedSnapshots.snapshots.some((s) => s.date === yesterdayDateStr);
 
   // 選択された日付のスナップショットを取得（互換性のため、totalCompareAtPriceValueがない場合は補完）
   const snapshotForDate = savedSnapshots.snapshots
@@ -398,13 +414,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
         // PrismaクライアントがInventoryChangeLogを認識しているか確認
         if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-          // デバッグ: フィルター条件を確認
-          console.log(`[inventory-info] Fetching change history logs:`, {
-            shop: session.shop,
-            whereClause: JSON.stringify(whereClause, null, 2),
-            sortOrder,
-          });
-          
           changeHistoryLogs = await (db as any).inventoryChangeLog.findMany({
             where: whereClause,
             orderBy: {
@@ -412,35 +421,46 @@ export async function loader({ request }: LoaderFunctionArgs) {
             },
             take: 1000, // 最大1000件まで表示
           });
-          
-          // デバッグ: 取得結果を確認
-          console.log(`[inventory-info] Found ${changeHistoryLogs.length} change history logs`);
-          
-          // 全件数を確認（フィルターなし）
-          const totalCount = await (db as any).inventoryChangeLog.count({
-            where: { shop: session.shop },
-          });
-          console.log(`[inventory-info] Total logs in database for shop ${session.shop}: ${totalCount}`);
-          
-          // 最新の5件を確認（デバッグ用）
-          if (totalCount > 0) {
-            const recentLogs = await (db as any).inventoryChangeLog.findMany({
-              where: { shop: session.shop },
-              orderBy: { timestamp: "desc" },
-              take: 5,
-              select: {
-                id: true,
-                timestamp: true,
-                date: true,
-                activity: true,
-                sku: true,
-                locationName: true,
-                delta: true,
-                quantityAfter: true,
-              },
-            });
-            console.log(`[inventory-info] Recent 5 logs:`, JSON.stringify(recentLogs, null, 2));
+
+          // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
+          const variantIds = [...new Set(changeHistoryLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
+          const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
+          if (variantIds.length > 0 && session) {
+            const CHUNK = 250;
+            for (let i = 0; i < variantIds.length; i += CHUNK) {
+              const chunk = variantIds.slice(i, i + CHUNK);
+              try {
+                const resp = await admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
+                const data = await resp.json();
+                const nodes = (data?.data?.nodes ?? []).filter(Boolean);
+                for (const node of nodes) {
+                  if (!node?.id) continue;
+                  const opts = (node.selectedOptions as Array<{ name?: string; value?: string }>) ?? [];
+                  const productTitle = (node.product?.title ?? node.displayName ?? "") as string;
+                  variantInfoMap.set(node.id, {
+                    productTitle,
+                    barcode: (node.barcode as string) ?? "",
+                    option1: opts[0]?.value ?? "",
+                    option2: opts[1]?.value ?? "",
+                    option3: opts[2]?.value ?? "",
+                  });
+                }
+              } catch (e) {
+                console.warn("[inventory-info] Variant batch for change history failed:", e);
+              }
+            }
           }
+          changeHistoryLogs = changeHistoryLogs.map((log: any) => {
+            const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
+            return {
+              ...log,
+              productTitle: info?.productTitle ?? null,
+              barcode: info?.barcode ?? null,
+              option1: info?.option1 ?? null,
+              option2: info?.option2 ?? null,
+              option3: info?.option3 ?? null,
+            };
+          });
         } else {
           console.warn(
             "[inventory-info] InventoryChangeLog model not found in Prisma client. Please restart the dev server."
@@ -464,6 +484,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       shopTimezone,
       todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
       firstSnapshotDate, // 最初のスナップショット日付（日付選択のmin属性用）
+      hasYesterdaySnapshot, // 前日分のスナップショットが既に保存されているか
+      yesterdayDateStr, // 前日の日付（YYYY-MM-DD）
       firstChangeHistoryDate,
       // 在庫変動履歴用のデータ
       changeHistoryLogs: changeHistoryLogs || [],
@@ -485,12 +507,115 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 }
 
+// 金額を取得するヘルパー（日次APIと同一ロジック）
+function toAmount(v: unknown): number {
+  if (v == null) return 0;
+  if (typeof v === "string") return parseFloat(v) || 0;
+  if (typeof v === "object" && v !== null && "amount" in v) return parseFloat((v as { amount?: string }).amount ?? "0") || 0;
+  return 0;
+}
+
 // 商品検索用のaction関数
 export async function action({ request }: ActionFunctionArgs) {
   try {
     const { admin } = await authenticate.admin(request);
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();
+
+    // 前日分スナップショットが無い場合に保存（管理画面を開いたときのフォールバック。Cronが無くても前日分を補完）
+    if (intent === "ensureYesterdaySnapshot") {
+      const snapshotsResp = await admin.graphql(GET_SNAPSHOTS_QUERY);
+      const snapshotsData = await snapshotsResp.json();
+      if (snapshotsData?.errors) {
+        return { ok: false, error: "スナップショット取得に失敗しました。" };
+      }
+      const shopId = snapshotsData?.data?.shop?.id;
+      const shopTimezone = snapshotsData?.data?.shop?.ianaTimezone || "UTC";
+      const metafieldValue = snapshotsData?.data?.shop?.metafield?.value;
+      let savedSnapshots: InventorySnapshotsData = { version: 1, snapshots: [] };
+      if (typeof metafieldValue === "string" && metafieldValue) {
+        try {
+          const parsed = JSON.parse(metafieldValue);
+          if (parsed?.version === 1 && Array.isArray(parsed?.snapshots)) savedSnapshots = parsed;
+        } catch {
+          /* ignore */
+        }
+      }
+      const now = new Date();
+      const todayStr = getDateInShopTimezone(now, shopTimezone);
+      const [y, m, d] = todayStr.split("-").map(Number);
+      const yesterdayDate = new Date(y, m - 1, d - 1);
+      const dateToSaveStr = yesterdayDate.toISOString().slice(0, 10);
+      if (savedSnapshots.snapshots.some((s) => s.date === dateToSaveStr)) {
+        return { ok: true, skipped: true, message: "前日分は既に保存済みです。" };
+      }
+      const allItems: any[] = [];
+      let hasNextPage = true;
+      let cursor: string | null = null;
+      while (hasNextPage) {
+        const resp = await admin.graphql(INVENTORY_ITEMS_QUERY, { variables: { first: 50, after: cursor } });
+        const data = await resp.json();
+        if (data?.errors) return { ok: false, error: "在庫取得に失敗しました。" };
+        const edges = data?.data?.inventoryItems?.edges ?? [];
+        const nodes = edges.map((e: any) => e.node);
+        allItems.push(...nodes);
+        hasNextPage = data?.data?.inventoryItems?.pageInfo?.hasNextPage ?? false;
+        cursor = data?.data?.inventoryItems?.pageInfo?.endCursor ?? null;
+      }
+      const locationMap = new Map<string, DailyInventorySnapshot>();
+      for (const item of allItems) {
+        const unitCost = toAmount(item.unitCost?.amount ?? item.unitCost);
+        const variant = item.variant ?? null;
+        const retailPrice = toAmount(variant?.price);
+        const compareAtPrice = toAmount(variant?.compareAtPrice);
+        const levels = item.inventoryLevels?.edges ?? [];
+        for (const levelEdge of levels) {
+          const level = levelEdge.node;
+          const locationId = level.location?.id;
+          const locationName = level.location?.name ?? "";
+          const quantity = level.quantities?.find((q: any) => q.name === "available")?.quantity ?? 0;
+          if (!locationId) continue;
+          if (!locationMap.has(locationId)) {
+            locationMap.set(locationId, {
+              date: dateToSaveStr,
+              locationId,
+              locationName,
+              totalQuantity: 0,
+              totalRetailValue: 0,
+              totalCompareAtPriceValue: 0,
+              totalCostValue: 0,
+            });
+          }
+          const snapshot = locationMap.get(locationId)!;
+          snapshot.totalQuantity += quantity;
+          snapshot.totalRetailValue += quantity * retailPrice;
+          snapshot.totalCompareAtPriceValue += quantity * (compareAtPrice || retailPrice);
+          snapshot.totalCostValue += quantity * unitCost;
+        }
+      }
+      const newSnapshots = Array.from(locationMap.values());
+      const updatedSnapshots = savedSnapshots.snapshots.filter((s) => s.date !== dateToSaveStr);
+      updatedSnapshots.push(...newSnapshots);
+      const saveResp = await admin.graphql(SAVE_SNAPSHOTS_MUTATION, {
+        variables: {
+          metafields: [
+            {
+              ownerId: shopId,
+              namespace: INVENTORY_INFO_NS,
+              key: DAILY_SNAPSHOTS_KEY,
+              type: "json",
+              value: JSON.stringify({ version: 1, snapshots: updatedSnapshots }),
+            },
+          ],
+        },
+      });
+      const saveData = await saveResp.json();
+      const userErrors = saveData?.data?.metafieldsSet?.userErrors ?? [];
+      if (userErrors.length > 0) {
+        return { ok: false, error: userErrors.map((e: any) => e.message).join(", ") };
+      }
+      return { ok: true, saved: true, date: dateToSaveStr, message: "前日分のスナップショットを保存しました。" };
+    }
 
     // SKU・商品名で検索（在庫変動履歴の商品検索用）
     if (intent === "searchVariantsForChangeHistory") {
@@ -539,10 +664,11 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function InventoryInfoPage() {
-  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, firstChangeHistoryDate, changeHistoryLogs, changeHistoryFilters } =
+  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, firstChangeHistoryDate, changeHistoryLogs, changeHistoryFilters } =
     useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher<typeof action>();
+  const ensuredYesterdayRef = useRef(false);
 
   // タブ管理（URLパラメータから取得、デフォルトは在庫高）
   type InventoryTabId = "inventory-level" | "change-history";
@@ -593,6 +719,16 @@ export default function InventoryInfoPage() {
   const [changeHistorySortOrder, setChangeHistorySortOrder] = useState<"asc" | "desc">(
     (changeHistoryFilters?.sortOrder as "asc" | "desc") || "desc"
   );
+
+  // 前日分スナップショットが無い場合に1回だけ保存を試みる（Cronが無くても管理画面を開けば前日分を補完）
+  useEffect(() => {
+    if (activeTab !== "inventory-level" || hasYesterdaySnapshot || ensuredYesterdayRef.current || fetcher.state !== "idle") return;
+    ensuredYesterdayRef.current = true;
+    fetcher.submit(
+      { intent: "ensureYesterdaySnapshot" },
+      { method: "post" }
+    );
+  }, [activeTab, hasYesterdaySnapshot, fetcher.state]);
 
   // 商品検索用のstate
   const [changeHistoryProductSearchQuery, setChangeHistoryProductSearchQuery] = useState("");
@@ -918,25 +1054,27 @@ export default function InventoryInfoPage() {
                       {/* @ts-expect-error s-divider は App Bridge の Web コンポーネント */}
                       <s-divider />
                       
-                      {/* 日付選択 */}
+                      {/* 日付選択（スマホで枠がはみ出さないよう親で幅を制約） */}
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
                       <s-text emphasis="bold" size="small">日付</s-text>
-                      <input
-                        type="date"
-                        value={dateValue}
-                        onChange={handleDateChange}
-                        min={firstSnapshotDate}
-                        max={todayInShopTimezone}
-                        style={{
-                          padding: "8px 12px",
-                          border: "1px solid #d1d5db",
-                          borderRadius: "6px",
-                          fontSize: "14px",
-                          width: "100%",
-                          boxSizing: "border-box",
-                          maxWidth: "100%",
-                        }}
-                      />
+                      <div style={{ width: "100%", minWidth: 0, overflow: "hidden" }}>
+                        <input
+                          type="date"
+                          value={dateValue}
+                          onChange={handleDateChange}
+                          min={firstSnapshotDate}
+                          max={todayInShopTimezone}
+                          style={{
+                            padding: "8px 12px",
+                            border: "1px solid #d1d5db",
+                            borderRadius: "6px",
+                            fontSize: "14px",
+                            width: "100%",
+                            maxWidth: "100%",
+                            boxSizing: "border-box",
+                          }}
+                        />
+                      </div>
                       {/* 最初のスナップショット日付を表示 */}
                       {firstSnapshotDate && (
                         <div style={{ marginTop: "4px" }}>
@@ -1790,13 +1928,18 @@ export default function InventoryInfoPage() {
                               </s-text>
                               <button
                                 onClick={() => {
-                                  // CSV出力処理
+                                  // CSV出力処理（商品名・オプションを含め他リストと同等の項目に）
                                   const headers = [
                                     "発生日時",
+                                    "商品名",
                                     "SKU",
+                                    "JAN",
+                                    "オプション1",
+                                    "オプション2",
+                                    "オプション3",
                                     "ロケーション",
                                     "アクティビティ",
-                                    "変動量",
+                                    "変動数",
                                     "変動後数量",
                                     "参照ID",
                                     "備考",
@@ -1804,7 +1947,12 @@ export default function InventoryInfoPage() {
 
                                   const rows = changeHistoryLogs.map((log) => [
                                     formatDateTimeInShopTimezone(log.timestamp, shopTimezone),
+                                    log.productTitle ?? log.sku ?? "",
                                     log.sku || "",
+                                    log.barcode ?? "",
+                                    log.option1 ?? "",
+                                    log.option2 ?? "",
+                                    log.option3 ?? "",
                                     log.locationName || "",
                                     activityLabels[log.activity] || log.activity || "",
                                     log.delta !== null ? String(log.delta) : "",
@@ -1848,10 +1996,13 @@ export default function InventoryInfoPage() {
                                 <thead>
                                   <tr style={{ backgroundColor: "#f6f6f7", borderBottom: "2px solid #e1e3e5" }}>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>発生日時</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>商品名</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>SKU</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>JAN</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>オプション</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>ロケーション</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>アクティビティ</th>
-                                    <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動量</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動数</th>
                                     <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動後数量</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>参照ID</th>
                                   </tr>
@@ -1862,10 +2013,15 @@ export default function InventoryInfoPage() {
                                       <td style={{ padding: "12px 16px" }}>
                                         {formatDateTimeInShopTimezone(log.timestamp, shopTimezone)}
                                       </td>
+                                      <td style={{ padding: "12px 16px" }}>{log.productTitle || log.sku || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.sku || "-"}</td>
+                                      <td style={{ padding: "12px 16px" }}>{log.barcode || "-"}</td>
+                                      <td style={{ padding: "12px 16px" }}>
+                                        {[log.option1, log.option2, log.option3].filter(Boolean).join(" / ") || "-"}
+                                      </td>
                                       <td style={{ padding: "12px 16px" }}>{log.locationName}</td>
                                       <td style={{ padding: "12px 16px" }}>{activityLabels[log.activity] || log.activity}</td>
-                                      <td style={{ padding: "12px 16px", textAlign: "right", color: log.delta && log.delta > 0 ? "#008060" : log.delta && log.delta < 0 ? "#d72c0d" : "#202223" }}>
+                                      <td style={{ padding: "12px 16px", textAlign: "right", color: log.delta != null && log.delta > 0 ? "#008060" : log.delta != null && log.delta < 0 ? "#d72c0d" : "#202223" }}>
                                         {log.delta !== null ? (log.delta > 0 ? `+${log.delta}` : String(log.delta)) : "-"}
                                       </td>
                                       <td style={{ padding: "12px 16px", textAlign: "right" }}>

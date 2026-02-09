@@ -40,46 +40,11 @@ import {
   renderExtrasHistory_,
   renderConfirmMemo_,
 } from "../InboundUiParts.jsx";
+import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 const SCAN_QUEUE_KEY = "stock_transfer_pos_scan_queue_v1";
-
-/** 在庫変動をアプリAPIに記録（履歴で種別が正しく表示されるようにする） */
-async function logInventoryChangeToApi({ activity, locationId, locationName, deltas, sourceId }) {
-  const session = SHOPIFY?.session;
-  if (!session?.getSessionToken || !deltas?.length || !sourceId) return;
-  try {
-    const token = await session.getSessionToken();
-    if (!token) return;
-    const { getAppUrl } = await import("../../../common/appUrl.js");
-    const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock.onrender.com
-    const apiUrl = `${appUrl}/api/log-inventory-change`;
-    const timestamp = new Date().toISOString();
-    for (const d of deltas) {
-      if (!d?.inventoryItemId || Number(d?.delta || 0) === 0) continue;
-      const res = await fetch(apiUrl, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          inventoryItemId: d.inventoryItemId,
-          variantId: d.variantId ?? null,
-          sku: d.sku ?? "",
-          locationId,
-          locationName: locationName || locationId,
-          activity,
-          delta: Number(d.delta),
-          quantityAfter: d.quantityAfter ?? null,
-          sourceId,
-          timestamp,
-        }),
-      });
-      if (!res.ok) console.warn("[InboundListScreen] log-inventory-change failed:", res.status);
-    }
-  } catch (e) {
-    console.warn("[InboundListScreen] logInventoryChangeToApi:", e);
-  }
-}
 
 // TDZ 対策: コンポーネント内で定義すると minify で jt 等になり参照順でエラーになるためモジュールレベルに配置
 function denyEdit_(toastReadOnlyOnceRef, toastFn) {

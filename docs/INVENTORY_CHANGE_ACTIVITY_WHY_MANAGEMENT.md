@@ -61,7 +61,35 @@
 3. API 側で「直近の同一 item・location の『管理』行」を検索し、その行の `activity` を受け取った種別に**上書き**する。
 
 このため、**各操作の確定処理で必ず `api/log-inventory-change` を呼ぶ**ことが、ロスと同様に種別を付ける条件です。  
-（入庫: InboundListScreen、出庫: ModalOutbound、ロス: LossProductList、棚卸: InventoryCountList、仕入: PurchaseProductList / PurchaseHistoryList で呼び出し済み。401 の場合はトークン設定を確認。）
+（入庫: InboundListScreen、出庫: ModalOutbound、ロス: LossProductList、棚卸: InventoryCountList、仕入: PurchaseProductList / PurchaseHistoryList で呼び出し済み。）
+
+### 入庫・出庫・仕入・棚卸と Webhook の違い
+
+- **記録の流れは同じ**です。在庫が変わると (1) Webhook が先に「管理」で 1 件入り、(2) 続けて POS が `api/log-inventory-change` を呼ぶと、その行の種別が入庫・出庫・ロス・棚卸・仕入に**上書き**されます。
+- **ロスだけ種別が出て他が「管理」のとき**は、**他フローの API 呼び出しが 401 などで失敗している**可能性が高いです。  
+  - **401 の主な原因**: インストール後しばらく**管理画面でアプリを開いていない**と、オフラインセッションが DB に無く、POS からの API が「Unauthorized」になります。その場合、Webhook で入った「管理」の行だけが残ります。  
+  - **確認**: 利用手順で「初回は必ず1回、管理画面でアプリを開く」を案内しているか。Render の Web サービスの **Logs** で `api/log-inventory-change` の 401 や `POS auth failed` が出ていないかを見ると原因を切り分けやすくなります。
+
+### コード上の扱い：ロスと他は同じか（修正済み）
+
+**「ロスは記録されている」なら、初回に管理画面を開いているかどうかはこの問題には関係ありません。** 同じセッションで他フローも動く前提です。
+
+**問題だった可能性がある点（修正済み）**: ロスは **fetch を直書き**しており、`sourceId` が無くても **送信しないという early return がありません**。一方、出庫・入庫・棚卸・仕入の **共通関数** では `if (!session?.getSessionToken || !deltas?.length || !sourceId) return;` としており、**sourceId が空のときは API を呼ばずに return していました**。呼び出し元で `sourceId` が未設定・空になるパスがあると、ロスだけ記録されて他が「管理」のままになる原因になります。
+
+**対応**: 共通関数から **「sourceId が無いと呼ばない」** 条件を外し、**sourceId が無い場合も API は呼ぶ**（body の sourceId は `null` または省略可）ように変更しました。これでロスと同じく「トークンと変動データがあれば必ず記録を試みる」動きになります。
+
+- **出庫** `ModalOutbound.jsx` の `logInventoryChangeToApi`: `!sourceId` を条件から削除、body は `sourceId: sourceId || null`
+- **入庫** `InboundListScreen.jsx` の `logInventoryChangeToApi`: 同様
+- **棚卸** `InventoryCountList.jsx` の `logInventoryCountToApi`: 同様
+- **仕入** `PurchaseHistoryList.jsx` の `logPurchaseToApi`: 同様
+
+### なぜロスは直書きで他は共通関数になっているか
+
+コードの履歴上、**「ロスだけ直書き、他は共通関数」と決めた仕様書はありません**。想定される経緯は次のとおりです。
+
+- **ロス**は、拡張 `stock-transfer-loss` の **LossProductList.jsx** 内で、確定処理の直後に「在庫変動ログを直接記録（webhookが来る前に記録）」する目的で、**その場で fetch を直書き**しています。1行ずつループで API を呼ぶ形で実装されたため、共通化されていません。
+- **出庫・入庫・棚卸・仕入**は、それぞれ別の拡張（tile / inbound / stocktake / purchase）で、**「在庫変更のあとに api/log-inventory-change を呼ぶ」** という同じパターンが繰り返し出てきたため、**各ファイル内で共通関数**（`logInventoryChangeToApi` / `logInventoryCountToApi` / `logPurchaseToApi`）にまとめられています。重複を避けるためのリファクタの結果です。
+- その結果、**ロスは「sourceId が無くても return しない」**、**共通関数は「sourceId が無いと呼ばない」** という条件の差が生まれ、ロスだけ記録されて他が「管理」のままになる原因の一つになり得ました。上記のとおり、共通関数側の条件を外して挙動を揃えています。
 
 ## 変動がない（delta=0）の記録をしない
 

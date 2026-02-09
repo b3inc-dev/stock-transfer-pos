@@ -40,6 +40,7 @@ import {
   ItemLeft,
   useDebounce,
 } from "./modalUiParts.jsx";
+import { logInventoryChangeToApi } from "../../../common/logInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify;
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -9886,46 +9887,6 @@ async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
       return d2b?.inventoryShipmentReceive?.inventoryShipment ?? null;
     }
     throw e;
-  }
-}
-
-/* =========================
-/* Log inventory change to app API (so history shows correct activity) */
-
-async function logInventoryChangeToApi({ activity, locationId, locationName, deltas, sourceId, lineItems }) {
-  const session = SHOPIFY?.session;
-  if (!session?.getSessionToken || !deltas?.length || !sourceId) return;
-  try {
-    const token = await session.getSessionToken();
-    if (!token) return;
-    const { getAppUrl } = await import("../../../common/appUrl.js");
-    const appUrl = getAppUrl(); // 公開アプリ本番: https://pos-stock.onrender.com
-    const apiUrl = `${appUrl}/api/log-inventory-change`;
-    const timestamp = new Date().toISOString();
-    for (const d of deltas) {
-      if (!d?.inventoryItemId || Number(d?.delta || 0) === 0) continue;
-      const li = lineItems?.find((l) => String(l?.inventoryItemId || "").trim() === d.inventoryItemId);
-      const logData = {
-        inventoryItemId: d.inventoryItemId,
-        variantId: li?.variantId ?? d.variantId ?? null,
-        sku: li?.sku ?? d.sku ?? "",
-        locationId,
-        locationName: locationName || locationId,
-        activity,
-        delta: Number(d.delta),
-        quantityAfter: d.quantityAfter ?? null,
-        sourceId,
-        timestamp,
-      };
-      const res = await fetch(apiUrl, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(logData),
-      });
-      if (!res.ok) console.warn(`[ModalOutbound] log-inventory-change failed: ${res.status}`);
-    }
-  } catch (e) {
-    console.warn("[ModalOutbound] logInventoryChangeToApi:", e);
   }
 }
 
