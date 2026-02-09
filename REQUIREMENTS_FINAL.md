@@ -1,7 +1,7 @@
 # 管理画面・ロス登録・棚卸 実装要件書
 
-**最終更新日**: 2026年2月7日（在庫変動履歴の種別振り分け・公開アプリ appUrl 統一まで反映済み）  
-**コード確認日**: 2026年2月（4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・POS拡張 description 更新・リスティングガイド・発注機能実装・仕入キャンセルモーダル・発注→仕入名称#P0000・CSVファイル名統一・loadItems JAN/オプション補完・仕入POS拡張・ロス区分設定・「その他」表示制御・選択中バッジ・在庫高表示（Phase 5-1）・在庫変動履歴（Phase 5-2）・**在庫履歴のアクティビティ種別振り分け（管理/ロス/仕入/入出庫/棚卸/売上/返品）・Webhook二重記録防止・api/log-inventory-change による種別上書き・公開/自社用 appUrl 共通設定（extensions/common/appUrl.js）** 反映済み）
+**最終更新日**: 2026年2月7日（在庫変動履歴の種別振り分け・公開アプリ appUrl 統一・**api.log-inventory-change デバッグログ削除・リリース時必須対策の要件整理**まで反映済み）  
+**コード確認日**: 2026年2月（4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・POS拡張 description 更新・リスティングガイド・発注機能実装・仕入キャンセルモーダル・発注→仕入名称#P0000・CSVファイル名統一・loadItems JAN/オプション補完・仕入POS拡張・ロス区分設定・「その他」表示制御・選択中バッジ・在庫高表示（Phase 5-1）・在庫変動履歴（Phase 5-2）・在庫履歴のアクティビティ種別振り分け・Webhook二重記録防止・api/log-inventory-change による種別上書き・公開/自社用 appUrl 共通設定・**api.log-inventory-change デバッグログ削除・リリース時必須対策（本番DB永続化・初回管理画面オープン案内）の要件整理** 反映済み）
 
 ---
 
@@ -25,7 +25,7 @@
 | 出庫ロケーション選択のインライン展開 | ✅ 完了（モーダル→ボタン押下で同一画面内展開、変更/閉じるトグル） |
 | 出庫到着時刻ラベル「時間指定」化 | ✅ 完了 |
 | 履歴モーダルに配送情報（配送業者・配送番号・予定日）追加 | ✅ 完了（入庫先とステータスの間に表示） |
-| 本番前の `console.log` 整理 | ✅ 完了（app/ のルート・API・Webhook および 全POS拡張のデバッグ用を削除。loader/action の catch 内 console.error は本番追跡のため残置） |
+| 本番前の `console.log` 整理 | ✅ 完了（app/ のルート・API・Webhook および 全POS拡張のデバッグ用を削除。api.log-inventory-change の Token payload / Called / Updated ログ削除を含む。loader/action の catch 内 console.error は本番追跡のため残置） |
 | 公開アプリ向け・リスティング準備 | ✅ ガイド整備済み（RELEASE_REQUIREMENTS_PUBLIC_APP.md、docs/LISTING_ASSETS_GUIDE.md） |
 | POS表記・UI微調整（画像ON/OFF統一・明細/SKU件数・フッター配置等） | ✅ 完了（本文「直近の主な更新」に記載） |
 | 発注機能：発注先編集・原価・販売価格取得・CSV出力拡張 | ✅ 完了（商品リストモーダル内で発注先編集、原価・販売価格の自動取得・保存、CSV出力項目拡張） |
@@ -33,6 +33,36 @@
 | 在庫変動履歴機能（Phase 5-2） | ✅ 完了（共通ユーティリティ・Webhook実装・一覧表示・CSV出力・UI調整） |
 | 在庫履歴のアクティビティ種別振り分け | ✅ 完了（管理/ロス/仕入/入出庫/棚卸/売上/返品。Webhook二重防止・api/log-inventory-change で種別記録・上書き） |
 | 公開アプリ用 appUrl 統一・切り替え | ✅ 完了（extensions/common/appUrl.js で public/inhouse 切り替え、全POS拡張で参照） |
+| リリース時必須対策の要件整理 | ✅ 完了（RELEASE_REQUIREMENTS_PUBLIC_APP.md セクション5 に記載。デプロイで履歴が消えないよう本番DB永続化、管理画面を開かなくても動くよう初回オープン案内） |
+
+---
+
+### 本番リリース時の2つの課題と対策（在庫変動履歴・情報取得）
+
+本番デプロイで次の2つを満たすための要件をまとめ直したものです。
+
+| 課題 | 望ましい状態 | 対策 | 備考 |
+|------|--------------|------|------|
+| **① 在庫変動履歴がデプロイ当日に消える** | デプロイ後も履歴一覧が残り、当日の履歴が消えない | **永続DB（PostgreSQL）を1つ用意する** | 下記 A / B の**どちらか一方**でよい |
+| **② 管理画面を開かないと情報が取得できない** | POS・Webhook から不備なく API が動く | **インストール後（または初回利用前）に、1回は「管理画面でアプリを開く」**ことを利用手順で案内する | DBの有無とは別。OAuth でオフライントークンが保存されるタイミングのため |
+
+**永続DBについて（①の対策）**
+
+- 本番では Render のディスクがエフェメラルなため、SQLite（`dev.sqlite`）はデプロイのたびに消えます。在庫変動履歴とセッションを残すには **PostgreSQL などの永続DBが必須**です。
+- 次の **A と B のどちらか一方** を用意すれば十分です（両方用意する必要はありません）。接続URLを環境変数 **`DATABASE_URL`** に設定し、Prisma 本番用設定・マイグレーションを行います。
+
+| 選択肢 | 内容 |
+|--------|------|
+| **A. Render PostgreSQL** | Render の「Add-ons」で PostgreSQL を追加し、発行される `DATABASE_URL` を環境変数に設定する。 |
+| **B. Supabase（PostgreSQL）** | Supabase で DB を作成し、接続URLを `DATABASE_URL` で渡す。（.cursorrules の本番環境予定に沿う場合） |
+
+**情報取得について（②の対策）**
+
+- POS や Webhook から `api/log-inventory-change` 等を呼ぶときは **オフラインアクセストークン** を使います。このトークンは **「管理画面でアプリを開いたとき」に OAuth が完了し、初めて Session テーブルに保存**されます。
+- そのため、**「インストール後（または初回利用前）に、必ず1回は Shopify 管理画面でアプリを開く」** ことを利用手順・オンボーディングに明記する運用が必須です。多くの Shopify アプリが同じ前提です。1回開いた後は、管理画面を開かなくとも不備なく情報を取得できます。
+- 詳細・Prisma 設定例・手順は **RELEASE_REQUIREMENTS_PUBLIC_APP.md の「5. 本番で必須の2つの対策」** を参照してください。
+
+---
 
 **任意で残っているもの**: 履歴タブのCSV案内文言の見直し。
 
@@ -141,6 +171,10 @@
 
 - **公開アプリ用 appUrl 設定・切り替え（2026-02-07）**: ①**共通設定**: `extensions/common/appUrl.js` を新規作成。`APP_MODE = "public"` で本番 `https://pos-stock.onrender.com`、`"inhouse"` で `https://stock-transfer-pos.onrender.com`。開発用 `DEV_APP_URL` はトンネル利用時に手動変更可。②**全POS拡張で参照**: ロス・仕入・入庫・出庫・棚卸・発注で `/api/log-inventory-change` 等のベース URL を `getAppUrl()` で取得。参照パスは `../../../../common/appUrl.js` 等で統一。③**公開開発**: 本番ビルド時は `getAppUrl()` を使用。Render への push と `shopify app deploy` で公開アプリとして利用可能。
 
+- **api.log-inventory-change デバッグログ削除（2026-02-07）**: 本番運用前に `app/routes/api.log-inventory-change.tsx` からデバッグ用ログを削除。①トークン payload の未検証デコード＋`console.warn`（aud/iss/dest 等）のブロック削除。②リクエスト受信時の `[api.log-inventory-change] Called: ...` および専用変数（rawItemIdLog / rawLocIdLog / qtyAfterLog）の削除。③`Updated admin_webhook to ...` の `console.log` 削除。認証エラー時の `No Authorization Bearer header`・`decodeSessionToken error`・`POS auth failed` は本番追跡のため残置。
+
+- **リリース時必須対策の要件整理（2026-02-07）**: デプロイで履歴が消える・管理画面を開かないとエラーになる問題の原因と対処を RELEASE_REQUIREMENTS_PUBLIC_APP.md の「5. 本番で必須の2つの対策」に記載。①**履歴が消える**: 本番は SQLite がエフェメラルなため、Render PostgreSQL または Supabase 等の永続DBを用意し DATABASE_URL 設定・Prisma 本番用設定・マイグレーション実施が必須。②**管理画面を開かないとエラー**: オフラインセッションは初回に管理画面でアプリを開いたときに保存されるため、インストール後「1回は管理画面でアプリを開く」旨を利用手順で案内する運用で対応。詳細・Prisma 設定例は RELEASE_REQUIREMENTS_PUBLIC_APP.md セクション5 参照。
+
 **以前の主な更新**:
 - **SKU/CSVグループの確認・編集**: 編集で「SKU選択から作成」タブに切り替え、選択済みSKUを復元。一覧外のinventoryItemIdは維持。右パネルに「SKU一覧（N件）を確認・編集」を表示。
 - **CSV**: 登録済みをCSVダウンロード、インポートモード（新規作成・追加・上書き）、新規作成を選択肢の一番上に配置。
@@ -237,7 +271,9 @@
 
 **今後のアクション（任意）**
 1. 履歴タブのCSV案内文言・配置の見直し（必要に応じて）
-2. **公開アプリリリースに向けて**: ① 更新されたコードのデプロイ ② リスティング用アセットの準備（`docs/LISTING_ASSETS_GUIDE.md` 参照） ③ アプリの審査提出。手順は RELEASE_REQUIREMENTS_PUBLIC_APP.md および docs/LISTING_ASSETS_GUIDE.md を参照。
+2. **公開アプリリリースに向けて**: ① 更新されたコードのデプロイ ② **本番で必須の2つの対策**（RELEASE_REQUIREMENTS_PUBLIC_APP.md セクション5）：永続DB（PostgreSQL 等）の用意・DATABASE_URL 設定・マイグレーション、および「インストール後1回は管理画面でアプリを開く」旨の利用案内 ③ リスティング用アセットの準備（`docs/LISTING_ASSETS_GUIDE.md` 参照） ④ アプリの審査提出。手順は RELEASE_REQUIREMENTS_PUBLIC_APP.md および docs/LISTING_ASSETS_GUIDE.md を参照。
+3. **外部DB前提の全体設計**: 永続DBを前提にしたデータ配置・移行対象の洗い出しとおすすめDB（Supabase）は **`docs/ARCHITECTURE_EXTERNAL_DB.md`** に整理済み。ロス・棚卸・仕入・発注・日次スナップ等の DB 移行は Phase に分けて実施可能。
+4. **Render PostgreSQL で実装し将来 Supabase を想定する場合**: ゴールとタスク整理は **`docs/TASKS_RENDER_POSTGRES_AND_FUTURE_SUPABASE.md`** を参照（Phase A: Prisma を PostgreSQL 対応、Phase B: Render で Postgres 追加・デプロイ、Phase C: ドキュメント・将来移行手順）。
 
 ---
 
@@ -1095,25 +1131,33 @@ type LossEntry = {
 
 ## 4. データベース設計
 
+### 外部DB前提の全体設計（2026-02 方針）
+
+本番で「デプロイで履歴が消えない」「管理画面を開かなくても情報取得が可能」を満たすため、**全体設計を外部DB（PostgreSQL）使用前提で組み直す**方針としました。
+
+- **全体設計・データ洗い出し・DB選定**: **`docs/ARCHITECTURE_EXTERNAL_DB.md`** を参照してください。
+  - 現状のデータ保存箇所の整理（Prisma / Metafield）
+  - 在庫変動履歴以外で外部DBに寄せた方がスムーズになるデータの洗い出し（日次スナップ・ロス・棚卸・仕入・発注・設定など）
+  - 外部DB前提のデータ配置方針と移行 Phase
+- **おすすめのDB**: 全体設計を外部DB前提で見直し、データを増やしていく場合は **Supabase（PostgreSQL）** を推奨。Render のみで完結させたい場合は Render PostgreSQL（Add-ons）も選択肢。比較と理由は上記ドキュメントの「4. おすすめのDB」を参照。
+
+以下は現行実装と、在庫変動履歴まわりの確定事項です。Metafield から DB への移行対象・スキーマ案は ARCHITECTURE_EXTERNAL_DB.md に記載しています。
+
 ### 4.1 現在の実装
-- **Session管理**: Prisma SQLite（`/prisma/schema.prisma`）
+- **Session管理**: Prisma SQLite（開発）/ 本番は PostgreSQL 必須（`/prisma/schema.prisma`）
+- **在庫変動履歴**: Prisma（`InventoryChangeLog`）。本番は PostgreSQL 必須。
 - **設定データ**: Shopify Metafield（`currentAppInstallation.metafield`）
+- **ロス・棚卸・仕入・発注の履歴／マスタ**: 各 Metafield（250KB/値の制限あり）。外部DB移行対象は ARCHITECTURE_EXTERNAL_DB.md 参照。
 
-### 4.2 新規データの保存方法
+### 4.2 新規データの保存方法（方針）
 
-#### オプション1: Metafield方式（推奨・現状維持）
-- **メリット**: 実装が簡単、Shopify標準
-- **デメリット**: データ量に制限がある可能性、検索・集計が難しい
-- **適用**: ロス登録、棚卸設定、棚卸ID
+#### 外部DB前提の方針（2026-02）
+- **永続化が必要なデータ**（セッション・在庫変動履歴・および移行対象のロス/棚卸/仕入/発注/日次スナップ等）は **PostgreSQL（外部DB）** に保存する。本番では SQLite は使わない。
+- **Metafield** は、外部DBに移行するまでは現状どおり利用。移行後は該当キーは書込をやめ、DB を正とする（詳細は ARCHITECTURE_EXTERNAL_DB.md）。
 
-#### オプション2: Prismaデータベース方式
-- **メリット**: 検索・集計が容易、データ量制限なし
-- **デメリット**: スキーマ変更が必要、マイグレーション管理が必要
-- **適用**: 将来的な拡張を考慮する場合
-
-#### 推奨方針
-- **Phase 1**: Metafield方式で実装（迅速な実装）
-- **Phase 2**: 必要に応じてPrismaデータベースに移行（データ量・パフォーマンス問題が発生した場合）
+#### 参考：Metafield と DB の比較（移行前の現状）
+- **Metafield方式**: 実装が簡単・Shopify標準。デメリットは 250KB 制限・検索・集計のしづらさ。適用: ロス登録、棚卸設定・棚卸ID、仕入・発注履歴（現状）。
+- **Prisma（PostgreSQL）方式**: 検索・集計が容易・データ量制限なし。適用: Session、在庫変動履歴（必須）。その他は段階的に移行（ARCHITECTURE_EXTERNAL_DB.md の Phase 参照）。
 
 #### 確定事項（在庫情報実装方針 - 2026-02-06更新）
 
@@ -1129,7 +1173,7 @@ type LossEntry = {
   - アプリ実行分（仕入確定・キャンセル）は、在庫調整成功後に直接ログ記録
   - 入庫・出庫・ロス・棚卸は、既存の`inventory_levels/update` Webhookで検知（`admin_webhook`として記録）
   - 売上時の変動は、`orders/updated` Webhookで検知（`order_sales`として記録）
-- **データ保存**：Prisma DB（SQLite開発環境 / Supabase PostgreSQL本番環境予定）
+- **データ保存**：Prisma DB（SQLite開発環境 / 本番は PostgreSQL）。**本番リリース時**は Render 等のエフェメラルなディスクでは SQLite がデプロイごとに消えるため、**永続DB（PostgreSQL）の利用が必須**。**Render PostgreSQL（Add-ons）と Supabase のどちらか一方**を用意し、接続URLを `DATABASE_URL` に設定すればよい。手順・Prisma 設定例は RELEASE_REQUIREMENTS_PUBLIC_APP.md の「5. 本番で必須の2つの対策」を参照。
 - **検索・フィルター**：期間・ロケーション・商品（InventoryItem ID）・アクティビティ種別でフィルター可能
 - **表示件数**：最大1000件まで表示
   - 変動履歴には「どの操作が原因か」を必ず追えるように、参照IDを保存する。
@@ -2256,3 +2300,22 @@ type SettingsV1 = {
   - 新規拡張 `extensions/stock-transfer-purchase` の作成（Phase C）。  
   - コンディション画面・商品リスト・確定で在庫プラス＋`purchase_entries_v1` に #B0000 で保存。  
   - 詳細は `docs/PURCHASE_IMPLEMENTATION_PLAN.md` の「Phase C: POS 拡張「仕入」」および `docs/REQUIREMENTS_PURCHASE_AND_ORDER.md` を参照。
+
+### 12.31 api.log-inventory-change デバッグログ削除・リリース時必須対策の要件整理（2026-02-07）✅ 完了
+
+本チャットで実装・検証・要件決定した内容を反映。
+
+#### 1. api.log-inventory-change のデバッグログ削除 ✅ 完了
+- **対象ファイル**: `app/routes/api.log-inventory-change.tsx`
+- **削除したログ**:
+  - トークン payload を検証せずに base64 デコードして `aud`/`iss`/`dest` 等を出力していたデバッグ用ブロック（401 切り分け用に一時追加していたもの）
+  - リクエスト受信時の `[api.log-inventory-change] Called: shop=..., activity=..., item=..., ...` およびそのための変数（rawItemIdLog, rawLocIdLog, qtyAfterLog）
+  - `[api.log-inventory-change] Updated admin_webhook to ...` の console.log
+- **残置したログ**: 認証エラー時の `No Authorization Bearer header`・`decodeSessionToken error`・`POS auth failed` は本番での原因追跡のため残置。
+
+#### 2. リリース時必須対策の要件整理 ✅ 完了
+- **反映先**: RELEASE_REQUIREMENTS_PUBLIC_APP.md に「5. 本番で必須の2つの対策」を新設。
+- **内容**:
+  - **デプロイすると履歴一覧が消える**: 原因（SQLite が Render のエフェメラルディスクでデプロイごとに消える）と対処（本番では Render PostgreSQL または Supabase 等の永続DBを用意し、DATABASE_URL 設定・Prisma 本番用設定・マイグレーション実施が必須）。デプロイ当日の履歴が消えないようにするための手順と Prisma 設定例を記載。
+  - **管理画面を開かないとエラーになる**: 原因（オフラインセッションは管理画面でアプリを開いたときに初めて保存される）と対処（インストール後「1回は管理画面でアプリを開く」旨を利用手順・オンボーディングで案内する運用。任意で POS 側に「管理画面でアプリを一度開いてから再度お試しください」と表示する改善も可能）。
+- **参照**: 詳細・本番DBの Prisma 設定例・Render Build Command 例は RELEASE_REQUIREMENTS_PUBLIC_APP.md のセクション5 を参照。

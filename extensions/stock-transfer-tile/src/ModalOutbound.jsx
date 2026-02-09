@@ -6754,6 +6754,33 @@ function OutboundList({
 
       toast(shipment ? "出庫を作成しました（進行中）" : "出庫を作成しました");
 
+      // 在庫変動履歴に「出庫」で記録する（Webhook の「管理」を上書き）
+      const transferIdStr = String(movementId || "").trim();
+      const transferIdMatch = transferIdStr.match(/(\d+)$/);
+      const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+      const outboundDeltas = lineItems.map((l) => {
+        const line = (Array.isArray(lines) ? lines : []).find((x) => String(x?.inventoryItemId) === String(l.inventoryItemId));
+        const available = typeof line?.available === "number" ? line.available : null;
+        const qty = Math.max(0, Number(l.quantity || 0));
+        return {
+          inventoryItemId: l.inventoryItemId,
+          delta: -qty,
+          quantityAfter: available != null ? available - qty : null,
+          variantId: line?.variantId ?? null,
+          sku: line?.sku ?? "",
+        };
+      }).filter((d) => d.inventoryItemId && d.delta !== 0);
+      if (outboundDeltas.length > 0) {
+        await logInventoryChangeToApi({
+          activity: "outbound_transfer",
+          locationId: originLocationGid,
+          locationName: "出庫元",
+          deltas: outboundDeltas,
+          sourceId: transferIdForUri,
+          lineItems: lines,
+        });
+      }
+
       // 後処理（商品リストとコンディションの両方の下書きをクリア）
       try { await clearOutboundDraft?.(); } catch (_) {}
       try {

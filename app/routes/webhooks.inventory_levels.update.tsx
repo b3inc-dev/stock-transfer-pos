@@ -208,10 +208,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             // エラー時は admin_webhook のまま
           }
         } else {
-          console.log(`[inventory_levels/update] No inventory_adjustment_group_id in webhook payload, will try fallback search`);
+          console.log(`[inventory_levels/update] No inventory_adjustment_group_id in webhook payload. Recording as admin_webhook; api/log-inventory-change will overwrite to correct activity (same as loss).`);
         }
         if (activity === "admin_webhook") {
-          console.log(`[inventory_levels/update] No adjustment group in payload; recording as admin_webhook (management). POS/app changes are logged via api/log-inventory-change.`);
+          console.log(`[inventory_levels/update] No adjustment group in payload; recording as admin_webhook (management). POS/app で api/log-inventory-change を呼ぶと種別で上書きされます（ロスと同様）。`);
         }
       } catch (error) {
         console.log(`[inventory_levels/update] Treating as admin_webhook due to error`);
@@ -270,6 +270,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     } catch (error) {
       console.error("Error checking previous log:", error);
       // エラーが発生しても続行（deltaはnullのまま）
+    }
+
+    // 変動がない（delta が 0）場合はログを保存しない（「0」の行が履歴に並ばないようにする）
+    if (delta === 0) {
+      console.log(`[inventory_levels/update] Skipping log: no change (delta=0), item=${inventoryItemIdRaw}, location=${locationIdRaw}, quantityAfter=${available}`);
+      return new Response("OK", { status: 200 });
     }
 
     // 同一の在庫変動がすでに別の経路で記録されていたら webhook では保存しない。

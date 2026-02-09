@@ -1127,9 +1127,11 @@ export function InboundListScreen({
         }
         extraDeltasMerged = extraDeltas;
 
+        let receivedItemsForLog = [];
         if (plannedItems.length > 0) {
           try {
             await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: plannedItems });
+            receivedItemsForLog = plannedItems;
           } catch (e) {
             const msg = String(e?.message || e || "");
             if (!/quantity|unreceived|exceed|max|greater|less/i.test(msg)) throw e;
@@ -1150,7 +1152,10 @@ export function InboundListScreen({
               if (overflow > 0 && inventoryItemId) overflowMap.set(inventoryItemId, (overflowMap.get(inventoryItemId) || 0) + overflow);
               return { shipmentLineItemId, quantity: deltaPlanned };
             }).filter((x) => x.shipmentLineItemId && x.quantity > 0);
-            if (cappedItems.length > 0) await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: cappedItems });
+            if (cappedItems.length > 0) {
+              await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: cappedItems });
+              receivedItemsForLog = cappedItems;
+            }
             if (overflowMap.size > 0) {
               const m = new Map();
               (extraDeltas || []).forEach((d) => {
@@ -1167,6 +1172,18 @@ export function InboundListScreen({
               });
               extraDeltasMerged = Array.from(m.entries()).map(([inventoryItemId, delta]) => ({ inventoryItemId, delta }));
             }
+          }
+        }
+        if (receivedItemsForLog.length > 0) {
+          const transferIdStr = String(transferId || "").trim();
+          const transferIdMatch = transferIdStr.match(/(\d+)$/);
+          const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+          const inboundDeltas = receivedItemsForLog.map((p) => {
+            const row = rows.find((r) => String(r.shipmentLineItemId || "").trim() === String(p.shipmentLineItemId || "").trim());
+            return row ? { inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity } : null;
+          }).filter((d) => d && d.inventoryItemId && d.delta > 0);
+          if (inboundDeltas.length > 0) {
+            await logInventoryChangeToApi({ activity: "inbound_transfer", locationId: locationGid, locationName: "", deltas: inboundDeltas, sourceId: transferIdForUri });
           }
         }
 
@@ -1252,11 +1269,16 @@ export function InboundListScreen({
           return false;
         }
         const overflowMap = new Map();
+        const multiReceivedDeltas = [];
         for (const [sid, sRows] of byShipment) {
           const plannedItems = plannedByShip.get(sid) || [];
           if (plannedItems.length === 0) continue;
           try {
             await receiveShipmentWithFallbackV2({ shipmentId: sid, items: plannedItems });
+            for (const p of plannedItems) {
+              const row = rowByLineId.get(String(p.shipmentLineItemId || "").trim());
+              if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
+            }
           } catch (e) {
             const msg = String(e?.message || e || "");
             if (!/quantity|unreceived|exceed|max|greater|less/i.test(msg)) throw e;
@@ -1276,7 +1298,28 @@ export function InboundListScreen({
               if (overflow > 0 && inventoryItemId) overflowMap.set(inventoryItemId, (overflowMap.get(inventoryItemId) || 0) + overflow);
               return { shipmentLineItemId, quantity: deltaPlanned };
             }).filter((x) => x.shipmentLineItemId && x.quantity > 0);
-            if (cappedItems.length > 0) await receiveShipmentWithFallbackV2({ shipmentId: sid, items: cappedItems });
+            if (cappedItems.length > 0) {
+              await receiveShipmentWithFallbackV2({ shipmentId: sid, items: cappedItems });
+              for (const p of cappedItems) {
+                const row = sRows.find((r) => String(r.shipmentLineItemId || "").trim() === String(p.shipmentLineItemId || "").trim());
+                if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
+              }
+            }
+          }
+        }
+        if (multiReceivedDeltas.length > 0 && locationGid) {
+          const merged = new Map();
+          multiReceivedDeltas.forEach((d) => {
+            if (!d.inventoryItemId || d.delta <= 0) return;
+            const k = d.inventoryItemId;
+            merged.set(k, (merged.get(k) || 0) + d.delta);
+          });
+          const inboundDeltas = Array.from(merged.entries()).map(([inventoryItemId, delta]) => ({ inventoryItemId, delta }));
+          if (inboundDeltas.length > 0) {
+            const transferIdStr = String(transferId || "").trim();
+            const transferIdMatch = transferIdStr.match(/(\d+)$/);
+            const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+            await logInventoryChangeToApi({ activity: "inbound_transfer", locationId: locationGid, locationName: "", deltas: inboundDeltas, sourceId: transferIdForUri });
           }
         }
         for (const [sid, rejItems] of rejectedByShip) {

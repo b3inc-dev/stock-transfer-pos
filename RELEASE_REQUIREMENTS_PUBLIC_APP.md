@@ -278,7 +278,83 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 
 ---
 
-## 5. リリースまでの作業フロー（チェックリスト）
+## 5. 本番で必須の2つの対策（履歴が消える・管理画面を開かないとエラー）
+
+デプロイ先（例: Render）で次の2つが起きる場合の原因と対処です。
+
+### 5.1 デプロイすると履歴一覧が消えてしまう
+
+**原因**
+
+- セッションと在庫変動履歴（`InventoryChangeLog`）はどちらも **Prisma + SQLite**（`prisma/schema.prisma` の `file:dev.sqlite`）に保存されています。
+- Render ではデプロイのたびにコンテナが作り直され、**ディスク上のファイルは消えます**（エフェメラル）。そのため `dev.sqlite` も毎回空の状態からになり、履歴とセッションが失われます。
+
+**対処（リリース時に必須）**
+
+本番では **永続的なデータベース** を使う必要があります。
+
+| 方法 | 内容 |
+|------|------|
+| **A. Render PostgreSQL** | Render の「Add-ons」で PostgreSQL を追加し、発行される `DATABASE_URL` を環境変数に設定する。 |
+| **B. Supabase（PostgreSQL）** | プロジェクト方針（.cursorrules）の「本番環境予定」の通り、Supabase で PostgreSQL を作成し、接続URLを `DATABASE_URL` で渡す。 |
+
+**手順の流れ（共通イメージ）**
+
+1. 上記のいずれかで PostgreSQL を用意し、**接続URL**（例: `postgresql://user:pass@host:5432/dbname`）を取得する。
+2. 本番用環境変数に **`DATABASE_URL`** を設定する（Render の Environment など）。
+3. Prisma を本番で PostgreSQL 向けに使うようにする（下記「5.3 本番DBの Prisma 設定」を参照）。
+4. デプロイ時（または初回デプロイ後1回）に **マイグレーション** を実行する（例: Build Command に `npx prisma migrate deploy` を入れる、または Render の「Deploy」の前に手動実行）。
+
+これにより、**デプロイ後も履歴とセッションが残り**、デプロイ当日の履歴一覧が消えません。
+
+### 5.2 管理画面を開かないとエラーになる（情報が取得できない）
+
+**原因**
+
+- POS や Webhook から API を呼ぶとき、**オフラインアクセストークン**（バックグラウンドで Admin API を叩くためのトークン）を使います。
+- このオフライントークンは、**ストアオーナーが「管理画面でアプリを開いたとき」に OAuth が完了し、そのタイミングで初めて Session テーブルに保存されます**。
+- 一度も管理画面でアプリを開いていないと、`findSessionsByShop` でセッションが見つからず、`api.log-inventory-change` などが「No session found for shop」で 401 になります。
+
+**対処（リリース時の運用と案内）**
+
+| 対策 | 内容 |
+|------|------|
+| **運用で必須** | **インストール後（または初回利用前）に、必ず1回は「Shopify 管理画面でアプリを開く」** ことを、利用手順・オンボーディング・README に明記する。多くの Shopify アプリが同じ前提です。 |
+| **体験の改善** | POS 側で「セッションがない」と分かったときに、「Shopify 管理画面でアプリを一度開いてから、再度お試しください」と表示すると親切です（任意）。 |
+| **技術的な前提** | App Store からインストールした場合も、**「アプリを開く」リンクを最初に1回クリックすると OAuth が実行され、オフライントークンが保存されます**。つまり「管理画面を開く＝アプリを開く」を1回やってもらう必要があります。 |
+
+リリース時は、**「初回セットアップで1回は管理画面でアプリを開く」** ことをドキュメントや画面で案内すれば、管理画面を開かなくても不備なく情報を取得できる状態を、開いた後から維持できます。
+
+### 5.3 本番DBの Prisma 設定（永続化する場合）
+
+履歴を消さないために本番で PostgreSQL を使う場合の設定例です。
+
+1. **環境変数**  
+   本番のみ `DATABASE_URL` を設定する（例: Render の Environment）。  
+   開発環境では従来どおり SQLite を使う場合は、開発用の `.env` には `DATABASE_URL` を書かず、`file:dev.sqlite` のままにします。
+
+2. **Prisma の切り替え方**  
+   - **開発**: これまで通り `provider = "sqlite"` と `url = "file:dev.sqlite"` のままでもよい。  
+   - **本番**: 同じリポジトリで本番だけ PostgreSQL にするには、**本番ビルド時だけ** `provider = "postgresql"` と `url = env("DATABASE_URL")` にする必要があります。  
+   - Prisma は 1 つの `schema.prisma` で provider を 1 つしか指定できないため、**本番も開発も PostgreSQL にする**か、**本番のみ PostgreSQL 用の schema を別ファイルで用意してビルド時に差し替える**かのどちらかになります。  
+   - シンプルなのは **「本番・開発ともに PostgreSQL」** にすることです。開発では Docker の PostgreSQL や Supabase の無料DBを `DATABASE_URL` で指すようにします。
+
+3. **マイグレーション**  
+   - PostgreSQL 用のマイグレーションを別途作成し、本番では `npx prisma migrate deploy` をデプロイ手順（または Build Command）に含めます。  
+   - 既存の SQLite 用マイグレーションとは別に、PostgreSQL 用の初期マイグレーションを用意する必要があります。
+
+**本番で PostgreSQL を使う場合の設定例（参考）**
+
+- 開発は従来どおり SQLite、本番だけ PostgreSQL にする場合は、`schema.prisma` の `datasource` を環境変数で切り替えられません（provider が sqlite か postgresql か 1 つに決まるため）。そのため、**本番・開発ともに PostgreSQL** にするか、本番用に別 schema を用意する必要があります。
+- **本番・開発ともに PostgreSQL** にする場合の例：
+  - `prisma/schema.prisma` の `datasource` を `provider = "postgresql"` と `url = env("DATABASE_URL")` に変更する。
+  - 開発用 `.env` には、ローカルや Supabase の PostgreSQL の `DATABASE_URL` を設定する。
+  - 新規に `npx prisma migrate dev --name init_postgres` で PostgreSQL 用マイグレーションを作成する（既存 SQLite とは別）。
+- Render の **Build Command** に `npx prisma generate && npx prisma migrate deploy` を追加し、本番では `DATABASE_URL` を設定したうえでデプロイする。
+
+---
+
+## 6. リリースまでの作業フロー（チェックリスト）
 
 ### Phase A: 準備（パートナー・インフラ）
 
@@ -312,7 +388,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 
 ---
 
-## 6. 参考リンク
+## 7. 参考リンク
 
 | 内容 | URL |
 |------|-----|
@@ -323,7 +399,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 
 ---
 
-## 7. 現在の `shopify.app.public.toml` の状態（要修正箇所）
+## 8. 現在の `shopify.app.public.toml` の状態（要修正箇所）
 
 - **`client_id`**: `YOUR_PUBLIC_APP_CLIENT_ID` → **公開用アプリの実際の Client ID に差し替える**
 - **`application_url`**: `https://pos-stock.onrender.com` → 実際の公開用本番URLと一致させる
@@ -333,9 +409,9 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 
 ---
 
-## 8. 機能拡張メモ：出庫の複数シップメント対応（設計案・アドバイス）
+## 9. 機能拡張メモ：出庫の複数シップメント対応（設計案・アドバイス）
 
-### 8.1 イメージの整理（賛成です）
+### 9.1 イメージの整理（賛成です）
 
 - **対象**: 履歴一覧の「未出庫」タブのうち、**ステータスが「配送準備完了」（READY_TO_SHIP）の Transfer だけ**を対象にする。
 - **UI**: 入庫の複数シップメント時と同様、**右側に「編集」ボタン**を出し、タップでモーダルを表示。
@@ -345,7 +421,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 
 この流れで、**配送準備完了のものだけ**追加シップメント可能にし、入庫の複数シップメントと対になる動きにできるので、そのイメージで問題ないと思います。
 
-### 8.2 利用する API（Shopify 公式）
+### 9.2 利用する API（Shopify 公式）
 
 - **このシップメントを確定**  
   - `inventoryShipmentMarkInTransit(id: シップメントID)`  
@@ -357,7 +433,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 
 追加したシップメントを「出庫した」扱いにする場合は、そのシップメントに対して同じく `inventoryShipmentMarkInTransit` を呼べば、Transfer は引き続き処理中として扱われます。
 
-### 8.3 未確定・新規作成が「処理中」に進むタイミング（アドバイス）
+### 9.3 未確定・新規作成が「処理中」に進むタイミング（アドバイス）
 
 - **Transfer が「処理中」（IN_PROGRESS / IN_TRANSIT）になる条件**  
   - **「いずれか 1 つ以上のシップメントが“出庫済み”（Mark In Transit）になったとき」**と整理するのが分かりやすいです。
@@ -387,7 +463,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 
 ---
 
-### 8.4 シップメントリストの必要性とモーダル内容
+### 9.4 シップメントリストの必要性とモーダル内容
 
 **シップメントリストは必要です。**
 
@@ -413,7 +489,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 
 ---
 
-### 8.5 Modal.jsx の容量を増やさない実装方針（慎重に進める）
+### 9.5 Modal.jsx の容量を増やさない実装方針（慎重に進める）
 
 `Modal.jsx` はすでに 14,000 行超あるため、**この機能のコンポーネントは Modal.jsx に足さず、別ファイルに切り出す**ことを推奨します。
 
