@@ -6,73 +6,17 @@ import { useState, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import { getDateInShopTimezone, formatDateTimeInShopTimezone } from "../utils/timezone";
 import db from "../db.server";
+import {
+  type DailyInventorySnapshot,
+  type InventorySnapshotsData,
+  getSavedSnapshots,
+  fetchAllInventoryItems,
+  aggregateSnapshotsFromItems,
+  fetchAndSaveSnapshotsForDate,
+} from "../utils/inventory-snapshot";
 
-const INVENTORY_INFO_NS = "inventory_info";
-const DAILY_SNAPSHOTS_KEY = "daily_snapshots";
-
-// 日次スナップショットのデータ構造
-export type DailyInventorySnapshot = {
-  date: string; // YYYY-MM-DD形式
-  locationId: string;
-  locationName: string;
-  totalQuantity: number;
-  totalRetailValue: number; // 販売価格合計（現在の価格）
-  totalCompareAtPriceValue: number; // 割引前価格合計
-  totalCostValue: number; // 原価合計
-};
-
-export type InventorySnapshotsData = {
-  version: 1;
-  snapshots: DailyInventorySnapshot[];
-};
-
-// 在庫アイテムを取得するGraphQLクエリ（inventoryItemsから取得）
-// 注: InventoryItem.variants は API バージョンにより存在しないため variant のみ使用
-const INVENTORY_ITEMS_QUERY = `#graphql
-  query InventoryItemsForSnapshot($first: Int!, $after: String) {
-    inventoryItems(first: $first, after: $after) {
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      edges {
-        node {
-          id
-          unitCost {
-            amount
-            currencyCode
-          }
-          inventoryLevels(first: 250) {
-            edges {
-              node {
-                id
-                quantities(names: ["available"]) {
-                  name
-                  quantity
-                }
-                location {
-                  id
-                  name
-                }
-              }
-            }
-          }
-          variant {
-            id
-            sku
-            price
-            compareAtPrice
-            product {
-              id
-              title
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
+// 型の再エクスポート（他ルートで参照している場合に備える）
+export type { DailyInventorySnapshot, InventorySnapshotsData };
 
 // ロケーション一覧を取得するクエリ
 const LOCATIONS_QUERY = `#graphql
@@ -81,38 +25,6 @@ const LOCATIONS_QUERY = `#graphql
       nodes {
         id
         name
-      }
-    }
-  }
-`;
-
-// Metafieldから日次スナップショットを読み取るクエリ
-const GET_SNAPSHOTS_QUERY = `#graphql
-  query GetInventorySnapshots {
-    shop {
-      id
-      name
-      ianaTimezone
-      metafield(namespace: "${INVENTORY_INFO_NS}", key: "${DAILY_SNAPSHOTS_KEY}") {
-        id
-        value
-      }
-    }
-  }
-`;
-
-// Metafieldに日次スナップショットを保存するmutation
-const SAVE_SNAPSHOTS_MUTATION = `#graphql
-  mutation SaveInventorySnapshots($metafields: [MetafieldsSetInput!]!) {
-    metafieldsSet(metafields: $metafields) {
-      metafields {
-        id
-        namespace
-        key
-      }
-      userErrors {
-        field
-        message
       }
     }
   }
@@ -159,144 +71,44 @@ export async function loader({ request }: LoaderFunctionArgs) {
     
     const locations = locationsData?.data?.locations?.nodes ?? [];
 
-    // Metafieldから日次スナップショットを読み取る
-    const snapshotsResp = await admin.graphql(GET_SNAPSHOTS_QUERY);
-    const snapshotsData = await snapshotsResp.json();
-    
-    if (snapshotsData.errors) {
-      console.error("Snapshots query errors:", snapshotsData.errors);
-      const errList = Array.isArray(snapshotsData.errors)
-        ? snapshotsData.errors.map((e: any) => e?.message ?? String(e))
-        : [String(snapshotsData.errors)];
-      throw new Error(`スナップショット取得エラー: ${errList.join(", ")}`);
-    }
-    
-    const shopId = snapshotsData?.data?.shop?.id;
-    const shopName = snapshotsData?.data?.shop?.name || "";
-    const shopTimezone = snapshotsData?.data?.shop?.ianaTimezone || "UTC"; // デフォルトはUTC
-    
-    const metafieldValue = snapshotsData?.data?.shop?.metafield?.value;
+    // 共通モジュール用に admin を request 形式でラップ
+    const adminForSnapshot = {
+      request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
+        admin.graphql(opts.data, { variables: opts.variables ?? {} }),
+    };
 
-  let savedSnapshots: InventorySnapshotsData = { version: 1, snapshots: [] };
-  if (typeof metafieldValue === "string" && metafieldValue) {
-    try {
-      const parsed = JSON.parse(metafieldValue);
-      if (parsed?.version === 1 && Array.isArray(parsed?.snapshots)) {
-        savedSnapshots = parsed;
-      }
-    } catch {
-      // ignore
-    }
-  }
+    // Metafieldから日次スナップショットを読み取る（共通モジュール）
+    const { shopId, shopName, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
 
   // ショップのタイムゾーンに基づいて今日の日付を取得
-  // サーバー側で現在時刻を取得してから日付を計算（サーバーのタイムゾーンではなく、ショップのタイムゾーンで計算）
   const now = new Date();
   const todayInShopTimezone = getDateInShopTimezone(now, shopTimezone);
   
   const selectedDate = url.searchParams.get("date") || todayInShopTimezone;
 
-  // 今日の場合はリアルタイムで在庫情報を取得
+  // 今日の場合はリアルタイムで在庫情報を取得（共通モジュールで取得・集計）
   const today = todayInShopTimezone;
   const isToday = selectedDate === today;
   
-  // 最初のスナップショット日付を取得（インストール日以降の日付選択制限用）
   const snapshotDates = savedSnapshots.snapshots.map((s) => s.date).sort();
   const firstSnapshotDate = snapshotDates.length > 0 ? snapshotDates[0] : todayInShopTimezone;
 
-  // 前日の日付（フォールバック保存・「前日分があるか」判定用）
   const [y, m, d] = todayInShopTimezone.split("-").map(Number);
   const yesterdayDate = new Date(y, m - 1, d - 1);
   const yesterdayDateStr = yesterdayDate.toISOString().slice(0, 10);
   const hasYesterdaySnapshot = savedSnapshots.snapshots.some((s) => s.date === yesterdayDateStr);
 
-  // 選択された日付のスナップショットを取得（互換性のため、totalCompareAtPriceValueがない場合は補完）
   const snapshotForDate = savedSnapshots.snapshots
     .filter((s) => s.date === selectedDate)
     .map((s) => ({
       ...s,
-      totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0, // 古いデータ形式の場合は販売価格合計と同じ値を使用
+      totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0,
     }));
 
   let currentInventory: DailyInventorySnapshot[] = [];
   if (isToday) {
-    // リアルタイム在庫を取得して集計
-    const allItems: any[] = [];
-    let hasNextPage = true;
-    let cursor: string | null = null;
-
-    // 在庫アイテムを取得（inventoryItemsクエリを使用）
-    while (hasNextPage) {
-      const resp = await admin.graphql(INVENTORY_ITEMS_QUERY, {
-        variables: { first: 50, after: cursor },
-      });
-      const data = await resp.json();
-      
-      if (data.errors) {
-        console.error("InventoryItems query errors:", data.errors);
-        const errList = Array.isArray(data.errors)
-          ? data.errors.map((e: any) => e?.message ?? String(e))
-          : [String(data.errors)];
-        throw new Error(`在庫アイテム取得エラー: ${errList.join(", ")}`);
-      }
-      
-      const edges = data?.data?.inventoryItems?.edges ?? [];
-      const nodes = edges.map((e: any) => e.node);
-      allItems.push(...nodes);
-
-      hasNextPage = data?.data?.inventoryItems?.pageInfo?.hasNextPage ?? false;
-      cursor = data?.data?.inventoryItems?.pageInfo?.endCursor ?? null;
-    }
-
-    // 価格を取得（Money は文字列 "123.45" のことも、オブジェクト { amount } のこともある）
-    const toAmount = (v: unknown): number => {
-      if (v == null) return 0;
-      if (typeof v === "string") return parseFloat(v) || 0;
-      if (typeof v === "object" && v !== null && "amount" in v) return parseFloat((v as { amount?: string }).amount ?? "0") || 0;
-      return 0;
-    };
-
-    // ロケーション別に集計
-    const locationMap = new Map<string, DailyInventorySnapshot>();
-    
-    for (const item of allItems) {
-      // 金額が0になる要因: unitCost未設定/権限不足→原価0。variant が null（削除済み等）→価格0。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
-      const unitCost = toAmount(item.unitCost?.amount ?? item.unitCost);
-      const variant = item.variant ?? null;
-      const retailPrice = toAmount(variant?.price);
-      const compareAtPrice = toAmount(variant?.compareAtPrice);
-      
-      // 各在庫レベルを処理
-      const levels = item.inventoryLevels?.edges ?? [];
-      for (const levelEdge of levels) {
-        const level = levelEdge.node;
-        const locationId = level.location?.id;
-        const locationName = level.location?.name ?? "";
-        const quantity = level.quantities?.find((q: any) => q.name === "available")?.quantity ?? 0;
-        
-        if (!locationId) continue;
-
-        if (!locationMap.has(locationId)) {
-          locationMap.set(locationId, {
-            date: todayInShopTimezone,
-            locationId,
-            locationName,
-            totalQuantity: 0,
-            totalRetailValue: 0,
-            totalCompareAtPriceValue: 0,
-            totalCostValue: 0,
-          });
-        }
-
-        const snapshot = locationMap.get(locationId)!;
-        snapshot.totalQuantity += quantity;
-        snapshot.totalRetailValue += quantity * retailPrice;
-        snapshot.totalCompareAtPriceValue += quantity * (compareAtPrice || retailPrice); // 割引前価格がない場合は販売価格を使用
-        snapshot.totalCostValue += quantity * unitCost;
-      }
-    }
-
-    currentInventory = Array.from(locationMap.values());
+    const allItems = await fetchAllInventoryItems(adminForSnapshot);
+    currentInventory = aggregateSnapshotsFromItems(allItems, todayInShopTimezone);
   }
 
   // 選択されたロケーションでフィルター（複数選択対応）
@@ -507,14 +319,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 }
 
-// 金額を取得するヘルパー（日次APIと同一ロジック）
-function toAmount(v: unknown): number {
-  if (v == null) return 0;
-  if (typeof v === "string") return parseFloat(v) || 0;
-  if (typeof v === "object" && v !== null && "amount" in v) return parseFloat((v as { amount?: string }).amount ?? "0") || 0;
-  return 0;
-}
-
 // 商品検索用のaction関数
 export async function action({ request }: ActionFunctionArgs) {
   try {
@@ -522,25 +326,13 @@ export async function action({ request }: ActionFunctionArgs) {
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();
 
-    // 前日分スナップショットが無い場合に保存（管理画面を開いたときのフォールバック。Cronが無くても前日分を補完）
+    // 前日分スナップショットが無い場合に保存（共通モジュールで取得・保存）
     if (intent === "ensureYesterdaySnapshot") {
-      const snapshotsResp = await admin.graphql(GET_SNAPSHOTS_QUERY);
-      const snapshotsData = await snapshotsResp.json();
-      if (snapshotsData?.errors) {
-        return { ok: false, error: "スナップショット取得に失敗しました。" };
-      }
-      const shopId = snapshotsData?.data?.shop?.id;
-      const shopTimezone = snapshotsData?.data?.shop?.ianaTimezone || "UTC";
-      const metafieldValue = snapshotsData?.data?.shop?.metafield?.value;
-      let savedSnapshots: InventorySnapshotsData = { version: 1, snapshots: [] };
-      if (typeof metafieldValue === "string" && metafieldValue) {
-        try {
-          const parsed = JSON.parse(metafieldValue);
-          if (parsed?.version === 1 && Array.isArray(parsed?.snapshots)) savedSnapshots = parsed;
-        } catch {
-          /* ignore */
-        }
-      }
+      const adminForSnapshot = {
+        request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
+          admin.graphql(opts.data, { variables: opts.variables ?? {} }),
+      };
+      const { shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
       const now = new Date();
       const todayStr = getDateInShopTimezone(now, shopTimezone);
       const [y, m, d] = todayStr.split("-").map(Number);
@@ -549,70 +341,9 @@ export async function action({ request }: ActionFunctionArgs) {
       if (savedSnapshots.snapshots.some((s) => s.date === dateToSaveStr)) {
         return { ok: true, skipped: true, message: "前日分は既に保存済みです。" };
       }
-      const allItems: any[] = [];
-      let hasNextPage = true;
-      let cursor: string | null = null;
-      while (hasNextPage) {
-        const resp = await admin.graphql(INVENTORY_ITEMS_QUERY, { variables: { first: 50, after: cursor } });
-        const data = await resp.json();
-        if (data?.errors) return { ok: false, error: "在庫取得に失敗しました。" };
-        const edges = data?.data?.inventoryItems?.edges ?? [];
-        const nodes = edges.map((e: any) => e.node);
-        allItems.push(...nodes);
-        hasNextPage = data?.data?.inventoryItems?.pageInfo?.hasNextPage ?? false;
-        cursor = data?.data?.inventoryItems?.pageInfo?.endCursor ?? null;
-      }
-      const locationMap = new Map<string, DailyInventorySnapshot>();
-      for (const item of allItems) {
-        const unitCost = toAmount(item.unitCost?.amount ?? item.unitCost);
-        const variant = item.variant ?? null;
-        const retailPrice = toAmount(variant?.price);
-        const compareAtPrice = toAmount(variant?.compareAtPrice);
-        const levels = item.inventoryLevels?.edges ?? [];
-        for (const levelEdge of levels) {
-          const level = levelEdge.node;
-          const locationId = level.location?.id;
-          const locationName = level.location?.name ?? "";
-          const quantity = level.quantities?.find((q: any) => q.name === "available")?.quantity ?? 0;
-          if (!locationId) continue;
-          if (!locationMap.has(locationId)) {
-            locationMap.set(locationId, {
-              date: dateToSaveStr,
-              locationId,
-              locationName,
-              totalQuantity: 0,
-              totalRetailValue: 0,
-              totalCompareAtPriceValue: 0,
-              totalCostValue: 0,
-            });
-          }
-          const snapshot = locationMap.get(locationId)!;
-          snapshot.totalQuantity += quantity;
-          snapshot.totalRetailValue += quantity * retailPrice;
-          snapshot.totalCompareAtPriceValue += quantity * (compareAtPrice || retailPrice);
-          snapshot.totalCostValue += quantity * unitCost;
-        }
-      }
-      const newSnapshots = Array.from(locationMap.values());
-      const updatedSnapshots = savedSnapshots.snapshots.filter((s) => s.date !== dateToSaveStr);
-      updatedSnapshots.push(...newSnapshots);
-      const saveResp = await admin.graphql(SAVE_SNAPSHOTS_MUTATION, {
-        variables: {
-          metafields: [
-            {
-              ownerId: shopId,
-              namespace: INVENTORY_INFO_NS,
-              key: DAILY_SNAPSHOTS_KEY,
-              type: "json",
-              value: JSON.stringify({ version: 1, snapshots: updatedSnapshots }),
-            },
-          ],
-        },
-      });
-      const saveData = await saveResp.json();
-      const userErrors = saveData?.data?.metafieldsSet?.userErrors ?? [];
-      if (userErrors.length > 0) {
-        return { ok: false, error: userErrors.map((e: any) => e.message).join(", ") };
+      const result = await fetchAndSaveSnapshotsForDate(adminForSnapshot, dateToSaveStr);
+      if (!result.ok && result.userErrors?.length) {
+        return { ok: false, error: result.userErrors.join(", ") };
       }
       return { ok: true, saved: true, date: dateToSaveStr, message: "前日分のスナップショットを保存しました。" };
     }
@@ -1999,7 +1730,9 @@ export default function InventoryInfoPage() {
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>商品名</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>SKU</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>JAN</th>
-                                    <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>オプション</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>オプション1</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>オプション2</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>オプション3</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>ロケーション</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>アクティビティ</th>
                                     <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動数</th>
@@ -2016,9 +1749,9 @@ export default function InventoryInfoPage() {
                                       <td style={{ padding: "12px 16px" }}>{log.productTitle || log.sku || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.sku || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.barcode || "-"}</td>
-                                      <td style={{ padding: "12px 16px" }}>
-                                        {[log.option1, log.option2, log.option3].filter(Boolean).join(" / ") || "-"}
-                                      </td>
+                                      <td style={{ padding: "12px 16px" }}>{log.option1 || "-"}</td>
+                                      <td style={{ padding: "12px 16px" }}>{log.option2 || "-"}</td>
+                                      <td style={{ padding: "12px 16px" }}>{log.option3 || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.locationName}</td>
                                       <td style={{ padding: "12px 16px" }}>{activityLabels[log.activity] || log.activity}</td>
                                       <td style={{ padding: "12px 16px", textAlign: "right", color: log.delta != null && log.delta > 0 ? "#008060" : log.delta != null && log.delta < 0 ? "#d72c0d" : "#202223" }}>

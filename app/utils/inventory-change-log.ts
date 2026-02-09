@@ -19,6 +19,8 @@ export type InventoryChangeLogData = {
   adjustmentGroupId?: string | null; // InventoryAdjustmentGroup ID（取れる場合）
   idempotencyKey: string; // 二重登録防止用キー
   note?: string | null; // 備考（アプリ実行分で取れる場合のみ）
+  /** ショップタイムゾーンで計算した日付（YYYY-MM-DD）。渡すとUTCフォールバックを使わず一貫した日付になる */
+  date?: string | null;
 };
 
 /**
@@ -73,9 +75,8 @@ export async function logInventoryChange(data: InventoryChangeLogData): Promise<
       return false;
     }
 
-    // タイムゾーンを取得して日付を計算（adminが必要な場合は呼び出し元で取得済みのはず）
-    // ここではとりあえずUTCで計算（後で修正する可能性がある）
-    const date = getDateInShopTimezone(data.timestamp, "UTC");
+    // 呼び出し元でショップタイムゾーンから date を渡すとそれを使用（Webhook・仕入等で統一）。未指定時はUTCで計算
+    const date = data.date ?? getDateInShopTimezone(data.timestamp, "UTC");
     
     console.log(`[logInventoryChange] Saving log: shop=${data.shop}, activity=${data.activity}, item=${data.inventoryItemId}, location=${data.locationId}, delta=${data.delta}, date=${date}`);
 
@@ -292,6 +293,7 @@ export async function logInventoryChangesFromAdjustment(
       const logData: InventoryChangeLogData = {
         shop,
         timestamp: new Date(),
+        date: baseDate, // ショップタイムゾーンで計算済み
         inventoryItemId: change.inventoryItemId,
         variantId: itemInfo.variantId,
         sku: itemInfo.sku,

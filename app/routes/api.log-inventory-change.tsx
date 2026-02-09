@@ -81,7 +81,7 @@ export async function action({ request }: ActionFunctionArgs) {
         { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
-    const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+    const token = (authHeader ?? "").replace(/^Bearer\s+/i, "").trim();
 
     // 先に自前 decode を試す（成功すれば authenticate.pos の 401 を回避し、失敗時はエラー内容をログに出す）
     let sessionToken: { dest?: string } | null = await decodePOSToken(token);
@@ -105,55 +105,139 @@ export async function action({ request }: ActionFunctionArgs) {
     const shop = shopFromDest(dest);
 
     const body = await request.json();
-    const {
-      inventoryItemId,
-      variantId,
-      sku,
-      locationId,
-      locationName,
-      activity,
-      delta,
-      quantityAfter,
-      sourceId,
-      adjustmentGroupId,
-      timestamp,
-    } = body;
+    // バッチ: body.entries が配列なら複数件、なければ body 1件として扱う（後方互換）
+    const entries: any[] = Array.isArray(body?.entries) && body.entries.length > 0 ? body.entries : [body];
 
-    if (!inventoryItemId || !locationId || !activity) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "Missing required fields" }),
-        { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
-    }
-
-    const rawItemId = toRawId(inventoryItemId);
-    const rawLocId = toRawId(locationId);
-    const ts = timestamp ? new Date(timestamp) : new Date();
-
-    // オフラインセッションを取得（Admin API と DB 用）。無くても最小限の記録は行う。
     const sessions = await (sessionStorage as any).findSessionsByShop(shop);
     const session = sessions?.find((s: any) => s.isOnline === false) ?? sessions?.[0];
 
-    if (!session) {
-      // セッションなし: GraphQL は使わず、リクエスト body と UTC のみで記録（管理画面を開かなくても履歴に残す）
-      const date = getDateInShopTimezone(ts, "UTC");
-      const idempotencyKey = `${shop}:${inventoryItemId}:${locationId}:${timestamp || ts.toISOString()}:${quantityAfter || 0}`;
-      const existingLog = await (db as any).inventoryChangeLog.findUnique({
-        where: {
-          shop_idempotencyKey: { shop, idempotencyKey },
+    let shopTimezone = "UTC";
+    let admin: { request: (opts: { data: string; variables?: any }) => Promise<Response> } | null = null;
+    if (session) {
+      const shopDomain = session.shop;
+      const accessToken = session.accessToken;
+      admin = {
+        request: async (options: { data: string; variables?: any }) => {
+          return fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": accessToken,
+            },
+            body: JSON.stringify({
+              query: options.data.replace(/^#graphql\s*/m, "").trim(),
+              variables: options.variables || {},
+            }),
+          });
         },
+      };
+      const shopTimezoneResp = await admin.request({
+        data: `#graphql
+          query GetShopTimezone { shop { ianaTimezone } }
+        `,
+      });
+      const shopTimezoneData = await shopTimezoneResp.json();
+      shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
+    }
+
+    const results: Array<{ ok: boolean; id?: number; updated?: boolean; message?: string; error?: string }> = [];
+    for (const singleBody of entries) {
+      const {
+        inventoryItemId,
+        variantId,
+        sku,
+        locationId,
+        locationName,
+        activity,
+        delta,
+        quantityAfter,
+        sourceId,
+        adjustmentGroupId,
+        timestamp,
+      } = singleBody;
+
+      if (!inventoryItemId || !locationId || !activity) {
+        results.push({ ok: false, error: "Missing required fields" });
+        continue;
+      }
+
+      const rawItemId = toRawId(inventoryItemId);
+      const rawLocId = toRawId(locationId);
+      const ts = timestamp ? new Date(timestamp) : new Date();
+      const date = getDateInShopTimezone(ts, shopTimezone);
+      const idempotencyKey = `${shop}:${inventoryItemId}:${locationId}:${timestamp || ts.toISOString()}:${quantityAfter || 0}`;
+
+      if (!session) {
+        const dateUtc = getDateInShopTimezone(ts, "UTC");
+        const existingLog = await (db as any).inventoryChangeLog.findUnique({
+          where: { shop_idempotencyKey: { shop, idempotencyKey } },
+        });
+        if (existingLog) {
+          results.push({ ok: true, message: "Log already exists", id: existingLog.id });
+          continue;
+        }
+        const recentFrom = new Date(ts.getTime() - 10 * 60 * 1000);
+        const recentTo = new Date(ts.getTime() + 5 * 60 * 1000);
+        const recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop,
+            inventoryItemId: rawItemId,
+            locationId: rawLocId,
+            activity: "admin_webhook",
+            timestamp: { gte: recentFrom, lte: recentTo },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (recentAdminLog) {
+          const updateData: Record<string, unknown> = {
+            activity,
+            sourceType: activity,
+            sourceId: sourceId || null,
+            adjustmentGroupId: adjustmentGroupId || null,
+          };
+          if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
+          if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
+          await (db as any).inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
+          results.push({ ok: true, updated: true, id: recentAdminLog.id });
+          continue;
+        }
+        const log = await (db as any).inventoryChangeLog.create({
+          data: {
+            shop,
+            timestamp: ts,
+            date: dateUtc,
+            inventoryItemId: rawItemId,
+            variantId: variantId || null,
+            sku: sku || "",
+            locationId: rawLocId,
+            locationName: locationName || locationId,
+            activity,
+            delta: delta !== undefined && delta !== null ? Number(delta) : null,
+            quantityAfter: quantityAfter !== undefined ? quantityAfter : null,
+            sourceType: activity,
+            sourceId: sourceId || null,
+            adjustmentGroupId: adjustmentGroupId || null,
+            idempotencyKey,
+            note: null,
+          },
+        });
+        results.push({ ok: true, id: log.id });
+        continue;
+      }
+
+      const shopId = session.shop;
+      const existingLog = await (db as any).inventoryChangeLog.findUnique({
+        where: { shop_idempotencyKey: { shop: shopId, idempotencyKey } },
       });
       if (existingLog) {
-        return new Response(
-          JSON.stringify({ ok: true, message: "Log already exists", id: existingLog.id }),
-          { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
+        results.push({ ok: true, message: "Log already exists", id: existingLog.id });
+        continue;
       }
       const recentFrom = new Date(ts.getTime() - 10 * 60 * 1000);
       const recentTo = new Date(ts.getTime() + 5 * 60 * 1000);
       const recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
         where: {
-          shop,
+          shop: shopId,
           inventoryItemId: rawItemId,
           locationId: rawLocId,
           activity: "admin_webhook",
@@ -170,19 +254,14 @@ export async function action({ request }: ActionFunctionArgs) {
         };
         if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
         if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
-        await (db as any).inventoryChangeLog.update({
-          where: { id: recentAdminLog.id },
-          data: updateData,
-        });
-        return new Response(
-          JSON.stringify({ ok: true, updated: true, id: recentAdminLog.id }),
-          { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
+        await (db as any).inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
+        results.push({ ok: true, updated: true, id: recentAdminLog.id });
+        continue;
       }
       const log = await (db as any).inventoryChangeLog.create({
         data: {
-          shop,
-          timestamp: ts,
+          shop: shopId,
+          timestamp: timestamp ? new Date(timestamp) : new Date(),
           date,
           inventoryItemId: rawItemId,
           variantId: variantId || null,
@@ -199,124 +278,16 @@ export async function action({ request }: ActionFunctionArgs) {
           note: null,
         },
       });
-      return new Response(
-        JSON.stringify({ ok: true, id: log.id }),
-        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
+      results.push({ ok: true, id: log.id });
     }
 
-    const shopDomain = session.shop;
-    const accessToken = session.accessToken;
-    const admin = {
-      request: async (options: { data: string; variables?: any }) => {
-        return fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": accessToken,
-          },
-          body: JSON.stringify({
-            query: options.data.replace(/^#graphql\s*/m, "").trim(),
-            variables: options.variables || {},
-          }),
-        });
-      },
-    };
-
-    // タイムゾーンと日付を取得（セッションあり時）
-    const shopTimezoneResp = await admin.request({
-      data: `
-        #graphql
-        query GetShopTimezone {
-          shop {
-            ianaTimezone
-          }
-        }
-      `,
-    });
-    const shopTimezoneData = await shopTimezoneResp.json();
-    const shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
-    const date = getDateInShopTimezone(timestamp ? new Date(timestamp) : new Date(), shopTimezone);
-
-    // idempotencyKeyを生成（重複防止）
-    const idempotencyKey = `${session.shop}:${inventoryItemId}:${locationId}:${timestamp || new Date().toISOString()}:${quantityAfter || 0}`;
-
-    // 既に同じidempotencyKeyのログが存在する場合はスキップ（二重登録防止）
-    const existingLog = await (db as any).inventoryChangeLog.findUnique({
-      where: {
-        shop_idempotencyKey: {
-          shop: session.shop,
-          idempotencyKey,
-        },
-      },
-    });
-
-    if (existingLog) {
-      return new Response(
-        JSON.stringify({ ok: true, message: "Log already exists", id: existingLog.id }),
-        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
-    }
-
-    // Webhook が先に届いて「管理」で保存されている場合、同じ変動として種別・変動数を上書きする。
-    // quantityAfter は検索条件に含めない（拡張側と Webhook で微妙にずれるとヒットしないため）。同一 item+location+時間帯の直近1件を更新する。
-    const recentFrom = new Date(ts.getTime() - 10 * 60 * 1000); // 10分前まで遡る
-    const recentTo = new Date(ts.getTime() + 5 * 60 * 1000);    // 5分後まで（Webhook/API 遅延を考慮）
-    const recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
-      where: {
-        shop: session.shop,
-        inventoryItemId: rawItemId,
-        locationId: rawLocId,
-        activity: "admin_webhook",
-        timestamp: { gte: recentFrom, lte: recentTo },
-      },
-      orderBy: { timestamp: "desc" },
-    });
-    if (recentAdminLog) {
-      // 拡張から受け取った数量（delta・quantityAfter）を相違なく反映する
-      const updateData: Record<string, unknown> = {
-        activity,
-        sourceType: activity,
-        sourceId: sourceId || null,
-        adjustmentGroupId: adjustmentGroupId || null,
-      };
-      if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
-      if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
-      await (db as any).inventoryChangeLog.update({
-        where: { id: recentAdminLog.id },
-        data: updateData,
-      });
-      return new Response(
-        JSON.stringify({ ok: true, updated: true, id: recentAdminLog.id }),
-        { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
-    }
-
-    // 在庫変動ログを保存（変動数は拡張から受け取った値をそのまま反映）。IDはraw形式で統一（Webhook・検索と一致）
-    const log = await (db as any).inventoryChangeLog.create({
-      data: {
-        shop: session.shop,
-        timestamp: timestamp ? new Date(timestamp) : new Date(),
-        date,
-        inventoryItemId: rawItemId,
-        variantId: variantId || null,
-        sku: sku || "",
-        locationId: rawLocId,
-        locationName: locationName || locationId,
-        activity,
-        delta: delta !== undefined && delta !== null ? Number(delta) : null,
-        quantityAfter: quantityAfter !== undefined ? quantityAfter : null,
-        sourceType: activity,
-        sourceId: sourceId || null,
-        adjustmentGroupId: adjustmentGroupId || null,
-        idempotencyKey,
-        note: null,
-      },
-    });
-
+    const payload = entries.length === 1
+      ? (results[0]?.ok ? results[0] : { ok: false, error: results[0]?.error ?? "Unknown" })
+      : { ok: true, results };
+    const status = entries.length === 1 && !results[0]?.ok ? 400 : 200;
     return new Response(
-      JSON.stringify({ ok: true, id: log.id }),
-      { headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      JSON.stringify(payload),
+      { status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   } catch (e: any) {
     console.error("[api.log-inventory-change] Error:", e);

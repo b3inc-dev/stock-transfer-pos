@@ -40,7 +40,7 @@ import {
   ItemLeft,
   useDebounce,
 } from "./modalUiParts.jsx";
-import { logInventoryChangeToApi } from "../../../common/logInventoryChange.js";
+import { logInventoryChangeToApi } from "../../common/logInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify;
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));

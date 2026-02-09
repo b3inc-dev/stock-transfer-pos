@@ -250,10 +250,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               console.error("Error checking existing log:", error);
             }
 
-            // 在庫変動ログを保存
+            // 在庫変動ログを保存（date はショップタイムゾーンで統一）
             await logInventoryChange({
               shop,
               timestamp: fulfillmentCreatedAt,
+              date,
               inventoryItemId: inventoryItemId,
               variantId: variantId,
               sku: sku,

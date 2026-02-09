@@ -31,6 +31,7 @@ export async function logInventoryChangeToApi({
     const timestamp = new Date().toISOString();
     const locName = locationName || locationId;
 
+    const entries = [];
     for (const d of deltas) {
       if (!d?.inventoryItemId || Number(d?.delta ?? 0) === 0) continue;
       const li = lineItems?.find((l) => String(l?.inventoryItemId || "").trim() === String(d.inventoryItemId).trim());
@@ -47,16 +48,19 @@ export async function logInventoryChangeToApi({
         timestamp,
       };
       if (adjustmentGroupId != null) logData.adjustmentGroupId = adjustmentGroupId;
+      entries.push(logData);
+    }
+    if (entries.length === 0) return;
 
-      const res = await fetch(apiUrl, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(logData),
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        console.warn(`[logInventoryChange] failed: ${res.status}`, text);
-      }
+    const body = entries.length === 1 ? entries[0] : { entries };
+    const res = await fetch(apiUrl, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.warn(`[logInventoryChange] failed: ${res.status}`, text);
     }
   } catch (e) {
     console.warn("[logInventoryChange] logInventoryChangeToApi:", e);

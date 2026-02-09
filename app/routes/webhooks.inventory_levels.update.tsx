@@ -158,65 +158,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       sku = itemData?.data?.inventoryItem?.variant?.sku || "";
       variantId = itemData?.data?.inventoryItem?.variant?.id || null;
 
-      // InventoryAdjustmentGroupを検索して種別判定（セッションあり時のみ）
-      console.log(`[inventory_levels/update] Starting activity determination: adjustmentGroupId=${adjustmentGroupId}`);
-      try {
-        if (adjustmentGroupId) {
-          try {
-            const groupResp = await admin.request({
-              data: `
-                #graphql
-                query GetInventoryAdjustmentGroup($id: ID!) {
-                  inventoryAdjustmentGroup(id: $id) {
-                    id
-                    createdAt
-                    reason
-                    referenceDocumentUri
-                    app { id
-                      handle
-                    }
-                  }
-                }
-              `,
-              variables: { id: adjustmentGroupId },
-            });
-            const groupData = await groupResp.json();
-            if (!groupData?.errors && groupData?.data?.inventoryAdjustmentGroup) {
-              const group = groupData.data.inventoryAdjustmentGroup;
-              const referenceUri = group.referenceDocumentUri || "";
-              const appHandle = group.app?.handle || "";
-              const appInfoResp = await admin.request({
-                data: `
-                  #graphql
-                  query GetAppInfo {
-                    currentAppInstallation { app { id handle } }
-                  }
-                `,
-              });
-              const appInfoData = await appInfoResp.json();
-              const currentAppHandle = appInfoData?.data?.currentAppInstallation?.app?.handle || "";
-              if (appHandle === currentAppHandle && referenceUri) {
-                if (referenceUri.includes("InboundTransfer") || referenceUri.includes("inbound") || referenceUri.includes("入庫")) activity = "inbound_transfer";
-                else if (referenceUri.includes("OutboundTransfer") || referenceUri.includes("outbound") || referenceUri.includes("出庫")) activity = "outbound_transfer";
-                else if (referenceUri.includes("LossEntry") || referenceUri.includes("loss") || referenceUri.includes("ロス")) activity = "loss_entry";
-                else if (referenceUri.includes("InventoryCount") || referenceUri.includes("stocktake") || referenceUri.includes("inventory_count") || referenceUri.includes("棚卸")) activity = "inventory_count";
-                const idMatch = referenceUri.match(/\/([^/]+)$/);
-                if (idMatch) sourceId = idMatch[1];
-              }
-            }
-          } catch (groupError: any) {
-            // エラー時は admin_webhook のまま
-          }
-        } else {
-          console.log(`[inventory_levels/update] No inventory_adjustment_group_id in webhook payload. Recording as admin_webhook; api/log-inventory-change will overwrite to correct activity (same as loss).`);
-        }
-        if (activity === "admin_webhook") {
-          console.log(`[inventory_levels/update] No adjustment group in payload; recording as admin_webhook (management). POS/app で api/log-inventory-change を呼ぶと種別で上書きされます（ロスと同様）。`);
-        }
-      } catch (error) {
-        console.log(`[inventory_levels/update] Treating as admin_webhook due to error`);
+      // 入庫・出庫・ロス・棚卸・仕入をすべて「同じ処理」にするため、Webhook では種別を判定しない。
+      // 常に admin_webhook（管理）で保存し、POS/アプリの api/log-inventory-change が正しい activity で上書きする。
+      // （以前は adjustment_group の referenceUri からロス等を判定していたが、ロスだけ記録されて他が「管理」のままになる原因になり得たため廃止。）
+      activity = "admin_webhook";
+      sourceId = null;
+      if (adjustmentGroupId) {
+        console.log(`[inventory_levels/update] adjustment_group_id present but not used for activity; recording as admin_webhook. API will overwrite.`);
+      } else {
+        console.log(`[inventory_levels/update] No adjustment_group_id. Recording as admin_webhook; api/log-inventory-change will overwrite to correct activity.`);
       }
-      console.log(`[inventory_levels/update] Final activity determination: activity=${activity}, sourceId=${sourceId}, adjustmentGroupId=${adjustmentGroupId}`);
+      console.log(`[inventory_levels/update] Final activity: admin_webhook (API overwrites for all: loss, inbound, outbound, stocktake, purchase).`);
     } else {
       console.log(`[inventory_levels/update] No session; saving minimal log (no GraphQL). 管理画面でアプリを開くとロケーション名・SKUが取得されます。`);
     }

@@ -4,104 +4,16 @@ import type { ActionFunctionArgs } from "react-router";
 import { sessionStorage } from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone, getHourInShopTimezone } from "../utils/timezone";
+import {
+  getSavedSnapshots,
+  fetchAllInventoryItems,
+  aggregateSnapshotsFromItems,
+  saveSnapshotsForDate,
+} from "../utils/inventory-snapshot";
+
+export type { DailyInventorySnapshot, InventorySnapshotsData } from "../utils/inventory-snapshot";
 
 const API_VERSION = "2025-10";
-
-const INVENTORY_INFO_NS = "inventory_info";
-const DAILY_SNAPSHOTS_KEY = "daily_snapshots";
-
-// 在庫アイテムを取得するGraphQLクエリ
-// 注: InventoryItem.variants は API バージョンにより存在しないため variant のみ使用
-const INVENTORY_ITEMS_QUERY = `#graphql
-  query InventoryItemsForSnapshot($first: Int!, $after: String) {
-    inventoryItems(first: $first, after: $after) {
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      edges {
-        node {
-          id
-          unitCost {
-            amount
-            currencyCode
-          }
-          inventoryLevels(first: 250) {
-            edges {
-              node {
-                id
-                quantities(names: ["available"]) {
-                  name
-                  quantity
-                }
-                location {
-                  id
-                  name
-                }
-              }
-            }
-          }
-          variant {
-            id
-            sku
-            price
-            compareAtPrice
-            product {
-              id
-              title
-            }
-          }
-        }
-      }
-    }
-  }
-`;
-
-// Metafieldから日次スナップショットを読み取るクエリ
-const GET_SNAPSHOTS_QUERY = `#graphql
-  query GetInventorySnapshots {
-    shop {
-      id
-      ianaTimezone
-      metafield(namespace: "${INVENTORY_INFO_NS}", key: "${DAILY_SNAPSHOTS_KEY}") {
-        id
-        value
-      }
-    }
-  }
-`;
-
-// Metafieldに日次スナップショットを保存するmutation
-const SAVE_SNAPSHOTS_MUTATION = `#graphql
-  mutation SaveInventorySnapshots($metafields: [MetafieldsSetInput!]!) {
-    metafieldsSet(metafields: $metafields) {
-      metafields {
-        id
-        namespace
-        key
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
-
-export type DailyInventorySnapshot = {
-  date: string;
-  locationId: string;
-  locationName: string;
-  totalQuantity: number;
-  totalRetailValue: number;
-  totalCompareAtPriceValue: number;
-  totalCostValue: number;
-};
-
-export type InventorySnapshotsData = {
-  version: 1;
-  snapshots: DailyInventorySnapshot[];
-};
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
@@ -168,149 +80,36 @@ export async function action({ request }: ActionFunctionArgs) {
           },
         };
 
-        // 既存のスナップショットを読み取る
-        // request の正しい形式: 第1引数＝クエリ文字列、第2引数＝{ variables }。{ data, variables } だと query がオブジェクトになり API が variant/unitCost を返さない
-        const snapshotsResp = await admin.request(GET_SNAPSHOTS_QUERY);
-        const snapshotsData = snapshotsResp && typeof snapshotsResp.json === "function" ? await snapshotsResp.json() : snapshotsResp;
+        // 共通モジュール用に admin を { request({ data, variables }) } 形式でラップ
+        const adminForSnapshot = {
+          request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
+            admin.request(opts.data, opts.variables ?? {}),
+        };
 
-        if (snapshotsData?.errors) {
-          const errList = Array.isArray(snapshotsData.errors)
-            ? snapshotsData.errors.map((e: any) => e?.message ?? String(e))
-            : [String(snapshotsData.errors)];
-          errors.push(`${sessionRecord.shop}: ${errList.join(", ")}`);
-          continue;
-        }
-        
-        const shopId = snapshotsData?.data?.shop?.id;
-        const shopTimezone = snapshotsData?.data?.shop?.ianaTimezone || "UTC"; // デフォルトはUTC
-        const metafieldValue = snapshotsData?.data?.shop?.metafield?.value;
+        const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
 
-        let savedSnapshots: InventorySnapshotsData = { version: 1, snapshots: [] };
-        if (typeof metafieldValue === "string" && metafieldValue) {
-          try {
-            const parsed = JSON.parse(metafieldValue);
-            if (parsed?.version === 1 && Array.isArray(parsed?.snapshots)) {
-              savedSnapshots = parsed;
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        // 保存する日付: 23:00-23:59 に実行されたら「今日」、それ以外（0:00 実行など）は「前日」。前日分＝その日の終了時点の在庫。
         const now = new Date();
         const hourInShop = getHourInShopTimezone(now, shopTimezone);
-        const isEndOfDayRun = hourInShop === 23; // 23:59 実行 → その日の終了時点を「今日」の日付で保存
+        const isEndOfDayRun = hourInShop === 23;
         const yesterdayDate = new Date(now);
         yesterdayDate.setDate(yesterdayDate.getDate() - 1);
         const dateToSaveStr = isEndOfDayRun
-          ? getDateInShopTimezone(now, shopTimezone)   // 今日
-          : getDateInShopTimezone(yesterdayDate, shopTimezone); // 前日
+          ? getDateInShopTimezone(now, shopTimezone)
+          : getDateInShopTimezone(yesterdayDate, shopTimezone);
 
-        // 既にその日付のスナップショットが存在する場合はスキップ（1日1回だけ保存、二重実行防止）
-        const existingForDate = savedSnapshots.snapshots.some((s) => s.date === dateToSaveStr);
-        if (existingForDate) {
+        if (savedSnapshots.snapshots.some((s) => s.date === dateToSaveStr)) {
           continue;
         }
 
-        // その日付の在庫情報を取得
-        const allItems: any[] = [];
-        let hasNextPage = true;
-        let cursor: string | null = null;
-
-        while (hasNextPage) {
-          const resp = await admin.request(INVENTORY_ITEMS_QUERY, { variables: { first: 50, after: cursor } });
-          const data = resp && typeof resp.json === "function" ? await resp.json() : resp;
-
-          if (data?.errors) {
-            const errList = Array.isArray(data.errors)
-              ? data.errors.map((e: any) => e?.message ?? String(e))
-              : [String(data.errors)];
-            errors.push(`${sessionRecord.shop}: ${errList.join(", ")}`);
-            break;
-          }
-          
-          const edges = data?.data?.inventoryItems?.edges ?? [];
-          const nodes = edges.map((e: any) => e.node);
-          allItems.push(...nodes);
-
-          hasNextPage = data?.data?.inventoryItems?.pageInfo?.hasNextPage ?? false;
-          cursor = data?.data?.inventoryItems?.pageInfo?.endCursor ?? null;
-        }
-
-        // ロケーション別に集計
-        const locationMap = new Map<string, DailyInventorySnapshot>();
-        
-        // 価格を取得（Money は文字列 "123.45" のことも、オブジェクト { amount } のこともある）
-        const toAmount = (v: unknown): number => {
-          if (v == null) return 0;
-          if (typeof v === "string") return parseFloat(v) || 0;
-          if (typeof v === "object" && v !== null && "amount" in v) return parseFloat((v as { amount?: string }).amount ?? "0") || 0;
-          return 0;
-        };
-
-        for (const item of allItems) {
-          // 金額が0になる要因: unitCost未設定/権限不足→原価0。variant が null（削除済み等）→価格0。詳細は docs/INVENTORY_SNAPSHOT_ZERO_VALUES_ANALYSIS.md
-          const unitCost = toAmount(item.unitCost?.amount ?? item.unitCost);
-          const variant = item.variant ?? null;
-          const retailPrice = toAmount(variant?.price);
-          const compareAtPrice = toAmount(variant?.compareAtPrice);
-          
-          const levels = item.inventoryLevels?.edges ?? [];
-          for (const levelEdge of levels) {
-            const level = levelEdge.node;
-            const locationId = level.location?.id;
-            const locationName = level.location?.name ?? "";
-            const quantity = level.quantities?.find((q: any) => q.name === "available")?.quantity ?? 0;
-            
-            if (!locationId) continue;
-
-            if (!locationMap.has(locationId)) {
-              locationMap.set(locationId, {
-                date: dateToSaveStr,
-                locationId,
-                locationName,
-                totalQuantity: 0,
-                totalRetailValue: 0,
-                totalCompareAtPriceValue: 0,
-                totalCostValue: 0,
-              });
-            }
-
-            const snapshot = locationMap.get(locationId)!;
-            snapshot.totalQuantity += quantity;
-            snapshot.totalRetailValue += quantity * retailPrice;
-            snapshot.totalCompareAtPriceValue += quantity * (compareAtPrice || retailPrice);
-            snapshot.totalCostValue += quantity * unitCost;
-          }
-        }
-
-        const newSnapshots = Array.from(locationMap.values());
-
-        // 既存のスナップショットから同じ日付のものを削除して、新しいものを追加
-        const updatedSnapshots = savedSnapshots.snapshots.filter((s) => s.date !== dateToSaveStr);
-        updatedSnapshots.push(...newSnapshots);
-
-        // Metafieldに保存
-        const saveResp = await admin.request(SAVE_SNAPSHOTS_MUTATION, {
-          variables: {
-            metafields: [
-              {
-                ownerId: shopId,
-                namespace: INVENTORY_INFO_NS,
-                key: DAILY_SNAPSHOTS_KEY,
-                type: "json",
-                value: JSON.stringify({
-                  version: 1,
-                  snapshots: updatedSnapshots,
-                }),
-              },
-            ],
-          },
-        });
-
-        const saveData = saveResp && typeof saveResp.json === "function" ? await saveResp.json() : saveResp;
-        const userErrors = saveData?.data?.metafieldsSet?.userErrors ?? [];
+        const allItems = await fetchAllInventoryItems(adminForSnapshot);
+        const newSnapshots = aggregateSnapshotsFromItems(allItems, dateToSaveStr);
+        const { userErrors } = await saveSnapshotsForDate(
+          adminForSnapshot,
+          shopId,
+          savedSnapshots,
+          newSnapshots,
+          dateToSaveStr
+        );
 
         if (userErrors.length > 0) {
           errors.push(`${sessionRecord.shop}: ${userErrors.map((e: any) => e.message).join(", ")}`);

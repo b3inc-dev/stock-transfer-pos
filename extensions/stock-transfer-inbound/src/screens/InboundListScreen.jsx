@@ -40,7 +40,7 @@ import {
   renderExtrasHistory_,
   renderConfirmMemo_,
 } from "../InboundUiParts.jsx";
-import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
+import { logInventoryChangeToApi } from "../../../common/logInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
