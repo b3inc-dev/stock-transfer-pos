@@ -230,28 +230,51 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return new Response("OK", { status: 200 });
     }
 
-    // 同一の在庫変動がすでに別の経路で記録されていたら webhook では保存しない。
+    // 同一の在庫変動がすでに別の経路で記録されていたら webhook では「管理」行を新規作成せず、
+    // 既存行の quantityAfter を最新値で更新する。
     // （POS/アプリの api/log-inventory-change、売上 orders.updated、返品 refunds.create で正しい種別が付いている）
     // そうしないと二重に「管理」で保存され、売上・返品・ロス等が「管理」で上書きされたように見える。
     if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
       const knownActivities = [
-        "loss_entry", "purchase_entry", "inbound_transfer", "outbound_transfer", "inventory_count",
-        "order_sales", "refund", // 売上・返品（orders.updated / refunds.create で記録済み）
+        "loss_entry",
+        "purchase_entry",
+        "inbound_transfer",
+        "outbound_transfer",
+        "inventory_count",
+        "order_sales",
+        "refund", // 売上・返品（orders.updated / refunds.create で記録済み）
       ];
-      const recentThreshold = new Date(updatedAt.getTime() - 2 * 60 * 1000); // 2分前
-      const duplicateLog = await (db as any).inventoryChangeLog.findFirst({
+      const recentThreshold = new Date(updatedAt.getTime() - 1 * 60 * 1000); // 1分前（まずは短めに運用し、必要に応じて調整）
+
+      // 直近で同一商品・ロケーションの既知アクティビティが記録されていれば、
+      // それをこの webhook で上書き（quantityAfter のみ更新）し、新しい「管理」行は作らない。
+      const recentNonAdminLog = await (db as any).inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: inventoryItemIdRaw,
           locationId: locationIdRaw,
-          quantityAfter: available,
           activity: { in: knownActivities },
           timestamp: { gte: recentThreshold },
         },
         orderBy: { timestamp: "desc" },
       });
-      if (duplicateLog) {
-        console.log(`[inventory_levels/update] Skipping webhook log: same change already recorded (activity=${duplicateLog.activity}, id=${duplicateLog.id})`);
+
+      if (recentNonAdminLog) {
+        try {
+          console.log(
+            `[inventory_levels/update] Updating existing log from webhook: id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter=${recentNonAdminLog.quantityAfter} -> ${available}`
+          );
+          await (db as any).inventoryChangeLog.update({
+            where: { id: recentNonAdminLog.id },
+            data: { quantityAfter: available },
+          });
+        } catch (e: any) {
+          console.error(
+            "[inventory_levels/update] Failed to update existing log from webhook:",
+            e?.message || String(e)
+          );
+          // 失敗しても新規に「管理」行を追加しないようにする（履歴が二重にならないことを優先）
+        }
         return new Response("OK", { status: 200 });
       }
     }
