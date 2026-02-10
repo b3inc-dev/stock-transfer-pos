@@ -54,6 +54,42 @@ function toRawId(id: string | number | null | undefined): string {
   return s;
 }
 
+// GraphQL 用に locationId を GID に正規化する
+function toLocationGid(locationId: string, rawLocId: string): string {
+  const s = String(locationId || "").trim();
+  if (s.startsWith("gid://")) return s;
+  if (rawLocId) return `gid://shopify/Location/${rawLocId}`;
+  return s;
+}
+
+// ロケーション名が未設定またはラベル（出庫元）のとき、GraphQL で実ロケーション名を取得する
+async function resolveLocationName(
+  admin: { request: (opts: { data: string; variables?: any }) => Promise<Response> },
+  locationId: string,
+  rawLocId: string
+): Promise<string> {
+  try {
+    const gid = toLocationGid(locationId, rawLocId);
+    const locationResp = await admin.request({
+      data: `#graphql
+        query GetLocation($id: ID!) {
+          location(id: $id) {
+            id
+            name
+          }
+        }
+      `,
+      variables: { id: gid },
+    });
+    const locationData = await locationResp.json();
+    const name = locationData?.data?.location?.name;
+    return typeof name === "string" && name.trim() ? name.trim() : rawLocId || locationId;
+  } catch (e: any) {
+    console.warn("[api.log-inventory-change] resolveLocationName error:", e?.message || String(e));
+    return rawLocId || locationId;
+  }
+}
+
 // CORS プリフライト（OPTIONS）用。POS から fetch する前に OPTIONS が飛び、これが 400 だと POST が送られない
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -167,6 +203,14 @@ export async function action({ request }: ActionFunctionArgs) {
       const date = getDateInShopTimezone(ts, shopTimezone);
       const idempotencyKey = `${shop}:${inventoryItemId}:${locationId}:${timestamp || ts.toISOString()}:${quantityAfter || 0}`;
 
+      // 入庫・出庫・仕入・ロス・棚卸で変動があったロケーション名を確実に保存する。
+      // 未設定またはラベル（出庫元）のときは GraphQL で実ロケーション名を取得する。
+      let resolvedLocationName = typeof locationName === "string" ? locationName.trim() : "";
+      if (admin && (!resolvedLocationName || resolvedLocationName === "出庫元")) {
+        resolvedLocationName = await resolveLocationName(admin, locationId, rawLocId);
+      }
+      if (!resolvedLocationName) resolvedLocationName = rawLocId || String(locationId || "");
+
       if (!session) {
         const dateUtc = getDateInShopTimezone(ts, "UTC");
         const existingLog = await (db as any).inventoryChangeLog.findUnique({
@@ -194,6 +238,7 @@ export async function action({ request }: ActionFunctionArgs) {
             sourceType: activity,
             sourceId: sourceId || null,
             adjustmentGroupId: adjustmentGroupId || null,
+            locationName: resolvedLocationName,
           };
           if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
@@ -210,7 +255,7 @@ export async function action({ request }: ActionFunctionArgs) {
             variantId: variantId || null,
             sku: sku || "",
             locationId: rawLocId,
-            locationName: locationName || locationId,
+            locationName: resolvedLocationName,
             activity,
             delta: delta !== undefined && delta !== null ? Number(delta) : null,
             quantityAfter: quantityAfter !== undefined ? quantityAfter : null,
@@ -251,6 +296,7 @@ export async function action({ request }: ActionFunctionArgs) {
           sourceType: activity,
           sourceId: sourceId || null,
           adjustmentGroupId: adjustmentGroupId || null,
+          locationName: resolvedLocationName,
         };
         if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
         if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
@@ -267,7 +313,7 @@ export async function action({ request }: ActionFunctionArgs) {
           variantId: variantId || null,
           sku: sku || "",
           locationId: rawLocId,
-          locationName: locationName || locationId,
+          locationName: resolvedLocationName,
           activity,
           delta: delta !== undefined && delta !== null ? Number(delta) : null,
           quantityAfter: quantityAfter !== undefined ? quantityAfter : null,

@@ -1148,7 +1148,8 @@ export function InboundListScreen({
             return row ? { inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity } : null;
           }).filter((d) => d && d.inventoryItemId && d.delta > 0);
           if (inboundDeltas.length > 0) {
-            await logInventoryChangeToApi({ activity: "inbound_transfer", locationId: locationGid, locationName: "", deltas: inboundDeltas, sourceId: transferIdForUri });
+            const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
+            await logInventoryChangeToApi({ activity: "inbound_transfer", locationId: locationGid, locationName: destinationLocationNameForLog, deltas: inboundDeltas, sourceId: transferIdForUri });
           }
         }
 
@@ -1177,10 +1178,11 @@ export function InboundListScreen({
                 deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
                 referenceDocumentUri: transferIdForUri || null
               });
+              const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
               await logInventoryChangeToApi({
                 activity: "inbound_transfer",
                 locationId: originLocationId,
-                locationName: "",
+                locationName: originLocationNameForLog,
                 deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta, sku: d.sku })),
                 sourceId: transferIdForUri,
               });
@@ -1284,7 +1286,8 @@ export function InboundListScreen({
             const transferIdStr = String(transferId || "").trim();
             const transferIdMatch = transferIdStr.match(/(\d+)$/);
             const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
-            await logInventoryChangeToApi({ activity: "inbound_transfer", locationId: locationGid, locationName: "", deltas: inboundDeltas, sourceId: transferIdForUri });
+            const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
+            await logInventoryChangeToApi({ activity: "inbound_transfer", locationId: locationGid, locationName: destinationLocationNameForLog, deltas: inboundDeltas, sourceId: transferIdForUri });
           }
         }
         for (const [sid, rejItems] of rejectedByShip) {
@@ -1320,15 +1323,16 @@ export function InboundListScreen({
             const transferIdStr = String(transferId || "").trim();
             const transferIdMatch = transferIdStr.match(/(\d+)$/);
             const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
-            await adjustInventoryAtLocationWithFallback({ 
-              locationId: originLocationId, 
+            await adjustInventoryAtLocationWithFallback({
+              locationId: originLocationId,
               deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
               referenceDocumentUri: transferIdForUri || null
             });
+            const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
             await logInventoryChangeToApi({
               activity: "inbound_transfer",
               locationId: originLocationId,
-              locationName: "",
+              locationName: originLocationNameForLog,
               deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
               sourceId: transferIdForUri,
             });
@@ -1366,15 +1370,16 @@ export function InboundListScreen({
         const transferIdMatch = transferIdStr.match(/(\d+)$/);
         const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
         
-        await adjustInventoryAtLocationWithFallback({ 
-          locationId: locationGid, 
+        await adjustInventoryAtLocationWithFallback({
+          locationId: locationGid,
           deltas: extraDeltasMerged,
           referenceDocumentUri: transferIdForUri || null
         });
+        const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
         await logInventoryChangeToApi({
           activity: "inbound_transfer",
           locationId: locationGid,
-          locationName: "",
+          locationName: destinationLocationNameForLog,
           deltas: extraDeltasMerged,
           sourceId: transferIdForUri,
         });
@@ -1387,15 +1392,16 @@ export function InboundListScreen({
             inventoryItemId: d.inventoryItemId,
             delta: -Math.max(0, Math.floor(Number(d.delta || 0))),
           }));
-          await adjustInventoryAtLocationWithFallback({ 
-            locationId: originLocationId, 
+          await adjustInventoryAtLocationWithFallback({
+            locationId: originLocationId,
             deltas: originDeltas,
             referenceDocumentUri: transferIdForUri || null
           });
+          const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
           await logInventoryChangeToApi({
             activity: "outbound_transfer",
             locationId: originLocationId,
-            locationName: "",
+            locationName: originLocationNameForLog,
             deltas: originDeltas,
             sourceId: transferIdForUri,
           });

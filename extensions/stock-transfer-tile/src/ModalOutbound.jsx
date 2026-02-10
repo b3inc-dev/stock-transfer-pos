@@ -3347,15 +3347,16 @@ function OutboundShipmentSelection({
           deltas,
           referenceDocumentUri: transferIdForUri,
         });
-        const originLocationName = String(detail?.originName || "").trim() || "出庫元";
+        const originLocationNameForLog = String(detail?.originName || outbound.historySelectedOriginName || "").trim();
         await logInventoryChangeToApi({
           activity: "outbound_transfer",
           locationId: originLocationId,
-          locationName: originLocationName,
+          locationName: originLocationNameForLog,
           deltas,
           sourceId: transferIdForUri,
           lineItems,
         });
+        const originLocationName = String(detail?.originName || outbound.historySelectedOriginName || "").trim() || "出庫元";
         const adjustments = deltas.map((d) => {
           const li = lineItems.find((l) => String(l?.inventoryItemId || "").trim() === d.inventoryItemId);
           return {
@@ -4727,16 +4728,16 @@ function OutboundHistoryDetail({
             deltas,
             referenceDocumentUri: transferIdForUri,
           });
+          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
           await logInventoryChangeToApi({
             activity: "outbound_transfer",
             locationId: originLocationId,
-            locationName: detail?.originName || "",
+            locationName: originLocationNameForLog,
             deltas,
             sourceId: transferIdForUri,
             lineItems: lineItems || detail?.lineItems,
           });
           // 在庫調整履歴をメモに反映
-          // detailオブジェクトにはoriginNameが直接プロパティとして含まれている
           const originLocationName = detail?.originName || 
             detail?.origin?.name || 
             outbound.historySelectedOriginName || 
@@ -4822,16 +4823,16 @@ function OutboundHistoryDetail({
             deltas,
             referenceDocumentUri: transferIdForUri,
           });
+          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
           await logInventoryChangeToApi({
             activity: "outbound_transfer",
             locationId: originLocationId,
-            locationName: detail?.originName || "",
+            locationName: originLocationNameForLog,
             deltas,
             sourceId: transferIdForUri,
             lineItems: lineItems || detail?.lineItems,
           });
           // 在庫調整履歴をメモに反映
-          // detailオブジェクトにはoriginNameが直接プロパティとして含まれている
           const originLocationName = detail?.originName || 
             detail?.origin?.name || 
             outbound.historySelectedOriginName || 
@@ -4901,10 +4902,11 @@ function OutboundHistoryDetail({
             deltas,
             referenceDocumentUri: transferIdForUri,
           });
+          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
           await logInventoryChangeToApi({
             activity: "outbound_transfer",
             locationId: originLocationId,
-            locationName: detail?.originName || "",
+            locationName: originLocationNameForLog,
             deltas,
             sourceId: transferIdForUri,
             lineItems: items || detail?.lineItems,
@@ -6734,26 +6736,22 @@ function OutboundList({
         throw new Error("transfer.id が取得できません");
       }
 
-      // 2) Shipment 作成（tracking が何も無い時は作らない）
-      let shipment = null;
+      // 2) Shipment 作成（「確定する」は常に処理中にする。配送情報はあれば付与、なければ null）
+      const trackingInput = (company || trackingNumber || trackingUrl || eta)
+        ? {
+            company: company || null,
+            trackingNumber: trackingNumber || null,
+            trackingUrl: trackingUrl || null,
+            arrivesAt: eta || null,
+          }
+        : null;
+      const shipment = await createInventoryShipmentInTransit({
+        movementId,
+        lineItems,
+        trackingInput,
+      });
 
-      const hasAnyTracking = Boolean(company || trackingNumber || trackingUrl || eta);
-      if (hasAnyTracking) {
-        const trackingInput = {
-          company: company || null,
-          trackingNumber: trackingNumber || null,
-          trackingUrl: trackingUrl || null,
-          arrivesAt: eta || null,
-        };
-
-        shipment = await createInventoryShipmentInTransit({
-          movementId,
-          lineItems,
-          trackingInput,
-        });
-      }
-
-      toast(shipment ? "出庫を作成しました（進行中）" : "出庫を作成しました");
+      toast("出庫を作成しました（進行中）");
 
       // 在庫変動履歴に「出庫」で記録する（Webhook の「管理」を上書き）
       const transferIdStr = String(movementId || "").trim();
@@ -6775,7 +6773,7 @@ function OutboundList({
         await logInventoryChangeToApi({
           activity: "outbound_transfer",
           locationId: originLocationGid,
-          locationName: "出庫元",
+          locationName: originLocationName,
           deltas: outboundDeltas,
           sourceId: transferIdForUri,
           lineItems: lines,
