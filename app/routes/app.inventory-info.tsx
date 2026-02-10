@@ -563,7 +563,7 @@ export default function InventoryInfoPage() {
     loss_entry: "ロス",
     inventory_count: "棚卸",
     purchase_entry: "仕入",
-    purchase_cancel: "仕入-",
+    purchase_cancel: "仕入",
     admin_webhook: "管理",
     order_sales: "売上",
     refund: "返品",
@@ -889,10 +889,7 @@ export default function InventoryInfoPage() {
                       fontSize: "14px",
                     }}
                   >
-                    <div>{selectedDate}のスナップショットが見つかりませんでした。</div>
-                    <div style={{ marginTop: "8px", fontSize: "13px", opacity: 0.9 }}>
-                      過去日付のスナップショットは、Cronで毎日23:59（推奨）または0:00（ショップタイムゾーン）に自動保存されます。管理画面を開かなくても保存されます。CronはRender等で手動設定が必要です。
-                    </div>
+                    <div>{selectedDate.replace(/-/g, "/")}の在庫高データが見つかりませんでした。</div>
                   </div>
                 )}
 
@@ -1563,7 +1560,7 @@ export default function InventoryInfoPage() {
                               { value: "loss_entry", label: "ロス" },
                               { value: "inventory_count", label: "棚卸" },
                               { value: "purchase_entry", label: "仕入" },
-                              { value: "purchase_cancel", label: "仕入-" },
+                              { value: "purchase_cancel", label: "仕入" },
                               { value: "order_sales", label: "売上" },
                               { value: "refund", label: "返品" },
                               { value: "admin_webhook", label: "管理" },

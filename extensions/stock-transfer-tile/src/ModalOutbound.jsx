@@ -1551,6 +1551,17 @@ function OutboundConditions({
       ? outbound.settings
       : { version: 1, destinationGroups: [], carriers: [] };
 
+  const arrivalQuickDays = useMemo(() => {
+    const raw = settings?.outbound?.arrivalQuickDays;
+    const base = Array.isArray(raw) ? raw : [1, 2];
+    const nums = base
+      .map((v) => Number(v))
+      .filter((n) => Number.isFinite(n) && n > 0 && n <= 365);
+    const uniq = Array.from(new Set(nums));
+    uniq.sort((a, b) => a - b);
+    return uniq;
+  }, [settings]);
+
   // ===== 出庫履歴（スクロール下部） =====
   const [historyMode, setHistoryMode] = useState("pending"); // "pending" | "shipped"
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -1838,8 +1849,8 @@ function OutboundConditions({
 
   // 右寄せプリセット（押したら必ず日付が見えるようにdraftも更新）
   const setArrivesPreset_ = useCallback(
-    (kind) => {
-      if (kind === "clear") {
+    (kindOrDays) => {
+      if (kindOrDays === "clear") {
         setStateSlice(setAppState, "outbound", {
           arrivesAtIso: "",
           arrivesDateDraft: "",
@@ -1849,7 +1860,12 @@ function OutboundConditions({
         return;
       }
 
-      const days = kind === "d2" ? 2 : 1;
+      const days =
+        typeof kindOrDays === "number"
+          ? kindOrDays
+          : kindOrDays === "d2"
+          ? 2
+          : 1;
 
       const cur = parseIsoToLocalParts_(outbound.arrivesAtIso);
       const hh = cur ? cur.hh : 12;
@@ -2485,13 +2501,16 @@ function OutboundConditions({
               onChange={onArrivesDateDraftCommit_}
             />
 
-            <s-stack direction="inline" gap="small" justifyContent="end" alignItems="center">
-              <s-button kind="secondary" onClick={() => setArrivesPreset_("d1")}>
-                1日後
-              </s-button>
-              <s-button kind="secondary" onClick={() => setArrivesPreset_("d2")}>
-                2日後
-              </s-button>
+            <s-stack direction="inline" gap="small" justifyContent="end" alignItems="center" wrap>
+              {arrivalQuickDays.map((d) => (
+                <s-button
+                  key={`arrives-cond-${d}`}
+                  kind="secondary"
+                  onClick={() => setArrivesPreset_(d)}
+                >
+                  {`${d}日後`}
+                </s-button>
+              ))}
               <s-button kind="secondary" onClick={() => setArrivesPreset_("clear")}>
                 クリア
               </s-button>
@@ -5448,8 +5467,8 @@ function OutboundList({
 
   // 配送情報モーダル用：到着予定日プリセット
   const setArrivesPreset = useCallback(
-    (kind) => {
-      if (kind === "clear") {
+    (kindOrDays) => {
+      if (kindOrDays === "clear") {
         setStateSlice(setAppState, "outbound", {
           arrivesAtIso: "",
           arrivesDateDraft: "",
@@ -5457,7 +5476,12 @@ function OutboundList({
         });
         return;
       }
-      const days = kind === "d2" ? 2 : 1;
+      const days =
+        typeof kindOrDays === "number"
+          ? kindOrDays
+          : kindOrDays === "d2"
+          ? 2
+          : 1;
       const d = new Date();
       d.setDate(d.getDate() + days);
       d.setHours(12, 0, 0, 0);
@@ -7590,13 +7614,16 @@ function OutboundList({
                 onInput={onArrivesDateInput}
                 onChange={onArrivesDateCommit}
               />
-              <s-stack direction="inline" gap="small" justifyContent="end">
-                <s-button kind="secondary" onClick={() => setArrivesPreset("d1")}>
-                  1日後
-                </s-button>
-                <s-button kind="secondary" onClick={() => setArrivesPreset("d2")}>
-                  2日後
-                </s-button>
+              <s-stack direction="inline" gap="small" justifyContent="end" wrap>
+                {arrivalQuickDays.map((d) => (
+                  <s-button
+                    key={`arrives-modal-${d}`}
+                    kind="secondary"
+                    onClick={() => setArrivesPreset(d)}
+                  >
+                    {`${d}日後`}
+                  </s-button>
+                ))}
                 <s-button kind="secondary" onClick={() => setArrivesPreset("clear")}>
                   クリア
                 </s-button>

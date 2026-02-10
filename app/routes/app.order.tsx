@@ -586,6 +586,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     destinations, // 発注先マスタ
     shopTimezone,
     todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
+    useDesiredDeliveryDate: settings?.order?.useDesiredDeliveryDate ?? true,
     pageInfo: {
       hasNextPage: false,
       hasPreviousPage: false,
@@ -1098,7 +1099,16 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function OrderPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, entries: initialEntries, csvExportColumns, csvExportColumnLabels, destinations, shopTimezone, todayInShopTimezone } = loaderData || {
+  const {
+    locations,
+    entries: initialEntries,
+    csvExportColumns,
+    csvExportColumnLabels,
+    destinations,
+    shopTimezone,
+    todayInShopTimezone,
+    useDesiredDeliveryDate = true,
+  } = loaderData || {
     locations: [],
     entries: [],
     csvExportColumns: [
@@ -1109,6 +1119,7 @@ export default function OrderPage() {
     csvExportColumnLabels: undefined,
     destinations: [],
     shopTimezone: "UTC",
+    useDesiredDeliveryDate: true,
     pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
   };
   // entriesをuseStateで管理（承認取り消し後の状態更新のため）
@@ -1934,7 +1945,7 @@ export default function OrderPage() {
                                       仕入先: {entry.destination || "-"}
                                     </s-text>
                                   </div>
-                                  {entry.desiredDeliveryDate && (
+                                  {useDesiredDeliveryDate && entry.desiredDeliveryDate && (
                                     <div>
                                       <s-text
                                         tone="subdued"
@@ -2258,14 +2269,16 @@ export default function OrderPage() {
                   {modalEntry.date ||
                     extractDateFromISO(modalEntry.createdAt, shopTimezone)}
                 </div>
-                <div style={{ fontSize: "14px", marginBottom: "4px" }}>
-                  <strong>希望納品日:</strong>{" "}
-                  {modalEntry.desiredDeliveryDate
-                    ? (modalEntry.desiredDeliveryDate.includes("T")
-                        ? modalEntry.desiredDeliveryDate.split("T")[0]
-                        : modalEntry.desiredDeliveryDate)
-                    : "-"}
-                </div>
+                {useDesiredDeliveryDate && (
+                  <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                    <strong>希望納品日:</strong>{" "}
+                    {modalEntry.desiredDeliveryDate
+                      ? (modalEntry.desiredDeliveryDate.includes("T")
+                          ? modalEntry.desiredDeliveryDate.split("T")[0]
+                          : modalEntry.desiredDeliveryDate)
+                      : "-"}
+                  </div>
+                )}
                 <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                   <strong>担当者:</strong> {modalEntry.staffName || "-"}
                 </div>

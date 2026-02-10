@@ -75,6 +75,8 @@ export type SettingsV1 = {
   };
   order?: {
     useDestinationMaster?: boolean; // 発注先マスタを使用するかどうか（true=使用, false=発注先項目を表示しない）
+    useDesiredDeliveryDate?: boolean; // 「希望納品日」フィールドを表示するかどうか（デフォルト: true）
+    desiredDeliveryQuickDays?: number[]; // 「希望納品日」ボタンのプリセット日数（例: [1,2,3,7,30]）
     destinations?: OrderDestinationOption[]; // 発注先マスタ一覧
     csvExportColumns?: OrderCsvColumn[]; // CSV出力項目（並び順を含む）
     csvExportColumnLabels?: Partial<Record<OrderCsvColumn, string>>; // CSV出力項目のカスタムラベル（項目名変更用）
@@ -90,6 +92,7 @@ export type SettingsV1 = {
     historyInitialLimit?: number; // 出庫履歴（Transfer）初回件数。API上限250、推奨100
     shippingRequired?: boolean; // 配送情報を必須にする（true=必須：優先1・翌日・午前中、false=任意：直接入力・日付空白・未選択）
     allowCustomCarrier?: boolean; // 「その他（配送会社入力）」を表示するかどうか（デフォルト: true）
+    arrivalQuickDays?: number[]; // 「到着予定日」ボタンのプリセット日数（例: [1,2]）
   };
   inbound?: {
     allowOverReceive?: boolean; // 過剰入庫許可（デフォルト: true）
@@ -168,6 +171,8 @@ function defaultSettings(): SettingsV1 {
     },
     order: {
       useDestinationMaster: false,
+      useDesiredDeliveryDate: true,
+      desiredDeliveryQuickDays: [1, 2, 3, 7, 30],
       destinations: [],
       csvExportColumns: [...DEFAULT_ORDER_CSV_COLUMNS], // デフォルトCSV出力項目
       csvExportColumnLabels: undefined, // カスタムラベル（初期値は未設定）
@@ -182,6 +187,7 @@ function defaultSettings(): SettingsV1 {
       historyInitialLimit: 100, // 出庫履歴 初回表示件数
       shippingRequired: false, // デフォルト: 任意
       allowCustomCarrier: true,
+      arrivalQuickDays: [1, 2],
     },
     inbound: {
       allowOverReceive: true,
@@ -216,6 +222,8 @@ function sanitizeSettings(input: any): SettingsV1 {
     lossReasons: [],
     order: {
       useDestinationMaster: false,
+      useDesiredDeliveryDate: true,
+      desiredDeliveryQuickDays: [1, 2, 3, 7, 30],
       destinations: [],
     },
     visibleLocationIds: [],
@@ -223,6 +231,7 @@ function sanitizeSettings(input: any): SettingsV1 {
       allowForceCancel: true,
       historyInitialLimit: 100,
       shippingRequired: Boolean(input?.outbound?.shippingRequired),
+      arrivalQuickDays: [1, 2],
     },
     inbound: {
       allowOverReceive: true,
@@ -318,6 +327,20 @@ function sanitizeSettings(input: any): SettingsV1 {
       typeof input.order.useDestinationMaster === "boolean"
         ? input.order.useDestinationMaster
         : false;
+    const useDesiredDeliveryDate =
+      typeof input.order.useDesiredDeliveryDate === "boolean"
+        ? input.order.useDesiredDeliveryDate
+        : true;
+    const desiredDeliveryQuickDaysRaw = Array.isArray(input.order.desiredDeliveryQuickDays)
+      ? input.order.desiredDeliveryQuickDays
+      : [];
+    const desiredDeliveryQuickDaysSanitized = Array.from(
+      new Set(
+        desiredDeliveryQuickDaysRaw
+          .map((v: any) => Number(v))
+          .filter((n) => Number.isFinite(n) && n > 0 && n <= 365)
+      )
+    ).sort((a, b) => a - b);
     const destinationsRaw = Array.isArray(input.order.destinations) ? input.order.destinations : [];
     const destinations: OrderDestinationOption[] = destinationsRaw
       .map((od: any) => ({
@@ -394,6 +417,11 @@ function sanitizeSettings(input: any): SettingsV1 {
     s.purchase = { suppliers: masterSuppliers };
     s.order = {
       useDestinationMaster,
+      useDesiredDeliveryDate,
+      desiredDeliveryQuickDays:
+        desiredDeliveryQuickDaysSanitized.length > 0
+          ? desiredDeliveryQuickDaysSanitized
+          : [1, 2, 3, 7, 30],
       // ✅ 発注側も同じ仕入先リストを使う（連動）
       destinations: toOrderDestinationsFromSuppliers(masterSuppliers),
       csvExportColumns,
@@ -667,6 +695,8 @@ export default function SettingsPage() {
 
   // carrier presets UI
   const [showCarrierPresets, setShowCarrierPresets] = useState(false);
+  const [orderQuickDayInput, setOrderQuickDayInput] = useState("");
+  const [outboundQuickDayInput, setOutboundQuickDayInput] = useState("");
 
   // 設定タブ（棚卸と同様のタブ構成）
   type SettingsTabId = "app" | "outbound" | "inbound" | "purchase" | "order" | "loss";
@@ -1690,57 +1720,154 @@ export default function SettingsPage() {
                           padding: 16,
                         }}
                       >
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "12px",
-                            alignItems: "center",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "6px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            <input
-                              type="radio"
-                              name="shippingRequired"
-                              checked={(settings.outbound?.shippingRequired ?? false) === false}
-                              onChange={() =>
-                                setSettings((s) => ({
-                                  ...s,
-                                  outbound: { ...(s.outbound ?? {}), shippingRequired: false },
-                                }))
-                              }
-                            />
-                            <span>任意</span>
-                          </label>
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "6px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            <input
-                              type="radio"
-                              name="shippingRequired"
-                              checked={(settings.outbound?.shippingRequired ?? false) === true}
-                              onChange={() =>
-                                setSettings((s) => ({
-                                  ...s,
-                                  outbound: { ...(s.outbound ?? {}), shippingRequired: true },
-                                }))
-                              }
-                            />
-                            <span>必須</span>
-                          </label>
-                        </div>
+                        <s-stack gap="base">
+                          {/* 配送情報の必須/任意 */}
+                          <s-stack gap="extraTight">
+                            <s-text emphasis="bold" size="small">
+                              配送情報の必須/任意
+                            </s-text>
+                            <s-stack direction="inline" gap="base" inlineAlignment="start">
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "6px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="shippingRequired"
+                                  checked={(settings.outbound?.shippingRequired ?? false) === false}
+                                  onChange={() =>
+                                    setSettings((s) => ({
+                                      ...s,
+                                      outbound: { ...(s.outbound ?? {}), shippingRequired: false },
+                                    }))
+                                  }
+                                />
+                                <span>任意</span>
+                              </label>
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "6px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="shippingRequired"
+                                  checked={(settings.outbound?.shippingRequired ?? false) === true}
+                                  onChange={() =>
+                                    setSettings((s) => ({
+                                      ...s,
+                                      outbound: { ...(s.outbound ?? {}), shippingRequired: true },
+                                    }))
+                                  }
+                                />
+                                <span>必須</span>
+                              </label>
+                            </s-stack>
+                          </s-stack>
+
+                          <s-divider />
+
+                          {/* 到着予定日ボタン設定 */}
+                          <s-stack gap="extraTight">
+                            <s-text emphasis="bold" size="small">
+                              「到着予定日」ボタン設定
+                            </s-text>
+                            <s-text tone="subdued" size="small">
+                              出庫の「到着予定日」に表示する「◯日後」ボタンを選択できます。
+                            </s-text>
+                            <s-stack gap="tight">
+                              <s-stack direction="inline" gap="base" inlineAlignment="start" wrap>
+                                {[1, 2, 3].map((d) => {
+                                  const current =
+                                    settings.outbound?.arrivalQuickDays ?? [1, 2];
+                                  const checked = current.includes(d);
+                                  const label = `${d}日後`;
+                                  return (
+                                    <label
+                                      key={d}
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "6px",
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={() =>
+                                          setSettings((s) => {
+                                            const cur =
+                                              s.outbound?.arrivalQuickDays ?? [1, 2];
+                                            let next = checked
+                                              ? cur.filter((v) => v !== d)
+                                              : [...cur, d];
+                                            next = Array.from(new Set(next)).filter(
+                                              (v) => v > 0 && v <= 365
+                                            );
+                                            next.sort((a, b) => a - b);
+                                            return {
+                                              ...s,
+                                              outbound: {
+                                                ...(s.outbound ?? {}),
+                                                arrivalQuickDays:
+                                                  next.length > 0 ? next : [1, 2],
+                                              },
+                                            };
+                                          })
+                                        }
+                                      />
+                                      <span>{label}</span>
+                                    </label>
+                                  );
+                                })}
+                              </s-stack>
+                              <s-stack direction="inline" gap="small" inlineAlignment="start">
+                                <s-text-field
+                                  label="任意の日数（1〜365）"
+                                  value={outboundQuickDayInput}
+                                  onInput={(e: any) => setOutboundQuickDayInput(readValue(e))}
+                                  onChange={(e: any) => setOutboundQuickDayInput(readValue(e))}
+                                  style={{ maxWidth: 140 }}
+                                />
+                                <s-button
+                                  kind="secondary"
+                                  onClick={() => {
+                                    const n = Number(outboundQuickDayInput);
+                                    if (!Number.isFinite(n) || n <= 0 || n > 365) return;
+                                    setSettings((s) => {
+                                      const cur =
+                                        s.outbound?.arrivalQuickDays ?? [1, 2];
+                                      let next = [...cur, n];
+                                      next = Array.from(new Set(next)).filter(
+                                        (v) => v > 0 && v <= 365
+                                      );
+                                      next.sort((a, b) => a - b);
+                                      return {
+                                        ...s,
+                                        outbound: {
+                                          ...(s.outbound ?? {}),
+                                          arrivalQuickDays:
+                                            next.length > 0 ? next : [1, 2],
+                                        },
+                                      };
+                                    });
+                                    setOutboundQuickDayInput("");
+                                  }}
+                                >
+                                  日数を追加
+                                </s-button>
+                              </s-stack>
+                            </s-stack>
+                          </s-stack>
+                        </s-stack>
                       </div>
                     </div>
                   </div>
@@ -2415,67 +2542,239 @@ export default function SettingsPage() {
                           padding: 16,
                         }}
                       >
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "12px",
-                            alignItems: "center",
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "6px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            <input
-                              type="radio"
-                              name="useDestinationMaster"
-                              checked={(settings.order?.useDestinationMaster ?? false) === true}
-                              onChange={() =>
-                                setSettings((s) => ({
-                                  ...s,
-                                  order: {
-                                    ...s.order,
-                                    useDestinationMaster: true,
-                                    destinations: s.order?.destinations ?? [],
-                                    csvExportColumns: s.order?.csvExportColumns,
-                                  },
-                                }))
-                              }
-                            />
-                            <span>仕入先マスタを使用する</span>
-                          </label>
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "6px",
-                              cursor: "pointer",
-                            }}
-                          >
-                            <input
-                              type="radio"
-                              name="useDestinationMaster"
-                              checked={(settings.order?.useDestinationMaster ?? false) === false}
-                              onChange={() =>
-                                setSettings((s) => ({
-                                  ...s,
-                                  order: {
-                                    ...s.order,
-                                    useDestinationMaster: false,
-                                    destinations: s.order?.destinations ?? [],
-                                    csvExportColumns: s.order?.csvExportColumns,
-                                  },
-                                }))
-                              }
-                            />
-                            <span>仕入先マスタを使用しない（非表示）</span>
-                          </label>
-                        </div>
+                        <s-stack gap="base">
+                          {/* 仕入先マスタの使用/不使用 */}
+                          <s-stack gap="extraTight">
+                            <s-text emphasis="bold" size="small">
+                              「仕入先マスタ」の使用
+                            </s-text>
+                            <s-stack direction="inline" gap="base" inlineAlignment="start">
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "6px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="useDestinationMaster"
+                                  checked={(settings.order?.useDestinationMaster ?? false) === true}
+                                  onChange={() =>
+                                    setSettings((s) => ({
+                                      ...s,
+                                      order: {
+                                        ...s.order,
+                                        useDestinationMaster: true,
+                                        destinations: s.order?.destinations ?? [],
+                                        csvExportColumns: s.order?.csvExportColumns,
+                                      },
+                                    }))
+                                  }
+                                />
+                                <span>使用する</span>
+                              </label>
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "6px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="useDestinationMaster"
+                                  checked={(settings.order?.useDestinationMaster ?? false) === false}
+                                  onChange={() =>
+                                    setSettings((s) => ({
+                                      ...s,
+                                      order: {
+                                        ...s.order,
+                                        useDestinationMaster: false,
+                                        destinations: s.order?.destinations ?? [],
+                                        csvExportColumns: s.order?.csvExportColumns,
+                                      },
+                                    }))
+                                  }
+                                />
+                                <span>使用しない（非表示）</span>
+                              </label>
+                            </s-stack>
+                          </s-stack>
+
+                          <s-divider />
+
+                          {/* 希望納品日の使用/不使用 */}
+                          <s-stack gap="extraTight">
+                            <s-text emphasis="bold" size="small">
+                              「希望納品日」の使用
+                            </s-text>
+                            <s-stack direction="inline" gap="base" inlineAlignment="start">
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "6px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="useDesiredDeliveryDate"
+                                  checked={(settings.order?.useDesiredDeliveryDate ?? true) === true}
+                                  onChange={() =>
+                                    setSettings((s) => ({
+                                      ...s,
+                                      order: {
+                                        ...s.order,
+                                        useDesiredDeliveryDate: true,
+                                      },
+                                    }))
+                                  }
+                                />
+                                <span>使用する</span>
+                              </label>
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "6px",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="useDesiredDeliveryDate"
+                                  checked={(settings.order?.useDesiredDeliveryDate ?? true) === false}
+                                  onChange={() =>
+                                    setSettings((s) => ({
+                                      ...s,
+                                      order: {
+                                        ...s.order,
+                                        useDesiredDeliveryDate: false,
+                                      },
+                                    }))
+                                  }
+                                />
+                                <span>使用しない（非表示）</span>
+                              </label>
+                            </s-stack>
+                          </s-stack>
+
+                          <s-divider />
+
+                          {/* 希望納品日ボタン設定（◯日後ボタン） */}
+                          <s-stack gap="extraTight">
+                            <s-text emphasis="bold" size="small">
+                              「希望納品日」ボタン設定
+                            </s-text>
+                            <s-text tone="subdued" size="small">
+                              発注条件画面に表示する「◯日後」ボタンを選択できます。
+                            </s-text>
+                            <s-stack gap="tight">
+                              <s-stack direction="inline" gap="base" inlineAlignment="start" wrap>
+                                {[1, 2, 3, 7, 30].map((d) => {
+                                  const current =
+                                    settings.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+                                  const checked = current.includes(d);
+                                  const label =
+                                    d === 7 ? "1週間後" : d === 30 ? "1ヶ月後" : `${d}日後`;
+                                  return (
+                                    <label
+                                      key={d}
+                                      style={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "6px",
+                                        cursor: "pointer",
+                                      }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={() =>
+                                          setSettings((s) => {
+                                            const cur =
+                                              s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+                                            let next = checked
+                                              ? cur.filter((v) => v !== d)
+                                              : [...cur, d];
+                                            next = Array.from(new Set(next)).filter(
+                                              (v) => v > 0 && v <= 365
+                                            );
+                                            next.sort((a, b) => a - b);
+                                            return {
+                                              ...s,
+                                              order: {
+                                                ...s.order,
+                                                useDestinationMaster:
+                                                  s.order?.useDestinationMaster ?? false,
+                                                useDesiredDeliveryDate:
+                                                  s.order?.useDesiredDeliveryDate ?? true,
+                                                desiredDeliveryQuickDays:
+                                                  next.length > 0 ? next : [1, 2, 3, 7, 30],
+                                                destinations: s.order?.destinations ?? [],
+                                                csvExportColumns: s.order?.csvExportColumns,
+                                                csvExportColumnLabels:
+                                                  s.order?.csvExportColumnLabels,
+                                              },
+                                            };
+                                          })
+                                        }
+                                      />
+                                      <span>{label}</span>
+                                    </label>
+                                  );
+                                })}
+                              </s-stack>
+                              <s-stack direction="inline" gap="small" inlineAlignment="start">
+                                <s-text-field
+                                  label="任意の日数（1〜365）"
+                                  value={orderQuickDayInput}
+                                  onInput={(e: any) => setOrderQuickDayInput(readValue(e))}
+                                  onChange={(e: any) => setOrderQuickDayInput(readValue(e))}
+                                  style={{ maxWidth: 140 }}
+                                />
+                                <s-button
+                                  kind="secondary"
+                                  onClick={() => {
+                                    const n = Number(orderQuickDayInput);
+                                    if (!Number.isFinite(n) || n <= 0 || n > 365) return;
+                                    setSettings((s) => {
+                                      const cur =
+                                        s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+                                      let next = [...cur, n];
+                                      next = Array.from(new Set(next)).filter(
+                                        (v) => v > 0 && v <= 365
+                                      );
+                                      next.sort((a, b) => a - b);
+                                      return {
+                                        ...s,
+                                        order: {
+                                          ...s.order,
+                                          useDestinationMaster:
+                                            s.order?.useDestinationMaster ?? false,
+                                          useDesiredDeliveryDate:
+                                            s.order?.useDesiredDeliveryDate ?? true,
+                                          desiredDeliveryQuickDays:
+                                            next.length > 0 ? next : [1, 2, 3, 7, 30],
+                                          destinations: s.order?.destinations ?? [],
+                                          csvExportColumns: s.order?.csvExportColumns,
+                                          csvExportColumnLabels: s.order?.csvExportColumnLabels,
+                                        },
+                                      };
+                                    });
+                                    setOrderQuickDayInput("");
+                                  }}
+                                >
+                                  日数を追加
+                                </s-button>
+                              </s-stack>
+                            </s-stack>
+                          </s-stack>
+                        </s-stack>
                       </div>
                     </div>
                   </div>

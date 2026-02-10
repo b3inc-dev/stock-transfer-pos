@@ -84,6 +84,19 @@ export function OrderConditions({
 
   const allLocations = useMemo(() => (Array.isArray(locationsProp) ? locationsProp : []), [locationsProp]);
 
+  // 設定から希望納品日フラグ・プリセット日数を計算
+  const useDesiredDeliveryDateFromSettings = !!settings?.order?.useDesiredDeliveryDate ?? true;
+  const desiredDeliveryQuickDays = useMemo(() => {
+    const raw = settings?.order?.desiredDeliveryQuickDays;
+    const base = Array.isArray(raw) ? raw : [1, 2, 3, 7, 30];
+    const nums = base
+      .map((v) => Number(v))
+      .filter((n) => Number.isFinite(n) && n > 0 && n <= 365);
+    const uniq = Array.from(new Set(nums));
+    uniq.sort((a, b) => a - b);
+    return uniq;
+  }, [settings]);
+
   // 設定読み込み（仕入先マスタ）
   useEffect(() => {
     let mounted = true;
@@ -453,14 +466,66 @@ export function OrderConditions({
           />
 
           {/* 希望納品日（任意） */}
-          <s-text-field
-            type="date"
-            label="希望納品日（任意）"
-            value={desiredDeliveryDate}
-            onInput={(e) => setDesiredDeliveryDate(readValue(e))}
-            onChange={(e) => setDesiredDeliveryDate(readValue(e))}
-            helpText="YYYY-MM-DD形式で入力してください"
-          />
+          {useDesiredDeliveryDateFromSettings && (
+            <s-stack gap="extraTight">
+              <s-text-field
+                type="date"
+                label="希望納品日（任意）"
+                value={desiredDeliveryDate}
+                onInput={(e) => setDesiredDeliveryDate(readValue(e))}
+                onChange={(e) => setDesiredDeliveryDate(readValue(e))}
+                helpText="YYYY-MM-DD形式で入力してください"
+              />
+              {desiredDeliveryQuickDays.length > 0 && (
+                <s-stack direction="inline" gap="small" inlineAlignment="end">
+                  {desiredDeliveryQuickDays.map((d) => {
+                    const label =
+                      d === 7 ? "1週間後" : d === 30 ? "1ヶ月後" : `${d}日後`;
+                    return (
+                      <s-button
+                        key={d}
+                        kind="secondary"
+                        onClick={() => {
+                          try {
+                            const baseStr = date;
+                            let base = new Date();
+                            if (baseStr && /^\d{4}-\d{1,2}-\d{1,2}$/.test(baseStr)) {
+                              const [y, m, day] = baseStr.split("-").map((n) => Number(n));
+                              base = new Date(y, m - 1, day, 0, 0, 0, 0);
+                            }
+                            const d2 = new Date(
+                              base.getFullYear(),
+                              base.getMonth(),
+                              base.getDate(),
+                              0,
+                              0,
+                              0,
+                              0
+                            );
+                            d2.setDate(d2.getDate() + d);
+                            const y2 = d2.getFullYear();
+                            const m2 = String(d2.getMonth() + 1).padStart(2, "0");
+                            const day2 = String(d2.getDate()).padStart(2, "0");
+                            setDesiredDeliveryDate(`${y2}-${m2}-${day2}`);
+                          } catch {
+                            // 失敗した場合は何もしない
+                          }
+                        }}
+                      >
+                        {label}
+                      </s-button>
+                    );
+                  })}
+                  <s-button
+                    kind="secondary"
+                    onClick={() => setDesiredDeliveryDate("")}
+                  >
+                    クリア
+                  </s-button>
+                </s-stack>
+              )}
+            </s-stack>
+          )}
 
           {/* スタッフ */}
           <s-stack gap="base">

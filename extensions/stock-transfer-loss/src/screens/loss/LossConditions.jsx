@@ -429,23 +429,28 @@ export function LossConditions({ onBack, onStart, onOpenHistory, locations: loca
             <s-text emphasis="bold" size="small">理由</s-text>
             <s-badge tone="critical">必須</s-badge>
           </s-stack>
-          <s-stack direction="inline" gap="small" style={{ width: "100%" }}>
+          <s-stack
+            direction="inline"
+            gap="small"
+            justifyContent="end"
+            alignItems="center"
+            wrap
+          >
             {[...reasonOptions, ...(allowCustomReason ? [{ value: OTHER_VALUE, label: "その他" }] : [])].map((r) => (
-              <s-box key={r.value} style={{ flex: "1 1 0", minWidth: 0, width: "100%" }}>
-                <s-button
-                  tone={reasonKey === r.value ? "success" : undefined}
-                  onClick={() => {
-                    setReasonKey(r.value);
-                    // 「その他」以外を選択した場合はカスタム入力をクリア
-                    if (r.value !== OTHER_VALUE) {
-                      setReasonCustom("");
-                    }
-                  }}
-                  style={{ width: "100%", maxWidth: "100%" }}
-                >
-                  {reasonKey === r.value ? "✓ " : ""}{r.label}
-                </s-button>
-              </s-box>
+              <s-button
+                key={r.value}
+                kind="secondary"
+                tone={reasonKey === r.value ? "success" : undefined}
+                onClick={() => {
+                  setReasonKey(r.value);
+                  // 「その他」以外を選択した場合はカスタム入力をクリア
+                  if (r.value !== OTHER_VALUE) {
+                    setReasonCustom("");
+                  }
+                }}
+              >
+                {reasonKey === r.value ? "✓ " : ""}{r.label}
+              </s-button>
             ))}
           </s-stack>
           {/* 「その他」が選択されている場合は入力欄を表示 */}
