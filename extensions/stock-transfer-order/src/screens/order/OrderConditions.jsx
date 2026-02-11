@@ -480,7 +480,8 @@ export function OrderConditions({
                 <s-stack direction="inline" gap="small" inlineAlignment="end">
                   {desiredDeliveryQuickDays.map((d) => {
                     const label =
-                      d === 7 ? "1週間後" : d === 30 ? "1ヶ月後" : `${d}日後`;
+                      settings?.order?.desiredDeliveryQuickDayLabels?.[String(d)]?.trim() ||
+                      (d === 7 ? "1週間後" : d === 30 ? "1ヶ月後" : `${d}日後`);
                     return (
                       <s-button
                         key={d}

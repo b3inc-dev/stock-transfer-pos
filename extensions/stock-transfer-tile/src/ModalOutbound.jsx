@@ -2508,7 +2508,7 @@ function OutboundConditions({
                   kind="secondary"
                   onClick={() => setArrivesPreset_(d)}
                 >
-                  {`${d}日後`}
+                  {settings?.outbound?.arrivalQuickDayLabels?.[String(d)]?.trim() || `${d}日後`}
                 </s-button>
               ))}
               <s-button kind="secondary" onClick={() => setArrivesPreset_("clear")}>
@@ -7621,7 +7621,7 @@ function OutboundList({
                     kind="secondary"
                     onClick={() => setArrivesPreset(d)}
                   >
-                    {`${d}日後`}
+                    {settings?.outbound?.arrivalQuickDayLabels?.[String(d)]?.trim() || `${d}日後`}
                   </s-button>
                 ))}
                 <s-button kind="secondary" onClick={() => setArrivesPreset("clear")}>

@@ -77,6 +77,7 @@ export type SettingsV1 = {
     useDestinationMaster?: boolean; // 発注先マスタを使用するかどうか（true=使用, false=発注先項目を表示しない）
     useDesiredDeliveryDate?: boolean; // 「希望納品日」フィールドを表示するかどうか（デフォルト: true）
     desiredDeliveryQuickDays?: number[]; // 「希望納品日」ボタンのプリセット日数（例: [1,2,3,7,30]）
+    desiredDeliveryQuickDayLabels?: Record<string, string>; // 日数ごとのカスタムボタン名（キーは日数の文字列。未設定時は日数から自動表示）
     destinations?: OrderDestinationOption[]; // 発注先マスタ一覧
     csvExportColumns?: OrderCsvColumn[]; // CSV出力項目（並び順を含む）
     csvExportColumnLabels?: Partial<Record<OrderCsvColumn, string>>; // CSV出力項目のカスタムラベル（項目名変更用）
@@ -93,6 +94,7 @@ export type SettingsV1 = {
     shippingRequired?: boolean; // 配送情報を必須にする（true=必須：優先1・翌日・午前中、false=任意：直接入力・日付空白・未選択）
     allowCustomCarrier?: boolean; // 「その他（配送会社入力）」を表示するかどうか（デフォルト: true）
     arrivalQuickDays?: number[]; // 「到着予定日」ボタンのプリセット日数（例: [1,2]）
+    arrivalQuickDayLabels?: Record<string, string>; // 日数ごとのカスタムボタン名（キーは日数の文字列）
   };
   inbound?: {
     allowOverReceive?: boolean; // 過剰入庫許可（デフォルト: true）
@@ -415,6 +417,20 @@ function sanitizeSettings(input: any): SettingsV1 {
     const masterSuppliers = purchaseSuppliersFromPurchase.length > 0 ? purchaseSuppliersFromPurchase : fallbackSuppliers;
 
     s.purchase = { suppliers: masterSuppliers };
+    // 希望納品日ボタンのカスタムラベル（日数→ボタン名）
+    const desiredDeliveryQuickDayLabelsRaw =
+      input.order.desiredDeliveryQuickDayLabels && typeof input.order.desiredDeliveryQuickDayLabels === "object"
+        ? input.order.desiredDeliveryQuickDayLabels
+        : {};
+    const desiredDeliveryQuickDayLabels: Record<string, string> = {};
+    Object.entries(desiredDeliveryQuickDayLabelsRaw).forEach(([k, v]) => {
+      const day = Number(k);
+      const label = String(v ?? "").trim();
+      if (Number.isFinite(day) && day >= 1 && day <= 365 && label) {
+        desiredDeliveryQuickDayLabels[String(day)] = label;
+      }
+    });
+
     s.order = {
       useDestinationMaster,
       useDesiredDeliveryDate,
@@ -422,6 +438,7 @@ function sanitizeSettings(input: any): SettingsV1 {
         desiredDeliveryQuickDaysSanitized.length > 0
           ? desiredDeliveryQuickDaysSanitized
           : [1, 2, 3, 7, 30],
+      desiredDeliveryQuickDayLabels: Object.keys(desiredDeliveryQuickDayLabels).length > 0 ? desiredDeliveryQuickDayLabels : undefined,
       // ✅ 発注側も同じ仕入先リストを使う（連動）
       destinations: toOrderDestinationsFromSuppliers(masterSuppliers),
       csvExportColumns,
@@ -461,6 +478,29 @@ function sanitizeSettings(input: any): SettingsV1 {
 
   // 出庫設定
   if (input?.outbound && typeof input.outbound === "object") {
+    const arrivalQuickDaysRaw = Array.isArray(input.outbound.arrivalQuickDays)
+      ? input.outbound.arrivalQuickDays
+      : [];
+    const arrivalQuickDaysSanitized = Array.from(
+      new Set(
+        arrivalQuickDaysRaw
+          .map((v: any) => Number(v))
+          .filter((n) => Number.isFinite(n) && n > 0 && n <= 365)
+      )
+    ).sort((a, b) => a - b);
+    const arrivalQuickDayLabelsRaw =
+      input.outbound.arrivalQuickDayLabels && typeof input.outbound.arrivalQuickDayLabels === "object"
+        ? input.outbound.arrivalQuickDayLabels
+        : {};
+    const arrivalQuickDayLabels: Record<string, string> = {};
+    Object.entries(arrivalQuickDayLabelsRaw).forEach(([k, v]) => {
+      const day = Number(k);
+      const label = String(v ?? "").trim();
+      if (Number.isFinite(day) && day >= 1 && day <= 365 && label) {
+        arrivalQuickDayLabels[String(day)] = label;
+      }
+    });
+
     s.outbound = {
       allowForceCancel:
         typeof input.outbound.allowForceCancel === "boolean"
@@ -477,6 +517,9 @@ function sanitizeSettings(input: any): SettingsV1 {
         typeof input.outbound.allowCustomCarrier === "boolean"
           ? input.outbound.allowCustomCarrier
           : true,
+      arrivalQuickDays:
+        arrivalQuickDaysSanitized.length > 0 ? arrivalQuickDaysSanitized : [1, 2],
+      arrivalQuickDayLabels: Object.keys(arrivalQuickDayLabels).length > 0 ? arrivalQuickDayLabels : undefined,
     };
   }
 
@@ -1162,6 +1205,272 @@ export default function SettingsPage() {
     });
   };
 
+  // 希望納品日ボタン（日程）の並び替え・トグル
+  const desiredDeliveryDaysList = settings.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+  const toggleDesiredDeliveryDay = (day: number) => {
+    setSettings((s) => {
+      const cur = s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+      const has = cur.includes(day);
+      let next = has ? cur.filter((v) => v !== day) : [...cur, day];
+      next = Array.from(new Set(next)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
+      if (next.length === 0) next = [1, 2, 3, 7, 30];
+      const labels = { ...(s.order?.desiredDeliveryQuickDayLabels ?? {}) };
+      if (has) delete labels[String(day)];
+      return {
+        ...s,
+        order: {
+          ...s.order,
+          useDestinationMaster: s.order?.useDestinationMaster ?? false,
+          useDesiredDeliveryDate: s.order?.useDesiredDeliveryDate ?? true,
+          desiredDeliveryQuickDays: next,
+          desiredDeliveryQuickDayLabels: Object.keys(labels).length > 0 ? labels : undefined,
+          destinations: s.order?.destinations ?? [],
+          csvExportColumns: s.order?.csvExportColumns,
+          csvExportColumnLabels: s.order?.csvExportColumnLabels,
+        },
+      };
+    });
+  };
+  const moveDesiredDeliveryDayUp = (day: number) => {
+    setSettings((s) => {
+      const cur = s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+      const i = cur.indexOf(day);
+      if (i <= 0) return s;
+      const updated = [...cur];
+      [updated[i - 1], updated[i]] = [updated[i], updated[i - 1]];
+      return {
+        ...s,
+        order: {
+          ...s.order,
+          useDestinationMaster: s.order?.useDestinationMaster ?? false,
+          useDesiredDeliveryDate: s.order?.useDesiredDeliveryDate ?? true,
+          desiredDeliveryQuickDays: updated,
+          destinations: s.order?.destinations ?? [],
+          csvExportColumns: s.order?.csvExportColumns,
+          csvExportColumnLabels: s.order?.csvExportColumnLabels,
+        },
+      };
+    });
+  };
+  const moveDesiredDeliveryDayDown = (day: number) => {
+    setSettings((s) => {
+      const cur = s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+      const i = cur.indexOf(day);
+      if (i < 0 || i >= cur.length - 1) return s;
+      const updated = [...cur];
+      [updated[i], updated[i + 1]] = [updated[i + 1], updated[i]];
+      return {
+        ...s,
+        order: {
+          ...s.order,
+          useDestinationMaster: s.order?.useDestinationMaster ?? false,
+          useDesiredDeliveryDate: s.order?.useDesiredDeliveryDate ?? true,
+          desiredDeliveryQuickDays: updated,
+          destinations: s.order?.destinations ?? [],
+          csvExportColumns: s.order?.csvExportColumns,
+          csvExportColumnLabels: s.order?.csvExportColumnLabels,
+        },
+      };
+    });
+  };
+  const moveDesiredDeliveryDayToPosition = (day: number, targetPosition: number) => {
+    setSettings((s) => {
+      const cur = s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+      const currentIndex = cur.indexOf(day);
+      if (currentIndex < 0) return s;
+      const targetIndex = Math.max(0, Math.min(cur.length - 1, targetPosition - 1));
+      if (currentIndex === targetIndex) return s;
+      const updated = [...cur];
+      const [moved] = updated.splice(currentIndex, 1);
+      updated.splice(targetIndex, 0, moved);
+      return {
+        ...s,
+        order: {
+          ...s.order,
+          useDestinationMaster: s.order?.useDestinationMaster ?? false,
+          useDesiredDeliveryDate: s.order?.useDesiredDeliveryDate ?? true,
+          desiredDeliveryQuickDays: updated,
+          destinations: s.order?.destinations ?? [],
+          csvExportColumns: s.order?.csvExportColumns,
+          csvExportColumnLabels: s.order?.csvExportColumnLabels,
+        },
+      };
+    });
+  };
+  const updateDesiredDeliveryDayValue = (oldDay: number, newDay: number) => {
+    if (!Number.isFinite(newDay) || newDay < 1 || newDay > 365) return;
+    setSettings((s) => {
+      const cur = s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+      const i = cur.indexOf(oldDay);
+      if (i < 0) return s;
+      const updated = [...cur];
+      updated[i] = newDay;
+      const uniq = Array.from(new Set(updated)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
+      const labels = { ...(s.order?.desiredDeliveryQuickDayLabels ?? {}) };
+      delete labels[String(oldDay)];
+      return {
+        ...s,
+        order: {
+          ...s.order,
+          useDestinationMaster: s.order?.useDestinationMaster ?? false,
+          useDesiredDeliveryDate: s.order?.useDesiredDeliveryDate ?? true,
+          desiredDeliveryQuickDays: uniq.length > 0 ? uniq : [1, 2, 3, 7, 30],
+          desiredDeliveryQuickDayLabels: Object.keys(labels).length > 0 ? labels : undefined,
+          destinations: s.order?.destinations ?? [],
+          csvExportColumns: s.order?.csvExportColumns,
+          csvExportColumnLabels: s.order?.csvExportColumnLabels,
+        },
+      };
+    });
+  };
+
+  const updateDesiredDeliveryDayLabel = (day: number, label: string) => {
+    setSettings((s) => {
+      const trimmed = String(label ?? "").trim();
+      const labels = { ...(s.order?.desiredDeliveryQuickDayLabels ?? {}) };
+      if (trimmed) {
+        labels[String(day)] = trimmed;
+      } else {
+        delete labels[String(day)];
+      }
+      return {
+        ...s,
+        order: {
+          ...s.order,
+          useDestinationMaster: s.order?.useDestinationMaster ?? false,
+          useDesiredDeliveryDate: s.order?.useDesiredDeliveryDate ?? true,
+          desiredDeliveryQuickDays: s.order?.desiredDeliveryQuickDays,
+          desiredDeliveryQuickDayLabels: Object.keys(labels).length > 0 ? labels : undefined,
+          destinations: s.order?.destinations ?? [],
+          csvExportColumns: s.order?.csvExportColumns,
+          csvExportColumnLabels: s.order?.csvExportColumnLabels,
+        },
+      };
+    });
+  };
+
+  const getDesiredDeliveryDayLabel = (day: number) =>
+    settings.order?.desiredDeliveryQuickDayLabels?.[String(day)]?.trim() ||
+    (day === 7 ? "1週間後" : day === 30 ? "1ヶ月後" : `${day}日後`);
+
+  // 出庫・到着予定日ボタンの並び替え・トグル・ラベル
+  const arrivalDaysList = settings.outbound?.arrivalQuickDays ?? [1, 2];
+  const toggleArrivalDay = (day: number) => {
+    setSettings((s) => {
+      const cur = s.outbound?.arrivalQuickDays ?? [1, 2];
+      const has = cur.includes(day);
+      let next = has ? cur.filter((v) => v !== day) : [...cur, day];
+      next = Array.from(new Set(next)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
+      if (next.length === 0) next = [1, 2];
+      const labels = { ...(s.outbound?.arrivalQuickDayLabels ?? {}) };
+      delete labels[String(day)];
+      return {
+        ...s,
+        outbound: {
+          ...(s.outbound ?? {}),
+          arrivalQuickDays: next,
+          arrivalQuickDayLabels: Object.keys(labels).length > 0 ? labels : undefined,
+        },
+      };
+    });
+  };
+  const moveArrivalDayUp = (day: number) => {
+    setSettings((s) => {
+      const cur = s.outbound?.arrivalQuickDays ?? [1, 2];
+      const i = cur.indexOf(day);
+      if (i <= 0) return s;
+      const updated = [...cur];
+      [updated[i - 1], updated[i]] = [updated[i], updated[i - 1]];
+      return {
+        ...s,
+        outbound: {
+          ...(s.outbound ?? {}),
+          arrivalQuickDays: updated,
+          arrivalQuickDayLabels: s.outbound?.arrivalQuickDayLabels,
+        },
+      };
+    });
+  };
+  const moveArrivalDayDown = (day: number) => {
+    setSettings((s) => {
+      const cur = s.outbound?.arrivalQuickDays ?? [1, 2];
+      const i = cur.indexOf(day);
+      if (i < 0 || i >= cur.length - 1) return s;
+      const updated = [...cur];
+      [updated[i], updated[i + 1]] = [updated[i + 1], updated[i]];
+      return {
+        ...s,
+        outbound: {
+          ...(s.outbound ?? {}),
+          arrivalQuickDays: updated,
+          arrivalQuickDayLabels: s.outbound?.arrivalQuickDayLabels,
+        },
+      };
+    });
+  };
+  const moveArrivalDayToPosition = (day: number, targetPosition: number) => {
+    setSettings((s) => {
+      const cur = s.outbound?.arrivalQuickDays ?? [1, 2];
+      const currentIndex = cur.indexOf(day);
+      if (currentIndex < 0) return s;
+      const targetIndex = Math.max(0, Math.min(cur.length - 1, targetPosition - 1));
+      if (currentIndex === targetIndex) return s;
+      const updated = [...cur];
+      const [moved] = updated.splice(currentIndex, 1);
+      updated.splice(targetIndex, 0, moved);
+      return {
+        ...s,
+        outbound: {
+          ...(s.outbound ?? {}),
+          arrivalQuickDays: updated,
+          arrivalQuickDayLabels: s.outbound?.arrivalQuickDayLabels,
+        },
+      };
+    });
+  };
+  const updateArrivalDayValue = (oldDay: number, newDay: number) => {
+    if (!Number.isFinite(newDay) || newDay < 1 || newDay > 365) return;
+    setSettings((s) => {
+      const cur = s.outbound?.arrivalQuickDays ?? [1, 2];
+      const i = cur.indexOf(oldDay);
+      if (i < 0) return s;
+      const updated = [...cur];
+      updated[i] = newDay;
+      const uniq = Array.from(new Set(updated)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
+      const labels = { ...(s.outbound?.arrivalQuickDayLabels ?? {}) };
+      delete labels[String(oldDay)];
+      return {
+        ...s,
+        outbound: {
+          ...(s.outbound ?? {}),
+          arrivalQuickDays: uniq.length > 0 ? uniq : [1, 2],
+          arrivalQuickDayLabels: Object.keys(labels).length > 0 ? labels : undefined,
+        },
+      };
+    });
+  };
+  const updateArrivalDayLabel = (day: number, label: string) => {
+    setSettings((s) => {
+      const trimmed = String(label ?? "").trim();
+      const labels = { ...(s.outbound?.arrivalQuickDayLabels ?? {}) };
+      if (trimmed) {
+        labels[String(day)] = trimmed;
+      } else {
+        delete labels[String(day)];
+      }
+      return {
+        ...s,
+        outbound: {
+          ...(s.outbound ?? {}),
+          arrivalQuickDays: s.outbound?.arrivalQuickDays,
+          arrivalQuickDayLabels: Object.keys(labels).length > 0 ? labels : undefined,
+        },
+      };
+    });
+  };
+  const getArrivalDayLabel = (day: number) =>
+    settings.outbound?.arrivalQuickDayLabels?.[String(day)]?.trim() || `${day}日後`;
+
   const save = () => {
     const fd = new FormData();
     fd.set("settings", JSON.stringify(settings));
@@ -1774,97 +2083,170 @@ export default function SettingsPage() {
 
                           <s-divider />
 
-                          {/* 到着予定日ボタン設定 */}
+                          {/* 到着予定日ボタン設定：チェック・並び順・ボタン名・日数・上下（初期で1日後・2日後） */}
                           <s-stack gap="extraTight">
                             <s-text emphasis="bold" size="small">
                               「到着予定日」ボタン設定
                             </s-text>
                             <s-text tone="subdued" size="small">
-                              出庫の「到着予定日」に表示する「◯日後」ボタンを選択できます。
+                              出庫の「到着予定日」に表示する「◯日後」ボタンを選択し、並び順を変更できます。
                             </s-text>
-                            <s-stack gap="tight">
-                              <s-stack direction="inline" gap="base" inlineAlignment="start" wrap>
-                                {[1, 2, 3].map((d) => {
-                                  const current =
-                                    settings.outbound?.arrivalQuickDays ?? [1, 2];
-                                  const checked = current.includes(d);
-                                  const label = `${d}日後`;
-                                  return (
-                                    <label
-                                      key={d}
+                            {arrivalDaysList.length === 0 ? (
+                              <s-box padding="base">
+                                <s-text tone="subdued">ボタンがありません。下の「日数を追加」で追加してください。</s-text>
+                              </s-box>
+                            ) : (
+                              <s-stack gap="tight">
+                                {arrivalDaysList.map((day, index) => (
+                                  <div
+                                    key={day}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: "8px",
+                                      padding: "8px 12px",
+                                      background: "#f6f6f7",
+                                      borderRadius: "6px",
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={true}
+                                      onChange={() => toggleArrivalDay(day)}
+                                      disabled={arrivalDaysList.length === 1}
                                       style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "6px",
-                                        cursor: "pointer",
+                                        cursor:
+                                          arrivalDaysList.length === 1 ? "not-allowed" : "pointer",
                                       }}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={checked}
-                                        onChange={() =>
-                                          setSettings((s) => {
-                                            const cur =
-                                              s.outbound?.arrivalQuickDays ?? [1, 2];
-                                            let next = checked
-                                              ? cur.filter((v) => v !== d)
-                                              : [...cur, d];
-                                            next = Array.from(new Set(next)).filter(
-                                              (v) => v > 0 && v <= 365
-                                            );
-                                            next.sort((a, b) => a - b);
-                                            return {
-                                              ...s,
-                                              outbound: {
-                                                ...(s.outbound ?? {}),
-                                                arrivalQuickDays:
-                                                  next.length > 0 ? next : [1, 2],
-                                              },
-                                            };
-                                          })
+                                    />
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={arrivalDaysList.length}
+                                      value={index + 1}
+                                      onChange={(e) => {
+                                        const newPos = parseInt(e.target.value, 10);
+                                        if (
+                                          !isNaN(newPos) &&
+                                          newPos >= 1 &&
+                                          newPos <= arrivalDaysList.length
+                                        ) {
+                                          moveArrivalDayToPosition(day, newPos);
                                         }
-                                      />
-                                      <span>{label}</span>
-                                    </label>
-                                  );
-                                })}
+                                      }}
+                                      onBlur={(e) => {
+                                        const v = parseInt(e.target.value, 10);
+                                        if (
+                                          isNaN(v) ||
+                                          v < 1 ||
+                                          v > arrivalDaysList.length
+                                        ) {
+                                          e.target.value = String(index + 1);
+                                        }
+                                      }}
+                                      style={{
+                                        width: "50px",
+                                        padding: "4px 6px",
+                                        fontSize: "12px",
+                                        textAlign: "center",
+                                        border: "1px solid #e1e3e5",
+                                        borderRadius: "4px",
+                                      }}
+                                    />
+                                    <input
+                                      type="text"
+                                      value={settings.outbound?.arrivalQuickDayLabels?.[String(day)] ?? ""}
+                                      onChange={(e) =>
+                                        updateArrivalDayLabel(day, (e.target as HTMLInputElement).value)
+                                      }
+                                      placeholder={getArrivalDayLabel(day)}
+                                      style={{
+                                        flex: "1 1 100px",
+                                        minWidth: "80px",
+                                        padding: "4px 8px",
+                                        fontSize: "13px",
+                                        border: "1px solid #e1e3e5",
+                                        borderRadius: "4px",
+                                        backgroundColor: "#ffffff",
+                                      }}
+                                      title="アプリに表示するボタン名を編集"
+                                    />
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={365}
+                                      value={day}
+                                      onChange={(e) => {
+                                        const n = parseInt(e.target.value, 10);
+                                        if (!isNaN(n) && n >= 1 && n <= 365) {
+                                          updateArrivalDayValue(day, n);
+                                        }
+                                      }}
+                                      style={{
+                                        width: "56px",
+                                        padding: "4px 6px",
+                                        fontSize: "12px",
+                                        textAlign: "center",
+                                        border: "1px solid #e1e3e5",
+                                        borderRadius: "4px",
+                                      }}
+                                      title="日数（1〜365）"
+                                    />
+                                    <s-stack direction="inline" gap="tight">
+                                      <s-button
+                                        size="small"
+                                        disabled={index === 0}
+                                        onClick={() => moveArrivalDayUp(day)}
+                                      >
+                                        ↑
+                                      </s-button>
+                                      <s-button
+                                        size="small"
+                                        disabled={index === arrivalDaysList.length - 1}
+                                        onClick={() => moveArrivalDayDown(day)}
+                                      >
+                                        ↓
+                                      </s-button>
+                                    </s-stack>
+                                  </div>
+                                ))}
                               </s-stack>
-                              <s-stack direction="inline" gap="small" inlineAlignment="start">
-                                <s-text-field
-                                  label="任意の日数（1〜365）"
-                                  value={outboundQuickDayInput}
-                                  onInput={(e: any) => setOutboundQuickDayInput(readValue(e))}
-                                  onChange={(e: any) => setOutboundQuickDayInput(readValue(e))}
-                                  style={{ maxWidth: 140 }}
-                                />
-                                <s-button
-                                  kind="secondary"
-                                  onClick={() => {
-                                    const n = Number(outboundQuickDayInput);
-                                    if (!Number.isFinite(n) || n <= 0 || n > 365) return;
-                                    setSettings((s) => {
-                                      const cur =
-                                        s.outbound?.arrivalQuickDays ?? [1, 2];
-                                      let next = [...cur, n];
-                                      next = Array.from(new Set(next)).filter(
-                                        (v) => v > 0 && v <= 365
-                                      );
-                                      next.sort((a, b) => a - b);
-                                      return {
-                                        ...s,
-                                        outbound: {
-                                          ...(s.outbound ?? {}),
-                                          arrivalQuickDays:
-                                            next.length > 0 ? next : [1, 2],
-                                        },
-                                      };
-                                    });
-                                    setOutboundQuickDayInput("");
-                                  }}
-                                >
-                                  日数を追加
-                                </s-button>
-                              </s-stack>
+                            )}
+                            <s-stack direction="inline" gap="small" inlineAlignment="start" style={{ marginTop: 8 }}>
+                              <s-text-field
+                                label="任意の日数（1〜365）"
+                                value={outboundQuickDayInput}
+                                onInput={(e: any) => setOutboundQuickDayInput(readValue(e))}
+                                onChange={(e: any) => setOutboundQuickDayInput(readValue(e))}
+                                style={{ maxWidth: 140 }}
+                              />
+                              <s-button
+                                kind="secondary"
+                                onClick={() => {
+                                  const n = Number(outboundQuickDayInput);
+                                  if (!Number.isFinite(n) || n <= 0 || n > 365) return;
+                                  setSettings((s) => {
+                                    const cur = s.outbound?.arrivalQuickDays ?? [1, 2];
+                                    let next = [...cur, n];
+                                    next = Array.from(new Set(next)).filter(
+                                      (v) => v > 0 && v <= 365
+                                    );
+                                    next.sort((a, b) => a - b);
+                                    return {
+                                      ...s,
+                                      outbound: {
+                                        ...(s.outbound ?? {}),
+                                        arrivalQuickDays:
+                                          next.length > 0 ? next : [1, 2],
+                                        arrivalQuickDayLabels: s.outbound?.arrivalQuickDayLabels,
+                                      },
+                                    };
+                                  });
+                                  setOutboundQuickDayInput("");
+                                }}
+                              >
+                                日数を追加
+                              </s-button>
                             </s-stack>
                           </s-stack>
                         </s-stack>
@@ -2603,9 +2985,51 @@ export default function SettingsPage() {
                               </label>
                             </s-stack>
                           </s-stack>
+                        </s-stack>
+                      </div>
+                    </div>
+                  </div>
+                </s-box>
 
-                          <s-divider />
+                {/* ② 希望納品日の使用：左にタイトル＋説明、右に白カードでラジオ＋日程ボタンリスト（CSV風） */}
+                <s-box padding="base">
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "24px",
+                      alignItems: "flex-start",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    {/* 左：タイトル＋説明 */}
+                    <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 14,
+                          marginBottom: 4,
+                        }}
+                      >
+                        希望納品日の使用
+                      </div>
+                      <s-text tone="subdued" size="small">
+                        POSアプリで希望納品日を使用するかどうかを設定します。
+                        <br />
+                        未使用にすると、希望納品日項目が表示されません。
+                      </s-text>
+                    </div>
 
+                    {/* 右：白カード（ラジオ＋チェックボックス＋並び順＋項目名＋日数＋上下入れ替えのリスト） */}
+                    <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+                      <div
+                        style={{
+                          background: "#ffffff",
+                          borderRadius: 12,
+                          boxShadow: "0 0 0 1px #e1e3e5",
+                          padding: 16,
+                        }}
+                      >
+                        <s-stack gap="base">
                           {/* 希望納品日の使用/不使用 */}
                           <s-stack gap="extraTight">
                             <s-text emphasis="bold" size="small">
@@ -2665,113 +3089,179 @@ export default function SettingsPage() {
 
                           <s-divider />
 
-                          {/* 希望納品日ボタン設定（◯日後ボタン） */}
+                          {/* 希望納品日ボタン設定：チェックボックス＋並び順＋項目名＋日数＋上下入れ替え（CSV出力項目に似たUI） */}
                           <s-stack gap="extraTight">
                             <s-text emphasis="bold" size="small">
                               「希望納品日」ボタン設定
                             </s-text>
                             <s-text tone="subdued" size="small">
-                              発注条件画面に表示する「◯日後」ボタンを選択できます。
+                              発注条件画面に表示する「◯日後」ボタンを選択し、並び順を変更できます。
                             </s-text>
-                            <s-stack gap="tight">
-                              <s-stack direction="inline" gap="base" inlineAlignment="start" wrap>
-                                {[1, 2, 3, 7, 30].map((d) => {
-                                  const current =
-                                    settings.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
-                                  const checked = current.includes(d);
-                                  const label =
-                                    d === 7 ? "1週間後" : d === 30 ? "1ヶ月後" : `${d}日後`;
-                                  return (
-                                    <label
-                                      key={d}
+                            {desiredDeliveryDaysList.length === 0 ? (
+                              <s-box padding="base">
+                                <s-text tone="subdued">ボタンがありません。下の「日数を追加」で追加してください。</s-text>
+                              </s-box>
+                            ) : (
+                              <s-stack gap="tight">
+                                {desiredDeliveryDaysList.map((day, index) => (
+                                  <div
+                                    key={day}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: "8px",
+                                      padding: "8px 12px",
+                                      background: "#f6f6f7",
+                                      borderRadius: "6px",
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={true}
+                                      onChange={() => toggleDesiredDeliveryDay(day)}
+                                      disabled={desiredDeliveryDaysList.length === 1}
                                       style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "6px",
-                                        cursor: "pointer",
+                                        cursor:
+                                          desiredDeliveryDaysList.length === 1
+                                            ? "not-allowed"
+                                            : "pointer",
                                       }}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={checked}
-                                        onChange={() =>
-                                          setSettings((s) => {
-                                            const cur =
-                                              s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
-                                            let next = checked
-                                              ? cur.filter((v) => v !== d)
-                                              : [...cur, d];
-                                            next = Array.from(new Set(next)).filter(
-                                              (v) => v > 0 && v <= 365
-                                            );
-                                            next.sort((a, b) => a - b);
-                                            return {
-                                              ...s,
-                                              order: {
-                                                ...s.order,
-                                                useDestinationMaster:
-                                                  s.order?.useDestinationMaster ?? false,
-                                                useDesiredDeliveryDate:
-                                                  s.order?.useDesiredDeliveryDate ?? true,
-                                                desiredDeliveryQuickDays:
-                                                  next.length > 0 ? next : [1, 2, 3, 7, 30],
-                                                destinations: s.order?.destinations ?? [],
-                                                csvExportColumns: s.order?.csvExportColumns,
-                                                csvExportColumnLabels:
-                                                  s.order?.csvExportColumnLabels,
-                                              },
-                                            };
-                                          })
+                                    />
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={desiredDeliveryDaysList.length}
+                                      value={index + 1}
+                                      onChange={(e) => {
+                                        const newPos = parseInt(e.target.value, 10);
+                                        if (
+                                          !isNaN(newPos) &&
+                                          newPos >= 1 &&
+                                          newPos <= desiredDeliveryDaysList.length
+                                        ) {
+                                          moveDesiredDeliveryDayToPosition(day, newPos);
                                         }
-                                      />
-                                      <span>{label}</span>
-                                    </label>
-                                  );
-                                })}
+                                      }}
+                                      onBlur={(e) => {
+                                        const v = parseInt(e.target.value, 10);
+                                        if (
+                                          isNaN(v) ||
+                                          v < 1 ||
+                                          v > desiredDeliveryDaysList.length
+                                        ) {
+                                          e.target.value = String(index + 1);
+                                        }
+                                      }}
+                                      style={{
+                                        width: "50px",
+                                        padding: "4px 6px",
+                                        fontSize: "12px",
+                                        textAlign: "center",
+                                        border: "1px solid #e1e3e5",
+                                        borderRadius: "4px",
+                                      }}
+                                    />
+                                    <input
+                                      type="text"
+                                      value={settings.order?.desiredDeliveryQuickDayLabels?.[String(day)] ?? ""}
+                                      onChange={(e) =>
+                                        updateDesiredDeliveryDayLabel(day, (e.target as HTMLInputElement).value)
+                                      }
+                                      placeholder={getDesiredDeliveryDayLabel(day)}
+                                      style={{
+                                        flex: "1 1 100px",
+                                        minWidth: "80px",
+                                        padding: "4px 8px",
+                                        fontSize: "13px",
+                                        border: "1px solid #e1e3e5",
+                                        borderRadius: "4px",
+                                        backgroundColor: "#ffffff",
+                                      }}
+                                      title="アプリに表示するボタン名を編集"
+                                    />
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      max={365}
+                                      value={day}
+                                      onChange={(e) => {
+                                        const n = parseInt(e.target.value, 10);
+                                        if (!isNaN(n) && n >= 1 && n <= 365) {
+                                          updateDesiredDeliveryDayValue(day, n);
+                                        }
+                                      }}
+                                      style={{
+                                        width: "56px",
+                                        padding: "4px 6px",
+                                        fontSize: "12px",
+                                        textAlign: "center",
+                                        border: "1px solid #e1e3e5",
+                                        borderRadius: "4px",
+                                      }}
+                                      title="日数（1〜365）"
+                                    />
+                                    <s-stack direction="inline" gap="tight">
+                                      <s-button
+                                        size="small"
+                                        disabled={index === 0}
+                                        onClick={() => moveDesiredDeliveryDayUp(day)}
+                                      >
+                                        ↑
+                                      </s-button>
+                                      <s-button
+                                        size="small"
+                                        disabled={index === desiredDeliveryDaysList.length - 1}
+                                        onClick={() => moveDesiredDeliveryDayDown(day)}
+                                      >
+                                        ↓
+                                      </s-button>
+                                    </s-stack>
+                                  </div>
+                                ))}
                               </s-stack>
-                              <s-stack direction="inline" gap="small" inlineAlignment="start">
-                                <s-text-field
-                                  label="任意の日数（1〜365）"
-                                  value={orderQuickDayInput}
-                                  onInput={(e: any) => setOrderQuickDayInput(readValue(e))}
-                                  onChange={(e: any) => setOrderQuickDayInput(readValue(e))}
-                                  style={{ maxWidth: 140 }}
-                                />
-                                <s-button
-                                  kind="secondary"
-                                  onClick={() => {
-                                    const n = Number(orderQuickDayInput);
-                                    if (!Number.isFinite(n) || n <= 0 || n > 365) return;
-                                    setSettings((s) => {
-                                      const cur =
-                                        s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
-                                      let next = [...cur, n];
-                                      next = Array.from(new Set(next)).filter(
-                                        (v) => v > 0 && v <= 365
-                                      );
-                                      next.sort((a, b) => a - b);
-                                      return {
-                                        ...s,
-                                        order: {
-                                          ...s.order,
-                                          useDestinationMaster:
-                                            s.order?.useDestinationMaster ?? false,
-                                          useDesiredDeliveryDate:
-                                            s.order?.useDesiredDeliveryDate ?? true,
-                                          desiredDeliveryQuickDays:
-                                            next.length > 0 ? next : [1, 2, 3, 7, 30],
-                                          destinations: s.order?.destinations ?? [],
-                                          csvExportColumns: s.order?.csvExportColumns,
-                                          csvExportColumnLabels: s.order?.csvExportColumnLabels,
-                                        },
-                                      };
-                                    });
-                                    setOrderQuickDayInput("");
-                                  }}
-                                >
-                                  日数を追加
-                                </s-button>
-                              </s-stack>
+                            )}
+                            <s-stack direction="inline" gap="small" inlineAlignment="start" style={{ marginTop: 8 }}>
+                              <s-text-field
+                                label="任意の日数（1〜365）"
+                                value={orderQuickDayInput}
+                                onInput={(e: any) => setOrderQuickDayInput(readValue(e))}
+                                onChange={(e: any) => setOrderQuickDayInput(readValue(e))}
+                                style={{ maxWidth: 140 }}
+                              />
+                              <s-button
+                                kind="secondary"
+                                onClick={() => {
+                                  const n = Number(orderQuickDayInput);
+                                  if (!Number.isFinite(n) || n <= 0 || n > 365) return;
+                                  setSettings((s) => {
+                                    const cur =
+                                      s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
+                                    let next = [...cur, n];
+                                    next = Array.from(new Set(next)).filter(
+                                      (v) => v > 0 && v <= 365
+                                    );
+                                    next.sort((a, b) => a - b);
+                                    return {
+                                      ...s,
+                                      order: {
+                                        ...s.order,
+                                        useDestinationMaster:
+                                          s.order?.useDestinationMaster ?? false,
+                                        useDesiredDeliveryDate:
+                                          s.order?.useDesiredDeliveryDate ?? true,
+                                        desiredDeliveryQuickDays:
+                                          next.length > 0 ? next : [1, 2, 3, 7, 30],
+                                        destinations: s.order?.destinations ?? [],
+                                        csvExportColumns: s.order?.csvExportColumns,
+                                        csvExportColumnLabels: s.order?.csvExportColumnLabels,
+                                      },
+                                    };
+                                  });
+                                  setOrderQuickDayInput("");
+                                }}
+                              >
+                                日数を追加
+                              </s-button>
                             </s-stack>
                           </s-stack>
                         </s-stack>
