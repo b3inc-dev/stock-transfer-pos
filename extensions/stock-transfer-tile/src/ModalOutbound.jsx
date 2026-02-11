@@ -3367,6 +3367,7 @@ function OutboundShipmentSelection({
           referenceDocumentUri: transferIdForUri,
         });
         const originLocationNameForLog = String(detail?.originName || outbound.historySelectedOriginName || "").trim();
+        console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer (history): locationId=${originLocationId}, deltas.length=${deltas?.length || 0}, sourceId=${transferIdForUri}`);
         await logInventoryChangeToApi({
           activity: "outbound_transfer",
           locationId: originLocationId,
@@ -3375,6 +3376,7 @@ function OutboundShipmentSelection({
           sourceId: transferIdForUri,
           lineItems,
         });
+        console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (history)`);
         const originLocationName = String(detail?.originName || outbound.historySelectedOriginName || "").trim() || "出庫元";
         const adjustments = deltas.map((d) => {
           const li = lineItems.find((l) => String(l?.inventoryItemId || "").trim() === d.inventoryItemId);
@@ -4748,6 +4750,7 @@ function OutboundHistoryDetail({
             referenceDocumentUri: transferIdForUri,
           });
           const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
+          console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer (receive): locationId=${originLocationId}, deltas.length=${deltas?.length || 0}, sourceId=${transferIdForUri}`);
           await logInventoryChangeToApi({
             activity: "outbound_transfer",
             locationId: originLocationId,
@@ -4756,6 +4759,7 @@ function OutboundHistoryDetail({
             sourceId: transferIdForUri,
             lineItems: lineItems || detail?.lineItems,
           });
+          console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (receive)`);
           // 在庫調整履歴をメモに反映
           const originLocationName = detail?.originName || 
             detail?.origin?.name || 
@@ -4843,6 +4847,7 @@ function OutboundHistoryDetail({
             referenceDocumentUri: transferIdForUri,
           });
           const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
+          console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer (receive): locationId=${originLocationId}, deltas.length=${deltas?.length || 0}, sourceId=${transferIdForUri}`);
           await logInventoryChangeToApi({
             activity: "outbound_transfer",
             locationId: originLocationId,
@@ -4851,6 +4856,7 @@ function OutboundHistoryDetail({
             sourceId: transferIdForUri,
             lineItems: lineItems || detail?.lineItems,
           });
+          console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (receive)`);
           // 在庫調整履歴をメモに反映
           const originLocationName = detail?.originName || 
             detail?.origin?.name || 
@@ -4922,6 +4928,7 @@ function OutboundHistoryDetail({
             referenceDocumentUri: transferIdForUri,
           });
           const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
+          console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer (delete): locationId=${originLocationId}, deltas.length=${deltas?.length || 0}, sourceId=${transferIdForUri}`);
           await logInventoryChangeToApi({
             activity: "outbound_transfer",
             locationId: originLocationId,
@@ -4930,6 +4937,7 @@ function OutboundHistoryDetail({
             sourceId: transferIdForUri,
             lineItems: items || detail?.lineItems,
           });
+          console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (delete)`);
         }
       }
 
@@ -6793,7 +6801,9 @@ function OutboundList({
           sku: line?.sku ?? "",
         };
       }).filter((d) => d.inventoryItemId && d.delta !== 0);
+      console.log(`[ModalOutbound] outboundDeltas.length=${outboundDeltas.length}, will call logInventoryChangeToApi=${outboundDeltas.length > 0}`);
       if (outboundDeltas.length > 0) {
+        console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer: locationId=${originLocationGid}, deltas.length=${outboundDeltas.length}, sourceId=${transferIdForUri}`);
         await logInventoryChangeToApi({
           activity: "outbound_transfer",
           locationId: originLocationGid,
@@ -6802,6 +6812,9 @@ function OutboundList({
           sourceId: transferIdForUri,
           lineItems: lines,
         });
+        console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer`);
+      } else {
+        console.warn(`[ModalOutbound] outboundDeltas.length is 0, skipping logInventoryChangeToApi call`);
       }
 
       // 後処理（商品リストとコンディションの両方の下書きをクリア）

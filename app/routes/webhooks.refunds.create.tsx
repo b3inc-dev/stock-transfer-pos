@@ -279,33 +279,94 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             });
 
             if (existingLog) {
-              console.log(`Skipping duplicate refund log: ${idempotencyKey}`);
+              console.log(`[refunds/create] Skipping duplicate refund log: ${idempotencyKey}`);
               continue;
             }
           }
         } catch (error) {
-          console.error("Error checking existing log:", error);
+          console.error("[refunds/create] Error checking existing log:", error);
         }
 
-        // 在庫変動ログを保存（date はショップタイムゾーンで統一）
-        await logInventoryChange({
-          shop,
-          timestamp: refundCreatedAt,
-          date,
-          inventoryItemId: inventoryItemId,
-          variantId: variantId,
-          sku: sku,
-          locationId: locationId,
-          locationName,
-          activity: "refund",
-          delta,
-          quantityAfter,
-          sourceType: "refund",
-          sourceId: `order_${refund.order_id}`,
-          adjustmentGroupId: null,
-          idempotencyKey,
-          note: `返品: 注文 #${refund.order_id}`,
-        });
+        // 既存のadmin_webhookログを検索して更新（inventory_levels/updateが先に来た場合の二重登録を防ぐ）
+        let updatedExistingAdminLog = false;
+        try {
+          if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+            // inventoryItemIdとlocationIdの候補を準備（GID形式と数値形式の両方を考慮）
+            const inventoryItemIdCandidates = [
+              inventoryItemId,
+              inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, ""),
+              `gid://shopify/InventoryItem/${inventoryItemId}`,
+            ].filter((id, index, arr) => arr.indexOf(id) === index); // 重複を除去
+
+            const locationIdCandidates = [
+              locationId,
+              locationId.replace(/^gid:\/\/shopify\/Location\//, ""),
+              `gid://shopify/Location/${locationId}`,
+            ].filter((id, index, arr) => arr.indexOf(id) === index); // 重複を除去
+
+            // 検索範囲を30分前〜5分後に拡大（inventory_levels/updateとのタイムスタンプのずれを考慮）
+            const searchFrom = new Date(refundCreatedAt.getTime() - 30 * 60 * 1000); // 30分前
+            const searchTo = new Date(refundCreatedAt.getTime() + 5 * 60 * 1000); // 5分後
+
+            const existingAdminLog = await (db as any).inventoryChangeLog.findFirst({
+              where: {
+                shop,
+                inventoryItemId: { in: inventoryItemIdCandidates },
+                locationId: { in: locationIdCandidates },
+                activity: "admin_webhook",
+                timestamp: { gte: searchFrom, lte: searchTo },
+              },
+              orderBy: { timestamp: "desc" },
+            });
+
+            if (existingAdminLog) {
+              console.log(
+                `[refunds/create] Found existing admin_webhook log to update: id=${existingAdminLog.id}, timestamp=${existingAdminLog.timestamp}, quantityAfter=${existingAdminLog.quantityAfter} -> ${quantityAfter}`
+              );
+              // 既存のadmin_webhookログをrefundに更新
+              await (db as any).inventoryChangeLog.update({
+                where: { id: existingAdminLog.id },
+                data: {
+                  activity: "refund",
+                  delta: delta !== null ? delta : existingAdminLog.delta, // deltaが計算できている場合はそれを使用
+                  quantityAfter: quantityAfter !== null ? quantityAfter : existingAdminLog.quantityAfter,
+                  sourceType: "refund",
+                  sourceId: `order_${refund.order_id}`,
+                  idempotencyKey,
+                  note: `返品: 注文 #${refund.order_id}`,
+                },
+              });
+              console.log(`[refunds/create] Updated admin_webhook log to refund: id=${existingAdminLog.id}`);
+              updatedExistingAdminLog = true;
+            }
+          }
+        } catch (error) {
+          console.error("[refunds/create] Error checking/updating existing admin_webhook log:", error);
+          // エラーが発生しても続行（新規作成に進む）
+        }
+
+        // 既存のadmin_webhookログを更新した場合は新規作成をスキップ
+        if (!updatedExistingAdminLog) {
+          // 在庫変動ログを保存（date はショップタイムゾーンで統一）
+          await logInventoryChange({
+            shop,
+            timestamp: refundCreatedAt,
+            date,
+            inventoryItemId: inventoryItemId,
+            variantId: variantId,
+            sku: sku,
+            locationId: locationId,
+            locationName,
+            activity: "refund",
+            delta,
+            quantityAfter,
+            sourceType: "refund",
+            sourceId: `order_${refund.order_id}`,
+            adjustmentGroupId: null,
+            idempotencyKey,
+            note: `返品: 注文 #${refund.order_id}`,
+          });
+        }
       } catch (error) {
         console.error(`Error logging inventory change for refund ${refund.id}, line item ${refundLineItem.line_item_id}:`, error);
         // エラーが発生しても続行

@@ -20,7 +20,11 @@ const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 /** 棚卸確定時の在庫変動を共通関数で記録（履歴で種別が正しく表示されるようにする） */
 
 async function logInventoryCountToApi({ locationId, locationName, items, sourceId }) {
-  if (!items?.length) return;
+  console.log(`[InventoryCountList] logInventoryCountToApi called: items.length=${items?.length || 0}, locationId=${locationId}, sourceId=${sourceId}`);
+  if (!items?.length) {
+    console.warn(`[InventoryCountList] No items provided, skipping logInventoryCountToApi`);
+    return;
+  }
   const deltas = items
     .filter((l) => l?.inventoryItemId)
     .map((l) => {
@@ -35,7 +39,12 @@ async function logInventoryCountToApi({ locationId, locationName, items, sourceI
       };
     })
     .filter((d) => d.delta !== 0);
-  if (deltas.length === 0) return;
+  console.log(`[InventoryCountList] deltas.length=${deltas.length}, will call logInventoryChangeToApi=${deltas.length > 0}`);
+  if (deltas.length === 0) {
+    console.warn(`[InventoryCountList] deltas.length is 0, skipping logInventoryChangeToApi call`);
+    return;
+  }
+  console.log(`[InventoryCountList] Calling logInventoryChangeToApi: activity=inventory_count, locationId=${locationId}, deltas.length=${deltas.length}, sourceId=${sourceId}`);
   await logInventoryChangeToApi({
     activity: "inventory_count",
     locationId,
@@ -43,6 +52,7 @@ async function logInventoryCountToApi({ locationId, locationName, items, sourceI
     deltas,
     sourceId: sourceId || null,
   });
+  console.log(`[InventoryCountList] logInventoryChangeToApi call completed`);
 }
 
 const SCAN_QUEUE_KEY = "stock_transfer_pos_inventory_count_scan_queue_v1";

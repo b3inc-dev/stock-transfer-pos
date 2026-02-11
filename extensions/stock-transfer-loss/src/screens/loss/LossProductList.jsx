@@ -829,10 +829,14 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       
       // 在庫変動ログを共通関数で記録（webhookが来る前に記録・他フローと同じ実装）
       try {
+        console.log(`[LossProductList] Starting inventory change logging: lines.length=${lines.length}, locationId=${conds.locationId}`);
         const lossDeltas = [];
         for (const l of lines) {
           const qty = Math.abs(Number(l.qty) || 0);
-          if (qty <= 0) continue;
+          if (qty <= 0) {
+            console.log(`[LossProductList] Skipping line with qty=0: inventoryItemId=${l.inventoryItemId}, qty=${l.qty}`);
+            continue;
+          }
           let quantityAfter = null;
           try {
             const available = await fetchVariantAvailable({
@@ -840,6 +844,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
               locationGid: conds.locationId,
             });
             quantityAfter = available?.available ?? null;
+            console.log(`[LossProductList] Fetched available quantity: inventoryItemId=${l.inventoryItemId}, quantityAfter=${quantityAfter}`);
           } catch (e) {
             console.warn("[LossProductList] Failed to fetch available quantity:", e);
           }
@@ -850,8 +855,11 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
             delta: -qty,
             quantityAfter,
           });
+          console.log(`[LossProductList] Added to lossDeltas: inventoryItemId=${l.inventoryItemId}, delta=${-qty}, lossDeltas.length=${lossDeltas.length}`);
         }
+        console.log(`[LossProductList] lossDeltas.length=${lossDeltas.length}, will call logInventoryChangeToApi=${lossDeltas.length > 0}`);
         if (lossDeltas.length > 0) {
+          console.log(`[LossProductList] Calling logInventoryChangeToApi: activity=loss_entry, locationId=${conds.locationId}, deltas.length=${lossDeltas.length}, sourceId=${lossEntryId}, adjustmentGroupId=${adjustmentGroupId}`);
           await logInventoryChangeToApi({
             activity: "loss_entry",
             locationId: conds.locationId,
@@ -860,9 +868,13 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
             sourceId: lossEntryId,
             adjustmentGroupId,
           });
+          console.log(`[LossProductList] logInventoryChangeToApi call completed`);
+        } else {
+          console.warn(`[LossProductList] lossDeltas.length is 0, skipping logInventoryChangeToApi call`);
         }
       } catch (e) {
-        console.warn("[LossProductList] Failed to log inventory change:", e);
+        console.error("[LossProductList] Failed to log inventory change:", e);
+        console.error("[LossProductList] Error details:", e?.message || String(e), e?.stack);
         // エラーが発生しても続行（ロス実行は成功）
       }
       

@@ -320,33 +320,94 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 });
 
                 if (existingLog) {
-                  console.log(`Skipping duplicate order fulfillment log: ${idempotencyKey}`);
+                  console.log(`[orders/updated] Skipping duplicate order fulfillment log: ${idempotencyKey}`);
                   continue;
                 }
               }
             } catch (error) {
-              console.error("Error checking existing log:", error);
+              console.error("[orders/updated] Error checking existing log:", error);
             }
 
-            // 在庫変動ログを保存（date はショップタイムゾーンで統一）
-            await logInventoryChange({
-              shop,
-              timestamp: fulfillmentCreatedAt,
-              date,
-              inventoryItemId: inventoryItemId,
-              variantId: variantId,
-              sku: sku,
-              locationId: fulfillmentLocationId,
-              locationName,
-              activity: "order_sales",
-              delta,
-              quantityAfter,
-              sourceType: "order_sales",
-              sourceId: orderId,
-              adjustmentGroupId: null,
-              idempotencyKey,
-              note: `注文: ${order.name || orderId}`,
-            });
+            // 既存のadmin_webhookログを検索して更新（inventory_levels/updateが先に来た場合の二重登録を防ぐ）
+            let updatedExistingAdminLog = false;
+            try {
+              if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+                // inventoryItemIdとlocationIdの候補を準備（GID形式と数値形式の両方を考慮）
+                const inventoryItemIdCandidates = [
+                  inventoryItemId,
+                  inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, ""),
+                  `gid://shopify/InventoryItem/${inventoryItemId}`,
+                ].filter((id, index, arr) => arr.indexOf(id) === index); // 重複を除去
+
+                const locationIdCandidates = [
+                  fulfillmentLocationId,
+                  fulfillmentLocationId.replace(/^gid:\/\/shopify\/Location\//, ""),
+                  `gid://shopify/Location/${fulfillmentLocationId}`,
+                ].filter((id, index, arr) => arr.indexOf(id) === index); // 重複を除去
+
+                // 検索範囲を30分前〜5分後に拡大（inventory_levels/updateとのタイムスタンプのずれを考慮）
+                const searchFrom = new Date(fulfillmentCreatedAt.getTime() - 30 * 60 * 1000); // 30分前
+                const searchTo = new Date(fulfillmentCreatedAt.getTime() + 5 * 60 * 1000); // 5分後
+
+                const existingAdminLog = await (db as any).inventoryChangeLog.findFirst({
+                  where: {
+                    shop,
+                    inventoryItemId: { in: inventoryItemIdCandidates },
+                    locationId: { in: locationIdCandidates },
+                    activity: "admin_webhook",
+                    timestamp: { gte: searchFrom, lte: searchTo },
+                  },
+                  orderBy: { timestamp: "desc" },
+                });
+
+                if (existingAdminLog) {
+                  console.log(
+                    `[orders/updated] Found existing admin_webhook log to update: id=${existingAdminLog.id}, timestamp=${existingAdminLog.timestamp}, quantityAfter=${existingAdminLog.quantityAfter} -> ${quantityAfter}`
+                  );
+                  // 既存のadmin_webhookログをorder_salesに更新
+                  await (db as any).inventoryChangeLog.update({
+                    where: { id: existingAdminLog.id },
+                    data: {
+                      activity: "order_sales",
+                      delta: delta !== null ? delta : existingAdminLog.delta, // deltaが計算できている場合はそれを使用
+                      quantityAfter: quantityAfter !== null ? quantityAfter : existingAdminLog.quantityAfter,
+                      sourceType: "order_sales",
+                      sourceId: orderId,
+                      idempotencyKey,
+                      note: `注文: ${order.name || orderId}`,
+                    },
+                  });
+                  console.log(`[orders/updated] Updated admin_webhook log to order_sales: id=${existingAdminLog.id}`);
+                  updatedExistingAdminLog = true;
+                }
+              }
+            } catch (error) {
+              console.error("[orders/updated] Error checking/updating existing admin_webhook log:", error);
+              // エラーが発生しても続行（新規作成に進む）
+            }
+
+            // 既存のadmin_webhookログを更新した場合は新規作成をスキップ
+            if (!updatedExistingAdminLog) {
+              // 在庫変動ログを保存（date はショップタイムゾーンで統一）
+              await logInventoryChange({
+                shop,
+                timestamp: fulfillmentCreatedAt,
+                date,
+                inventoryItemId: inventoryItemId,
+                variantId: variantId,
+                sku: sku,
+                locationId: fulfillmentLocationId,
+                locationName,
+                activity: "order_sales",
+                delta,
+                quantityAfter,
+                sourceType: "order_sales",
+                sourceId: orderId,
+                adjustmentGroupId: null,
+                idempotencyKey,
+                note: `注文: ${order.name || orderId}`,
+              });
+            }
           } catch (error) {
             console.error(`Error logging inventory change for order ${order.id}, fulfillment ${fulfillment.id}:`, error);
             // エラーが発生しても続行

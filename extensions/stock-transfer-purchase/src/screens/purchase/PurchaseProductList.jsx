@@ -857,10 +857,14 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       });
       // 在庫変動ログを共通関数で記録（履歴で「仕入」と表示されるようにする）
       try {
+        console.log(`[PurchaseProductList] Starting inventory change logging: lines.length=${lines.length}, locationId=${conds.locationId}`);
         const purchaseDeltas = [];
         for (const l of lines) {
           const qty = Math.abs(Number(l.qty) || 0);
-          if (qty <= 0) continue;
+          if (qty <= 0) {
+            console.log(`[PurchaseProductList] Skipping line with qty=0: inventoryItemId=${l.inventoryItemId}, qty=${l.qty}`);
+            continue;
+          }
           let quantityAfter = null;
           try {
             const available = await fetchVariantAvailable({
@@ -868,6 +872,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
               locationGid: conds.locationId,
             });
             quantityAfter = available?.available ?? null;
+            console.log(`[PurchaseProductList] Fetched available quantity: inventoryItemId=${l.inventoryItemId}, quantityAfter=${quantityAfter}`);
           } catch (e) {
             console.warn("[PurchaseProductList] Failed to fetch available quantity:", e);
           }
@@ -878,8 +883,11 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
             delta: qty,
             quantityAfter,
           });
+          console.log(`[PurchaseProductList] Added to purchaseDeltas: inventoryItemId=${l.inventoryItemId}, delta=${qty}, purchaseDeltas.length=${purchaseDeltas.length}`);
         }
+        console.log(`[PurchaseProductList] purchaseDeltas.length=${purchaseDeltas.length}, will call logInventoryChangeToApi=${purchaseDeltas.length > 0}`);
         if (purchaseDeltas.length > 0) {
+          console.log(`[PurchaseProductList] Calling logInventoryChangeToApi: activity=purchase_entry, locationId=${conds.locationId}, deltas.length=${purchaseDeltas.length}, sourceId=${purchaseEntryId}`);
           await logInventoryChangeToApi({
             activity: "purchase_entry",
             locationId: conds.locationId,
@@ -887,9 +895,13 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
             deltas: purchaseDeltas,
             sourceId: purchaseEntryId,
           });
+          console.log(`[PurchaseProductList] logInventoryChangeToApi call completed`);
+        } else {
+          console.warn(`[PurchaseProductList] purchaseDeltas.length is 0, skipping logInventoryChangeToApi call`);
         }
       } catch (e) {
-        console.warn("[PurchaseProductList] Failed to log inventory change:", e);
+        console.error("[PurchaseProductList] Failed to log inventory change:", e);
+        console.error("[PurchaseProductList] Error details:", e?.message || String(e), e?.stack);
       }
       const items = lines.map((l) => {
         // オプション情報を抽出

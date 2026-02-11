@@ -1376,6 +1376,7 @@ export function InboundListScreen({
           referenceDocumentUri: transferIdForUri || null
         });
         const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
+        console.log(`[InboundListScreen] Calling logInventoryChangeToApi for inbound_transfer: locationId=${locationGid}, deltas.length=${extraDeltasMerged?.length || 0}, sourceId=${transferIdForUri}`);
         await logInventoryChangeToApi({
           activity: "inbound_transfer",
           locationId: locationGid,
@@ -1383,6 +1384,7 @@ export function InboundListScreen({
           deltas: extraDeltasMerged,
           sourceId: transferIdForUri,
         });
+        console.log(`[InboundListScreen] logInventoryChangeToApi call completed for inbound_transfer`);
         const originLocationId = String(transferForShipment?.originLocationId || transferForShipment?.origin?.location?.id || inbound?.selectedOriginLocationId || "").trim() || null;
         if (!originLocationId) {
           toast("警告: 出庫元のlocationIdが取得できませんでした（出庫元の在庫調整をスキップします）");
@@ -1398,6 +1400,7 @@ export function InboundListScreen({
             referenceDocumentUri: transferIdForUri || null
           });
           const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
+          console.log(`[InboundListScreen] Calling logInventoryChangeToApi for outbound_transfer: locationId=${originLocationId}, deltas.length=${originDeltas?.length || 0}, sourceId=${transferIdForUri}`);
           await logInventoryChangeToApi({
             activity: "outbound_transfer",
             locationId: originLocationId,
@@ -1405,6 +1408,7 @@ export function InboundListScreen({
             deltas: originDeltas,
             sourceId: transferIdForUri,
           });
+          console.log(`[InboundListScreen] logInventoryChangeToApi call completed for outbound_transfer`);
         }
       }
 
