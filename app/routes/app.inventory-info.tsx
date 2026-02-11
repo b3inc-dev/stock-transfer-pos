@@ -333,7 +333,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
           );
         }
       } catch (error) {
-        console.error("[inventory-info] Error fetching change history logs:", error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const errorStack = error instanceof Error ? error.stack : undefined;
+        console.error("[inventory-info] Error fetching change history logs:", errorMessage, errorStack);
+        // エラーが発生しても空配列を返して処理を続行（画面は表示されるがデータは空）
         changeHistoryLogs = [];
       }
     }
