@@ -214,12 +214,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 });
 
                 const prevAvailable = prevLog?.quantityAfter ?? null;
-                delta = prevAvailable !== null && quantityAfter !== null 
-                  ? quantityAfter - prevAvailable 
-                  : -quantity; // 直前値が取れない場合は、履行数量をマイナスとして記録
+                // deltaの計算: quantityAfterが取得できている場合はそれを使用、できていない場合は履行数量を使用
+                if (prevAvailable !== null && quantityAfter !== null) {
+                  delta = quantityAfter - prevAvailable;
+                } else if (quantityAfter !== null) {
+                  // quantityAfterは取得できているが、直前のログがない場合
+                  // quantityAfterから履行数量を引いてdeltaを計算（quantityAfterは既に変動後の値なので、履行数量分をマイナス）
+                  delta = -(quantity || 0);
+                } else {
+                  // quantityAfterが取得できていない場合、履行数量をマイナスとして記録
+                  delta = -(quantity || 0);
+                }
+                console.log(`[orders.updated] Calculated delta: quantity=${quantity}, quantityAfter=${quantityAfter}, prevAvailable=${prevAvailable}, delta=${delta}`);
               } else {
                 // dbがundefinedの場合でも、履行数量をマイナスとして記録
-                delta = -quantity;
+                delta = -(quantity || 0);
+                console.log(`[orders.updated] db undefined, using quantity for delta: quantity=${quantity}, delta=${delta}`);
               }
             } catch (error) {
               console.error("Error checking previous log:", error);

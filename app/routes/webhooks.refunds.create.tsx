@@ -210,12 +210,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             });
 
             const prevAvailable = prevLog?.quantityAfter ?? null;
-            delta = prevAvailable !== null && quantityAfter !== null 
-              ? quantityAfter - prevAvailable 
-              : quantity; // 直前値が取れない場合は、返品数量をプラスとして記録
+            // deltaの計算: quantityAfterが取得できている場合はそれを使用、できていない場合は返品数量を使用
+            if (prevAvailable !== null && quantityAfter !== null) {
+              delta = quantityAfter - prevAvailable;
+            } else if (quantityAfter !== null) {
+              // quantityAfterは取得できているが、直前のログがない場合
+              // quantityAfterから返品数量を引いてdeltaを計算（quantityAfterは既に変動後の値なので、返品数量分をプラス）
+              delta = quantity || 0;
+            } else {
+              // quantityAfterが取得できていない場合、返品数量をプラスとして記録
+              delta = quantity || 0;
+            }
+            console.log(`[refunds.create] Calculated delta: quantity=${quantity}, quantityAfter=${quantityAfter}, prevAvailable=${prevAvailable}, delta=${delta}`);
           } else {
             // dbがundefinedの場合でも、返品数量をプラスとして記録
-            delta = quantity;
+            delta = quantity || 0;
+            console.log(`[refunds.create] db undefined, using quantity for delta: quantity=${quantity}, delta=${delta}`);
           }
         } catch (error) {
           console.error("Error checking previous log:", error);

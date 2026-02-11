@@ -863,8 +863,8 @@ export default function InventoryInfoPage() {
                       {/* 日付選択（スマホで枠がはみ出さないよう親で幅を制約） */}
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
                       <s-text emphasis="bold" size="small">日付</s-text>
-                      <div style={{ display: "flex", gap: "8px", alignItems: "center", width: "100%" }}>
-                        <div style={{ flex: "1 1 0", minWidth: 0, overflow: "hidden" }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px", width: "100%" }}>
+                        <div style={{ width: "100%", minWidth: 0, overflow: "hidden" }}>
                           <input
                             type="date"
                             value={dateValue}
@@ -900,7 +900,7 @@ export default function InventoryInfoPage() {
                             fontWeight: 600,
                             cursor: "pointer",
                             whiteSpace: "nowrap",
-                            flexShrink: 0,
+                            width: "100%",
                           }}
                         >
                           本日集計
