@@ -389,8 +389,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       if (recentNonAdminLog) {
-
-      if (recentNonAdminLog) {
         try {
           console.log(
             `[inventory_levels/update] Updating existing log from webhook: id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter=${recentNonAdminLog.quantityAfter} -> ${available}`
