@@ -48,6 +48,16 @@ const VARIANTS_FOR_CHANGE_HISTORY_QUERY = `#graphql
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
     const { admin, session } = await authenticate.admin(request);
+
+    // 日次スナップショット用トークンの有効期限（ストア別・画面表示用）
+    const offlineSession = await db.session.findFirst({
+      where: { shop: session.shop, isOnline: false },
+      select: { refreshTokenExpires: true },
+    });
+    const snapshotRefreshTokenExpires = offlineSession?.refreshTokenExpires
+      ? offlineSession.refreshTokenExpires.toISOString()
+      : null;
+
   const url = new URL(request.url);
   // 複数ロケーションIDを取得（カンマ区切り）
   const locationIdsParam = url.searchParams.get("locationIds") || "";
@@ -298,6 +308,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       firstSnapshotDate, // 最初のスナップショット日付（日付選択のmin属性用）
       hasYesterdaySnapshot, // 前日分のスナップショットが既に保存されているか
       yesterdayDateStr, // 前日の日付（YYYY-MM-DD）
+      snapshotRefreshTokenExpires, // 日次スナップショット用リフレッシュトークン有効期限（ISO文字列 or null）
       firstChangeHistoryDate,
       // 在庫変動履歴用のデータ
       changeHistoryLogs: changeHistoryLogs || [],
@@ -395,7 +406,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function InventoryInfoPage() {
-  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, firstChangeHistoryDate, changeHistoryLogs, changeHistoryFilters } =
+  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, firstChangeHistoryDate, changeHistoryLogs, changeHistoryFilters } =
     useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher<typeof action>();
@@ -764,6 +775,24 @@ export default function InventoryInfoPage() {
                         条件で絞り込みを行い、在庫高を表示します。
                       </s-text>
                     </div>
+
+                    {/* 日次スナップショット用トークン有効期限（ストア別・90日の説明） */}
+                    {snapshotRefreshTokenExpires && (() => {
+                      const exp = new Date(snapshotRefreshTokenExpires);
+                      const expStr = `${exp.getFullYear()}/${exp.getMonth() + 1}/${exp.getDate()}`;
+                      return (
+                        <div style={{ marginTop: 8, padding: "10px 12px", background: "#f6f6f7", borderRadius: 8, border: "1px solid #e1e3e5" }}>
+                          {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
+                          <s-text tone="subdued" size="small">
+                            <strong>在庫高自動保存のトークン有効期限：{expStr}</strong>
+                            <br />
+                            管理画面を開くと自動で延長更新されます。
+                            <br />
+                            期限を過ぎた場合のデータ保証はいたしかねますので、あらかじめご了承ください。
+                          </s-text>
+                        </div>
+                      );
+                    })()}
 
                   {/* フィルター領域（白背景カード） */}
                   <div
@@ -1237,6 +1266,24 @@ export default function InventoryInfoPage() {
                           条件で絞り込みを行い、在庫変動履歴を表示します。
                         </s-text>
                       </div>
+
+                      {/* トークン有効期限（在庫高と同じトークンを履歴記録にも使用） */}
+                      {snapshotRefreshTokenExpires && (() => {
+                        const exp = new Date(snapshotRefreshTokenExpires);
+                        const expStr = `${exp.getFullYear()}/${exp.getMonth() + 1}/${exp.getDate()}`;
+                        return (
+                          <div style={{ marginTop: 8, padding: "10px 12px", background: "#f6f6f7", borderRadius: 8, border: "1px solid #e1e3e5" }}>
+                            {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
+                            <s-text tone="subdued" size="small">
+                              <strong>在庫変動履歴自動保存のトークン有効期限：{expStr}</strong>
+                              <br />
+                              管理画面を開くと自動で延長更新されます。
+                              <br />
+                              期限を過ぎた場合のデータ保証はいたしかねますので、あらかじめご了承ください。
+                            </s-text>
+                          </div>
+                        );
+                      })()}
 
                       {/* フィルター領域（ここだけ白背景カード） */}
                       <div

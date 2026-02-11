@@ -6,6 +6,7 @@ import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
+import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 
 const API_VERSION = "2025-10";
 
@@ -144,8 +145,18 @@ export async function action({ request }: ActionFunctionArgs) {
     // バッチ: body.entries が配列なら複数件、なければ body 1件として扱う（後方互換）
     const entries: any[] = Array.isArray(body?.entries) && body.entries.length > 0 ? body.entries : [body];
 
-    const sessions = await (sessionStorage as any).findSessionsByShop(shop);
-    const session = sessions?.find((s: any) => s.isOnline === false) ?? sessions?.[0];
+    let sessions = await (sessionStorage as any).findSessionsByShop(shop);
+    let session = sessions?.find((s: any) => s.isOnline === false) ?? sessions?.[0];
+
+    // オフラインアクセストークンが期限切れならリフレッシュ（在庫変動履歴の記録に同じトークンを使用するため）
+    if (session) {
+      const expiresDate = session.expires != null
+        ? new Date(typeof session.expires === "number" ? session.expires : (session.expires as Date).getTime())
+        : null;
+      await refreshOfflineSessionIfNeeded(session.id, session.shop, expiresDate, session.refreshToken ?? null);
+      const sessionsAfter = await (sessionStorage as any).findSessionsByShop(shop);
+      session = sessionsAfter?.find((s: any) => s.isOnline === false) ?? sessionsAfter?.[0];
+    }
 
     let shopTimezone = "UTC";
     let admin: { request: (opts: { data: string; variables?: any }) => Promise<Response> } | null = null;
