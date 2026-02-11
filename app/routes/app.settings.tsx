@@ -72,6 +72,7 @@ export type SettingsV1 = {
   lossReasons?: LossReasonOption[]; // ロス区分設定（破損/紛失 など）
   loss?: {
     allowCustomReason?: boolean; // 「その他（自由入力）」を許可するかどうか（デフォルト: true）
+    csvExportColumns?: string[]; // ロス履歴CSV出力項目（並び順を含む）
   };
   order?: {
     useDestinationMaster?: boolean; // 発注先マスタを使用するかどうか（true=使用, false=発注先項目を表示しない）
@@ -85,6 +86,7 @@ export type SettingsV1 = {
   purchase?: {
     suppliers?: SupplierOption[]; // 仕入で使用する仕入先設定（ここが正：発注もこのリストを使用）
     allowCustomSupplier?: boolean; // 「その他（仕入先入力）」を表示するかどうか（デフォルト: true）
+    csvExportColumns?: string[]; // 仕入履歴CSV出力項目（並び順を含む）
   };
   // 追加設定項目
   visibleLocationIds?: string[]; // 表示ロケーション選択設定（空配列=全ロケーション表示）
@@ -100,6 +102,10 @@ export type SettingsV1 = {
     allowOverReceive?: boolean; // 過剰入庫許可（デフォルト: true）
     allowExtraReceive?: boolean; // 予定外入庫許可（デフォルト: true）
     listInitialLimit?: number; // 入庫リスト（Transfer）初回件数。API上限250、推奨100
+    csvExportColumns?: string[]; // 入出庫履歴CSV出力項目（出庫は入庫と連動。並び順を含む）
+  };
+  inventoryCount?: {
+    csvExportColumns?: string[]; // 棚卸履歴CSV出力項目（並び順を含む、明細モード用）
   };
   productList?: {
     initialLimit?: number; // 商品リスト（追加行表示）初回件数。lineItems上限250、推奨250
@@ -160,6 +166,66 @@ const DEFAULT_ORDER_CSV_COLUMNS: OrderCsvColumn[] = [
   "option3",
   "quantity",
 ];
+
+// 入出庫履歴CSV列（出庫は入庫と連動。app.history のヘッダーと一致）
+const HISTORY_CSV_COLUMN_IDS = [
+  "historyId", "name", "date", "origin", "destination", "status",
+  "shipmentId", "shipmentStatus", "productTitle", "sku", "barcode",
+  "option1", "option2", "option3", "plannedQty", "receivedQty", "kind",
+] as const;
+const HISTORY_CSV_LABELS = [
+  "履歴ID", "名称", "日付", "出庫元", "入庫先", "ステータス",
+  "配送ID", "配送ステータス", "商品名", "SKU", "JAN",
+  "オプション1", "オプション2", "オプション3", "予定数", "入庫数", "種別",
+];
+const HISTORY_CSV_ID_TO_LABEL: Record<string, string> = Object.fromEntries(
+  HISTORY_CSV_COLUMN_IDS.map((id, i) => [id, HISTORY_CSV_LABELS[i] ?? id])
+);
+const DEFAULT_HISTORY_CSV_COLUMNS_IDS = [...HISTORY_CSV_COLUMN_IDS];
+
+// 仕入履歴CSV列（app.purchase のヘッダーと一致）
+const PURCHASE_CSV_COLUMN_IDS = [
+  "purchaseId", "name", "date", "location", "supplier", "carrier", "trackingNumber", "status",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "quantity",
+] as const;
+const DEFAULT_PURCHASE_CSV_LABELS = [
+  "仕入ID", "名称", "日付", "入庫先ロケーション", "仕入先", "配送業者", "配送番号", "ステータス",
+  "商品名", "SKU", "JAN", "オプション1", "オプション2", "オプション3", "数量",
+];
+const PURCHASE_CSV_ID_TO_LABEL: Record<string, string> = Object.fromEntries(
+  PURCHASE_CSV_COLUMN_IDS.map((id, i) => [id, DEFAULT_PURCHASE_CSV_LABELS[i] ?? id])
+);
+const DEFAULT_PURCHASE_CSV_COLUMNS_IDS = [...PURCHASE_CSV_COLUMN_IDS];
+
+// ロス履歴CSV列（app.loss のヘッダーと一致）
+const LOSS_CSV_COLUMN_IDS = [
+  "historyId", "name", "date", "location", "reason", "staff", "status",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "quantity",
+] as const;
+const DEFAULT_LOSS_CSV_LABELS = [
+  "履歴ID", "名称", "日付", "ロケーション", "理由", "担当者", "ステータス",
+  "商品名", "SKU", "JAN", "オプション1", "オプション2", "オプション3", "数量",
+];
+const LOSS_CSV_ID_TO_LABEL: Record<string, string> = Object.fromEntries(
+  LOSS_CSV_COLUMN_IDS.map((id, i) => [id, DEFAULT_LOSS_CSV_LABELS[i] ?? id])
+);
+const DEFAULT_LOSS_CSV_COLUMNS_IDS = [...LOSS_CSV_COLUMN_IDS];
+
+// 棚卸履歴CSV列（明細付き。app.inventory-count の detail ヘッダーと一致）
+const STOCKTAKE_CSV_COLUMN_IDS = [
+  "countId", "name", "date", "completedDate", "location", "productGroup", "status",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3",
+  "currentQty", "actualQty", "delta", "kind",
+] as const;
+const DEFAULT_STOCKTAKE_CSV_LABELS = [
+  "棚卸ID", "名称", "日付", "完了日", "ロケーション", "商品グループ", "ステータス",
+  "商品名", "SKU", "JAN", "オプション1", "オプション2", "オプション3",
+  "在庫", "実数", "差分", "種別",
+];
+const STOCKTAKE_CSV_ID_TO_LABEL: Record<string, string> = Object.fromEntries(
+  STOCKTAKE_CSV_COLUMN_IDS.map((id, i) => [id, DEFAULT_STOCKTAKE_CSV_LABELS[i] ?? id])
+);
+const DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS = [...STOCKTAKE_CSV_COLUMN_IDS];
 
 function defaultSettings(): SettingsV1 {
   return {
@@ -283,31 +349,47 @@ function sanitizeSettings(input: any): SettingsV1 {
 
   // ロス設定（「その他（自由入力）」許可フラグ）
   if (input?.loss && typeof input.loss === "object") {
+    const lossCols = Array.isArray(input.loss.csvExportColumns)
+      ? (input.loss.csvExportColumns as string[]).filter((id) =>
+          LOSS_CSV_COLUMN_IDS.includes(id as any)
+        )
+      : [];
     s.loss = {
       allowCustomReason:
         typeof input.loss.allowCustomReason === "boolean"
           ? input.loss.allowCustomReason
           : true,
+      csvExportColumns:
+        lossCols.length > 0 ? lossCols : DEFAULT_LOSS_CSV_COLUMNS_IDS,
     };
   } else {
     s.loss = {
       allowCustomReason: true,
+      csvExportColumns: DEFAULT_LOSS_CSV_COLUMNS_IDS,
     };
   }
 
   // 仕入設定（「その他（仕入先入力）」表示フラグ）
   if (input?.purchase && typeof input.purchase === "object") {
+    const purchaseCols = Array.isArray(input.purchase.csvExportColumns)
+      ? (input.purchase.csvExportColumns as string[]).filter((id) =>
+          PURCHASE_CSV_COLUMN_IDS.includes(id as any)
+        )
+      : [];
     s.purchase = {
       ...(s.purchase ?? {}),
       allowCustomSupplier:
         typeof input.purchase.allowCustomSupplier === "boolean"
           ? input.purchase.allowCustomSupplier
           : true,
+      csvExportColumns:
+        purchaseCols.length > 0 ? purchaseCols : DEFAULT_PURCHASE_CSV_COLUMNS_IDS,
     };
   } else {
     s.purchase = {
       ...(s.purchase ?? {}),
       allowCustomSupplier: true,
+      csvExportColumns: DEFAULT_PURCHASE_CSV_COLUMNS_IDS,
     };
   }
 
@@ -416,7 +498,7 @@ function sanitizeSettings(input: any): SettingsV1 {
 
     const masterSuppliers = purchaseSuppliersFromPurchase.length > 0 ? purchaseSuppliersFromPurchase : fallbackSuppliers;
 
-    s.purchase = { suppliers: masterSuppliers };
+    s.purchase = { ...(s.purchase ?? {}), suppliers: masterSuppliers };
     // 希望納品日ボタンのカスタムラベル（日数→ボタン名）
     const desiredDeliveryQuickDayLabelsRaw =
       input.order.desiredDeliveryQuickDayLabels && typeof input.order.desiredDeliveryQuickDayLabels === "object"
@@ -525,6 +607,11 @@ function sanitizeSettings(input: any): SettingsV1 {
 
   // 入庫設定
   if (input?.inbound && typeof input.inbound === "object") {
+    const inboundCols = Array.isArray(input.inbound.csvExportColumns)
+      ? (input.inbound.csvExportColumns as string[]).filter((id) =>
+          HISTORY_CSV_COLUMN_IDS.includes(id as any)
+        )
+      : [];
     s.inbound = {
       allowOverReceive:
         typeof input.inbound.allowOverReceive === "boolean"
@@ -540,6 +627,8 @@ function sanitizeSettings(input: any): SettingsV1 {
         250,
         100
       ),
+      csvExportColumns:
+        inboundCols.length > 0 ? inboundCols : DEFAULT_HISTORY_CSV_COLUMNS_IDS,
     };
   }
 
@@ -554,6 +643,19 @@ function sanitizeSettings(input: any): SettingsV1 {
   if (input?.searchList && typeof input.searchList === "object") {
     s.searchList = {
       initialLimit: clampInt(input.searchList.initialLimit, 1, 50, 50),
+    };
+  }
+
+  // 棚卸設定（CSV出力項目）
+  if (input?.inventoryCount && typeof input.inventoryCount === "object") {
+    const stocktakeCols = Array.isArray(input.inventoryCount.csvExportColumns)
+      ? (input.inventoryCount.csvExportColumns as string[]).filter((id) =>
+          STOCKTAKE_CSV_COLUMN_IDS.includes(id as any)
+        )
+      : [];
+    s.inventoryCount = {
+      csvExportColumns:
+        stocktakeCols.length > 0 ? stocktakeCols : DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS,
     };
   }
 
@@ -742,7 +844,7 @@ export default function SettingsPage() {
   const [outboundQuickDayInput, setOutboundQuickDayInput] = useState("");
 
   // 設定タブ（棚卸と同様のタブ構成）
-  type SettingsTabId = "app" | "outbound" | "inbound" | "purchase" | "order" | "loss";
+  type SettingsTabId = "app" | "outbound" | "inbound" | "purchase" | "order" | "loss" | "stocktake";
   const [activeTab, setActiveTab] = useState<SettingsTabId>("app");
 
   // アプリ表示件数の入力検証エラー（半角数字以外など）
@@ -1179,6 +1281,206 @@ export default function SettingsPage() {
     }));
   };
 
+  // 入出庫履歴CSV項目操作
+  const historyCsvColumns = settings.inbound?.csvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS_IDS;
+  const toggleHistoryCsvColumn = (column: string) => {
+    setSettings((s) => {
+      const current = s.inbound?.csvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS_IDS;
+      const isSelected = current.includes(column);
+      if (isSelected) {
+        if (current.length <= 1) return s;
+        return { ...s, inbound: { ...(s.inbound ?? {}), csvExportColumns: current.filter((c) => c !== column) } };
+      }
+      return { ...s, inbound: { ...(s.inbound ?? {}), csvExportColumns: [...current, column] } };
+    });
+  };
+  const moveHistoryCsvColumnUp = (column: string) => {
+    setSettings((s) => {
+      const current = s.inbound?.csvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS_IDS;
+      const i = current.indexOf(column);
+      if (i <= 0) return s;
+      const updated = [...current];
+      [updated[i - 1], updated[i]] = [updated[i], updated[i - 1]];
+      return { ...s, inbound: { ...(s.inbound ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const moveHistoryCsvColumnDown = (column: string) => {
+    setSettings((s) => {
+      const current = s.inbound?.csvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS_IDS;
+      const i = current.indexOf(column);
+      if (i < 0 || i >= current.length - 1) return s;
+      const updated = [...current];
+      [updated[i], updated[i + 1]] = [updated[i + 1], updated[i]];
+      return { ...s, inbound: { ...(s.inbound ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const moveHistoryCsvColumnToPosition = (column: string, targetPosition: number) => {
+    setSettings((s) => {
+      const current = s.inbound?.csvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS_IDS;
+      const ci = current.indexOf(column);
+      if (ci < 0) return s;
+      const ti = Math.max(0, Math.min(current.length - 1, targetPosition - 1));
+      if (ci === ti) return s;
+      const updated = [...current];
+      const [moved] = updated.splice(ci, 1);
+      updated.splice(ti, 0, moved);
+      return { ...s, inbound: { ...(s.inbound ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const resetHistoryCsvColumns = () => {
+    setSettings((s) => ({ ...s, inbound: { ...(s.inbound ?? {}), csvExportColumns: [...DEFAULT_HISTORY_CSV_COLUMNS_IDS] } }));
+  };
+
+  // 仕入履歴CSV項目操作
+  const purchaseCsvColumns = settings.purchase?.csvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS_IDS;
+  const togglePurchaseCsvColumn = (column: string) => {
+    setSettings((s) => {
+      const current = s.purchase?.csvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS_IDS;
+      const isSelected = current.includes(column);
+      if (isSelected) {
+        if (current.length <= 1) return s;
+        return { ...s, purchase: { ...(s.purchase ?? {}), csvExportColumns: current.filter((c) => c !== column) } };
+      }
+      return { ...s, purchase: { ...(s.purchase ?? {}), csvExportColumns: [...current, column] } };
+    });
+  };
+  const movePurchaseCsvColumnUp = (column: string) => {
+    setSettings((s) => {
+      const current = s.purchase?.csvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS_IDS;
+      const i = current.indexOf(column);
+      if (i <= 0) return s;
+      const updated = [...current];
+      [updated[i - 1], updated[i]] = [updated[i], updated[i - 1]];
+      return { ...s, purchase: { ...(s.purchase ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const movePurchaseCsvColumnDown = (column: string) => {
+    setSettings((s) => {
+      const current = s.purchase?.csvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS_IDS;
+      const i = current.indexOf(column);
+      if (i < 0 || i >= current.length - 1) return s;
+      const updated = [...current];
+      [updated[i], updated[i + 1]] = [updated[i + 1], updated[i]];
+      return { ...s, purchase: { ...(s.purchase ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const movePurchaseCsvColumnToPosition = (column: string, targetPosition: number) => {
+    setSettings((s) => {
+      const current = s.purchase?.csvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS_IDS;
+      const ci = current.indexOf(column);
+      if (ci < 0) return s;
+      const ti = Math.max(0, Math.min(current.length - 1, targetPosition - 1));
+      if (ci === ti) return s;
+      const updated = [...current];
+      const [moved] = updated.splice(ci, 1);
+      updated.splice(ti, 0, moved);
+      return { ...s, purchase: { ...(s.purchase ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const resetPurchaseCsvColumns = () => {
+    setSettings((s) => ({ ...s, purchase: { ...(s.purchase ?? {}), csvExportColumns: [...DEFAULT_PURCHASE_CSV_COLUMNS_IDS] } }));
+  };
+
+  // ロス履歴CSV項目操作
+  const lossCsvColumns = settings.loss?.csvExportColumns ?? DEFAULT_LOSS_CSV_COLUMNS_IDS;
+  const toggleLossCsvColumn = (column: string) => {
+    setSettings((s) => {
+      const current = s.loss?.csvExportColumns ?? DEFAULT_LOSS_CSV_COLUMNS_IDS;
+      const isSelected = current.includes(column);
+      if (isSelected) {
+        if (current.length <= 1) return s;
+        return { ...s, loss: { ...(s.loss ?? {}), csvExportColumns: current.filter((c) => c !== column) } };
+      }
+      return { ...s, loss: { ...(s.loss ?? {}), csvExportColumns: [...current, column] } };
+    });
+  };
+  const moveLossCsvColumnUp = (column: string) => {
+    setSettings((s) => {
+      const current = s.loss?.csvExportColumns ?? DEFAULT_LOSS_CSV_COLUMNS_IDS;
+      const i = current.indexOf(column);
+      if (i <= 0) return s;
+      const updated = [...current];
+      [updated[i - 1], updated[i]] = [updated[i], updated[i - 1]];
+      return { ...s, loss: { ...(s.loss ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const moveLossCsvColumnDown = (column: string) => {
+    setSettings((s) => {
+      const current = s.loss?.csvExportColumns ?? DEFAULT_LOSS_CSV_COLUMNS_IDS;
+      const i = current.indexOf(column);
+      if (i < 0 || i >= current.length - 1) return s;
+      const updated = [...current];
+      [updated[i], updated[i + 1]] = [updated[i + 1], updated[i]];
+      return { ...s, loss: { ...(s.loss ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const moveLossCsvColumnToPosition = (column: string, targetPosition: number) => {
+    setSettings((s) => {
+      const current = s.loss?.csvExportColumns ?? DEFAULT_LOSS_CSV_COLUMNS_IDS;
+      const ci = current.indexOf(column);
+      if (ci < 0) return s;
+      const ti = Math.max(0, Math.min(current.length - 1, targetPosition - 1));
+      if (ci === ti) return s;
+      const updated = [...current];
+      const [moved] = updated.splice(ci, 1);
+      updated.splice(ti, 0, moved);
+      return { ...s, loss: { ...(s.loss ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const resetLossCsvColumns = () => {
+    setSettings((s) => ({ ...s, loss: { ...(s.loss ?? {}), csvExportColumns: [...DEFAULT_LOSS_CSV_COLUMNS_IDS] } }));
+  };
+
+  // 棚卸履歴CSV項目操作
+  const stocktakeCsvColumns = settings.inventoryCount?.csvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS;
+  const toggleStocktakeCsvColumn = (column: string) => {
+    setSettings((s) => {
+      const current = s.inventoryCount?.csvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS;
+      const isSelected = current.includes(column);
+      if (isSelected) {
+        if (current.length <= 1) return s;
+        return { ...s, inventoryCount: { ...(s.inventoryCount ?? {}), csvExportColumns: current.filter((c) => c !== column) } };
+      }
+      return { ...s, inventoryCount: { ...(s.inventoryCount ?? {}), csvExportColumns: [...current, column] } };
+    });
+  };
+  const moveStocktakeCsvColumnUp = (column: string) => {
+    setSettings((s) => {
+      const current = s.inventoryCount?.csvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS;
+      const i = current.indexOf(column);
+      if (i <= 0) return s;
+      const updated = [...current];
+      [updated[i - 1], updated[i]] = [updated[i], updated[i - 1]];
+      return { ...s, inventoryCount: { ...(s.inventoryCount ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const moveStocktakeCsvColumnDown = (column: string) => {
+    setSettings((s) => {
+      const current = s.inventoryCount?.csvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS;
+      const i = current.indexOf(column);
+      if (i < 0 || i >= current.length - 1) return s;
+      const updated = [...current];
+      [updated[i], updated[i + 1]] = [updated[i + 1], updated[i]];
+      return { ...s, inventoryCount: { ...(s.inventoryCount ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const moveStocktakeCsvColumnToPosition = (column: string, targetPosition: number) => {
+    setSettings((s) => {
+      const current = s.inventoryCount?.csvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS;
+      const ci = current.indexOf(column);
+      if (ci < 0) return s;
+      const ti = Math.max(0, Math.min(current.length - 1, targetPosition - 1));
+      if (ci === ti) return s;
+      const updated = [...current];
+      const [moved] = updated.splice(ci, 1);
+      updated.splice(ti, 0, moved);
+      return { ...s, inventoryCount: { ...(s.inventoryCount ?? {}), csvExportColumns: updated } };
+    });
+  };
+  const resetStocktakeCsvColumns = () => {
+    setSettings((s) => ({ ...s, inventoryCount: { ...(s.inventoryCount ?? {}), csvExportColumns: [...DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS] } }));
+  };
+
   const updateCsvColumnLabel = (column: OrderCsvColumn, label: string) => {
     setSettings((s) => {
       const currentLabels = s.order?.csvExportColumnLabels || {};
@@ -1531,6 +1833,7 @@ export default function SettingsPage() {
                 { id: "purchase" as SettingsTabId, label: "仕入設定" },
                 { id: "order" as SettingsTabId, label: "発注設定" },
                 { id: "loss" as SettingsTabId, label: "ロス設定" },
+                { id: "stocktake" as SettingsTabId, label: "棚卸設定" },
               ].map((tab) => {
                 const selected = activeTab === tab.id;
                 return (
@@ -1796,7 +2099,7 @@ export default function SettingsPage() {
                             }}
                           />
                           <s-text tone="subdued" size="small">
-                            出庫・入庫・ロス履歴の一覧表示件数に適用（棚卸履歴は対象外）。最大250件、推奨100件。
+                            出庫・入庫・ロス履歴の一覧表示件数に適用（棚卸履歴・発注・仕入は対象外）。最大250件、推奨100件。
                           </s-text>
 
                           <s-text-field
@@ -2030,11 +2333,7 @@ export default function SettingsPage() {
                         }}
                       >
                         <s-stack gap="base">
-                          {/* 配送情報の必須/任意 */}
                           <s-stack gap="extraTight">
-                            <s-text emphasis="bold" size="small">
-                              配送情報の必須/任意
-                            </s-text>
                             <s-stack direction="inline" gap="base" inlineAlignment="start">
                               <label
                                 style={{
@@ -2696,11 +2995,70 @@ export default function SettingsPage() {
                     </div>
                   </div>
                 </s-box>
+
+                {/* 入出庫履歴CSV出力項目設定 */}
+                <s-box padding="base">
+                  <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
+                    <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>入出庫履歴CSV出力項目設定</div>
+                      <s-text tone="subdued" size="small">
+                        入出庫履歴のCSV出力時に含める項目を選択し、並び順を変更できます。出庫は入庫と同じ設定を共有します。チェックを外すとその項目は出力されません。
+                      </s-text>
+                    </div>
+                    <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+                      <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                        <s-stack gap="base">
+                          <div>
+                            {historyCsvColumns.length === 0 ? (
+                              <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                            ) : (
+                              <s-stack gap="tight">
+                                {historyCsvColumns.map((col, index) => (
+                                  <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
+                                    <input type="checkbox" checked={true} onChange={() => toggleHistoryCsvColumn(col)} disabled={historyCsvColumns.length === 1} style={{ cursor: historyCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
+                                    <input type="number" min={1} max={historyCsvColumns.length} defaultValue={index + 1} key={`${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= historyCsvColumns.length) moveHistoryCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.inbound?.csvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
+                                    <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{HISTORY_CSV_ID_TO_LABEL[col] ?? col}</span>
+                                    <s-stack direction="inline" gap="tight">
+                                      <s-button size="small" disabled={index === 0} onClick={() => moveHistoryCsvColumnUp(col)}>↑</s-button>
+                                      <s-button size="small" disabled={index === historyCsvColumns.length - 1} onClick={() => moveHistoryCsvColumnDown(col)}>↓</s-button>
+                                    </s-stack>
+                                  </div>
+                                ))}
+                              </s-stack>
+                            )}
+                          </div>
+                          <s-divider />
+                          <div>
+                            <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                            {HISTORY_CSV_COLUMN_IDS.filter((c) => !historyCsvColumns.includes(c)).length === 0 ? (
+                              <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                            ) : (
+                              <s-stack gap="tight">
+                                {HISTORY_CSV_COLUMN_IDS.filter((c) => !historyCsvColumns.includes(c)).map((col) => (
+                                  <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
+                                    <input type="checkbox" checked={false} onChange={() => toggleHistoryCsvColumn(col)} />
+                                    <span style={{ flex: 1, fontSize: 13 }}>{HISTORY_CSV_ID_TO_LABEL[col] ?? col}</span>
+                                  </label>
+                                ))}
+                              </s-stack>
+                            )}
+                          </div>
+                          <s-box padding="base">
+                            <s-stack direction="inline" gap="base" inlineAlignment="start">
+                              <s-button size="small" onClick={resetHistoryCsvColumns}>デフォルトに戻す</s-button>
+                            </s-stack>
+                          </s-box>
+                        </s-stack>
+                      </div>
+                    </div>
+                  </div>
+                </s-box>
               </>
             )}
 
             {/* ④ 仕入設定タブ：仕入先設定 */}
             {activeTab === "purchase" && (
+              <>
               <s-box padding="base">
                 <div
                   style={{
@@ -2719,7 +3077,7 @@ export default function SettingsPage() {
                         marginBottom: 4,
                       }}
                     >
-                      仕入設定
+                      仕入先設定
                     </div>
                     <s-text tone="subdued" size="small">
                       仕入先と仕入先コードを登録します。
@@ -2881,6 +3239,65 @@ export default function SettingsPage() {
                   </div>
                 </div>
               </s-box>
+
+              {/* 仕入履歴CSV出力項目設定 */}
+              <s-box padding="base">
+                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
+                  <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>仕入履歴CSV出力項目設定</div>
+                    <s-text tone="subdued" size="small">
+                      仕入履歴のCSV出力時に含める項目を選択し、並び順を変更できます。チェックを外すとその項目は出力されません。
+                    </s-text>
+                  </div>
+                  <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+                    <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                      <s-stack gap="base">
+                        <div>
+                          {purchaseCsvColumns.length === 0 ? (
+                            <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                          ) : (
+                            <s-stack gap="tight">
+                              {purchaseCsvColumns.map((col, index) => (
+                                <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
+                                  <input type="checkbox" checked={true} onChange={() => togglePurchaseCsvColumn(col)} disabled={purchaseCsvColumns.length === 1} style={{ cursor: purchaseCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
+                                  <input type="number" min={1} max={purchaseCsvColumns.length} defaultValue={index + 1} key={`p-${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= purchaseCsvColumns.length) movePurchaseCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.purchase?.csvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
+                                  <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{PURCHASE_CSV_ID_TO_LABEL[col] ?? col}</span>
+                                  <s-stack direction="inline" gap="tight">
+                                    <s-button size="small" disabled={index === 0} onClick={() => movePurchaseCsvColumnUp(col)}>↑</s-button>
+                                    <s-button size="small" disabled={index === purchaseCsvColumns.length - 1} onClick={() => movePurchaseCsvColumnDown(col)}>↓</s-button>
+                                  </s-stack>
+                                </div>
+                              ))}
+                            </s-stack>
+                          )}
+                        </div>
+                        <s-divider />
+                        <div>
+                          <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                          {PURCHASE_CSV_COLUMN_IDS.filter((c) => !purchaseCsvColumns.includes(c)).length === 0 ? (
+                            <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                          ) : (
+                            <s-stack gap="tight">
+                              {PURCHASE_CSV_COLUMN_IDS.filter((c) => !purchaseCsvColumns.includes(c)).map((col) => (
+                                <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
+                                  <input type="checkbox" checked={false} onChange={() => togglePurchaseCsvColumn(col)} />
+                                  <span style={{ flex: 1, fontSize: 13 }}>{PURCHASE_CSV_ID_TO_LABEL[col] ?? col}</span>
+                                </label>
+                              ))}
+                            </s-stack>
+                          )}
+                        </div>
+                        <s-box padding="base">
+                          <s-stack direction="inline" gap="base" inlineAlignment="start">
+                            <s-button size="small" onClick={resetPurchaseCsvColumns}>デフォルトに戻す</s-button>
+                          </s-stack>
+                        </s-box>
+                      </s-stack>
+                    </div>
+                  </div>
+                </div>
+              </s-box>
+              </>
             )}
 
             {/* ⑤ 発注設定タブ：発注先マスタ使用/不使用＋CSV出力項目設定 */}
@@ -2925,11 +3342,7 @@ export default function SettingsPage() {
                         }}
                       >
                         <s-stack gap="base">
-                          {/* 仕入先マスタの使用/不使用 */}
                           <s-stack gap="extraTight">
-                            <s-text emphasis="bold" size="small">
-                              「仕入先マスタ」の使用
-                            </s-text>
                             <s-stack direction="inline" gap="base" inlineAlignment="start">
                               <label
                                 style={{
@@ -3030,11 +3443,7 @@ export default function SettingsPage() {
                         }}
                       >
                         <s-stack gap="base">
-                          {/* 希望納品日の使用/不使用 */}
                           <s-stack gap="extraTight">
-                            <s-text emphasis="bold" size="small">
-                              「希望納品日」の使用
-                            </s-text>
                             <s-stack direction="inline" gap="base" inlineAlignment="start">
                               <label
                                 style={{
@@ -3499,6 +3908,7 @@ export default function SettingsPage() {
 
             {/* ⑤ ロス設定タブ：ロス区分設定（lossReasons） */}
             {activeTab === "loss" && (
+              <>
               <s-box padding="base">
                 <div
                   style={{
@@ -3517,7 +3927,7 @@ export default function SettingsPage() {
                         marginBottom: 4,
                       }}
                     >
-                      ロス設定
+                      ロス理由設定
                     </div>
                     <s-text tone="subdued" size="small">
                       ロス登録で選べる「ロス区分（理由）」を設定します。
@@ -3665,6 +4075,125 @@ export default function SettingsPage() {
                           <s-button onClick={addLossReason}>ロス区分を追加</s-button>
                         </s-stack>
                       </s-box>
+                    </div>
+                  </div>
+                </div>
+              </s-box>
+
+              {/* ロス履歴CSV出力項目設定 */}
+              <s-box padding="base">
+                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
+                  <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>ロス履歴CSV出力項目設定</div>
+                    <s-text tone="subdued" size="small">
+                      ロス履歴のCSV出力時に含める項目を選択し、並び順を変更できます。チェックを外すとその項目は出力されません。
+                    </s-text>
+                  </div>
+                  <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+                    <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                      <s-stack gap="base">
+                        <div>
+                          {lossCsvColumns.length === 0 ? (
+                            <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                          ) : (
+                            <s-stack gap="tight">
+                              {lossCsvColumns.map((col, index) => (
+                                <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
+                                  <input type="checkbox" checked={true} onChange={() => toggleLossCsvColumn(col)} disabled={lossCsvColumns.length === 1} style={{ cursor: lossCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
+                                  <input type="number" min={1} max={lossCsvColumns.length} defaultValue={index + 1} key={`l-${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= lossCsvColumns.length) moveLossCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.loss?.csvExportColumns ?? DEFAULT_LOSS_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
+                                  <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{LOSS_CSV_ID_TO_LABEL[col] ?? col}</span>
+                                  <s-stack direction="inline" gap="tight">
+                                    <s-button size="small" disabled={index === 0} onClick={() => moveLossCsvColumnUp(col)}>↑</s-button>
+                                    <s-button size="small" disabled={index === lossCsvColumns.length - 1} onClick={() => moveLossCsvColumnDown(col)}>↓</s-button>
+                                  </s-stack>
+                                </div>
+                              ))}
+                            </s-stack>
+                          )}
+                        </div>
+                        <s-divider />
+                        <div>
+                          <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                          {LOSS_CSV_COLUMN_IDS.filter((c) => !lossCsvColumns.includes(c)).length === 0 ? (
+                            <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                          ) : (
+                            <s-stack gap="tight">
+                              {LOSS_CSV_COLUMN_IDS.filter((c) => !lossCsvColumns.includes(c)).map((col) => (
+                                <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
+                                  <input type="checkbox" checked={false} onChange={() => toggleLossCsvColumn(col)} />
+                                  <span style={{ flex: 1, fontSize: 13 }}>{LOSS_CSV_ID_TO_LABEL[col] ?? col}</span>
+                                </label>
+                              ))}
+                            </s-stack>
+                          )}
+                        </div>
+                        <s-box padding="base">
+                          <s-stack direction="inline" gap="base" inlineAlignment="start">
+                            <s-button size="small" onClick={resetLossCsvColumns}>デフォルトに戻す</s-button>
+                          </s-stack>
+                        </s-box>
+                      </s-stack>
+                    </div>
+                  </div>
+                </div>
+              </s-box>
+              </>
+            )}
+
+            {/* ⑦ 棚卸設定タブ */}
+            {activeTab === "stocktake" && (
+              <s-box padding="base">
+                <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
+                  <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>棚卸履歴CSV出力項目設定</div>
+                    <s-text tone="subdued" size="small">
+                      棚卸履歴のCSV出力時に含める項目を選択し、並び順を変更できます。明細ありのCSVに適用されます。チェックを外すとその項目は出力されません。
+                    </s-text>
+                  </div>
+                  <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+                    <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                      <s-stack gap="base">
+                        <div>
+                          {stocktakeCsvColumns.length === 0 ? (
+                            <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                          ) : (
+                            <s-stack gap="tight">
+                              {stocktakeCsvColumns.map((col, index) => (
+                                <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
+                                  <input type="checkbox" checked={true} onChange={() => toggleStocktakeCsvColumn(col)} disabled={stocktakeCsvColumns.length === 1} style={{ cursor: stocktakeCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
+                                  <input type="number" min={1} max={stocktakeCsvColumns.length} defaultValue={index + 1} key={`st-${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= stocktakeCsvColumns.length) moveStocktakeCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.inventoryCount?.csvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
+                                  <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{STOCKTAKE_CSV_ID_TO_LABEL[col] ?? col}</span>
+                                  <s-stack direction="inline" gap="tight">
+                                    <s-button size="small" disabled={index === 0} onClick={() => moveStocktakeCsvColumnUp(col)}>↑</s-button>
+                                    <s-button size="small" disabled={index === stocktakeCsvColumns.length - 1} onClick={() => moveStocktakeCsvColumnDown(col)}>↓</s-button>
+                                  </s-stack>
+                                </div>
+                              ))}
+                            </s-stack>
+                          )}
+                        </div>
+                        <s-divider />
+                        <div>
+                          <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                          {STOCKTAKE_CSV_COLUMN_IDS.filter((c) => !stocktakeCsvColumns.includes(c)).length === 0 ? (
+                            <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                          ) : (
+                            <s-stack gap="tight">
+                              {STOCKTAKE_CSV_COLUMN_IDS.filter((c) => !stocktakeCsvColumns.includes(c)).map((col) => (
+                                <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
+                                  <input type="checkbox" checked={false} onChange={() => toggleStocktakeCsvColumn(col)} />
+                                  <span style={{ flex: 1, fontSize: 13 }}>{STOCKTAKE_CSV_ID_TO_LABEL[col] ?? col}</span>
+                                </label>
+                              ))}
+                            </s-stack>
+                          )}
+                        </div>
+                        <s-box padding="base">
+                          <s-stack direction="inline" gap="base" inlineAlignment="start">
+                            <s-button size="small" onClick={resetStocktakeCsvColumns}>デフォルトに戻す</s-button>
+                          </s-stack>
+                        </s-box>
+                      </s-stack>
                     </div>
                   </div>
                 </div>

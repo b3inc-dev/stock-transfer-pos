@@ -8,6 +8,19 @@ import { getDateInShopTimezone, extractDateFromISO, getShopTimezone } from "../u
 
 const LOSS_NS = "stock_transfer_pos";
 const LOSS_KEY = "loss_entries_v1";
+const SETTINGS_NS = "stock_transfer_pos";
+const SETTINGS_KEY = "settings_v1";
+
+// ロス履歴CSV列（設定の「ロス履歴CSV出力項目設定」と一致）
+const LOSS_CSV_COLUMN_IDS = [
+  "historyId", "name", "date", "location", "reason", "staff", "status",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "quantity",
+] as const;
+const LOSS_CSV_LABELS: Record<string, string> = {
+  historyId: "履歴ID", name: "名称", date: "日付", location: "ロケーション", reason: "理由", staff: "担当者", status: "ステータス",
+  productTitle: "商品名", sku: "SKU", barcode: "JAN", option1: "オプション1", option2: "オプション2", option3: "オプション3", quantity: "数量",
+};
+const DEFAULT_LOSS_CSV_COLUMNS = [...LOSS_CSV_COLUMN_IDS];
 
 export type LocationNode = { id: string; name: string };
 
@@ -45,7 +58,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // ショップのタイムゾーンを取得
   const shopTimezone = await getShopTimezone(admin);
 
-  const [locResp, appResp] = await Promise.all([
+  const [locResp, appResp, settingsResp] = await Promise.all([
     admin.graphql(
       `#graphql
         query Locations($first: Int!) {
@@ -64,10 +77,20 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
       `
     ),
+    admin.graphql(
+      `#graphql
+        query LossSettings {
+          currentAppInstallation {
+            metafield(namespace: "${SETTINGS_NS}", key: "${SETTINGS_KEY}") { value }
+          }
+        }
+      `
+    ),
   ]);
 
   const locData = await locResp.json();
   const appData = await appResp.json();
+  const settingsData = await settingsResp.json();
   const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
 
   let entries: LossEntry[] = [];
@@ -175,13 +198,26 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // サーバー側で「今日の日付」を計算
   const todayInShopTimezone = getDateInShopTimezone(new Date(), shopTimezone);
 
-  // ページネーション用の情報（metafieldは全件取得のため、クライアント側でページネーション）
-  // 入出庫履歴と同じ形式で返す（ただし、metafieldは全件取得のため、pageInfoは常にfalse）
+  // 設定からロスCSV出力項目を取得
+  let lossCsvExportColumns: string[] = DEFAULT_LOSS_CSV_COLUMNS;
+  const settingsRaw = settingsData?.data?.currentAppInstallation?.metafield?.value;
+  if (typeof settingsRaw === "string" && settingsRaw) {
+    try {
+      const parsed = JSON.parse(settingsRaw);
+      const cols = Array.isArray(parsed?.loss?.csvExportColumns) ? parsed.loss.csvExportColumns : [];
+      const valid = (cols as string[]).filter((id: string) => LOSS_CSV_COLUMN_IDS.includes(id as any));
+      if (valid.length > 0) lossCsvExportColumns = valid;
+    } catch {
+      // 失敗時はデフォルト
+    }
+  }
+
   return {
     locations,
     entries: needsUpdate ? entriesWithLossName : entries,
     shopTimezone,
-    todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
+    todayInShopTimezone,
+    lossCsvExportColumns,
     pageInfo: {
       hasNextPage: false,
       hasPreviousPage: false,
@@ -270,12 +306,14 @@ export default function LossPage() {
     entries,
     shopTimezone,
     todayInShopTimezone,
+    lossCsvExportColumns,
     pageInfo,
   } = loaderData || {
     locations: [],
     entries: [],
     shopTimezone: "UTC",
     todayInShopTimezone: getDateInShopTimezone(new Date(), "UTC"),
+    lossCsvExportColumns: DEFAULT_LOSS_CSV_COLUMNS,
     pageInfo: {
       hasNextPage: false,
       hasPreviousPage: false,
@@ -283,6 +321,7 @@ export default function LossPage() {
       endCursor: null,
     },
   };
+  const csvColumns = lossCsvExportColumns ?? DEFAULT_LOSS_CSV_COLUMNS;
   const fetcher = useFetcher<typeof action>();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -368,25 +407,10 @@ export default function LossPage() {
     setCsvExportProgress({ current: 0, total: selectedEntries.length });
 
     try {
-      // CSVヘッダー（モーダルCSVと同一：オプション1〜3を含む）
-      const headers = [
-        "履歴ID",
-        "名称",
-        "日付",
-        "ロケーション",
-        "理由",
-        "担当者",
-        "ステータス",
-        "商品名",
-        "SKU",
-        "JAN",
-        "オプション1",
-        "オプション2",
-        "オプション3",
-        "数量",
-      ];
+      const headers = csvColumns.map((id) => LOSS_CSV_LABELS[id] ?? id);
+      const toRow = (rowObj: Record<string, string | number>) =>
+        csvColumns.map((id) => String(rowObj[id] ?? ""));
 
-      // CSVデータ（商品明細を展開）
       const rows: string[][] = [];
 
       for (let i = 0; i < selectedEntries.length; i++) {
@@ -400,40 +424,40 @@ export default function LossPage() {
         const lossName = e.lossName || formatLossName(e, entries, entries.findIndex((entry) => entry.id === e.id));
 
         if (e.items.length === 0) {
-          rows.push([
-            e.id,
-            lossName,
+          rows.push(toRow({
+            historyId: e.id,
+            name: lossName,
             date,
-            locationName,
-            e.reason || "",
+            location: locationName,
+            reason: e.reason || "",
             staff,
-            statusLabel,
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-          ]);
+            status: statusLabel,
+            productTitle: "",
+            sku: "",
+            barcode: "",
+            option1: "",
+            option2: "",
+            option3: "",
+            quantity: "",
+          }));
         } else {
           e.items.forEach((item) => {
-            rows.push([
-              e.id,
-              lossName,
+            rows.push(toRow({
+              historyId: e.id,
+              name: lossName,
               date,
-              locationName,
-              e.reason || "",
+              location: locationName,
+              reason: e.reason || "",
               staff,
-              statusLabel,
-              item.title || "",
-              item.sku || "",
-              item.barcode || "",
-              item.option1 || "",
-              item.option2 || "",
-              item.option3 || "",
-              String(item.quantity || 0),
-            ]);
+              status: statusLabel,
+              productTitle: item.title || "",
+              sku: item.sku || "",
+              barcode: item.barcode || "",
+              option1: item.option1 || "",
+              option2: item.option2 || "",
+              option3: item.option3 || "",
+              quantity: item.quantity || 0,
+            }));
           });
         }
       }
@@ -523,25 +547,9 @@ export default function LossPage() {
       return;
     }
 
-    // CSVヘッダー（入出庫履歴と同じ形式）
-    const headers = [
-      "履歴ID",
-      "名称",
-      "日付",
-      "ロケーション",
-      "理由",
-      "担当者",
-      "ステータス",
-      "商品名",
-      "SKU",
-      "JAN",
-      "オプション1",
-      "オプション2",
-      "オプション3",
-      "数量",
-    ];
-
-    // CSVデータ
+    const headers = csvColumns.map((id) => LOSS_CSV_LABELS[id] ?? id);
+    const toRow = (rowObj: Record<string, string | number>) =>
+      csvColumns.map((id) => String(rowObj[id] ?? ""));
     const rows: string[][] = [];
     const locationName =
       modalEntry.locationName || locations.find((l) => l.id === modalEntry.locationId)?.name || modalEntry.locationId;
@@ -552,22 +560,22 @@ export default function LossPage() {
       modalEntry.lossName || formatLossName(modalEntry, entries, entries.findIndex((e) => e.id === modalEntry.id));
 
     modalItems.forEach((item) => {
-      rows.push([
-        modalEntry.id,
-        lossName,
+      rows.push(toRow({
+        historyId: modalEntry.id,
+        name: lossName,
         date,
-        locationName,
-        modalEntry.reason || "",
+        location: locationName,
+        reason: modalEntry.reason || "",
         staff,
-        statusLabel,
-        item.title || "",
-        item.sku || "",
-        item.barcode || "",
-        item.option1 || "",
-        item.option2 || "",
-        item.option3 || "",
-        String(item.quantity || 0),
-      ]);
+        status: statusLabel,
+        productTitle: item.title || "",
+        sku: item.sku || "",
+        barcode: item.barcode || "",
+        option1: item.option1 || "",
+        option2: item.option2 || "",
+        option3: item.option3 || "",
+        quantity: item.quantity || 0,
+      }));
     });
 
     // CSV文字列を生成

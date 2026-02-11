@@ -5,6 +5,21 @@ import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
 import { getDateInShopTimezone } from "../utils/timezone";
 
+// 入出庫履歴CSV列（設定画面の「入出庫履歴CSV出力項目設定」と一致）
+const HISTORY_CSV_COLUMN_IDS = [
+  "historyId", "name", "date", "origin", "destination", "status",
+  "shipmentId", "shipmentStatus", "productTitle", "sku", "barcode",
+  "option1", "option2", "option3", "plannedQty", "receivedQty", "kind",
+] as const;
+const HISTORY_CSV_LABELS: Record<string, string> = {
+  historyId: "履歴ID", name: "名称", date: "日付", origin: "出庫元", destination: "入庫先", status: "ステータス",
+  shipmentId: "配送ID", shipmentStatus: "配送ステータス", productTitle: "商品名", sku: "SKU", barcode: "JAN",
+  option1: "オプション1", option2: "オプション2", option3: "オプション3", plannedQty: "予定数", receivedQty: "入庫数", kind: "種別",
+};
+const DEFAULT_HISTORY_CSV_COLUMNS = [...HISTORY_CSV_COLUMN_IDS];
+const SETTINGS_NS = "stock_transfer_pos";
+const SETTINGS_KEY = "settings_v1";
+
 // メモ（note）から予定外入庫の数量合計を抽出する関数
 function extractExtrasQuantityFromNote(note: string): number {
   if (!note) return 0;
@@ -281,11 +296,37 @@ export async function loader({ request }: LoaderFunctionArgs) {
     // サーバー側で「今日の日付」を計算
     const todayInShopTimezone = getDateInShopTimezone(new Date(), shopTimezone);
 
+    // 設定から入出庫CSV出力項目を取得（設定画面の「入出庫履歴CSV出力項目設定」と連動）
+    let historyCsvExportColumns: string[] = DEFAULT_HISTORY_CSV_COLUMNS;
+    try {
+      const mfResp = await admin.graphql(
+        `#graphql
+          query HistorySettings {
+            currentAppInstallation {
+              metafield(namespace: "${SETTINGS_NS}", key: "${SETTINGS_KEY}") { value }
+            }
+          }
+        `,
+        {}
+      );
+      const mfData = await mfResp.json();
+      const raw = mfData?.data?.currentAppInstallation?.metafield?.value ?? null;
+      if (raw && typeof raw === "string") {
+        const parsed = JSON.parse(raw);
+        const arr = Array.isArray(parsed?.inbound?.csvExportColumns) ? parsed.inbound.csvExportColumns : [];
+        const valid = (arr as string[]).filter((id) => HISTORY_CSV_COLUMN_IDS.includes(id as any));
+        if (valid.length > 0) historyCsvExportColumns = valid;
+      }
+    } catch {
+      // 設定取得失敗時はデフォルトの並びのまま
+    }
+
     return {
       locations,
       histories: allHistories,
       shopTimezone,
       todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
+      historyCsvExportColumns,
       pageInfo: {
         hasNextPage: pageInfo.hasNextPage || false,
         hasPreviousPage: pageInfo.hasPreviousPage || false,
@@ -580,14 +621,16 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function HistoryPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, histories, shopTimezone, todayInShopTimezone, pageInfo, pagination } = loaderData || {
+  const { locations, histories, shopTimezone, todayInShopTimezone, historyCsvExportColumns, pageInfo, pagination } = loaderData || {
     locations: [],
     histories: [],
     shopTimezone: "UTC",
     todayInShopTimezone: getDateInShopTimezone(new Date(), "UTC"),
+    historyCsvExportColumns: DEFAULT_HISTORY_CSV_COLUMNS,
     pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
     pagination: { total: null, startIndex: 1, pageSize: 100 },
   };
+  const csvColumns = historyCsvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS;
   const fetcher = useFetcher<typeof action>();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -738,26 +781,8 @@ export default function HistoryPage() {
     setCsvExportProgress({ current: 0, total: selectedHistories.length });
 
     try {
-      // CSVヘッダー（モーダルCSVと同一。配送ID・配送ステータス・予定数・入庫数・種別を含む）
-      const headers = [
-        "履歴ID",
-        "名称",
-        "日付",
-        "出庫元",
-        "入庫先",
-        "ステータス",
-        "配送ID",
-        "配送ステータス",
-        "商品名",
-        "SKU",
-        "JAN",
-        "オプション1",
-        "オプション2",
-        "オプション3",
-        "予定数",
-        "入庫数",
-        "種別",
-      ];
+      // CSVヘッダー（設定の「入出庫履歴CSV出力項目設定」の並び・項目を使用）
+      const headers = csvColumns.map((id) => HISTORY_CSV_LABELS[id] ?? id);
 
       // CSVデータ（商品明細を展開）
       // 商品明細を取得してからCSV出力
@@ -853,51 +878,51 @@ export default function HistoryPage() {
       const destName = h.destinationLocationName || "";
       const historyName = h.name || h.id;
 
+      const toRow = (rowObj: Record<string, string | number>) =>
+        csvColumns.map((id) => String(rowObj[id] ?? ""));
+
       if (lineItems.length === 0) {
-        // 商品明細がない場合は履歴情報のみ（列数はモーダルCSVと同一）
-        rows.push([
-          h.id,
-          historyName,
+        rows.push(toRow({
+          historyId: h.id,
+          name: historyName,
           date,
-          originName,
-          destName,
-          statusLabel,
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-        ]);
+          origin: originName,
+          destination: destName,
+          status: statusLabel,
+          shipmentId: "",
+          shipmentStatus: "",
+          productTitle: "",
+          sku: "",
+          barcode: "",
+          option1: "",
+          option2: "",
+          option3: "",
+          plannedQty: "",
+          receivedQty: "",
+          kind: "",
+        }));
       } else {
-        // 商品明細を展開（モーダルCSVと同一：配送ID・配送ステータス・予定数・入庫数・種別）
         lineItems.forEach((item) => {
           const shipmentStatusLabel = item.shipmentStatus ? (STATUS_LABEL[item.shipmentStatus] || item.shipmentStatus) : "";
-          rows.push([
-            h.id,
-            historyName,
+          rows.push(toRow({
+            historyId: h.id,
+            name: historyName,
             date,
-            originName,
-            destName,
-            statusLabel,
-            item.shipmentDisplayId || "",
-            shipmentStatusLabel,
-            item.title || "",
-            item.sku || "",
-            item.barcode || "",
-            item.option1 || "",
-            item.option2 || "",
-            item.option3 || "",
-            String(item.quantity),
-            String(item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity),
-            item.isExtra ? "予定外入庫" : "通常",
-          ]);
+            origin: originName,
+            destination: destName,
+            status: statusLabel,
+            shipmentId: item.shipmentDisplayId || "",
+            shipmentStatus: shipmentStatusLabel,
+            productTitle: item.title || "",
+            sku: item.sku || "",
+            barcode: item.barcode || "",
+            option1: item.option1 || "",
+            option2: item.option2 || "",
+            option3: item.option3 || "",
+            plannedQty: item.quantity,
+            receivedQty: item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity,
+            kind: item.isExtra ? "予定外入庫" : "通常",
+          }));
         });
       }
     }
@@ -1025,28 +1050,7 @@ export default function HistoryPage() {
       return;
     }
 
-    // CSVヘッダー（複数シップメント時は配送ID・配送ステータス列を含む・棚卸の商品グループ列と同様）
-    const headers = [
-      "履歴ID",
-      "名称",
-      "日付",
-      "出庫元",
-      "入庫先",
-      "ステータス",
-      "配送ID",
-      "配送ステータス",
-      "商品名",
-      "SKU",
-      "JAN",
-      "オプション1",
-      "オプション2",
-      "オプション3",
-      "予定数",
-      "入庫数",
-      "種別",
-    ];
-
-    // CSVデータ
+    const headers = csvColumns.map((id) => HISTORY_CSV_LABELS[id] ?? id);
     const rows: string[][] = [];
     const originName = modalHistory.originLocationName || "";
     const destName = modalHistory.destinationLocationName || "";
@@ -1056,27 +1060,30 @@ export default function HistoryPage() {
     const statusLabel = STATUS_LABEL[modalHistory.status] || modalHistory.status;
     const historyName = modalHistory.name || modalHistory.id;
 
+    const toRow = (rowObj: Record<string, string | number>) =>
+      csvColumns.map((id) => String(rowObj[id] ?? ""));
+
     modalLineItems.forEach((item) => {
       const shipmentStatusLabel = item.shipmentStatus ? (STATUS_LABEL[item.shipmentStatus] || item.shipmentStatus) : "";
-      rows.push([
-        modalHistory.id,
-        historyName,
+      rows.push(toRow({
+        historyId: modalHistory.id,
+        name: historyName,
         date,
-        originName,
-        destName,
-        statusLabel,
-        item.shipmentDisplayId || "",
-        shipmentStatusLabel,
-        item.title || "",
-        item.sku || "",
-        item.barcode || "",
-        item.option1 || "",
-        item.option2 || "",
-        item.option3 || "",
-        String(item.quantity || "-"),
-        String(item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity),
-        item.isExtra ? "予定外入庫" : "通常",
-      ]);
+        origin: originName,
+        destination: destName,
+        status: statusLabel,
+        shipmentId: item.shipmentDisplayId || "",
+        shipmentStatus: shipmentStatusLabel,
+        productTitle: item.title || "",
+        sku: item.sku || "",
+        barcode: item.barcode || "",
+        option1: item.option1 || "",
+        option2: item.option2 || "",
+        option3: item.option3 || "",
+        plannedQty: item.quantity ?? "-",
+        receivedQty: item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity,
+        kind: item.isExtra ? "予定外入庫" : "通常",
+      }));
     });
 
     // CSV文字列を生成

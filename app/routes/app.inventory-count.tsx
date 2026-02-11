@@ -9,6 +9,21 @@ import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
 const INVENTORY_COUNTS_KEY = "inventory_counts_v1";
+const SETTINGS_KEY = "settings_v1";
+
+// 棚卸履歴CSV列（設定の「棚卸履歴CSV出力項目設定」と一致。明細あり用）
+const STOCKTAKE_CSV_COLUMN_IDS = [
+  "countId", "name", "date", "completedDate", "location", "productGroup", "status",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3",
+  "currentQty", "actualQty", "delta", "kind",
+] as const;
+const STOCKTAKE_SUMMARY_IDS = ["countId", "name", "date", "completedDate", "location", "productGroup", "status"];
+const STOCKTAKE_CSV_LABELS: Record<string, string> = {
+  countId: "棚卸ID", name: "名称", date: "日付", completedDate: "完了日", location: "ロケーション", productGroup: "商品グループ", status: "ステータス",
+  productTitle: "商品名", sku: "SKU", barcode: "JAN", option1: "オプション1", option2: "オプション2", option3: "オプション3",
+  currentQty: "在庫", actualQty: "実数", delta: "差分", kind: "種別",
+};
+const DEFAULT_STOCKTAKE_CSV_COLUMNS = [...STOCKTAKE_CSV_COLUMN_IDS];
 
 export type LocationNode = { id: string; name: string };
 export type CollectionNode = { 
@@ -78,8 +93,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // ショップのタイムゾーンを取得
   const shopTimezone = await getShopTimezone(admin);
 
-  // ロケーション・メタフィールドは単発取得。コレクション・商品はページネーションで全件取得
-  const [locResp, appResp] = await Promise.all([
+  // ロケーション・メタフィールド・設定は単発取得。コレクション・商品はページネーションで全件取得
+  const [locResp, appResp, settingsResp] = await Promise.all([
     admin.graphql(
       `#graphql
         query Locations($first: Int!) {
@@ -98,10 +113,20 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
       `
     ),
+    admin.graphql(
+      `#graphql
+        query StocktakeSettings {
+          currentAppInstallation {
+            metafield(namespace: "${NS}", key: "${SETTINGS_KEY}") { value }
+          }
+        }
+      `
+    ),
   ]);
 
   const locData = await locResp.json();
   const appData = await appResp.json();
+  const settingsData = await settingsResp.json();
 
   const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
 
@@ -297,7 +322,30 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // サーバー側で「今日の日付」を計算
   const todayInShopTimezone = getDateInShopTimezone(new Date(), shopTimezone);
 
-  return { locations, collections, productGroups, inventoryCounts, skuVariantList, shopTimezone, todayInShopTimezone };
+  // 設定から棚卸CSV出力項目を取得（明細あり用）
+  let stocktakeCsvExportColumns: string[] = DEFAULT_STOCKTAKE_CSV_COLUMNS;
+  const settingsRaw = settingsData?.data?.currentAppInstallation?.metafield?.value;
+  if (typeof settingsRaw === "string" && settingsRaw) {
+    try {
+      const parsed = JSON.parse(settingsRaw);
+      const cols = Array.isArray(parsed?.inventoryCount?.csvExportColumns) ? parsed.inventoryCount.csvExportColumns : [];
+      const valid = (cols as string[]).filter((id: string) => STOCKTAKE_CSV_COLUMN_IDS.includes(id as any));
+      if (valid.length > 0) stocktakeCsvExportColumns = valid;
+    } catch {
+      // 失敗時はデフォルト
+    }
+  }
+
+  return {
+    locations,
+    collections,
+    productGroups,
+    inventoryCounts,
+    skuVariantList,
+    shopTimezone,
+    todayInShopTimezone,
+    stocktakeCsvExportColumns,
+  };
 }
 
 function generateId(prefix: string): string {
@@ -1357,14 +1405,17 @@ export type SkuSearchVariant = {
 
 export default function InventoryCountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, collections, productGroups, inventoryCounts, skuVariantList, shopTimezone, todayInShopTimezone } = loaderData || {
+  const { locations, collections, productGroups, inventoryCounts, skuVariantList, shopTimezone, todayInShopTimezone, stocktakeCsvExportColumns } = loaderData || {
     locations: [],
     collections: [],
     productGroups: [],
     inventoryCounts: [],
     skuVariantList: [],
     shopTimezone: "UTC",
+    stocktakeCsvExportColumns: DEFAULT_STOCKTAKE_CSV_COLUMNS,
   };
+  const csvColumns = stocktakeCsvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS;
+  const csvColumnsSummary = csvColumns.filter((id) => STOCKTAKE_SUMMARY_IDS.includes(id));
   const fetcher = useFetcher<typeof action>();
   const allSkuVariants: SkuSearchVariant[] = Array.isArray(skuVariantList) ? skuVariantList : [];
   const [skuSearchQuery, setSkuSearchQuery] = useState("");
@@ -2044,38 +2095,11 @@ export default function InventoryCountPage() {
     }
 
     const selectedCounts = filteredCounts.filter((c) => selectedIds.has(c.id));
+    const cols = detail ? csvColumns : csvColumnsSummary;
+    const headers = cols.map((id) => STOCKTAKE_CSV_LABELS[id] ?? id);
+    const toRow = (rowObj: Record<string, string | number>) => cols.map((id) => String(rowObj[id] ?? ""));
 
     const dateOnly = (iso?: string) => (iso ? new Date(iso).toISOString().split("T")[0] : "");
-    const headers = detail
-      ? [
-          "棚卸ID",
-          "名称",
-          "日付",
-          "完了日",
-          "ロケーション",
-          "商品グループ",
-          "ステータス",
-          "商品名",
-          "SKU",
-          "JAN",
-          "オプション1",
-          "オプション2",
-          "オプション3",
-          "在庫",
-          "実数",
-          "差分",
-          "種別",
-        ]
-      : [
-          "棚卸ID",
-          "名称",
-          "日付",
-          "完了日",
-          "ロケーション",
-          "商品グループ",
-          "ステータス",
-        ];
-
     const rows: string[][] = [];
     selectedCounts.forEach((c) => {
       const locName = getLocationName(c.locationId);
@@ -2087,6 +2111,16 @@ export default function InventoryCountPage() {
         : Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
         ? c.productGroupIds.join(", ")
         : c.productGroupName || c.productGroupId || "-";
+
+      const baseRow: Record<string, string | number> = {
+        countId: c.id,
+        name: countName,
+        date: dateOnly(c.createdAt),
+        completedDate: dateOnly(c.completedAt),
+        location: locName,
+        productGroup: groupNames,
+        status: statusLabel,
+      };
 
       if (detail && c.items?.length) {
         c.items.forEach((it) => {
@@ -2101,36 +2135,22 @@ export default function InventoryCountPage() {
           const jan = String((it as any).barcode ?? "").trim();
           const kindLabel = (it as any).isExtra ? "予定外" : "";
 
-          rows.push([
-            c.id,
-            countName,
-            dateOnly(c.createdAt),
-            dateOnly(c.completedAt),
-            locName,
-            groupNames,
-            statusLabel,
-            productName,
+          rows.push(toRow({
+            ...baseRow,
+            productTitle: productName,
             sku,
-            jan,
+            barcode: jan,
             option1,
             option2,
             option3,
-            String(it.currentQuantity ?? ""),
-            String(it.actualQuantity ?? ""),
-            String(it.delta ?? ""),
-            kindLabel,
-          ]);
+            currentQty: it.currentQuantity ?? "",
+            actualQty: it.actualQuantity ?? "",
+            delta: it.delta ?? "",
+            kind: kindLabel,
+          }));
         });
       } else {
-        rows.push([
-          c.id,
-          countName,
-          dateOnly(c.createdAt),
-          dateOnly(c.completedAt),
-          locName,
-          groupNames,
-          statusLabel,
-        ]);
+        rows.push(toRow(baseRow));
       }
     });
 
@@ -4278,32 +4298,15 @@ export default function InventoryCountPage() {
                         return;
                       }
 
-                      const headers = [
-                        "棚卸ID",
-                        "名称",
-                        "日付",
-                        "完了日",
-                        "ロケーション",
-                        "商品グループ",
-                        "ステータス",
-                        "商品名",
-                        "SKU",
-                        "JAN",
-                        "オプション1",
-                        "オプション2",
-                        "オプション3",
-                        "在庫",
-                        "実数",
-                        "差分",
-                        "種別",
-                      ];
+                      const headers = csvColumns.map((id) => STOCKTAKE_CSV_LABELS[id] ?? id);
+                      const toRow = (rowObj: Record<string, string | number>) =>
+                        csvColumns.map((id) => String(rowObj[id] ?? ""));
 
                       const dateOnly = (iso?: string) => extractDateFromISO(iso, shopTimezone);
                       const rows: string[][] = [];
                       displayItemsWithGroupInfo.forEach((it) => {
                         const locName = getLocationName(modalCount.locationId);
                         const countName = modalCount.countName || modalCount.id;
-                        
                         const groupName = (it as any).groupName || "-";
                         const isGroupCompleted = (it as any).isGroupCompleted || false;
                         const statusLabel = isGroupCompleted ? "完了" : "進行中";
@@ -4320,25 +4323,25 @@ export default function InventoryCountPage() {
                         const isExtra = !!(it as any).isExtra;
                         const kindLabel = isExtra ? "予定外" : "";
 
-                        rows.push([
-                          modalCount.id,
-                          countName,
-                          dateOnly(modalCount.createdAt),
-                          dateOnly(modalCount.completedAt),
-                          locName,
-                          groupName,
-                          statusLabel,
-                          productName,
+                        rows.push(toRow({
+                          countId: modalCount.id,
+                          name: countName,
+                          date: dateOnly(modalCount.createdAt),
+                          completedDate: dateOnly(modalCount.completedAt),
+                          location: locName,
+                          productGroup: groupName,
+                          status: statusLabel,
+                          productTitle: productName,
                           sku,
-                          jan,
+                          barcode: jan,
                           option1,
                           option2,
                           option3,
-                          String(it.currentQuantity ?? ""),
-                          String(it.actualQuantity ?? ""),
-                          String(it.delta ?? ""),
-                          kindLabel,
-                        ]);
+                          currentQty: it.currentQuantity ?? "",
+                          actualQty: it.actualQuantity ?? "",
+                          delta: it.delta ?? "",
+                          kind: kindLabel,
+                        }));
                       });
 
                       const csvContent = [headers, ...rows]

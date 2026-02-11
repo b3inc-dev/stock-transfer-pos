@@ -1,7 +1,7 @@
 # 管理画面・ロス登録・棚卸 実装要件書
 
-**最終更新日**: 2026年2月10日（**在庫・変動履歴の改善（スナップショット共通化・変動日付TZ統一・バッチAPI・ロスと同様の処理に統一・履歴オプション3列）・公開アプリ完了までの残タスク整理**まで反映済み）  
-**コード確認日**: 2026年2月（上記に加え、4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・発注機能実装・仕入POS拡張・在庫高・在庫変動履歴・api/log-inventory-change 種別上書き・公開/自社用 appUrl・リリース時必須対策 反映済み）
+**最終更新日**: 2026年2月11日（**入出庫・仕入・ロス・棚卸のCSV出力項目設定（設定タブ4画面＋各履歴CSV連動）**まで反映済み）  
+**コード確認日**: 2026年2月（上記に加え、4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・発注機能実装・仕入POS拡張・在庫高・在庫変動履歴・api/log-inventory-change 種別上書き・ロケーション名取得・公開/自社用 appUrl・リリース時必須対策・希望納品日/到着予定日ボタン設定・入出庫/仕入/ロス/棚卸CSV出力項目設定 反映済み）
 
 ---
 
@@ -35,6 +35,9 @@
 | 公開アプリ用 appUrl 統一・切り替え | ✅ 完了（extensions/common/appUrl.js で public/inhouse 切り替え、全POS拡張で参照） |
 | リリース時必須対策の要件整理 | ✅ 完了（RELEASE_REQUIREMENTS_PUBLIC_APP.md セクション5 に記載。デプロイで履歴が消えないよう本番DB永続化、管理画面を開かなくても動くよう初回オープン案内） |
 | 在庫・変動履歴の改善（2026-02-10 以降） | ✅ 完了（スナップショット共通化・変動日付TZ統一・バッチAPI・ロスと同様の処理に統一・履歴オプション3列。本文「このチャットで決めた要件・実装と進捗」に詳細） |
+| 在庫変動履歴のロケーション名表示 | ✅ 完了（api/log-inventory-change でロケーション名が未設定または「出庫元」等ラベルのとき GraphQL で実ロケーション名を取得して保存。一覧・CSVで「ロケーション」列に正しい名前を表示） |
+| 希望納品日・到着予定日ボタン設定UI | ✅ 完了（発注：希望納品日を発注先マスタと分離・CSV風リストでチェック・並び順・ボタン名・日数・上下。出庫：到着予定日も同様。ボタン名のカスタムラベル保存・POSで表示。初期は希望納品日=1週間後/1ヶ月後含む、到着=1日後/2日後） |
+| 入出庫・仕入・ロス・棚卸のCSV出力項目設定 | ✅ 完了（設定画面の入庫・仕入・ロス・棚卸各タブに「〇〇履歴CSV出力項目設定」を追加。発注と同様のUIで項目のオン/オフ・並び順・デフォルトに戻す。各履歴画面のCSVダウンロードは設定の並び・含める列で出力） |
 
 ---
 
@@ -77,6 +80,7 @@
 | **①在庫高** | 日付選択の枠がスマホで領域をはみ出している。 | 日付入力の親要素に `width: 100%`, `minWidth: 0`, `overflow: hidden` を指定し、領域内に収まるよう修正（`app.inventory-info.tsx`）。 |
 | **②変動履歴** | POS からの変動がロスしかアクティビティが振り分けられず、他が全て「管理」になる。参照IDも空。 | **原因**：①インストール後しばらく管理画面を開いていないとオフラインセッションが無く、POS から `api/log-inventory-change` が 401 で失敗する。②その場合、後から `inventory_levels/update` Webhook だけが記録され「管理」・参照IDなしになる。**対策**：利用手順で「初回は必ず1回管理画面でアプリを開く」を案内（上記「本番リリース時の2つの課題」と同一）。各 POS 確定処理では既に `api/log-inventory-change` と `sourceId` を渡す実装済み。詳細は `docs/INVENTORY_CHANGE_ACTIVITY_WHY_MANAGEMENT.md`・`docs/INVENTORY_HISTORY_ADMIN_AND_DELTA_CAUSE.md`。 |
 | **②変動履歴** | 履歴の項目を、商品名・オプションを含め他商品リスト・CSV と同等にしたい。「変動量」→「変動数」に変更したい。 | **一覧・CSV**：表示項目を「発生日時・商品名・SKU・オプション・ロケーション・アクティビティ・**変動数**・変動後数量・参照ID・備考」に変更。商品名・オプションはバリアントを GraphQL で一括取得して付与。CSV はオプションを「オプション1」「オプション2」「オプション3」列で出力。 |
+| **②変動履歴** | 一覧・CSVの「ロケーション」列に ID や「出庫元」等のラベルではなく、実ロケーション名を表示したい。 | **api/log-inventory-change**：POS から送信される `locationName` が未設定または「出庫元」等のラベルのとき、GraphQL（`location(id).name`）で実ロケーション名を取得し、保存時に `resolvedLocationName` として DB に記録。管理画面の在庫変動履歴一覧・CSV の「ロケーション」列で正しい名前が表示される。実装: `resolveLocationName`（api.log-inventory-change.tsx）。 |
 
 **メタフィールドから Render DB への方向性変更について**  
 在庫変動履歴は当初メタフィールドで検討していたが、データ量・検索要件のため **Prisma（Render の PostgreSQL 等）の `InventoryChangeLog`** で実装済み。在庫高の日次スナップショットは引き続き **Metafield** に保存（Cron またはフォールバックで保存）。処理の分岐は「スナップショット＝Metafield 読み書き」「変動履歴＝DB 読み書き」で整理されている。
@@ -140,6 +144,9 @@
 | **微調整済み** | 棚卸ページ：上部メニュー下の余白を狭く（タブ＋区切り線を1ブロックにまとめて余白削減）。設定ページ：「破棄」「保存」ボタンを右寄せし、上下余白を抑えて浮き感を軽減 |
 
 **直近の主な更新（2026-02）**:
+- **在庫変動履歴のロケーション名修正（別チャットで実装）**: 在庫変動履歴一覧・CSVで「ロケーション」列に正しいロケーション名が表示されるよう修正。**api/log-inventory-change** で `locationName` が未設定または「出庫元」等のラベルのとき、GraphQL（`location(id)`）で実ロケーション名を取得し DB に保存。管理画面の在庫変動履歴タブの一覧・CSV出力の「ロケーション」列で、ID やラベルではなくショップのロケーション名が表示される。実装: `app/routes/api.log-inventory-change.tsx`（`resolveLocationName`、保存時の `resolvedLocationName`）。
+- **希望納品日・到着予定日ボタン設定のUI改善（2026-02-11）**: ①**希望納品日の表示箇所**: 発注先マスタと分離し、仕入先マスタと同様に「左：タイトル＋説明／右：白カード」で「希望納品日の使用」を独立ブロックに。右側にラジオ（使用する/使用しない）＋日程ボタンリストを配置。②**日程ボタンのリストUI**: 希望納品日・到着予定日ともに、CSV出力項目設定に似た縦リストに変更（チェック・並び順・**ボタン名**・日数・↑↓）。チェックを外すとリストから削除、並び順は数字入力または上下ボタンで変更。③**ボタン名の編集**: アプリに表示するボタン名を管理画面で編集可能に。`order.desiredDeliveryQuickDayLabels` / `outbound.arrivalQuickDayLabels`（日数→ラベル）を保存。未設定時は日数から自動（7→1週間後、30→1ヶ月後、それ以外→○日後）。④**初期値**: 希望納品日は 1,2,3,7,30 日後（1週間後・1ヶ月後含む）、到着予定日は 1,2 日後。いずれも編集・追加可能。⑤**POSでの表示**: OrderConditions（発注）・ModalOutbound（出庫）でカスタムラベルを参照し、設定したボタン名を表示。実装: `app.settings.tsx`（型・サニタイザー・ヘルパー・UI）、`OrderConditions.jsx`、`ModalOutbound.jsx`。
+- **入出庫・仕入・ロス・棚卸のCSV出力項目設定（2026-02-11）**: ①**設定画面**: 入庫設定タブに「入出庫履歴CSV出力項目設定」、仕入設定タブに「仕入履歴CSV出力項目設定」、ロス設定タブに「ロス履歴CSV出力項目設定」、棚卸設定タブに「棚卸履歴CSV出力項目設定」を追加。いずれも発注のCSV出力項目設定と同様のUI（左：タイトル＋説明、右：選択中項目のチェック・並び番号・項目名・上下ボタン、未選択項目の追加、デフォルトに戻す）。②**型・サニタイザー**: `SettingsV1` に `inbound.csvExportColumns` / `purchase.csvExportColumns` / `loss.csvExportColumns` / `inventoryCount.csvExportColumns` を追加。`sanitizeSettings` で各配列を検証し、空の場合はデフォルト並びを代入。③**各履歴画面のCSV連動**: 入出庫（app.history）・仕入（app.purchase）・ロス（app.loss）・棚卸（app.inventory-count）の loader で設定から該当 `csvExportColumns` を取得し、一括・モーダル両方のCSV出力で設定の並び・含める列でヘッダーと行を生成。入出庫は出庫も入庫と同じ設定を共有。棚卸は明細あり/明細なしの両方に対応（明細なしは設定のうち先頭7項目のみ）。実装: `app.settings.tsx`（定数・サニタイザー・4タブのCSV設定UI）、`app.history.tsx` / `app.purchase.tsx` / `app.loss.tsx` / `app.inventory-count.tsx`（loader で設定取得・CSV生成で設定参照）。
 - **在庫変動履歴：出庫・入庫の確定処理から確実に api/log-inventory-change を呼ぶよう修正（2026-02-10）**: ①**出庫**: POS「出庫タイル→出庫モーダルで確定」のメインフロー（`submitTransferCore`）では、Transfer 作成後に `logInventoryChangeToApi` を呼んでおらず「管理」のままだったため、Transfer 作成成功直後に `logInventoryChangeToApi`（`activity: outbound_transfer`）を呼ぶ処理を追加（`extensions/stock-transfer-tile/src/ModalOutbound.jsx`）。②**入庫**: 通常受領分（plannedItems / cappedItems）で `receiveShipmentWithFallbackV2` 後に API が呼ばれていなかったため、単一シップメント・複数シップメントの両方で受領後に `logInventoryChangeToApi`（`activity: inbound_transfer`）を呼ぶ処理を追加（`extensions/stock-transfer-inbound/src/screens/InboundListScreen.jsx`）。③**棚卸・仕入・ロス**は全確定処理で既に API を呼んでいることをコード上で確認済み。④**ドキュメント**: 「なぜロス以外が管理になるか」「種別を付けるには api/log-inventory-change を各確定処理で呼ぶ」旨を `docs/INVENTORY_CHANGE_ACTIVITY_WHY_MANAGEMENT.md` に新規作成。
 - **出庫マルチシップメント挙動の定義**: `docs/OUTBOUND_MULTI_SHIPMENT_BEHAVIOR.md` を作成。出庫リストの「確定する」「下書き保存」「配送準備完了にする」の挙動を明確化。Shopify Admin API 検証に基づき、既存 Transfer へのシップメント追加は `inventoryShipmentCreate`（下書き）または `inventoryShipmentCreateInTransit`（確定）で `movementId` に Transfer ID を渡すことで可能であることを確認。`READY_TO_SHIP` な Transfer の lineItems 更新は `inventoryTransferSetItems` で可能だが、`READY_TO_SHIP` から `DRAFT` への戻しは API がサポートしていないことを明記。UI では「編集」モーダルから「シップメントを確定」を削除し、出庫リストの「確定する」で Transfer またはシップメント全体の確定が行われるように簡素化。
 - **POS拡張の4分割**: 出庫・入庫・ロス・棚卸を各1拡張に分割（stock-transfer-tile=出庫のみ `ModalOutbound.jsx`、stock-transfer-inbound=入庫のみ、stock-transfer-loss=ロスのみ・棚卸関連ファイル削除、stock-transfer-stocktake=棚卸のみ・新規作成）。ビルドサイズ対策・単一機能化。4分割後の検証結果は `docs/EXTENSION_VERIFICATION_4SPLIT.md` に記載。

@@ -12,6 +12,18 @@ import { logInventoryChangesFromAdjustment } from "../utils/inventory-change-log
 const PURCHASE_NS = "stock_transfer_pos";
 const PURCHASE_KEY = "purchase_entries_v1";
 
+// 仕入履歴CSV列（設定の「仕入履歴CSV出力項目設定」と一致）
+const PURCHASE_CSV_COLUMN_IDS = [
+  "purchaseId", "name", "date", "location", "supplier", "carrier", "trackingNumber", "status",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "quantity",
+] as const;
+const PURCHASE_CSV_LABELS: Record<string, string> = {
+  purchaseId: "仕入ID", name: "名称", date: "日付", location: "入庫先ロケーション", supplier: "仕入先",
+  carrier: "配送業者", trackingNumber: "配送番号", status: "ステータス", productTitle: "商品名", sku: "SKU",
+  barcode: "JAN", option1: "オプション1", option2: "オプション2", option3: "オプション3", quantity: "数量",
+};
+const DEFAULT_PURCHASE_CSV_COLUMNS = [...PURCHASE_CSV_COLUMN_IDS];
+
 function normalizeLocationGid(locationId: string): string {
   const s = String(locationId || "").trim();
   if (!s) return "";
@@ -284,9 +296,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
-  // 仕入先マスタ・配送業者マスタ（設定から取得）
+  // 仕入先マスタ・配送業者マスタ・CSV出力項目（設定から取得）
   let suppliers: Array<{ id: string; name: string; code?: string }> = [];
   let carriers: Array<{ id: string; label: string; company: string; sortOrder?: number }> = [];
+  let purchaseCsvExportColumns: string[] = DEFAULT_PURCHASE_CSV_COLUMNS;
   const settingsRaw = settingsData?.data?.currentAppInstallation?.metafield?.value;
   if (typeof settingsRaw === "string" && settingsRaw) {
     try {
@@ -314,6 +327,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
           .filter((c: any) => c.id && c.label && c.company)
           .sort((a: any, b: any) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
       }
+
+      const cols = Array.isArray(parsed?.purchase?.csvExportColumns) ? parsed.purchase.csvExportColumns : [];
+      const valid = (cols as string[]).filter((id: string) => PURCHASE_CSV_COLUMN_IDS.includes(id as any));
+      if (valid.length > 0) purchaseCsvExportColumns = valid;
     } catch {
       suppliers = [];
       carriers = [];
@@ -330,6 +347,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     carriers,
     shopTimezone,
     todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
+    purchaseCsvExportColumns,
     pageInfo: {
       hasNextPage: false,
       hasPreviousPage: false,
@@ -791,14 +809,17 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function PurchasePage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, entries, pageInfo, suppliers, carriers, shopTimezone, todayInShopTimezone } = loaderData || {
+  const { locations, entries, pageInfo, suppliers, carriers, shopTimezone, todayInShopTimezone, purchaseCsvExportColumns } = loaderData || {
     locations: [] as LocationNode[],
     entries: [] as PurchaseEntry[],
     suppliers: [] as Array<{ id: string; name: string; code?: string }>,
     carriers: [] as Array<{ id: string; label: string; company: string; sortOrder?: number }>,
     shopTimezone: "UTC",
+    todayInShopTimezone: getDateInShopTimezone(new Date(), "UTC"),
+    purchaseCsvExportColumns: DEFAULT_PURCHASE_CSV_COLUMNS,
     pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
   };
+  const csvColumns = purchaseCsvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS;
   const fetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   const location = useLocation();
@@ -994,23 +1015,9 @@ export default function PurchasePage() {
     setCsvExportProgress({ current: 0, total: selectedEntries.length });
 
     try {
-      const headers = [
-        "仕入ID",
-        "名称",
-        "日付",
-        "入庫先ロケーション",
-        "仕入先",
-        "配送業者",
-        "配送番号",
-        "ステータス",
-        "商品名",
-        "SKU",
-        "JAN",
-        "オプション1",
-        "オプション2",
-        "オプション3",
-        "数量",
-      ];
+      const headers = csvColumns.map((id) => PURCHASE_CSV_LABELS[id] ?? id);
+      const toRow = (rowObj: Record<string, string | number>) =>
+        csvColumns.map((id) => String(rowObj[id] ?? ""));
 
       const rows: string[][] = [];
       for (let i = 0; i < selectedEntries.length; i++) {
@@ -1021,42 +1028,42 @@ export default function PurchasePage() {
         const statusLabel = STATUS_LABEL[e.status] || e.status;
 
         if (e.items.length === 0) {
-          rows.push([
-            e.id,
-            e.purchaseName || e.id,
+          rows.push(toRow({
+            purchaseId: e.id,
+            name: e.purchaseName || e.id,
             date,
-            locationName,
-            e.supplierName || "",
-            e.carrier || "",
-            e.trackingNumber || "",
-            statusLabel,
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-          ]);
+            location: locationName,
+            supplier: e.supplierName || "",
+            carrier: e.carrier || "",
+            trackingNumber: e.trackingNumber || "",
+            status: statusLabel,
+            productTitle: "",
+            sku: "",
+            barcode: "",
+            option1: "",
+            option2: "",
+            option3: "",
+            quantity: "",
+          }));
         } else {
           e.items.forEach((item) => {
-            rows.push([
-              e.id,
-              e.purchaseName || e.id,
+            rows.push(toRow({
+              purchaseId: e.id,
+              name: e.purchaseName || e.id,
               date,
-              locationName,
-              e.supplierName || "",
-              e.carrier || "",
-              e.trackingNumber || "",
-              statusLabel,
-              item.title || "",
-              item.sku || "",
-              item.barcode || "",
-              item.option1 || "",
-              item.option2 || "",
-              item.option3 || "",
-              String(item.quantity || 0),
-            ]);
+              location: locationName,
+              supplier: e.supplierName || "",
+              carrier: e.carrier || "",
+              trackingNumber: e.trackingNumber || "",
+              status: statusLabel,
+              productTitle: item.title || "",
+              sku: item.sku || "",
+              barcode: item.barcode || "",
+              option1: item.option1 || "",
+              option2: item.option2 || "",
+              option3: item.option3 || "",
+              quantity: item.quantity || 0,
+            }));
           });
         }
       }
@@ -1226,23 +1233,9 @@ export default function PurchasePage() {
       alert("商品リストがありません");
       return;
     }
-    const headers = [
-      "仕入ID",
-      "名称",
-      "日付",
-      "入庫先ロケーション",
-      "仕入先",
-      "配送業者",
-      "配送番号",
-      "ステータス",
-      "商品名",
-      "SKU",
-      "JAN",
-      "オプション1",
-      "オプション2",
-      "オプション3",
-      "数量",
-    ];
+    const headers = csvColumns.map((id) => PURCHASE_CSV_LABELS[id] ?? id);
+    const toRow = (rowObj: Record<string, string | number>) =>
+      csvColumns.map((id) => String(rowObj[id] ?? ""));
     const locationName =
       modalEntry.locationName || locations.find((l) => l.id === modalEntry.locationId)?.name || modalEntry.locationId;
     const date = modalEntry.date || extractDateFromISO(modalEntry.createdAt, shopTimezone);
@@ -1250,23 +1243,23 @@ export default function PurchasePage() {
 
     const rows: string[][] = [];
     modalItems.forEach((item) => {
-      rows.push([
-        modalEntry.id,
-        modalEntry.purchaseName || modalEntry.id,
+      rows.push(toRow({
+        purchaseId: modalEntry.id,
+        name: modalEntry.purchaseName || modalEntry.id,
         date,
-        locationName,
-        modalEntry.supplierName || "",
-        modalEntry.carrier || "",
-        modalEntry.trackingNumber || "",
-        statusLabel,
-        item.title || "",
-        item.sku || "",
-        item.barcode || "",
-        item.option1 || "",
-        item.option2 || "",
-        item.option3 || "",
-        String(item.quantity || 0),
-      ]);
+        location: locationName,
+        supplier: modalEntry.supplierName || "",
+        carrier: modalEntry.carrier || "",
+        trackingNumber: modalEntry.trackingNumber || "",
+        status: statusLabel,
+        productTitle: item.title || "",
+        sku: item.sku || "",
+        barcode: item.barcode || "",
+        option1: item.option1 || "",
+        option2: item.option2 || "",
+        option3: item.option3 || "",
+        quantity: item.quantity || 0,
+      }));
     });
 
     const csvContent = [headers, ...rows]
@@ -2501,24 +2494,7 @@ export default function PurchasePage() {
                       <s-text tone="subdued" size="small">
                         表示: {filteredEntries.length}件 / {estimatedTotal}
                       </s-text>
-                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                        {filteredEntries.length > 0 && (
-                          <button
-                            onClick={exportCSV}
-                            style={{
-                              padding: "6px 12px",
-                              backgroundColor: "#007bff",
-                              color: "white",
-                              border: "none",
-                              borderRadius: "4px",
-                              cursor: "pointer",
-                              fontSize: "14px",
-                            }}
-                          >
-                            CSV出力（表示中）
-                          </button>
-                        )}
-                      </div>
+                      {/* 一覧のCSV一括ダウンロードは非表示（モーダル内のCSV出力のみ利用可能） */}
                     </div>
                     {filteredEntries.length === 0 ? (
                       <s-box padding="base">
