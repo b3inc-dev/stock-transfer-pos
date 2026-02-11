@@ -288,6 +288,36 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return new Response("OK", { status: 200 });
     }
 
+    // 重複チェック：同じタイムスタンプで既にadmin_webhookログが存在する場合はスキップ
+    // （inventory_levels/updateが複数回呼ばれる場合の二重登録を防ぐ）
+    if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+      const duplicateCheckThreshold = new Date(updatedAt.getTime() - 5 * 1000); // 5秒前
+      const duplicateCheckTo = new Date(updatedAt.getTime() + 5 * 1000); // 5秒後
+      const duplicateAdminLog = await (db as any).inventoryChangeLog.findFirst({
+        where: {
+          shop,
+          inventoryItemId: inventoryItemIdRaw,
+          locationId: locationIdRaw,
+          activity: "admin_webhook",
+          timestamp: { gte: duplicateCheckThreshold, lte: duplicateCheckTo },
+        },
+      });
+      if (duplicateAdminLog) {
+        console.log(
+          `[inventory_levels/update] Skipping duplicate admin_webhook log: existing id=${duplicateAdminLog.id}, timestamp=${duplicateAdminLog.timestamp}, quantityAfter=${duplicateAdminLog.quantityAfter}`
+        );
+        // 既存ログのquantityAfterを更新（最新の値に更新）
+        if (duplicateAdminLog.quantityAfter !== available) {
+          await (db as any).inventoryChangeLog.update({
+            where: { id: duplicateAdminLog.id },
+            data: { quantityAfter: available },
+          });
+          console.log(`[inventory_levels/update] Updated existing admin_webhook log quantityAfter: ${duplicateAdminLog.quantityAfter} -> ${available}`);
+        }
+        return new Response("OK", { status: 200 });
+      }
+    }
+
     // 同一の在庫変動がすでに別の経路で記録されていたら webhook では「管理」行を新規作成せず、
     // 既存行の quantityAfter を最新値で更新する。
     // （POS/アプリの api/log-inventory-change、売上 orders.updated、返品 refunds.create で正しい種別が付いている）
@@ -302,8 +332,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         "order_sales",
         "refund", // 売上・返品（orders.updated / refunds.create で記録済み）
       ];
-      // タイムウィンドウを10分に拡大（refunds/createとinventory_levels/updateのタイムスタンプのずれを考慮）
-      const recentThreshold = new Date(updatedAt.getTime() - 10 * 60 * 1000); // 10分前
+      // タイムウィンドウを拡大（orders/updatedやrefunds/createとinventory_levels/updateのタイムスタンプのずれを考慮）
+      // 過去30分前から未来5分後まで検索（orders/updatedが先に来る場合も考慮）
+      const searchFrom = new Date(updatedAt.getTime() - 30 * 60 * 1000); // 30分前
+      const searchTo = new Date(updatedAt.getTime() + 5 * 60 * 1000); // 5分後
 
       // 直近で同一商品・ロケーションの既知アクティビティが記録されていれば、
       // それをこの webhook で上書き（quantityAfter のみ更新）し、新しい「管理」行は作らない。
@@ -323,37 +355,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         `gid://shopify/Location/${locationIdRaw}`,
       ];
 
-      // まず10分前のウィンドウで検索
+      // 過去30分前から未来5分後までの範囲で検索
+      // （orders/updatedが先に来て、その後にinventory_levels/updateが来る場合も考慮）
       let recentNonAdminLog = await (db as any).inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: { in: inventoryItemIdCandidates },
           locationId: { in: locationIdCandidates },
           activity: { in: knownActivities },
-          timestamp: { gte: recentThreshold },
+          timestamp: { gte: searchFrom, lte: searchTo },
         },
         orderBy: { timestamp: "desc" },
       });
-
-      // 見つからない場合、タイムウィンドウを広げて再検索（30分前まで）
-      if (!recentNonAdminLog) {
-        const extendedThreshold = new Date(updatedAt.getTime() - 30 * 60 * 1000);
-        recentNonAdminLog = await (db as any).inventoryChangeLog.findFirst({
-          where: {
-            shop,
-            inventoryItemId: { in: inventoryItemIdCandidates },
-            locationId: { in: locationIdCandidates },
-            activity: { in: knownActivities },
-            timestamp: { gte: extendedThreshold },
-          },
-          orderBy: { timestamp: "desc" },
-        });
-        
-        if (recentNonAdminLog) {
-          console.log(
-            `[inventory_levels/update] Found log with extended window (30min): id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, timestamp=${recentNonAdminLog.timestamp}`
-          );
-        }
+      
+      if (recentNonAdminLog) {
+        console.log(
+          `[inventory_levels/update] Found existing log: id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, timestamp=${recentNonAdminLog.timestamp}`
+        );
       }
 
       // デバッグログ：検索結果を出力
@@ -364,13 +382,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             shop,
             inventoryItemId: { in: inventoryItemIdCandidates },
             locationId: { in: locationIdCandidates },
-            timestamp: { gte: new Date(updatedAt.getTime() - 30 * 60 * 1000) },
+            timestamp: { gte: searchFrom, lte: searchTo },
           },
           orderBy: { timestamp: "desc" },
           take: 10,
         });
         console.log(
-          `[inventory_levels/update] No recent non-admin log found. Search criteria: shop=${shop}, inventoryItemIds=[${inventoryItemIdCandidates.join(", ")}], locationIds=[${locationIdCandidates.join(", ")}], activities=[${knownActivities.join(", ")}], timestamp >= ${recentThreshold.toISOString()}`
+          `[inventory_levels/update] No recent non-admin log found. Search criteria: shop=${shop}, inventoryItemIds=[${inventoryItemIdCandidates.join(", ")}], locationIds=[${locationIdCandidates.join(", ")}], activities=[${knownActivities.join(", ")}], timestamp between ${searchFrom.toISOString()} and ${searchTo.toISOString()}`
         );
         if (allRecentLogs.length > 0) {
           console.log(

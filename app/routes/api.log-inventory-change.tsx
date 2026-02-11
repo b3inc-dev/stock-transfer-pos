@@ -236,7 +236,8 @@ export async function action({ request }: ActionFunctionArgs) {
           results.push({ ok: true, message: "Log already exists", id: existingLog.id });
           continue;
         }
-        const recentFrom = new Date(ts.getTime() - 10 * 60 * 1000);
+        // 検索範囲を30分前〜5分後に拡大（inventory_levels/updateとのタイムスタンプのずれを考慮）
+        const recentFrom = new Date(ts.getTime() - 30 * 60 * 1000);
         const recentTo = new Date(ts.getTime() + 5 * 60 * 1000);
         // inventory_levels/update Webhookは数値ID形式で保存しているが、念のため両方の形式を候補として検索
         const inventoryItemIdCandidates = [
@@ -258,6 +259,9 @@ export async function action({ request }: ActionFunctionArgs) {
           orderBy: { timestamp: "desc" },
         });
         if (recentAdminLog) {
+          console.log(
+            `[api.log-inventory-change] Found admin_webhook log to update: id=${recentAdminLog.id}, activity=${activity}, delta=${delta}, quantityAfter=${quantityAfter}`
+          );
           const updateData: Record<string, unknown> = {
             activity,
             sourceType: activity,
@@ -268,8 +272,13 @@ export async function action({ request }: ActionFunctionArgs) {
           if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
           await (db as any).inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
+          console.log(`[api.log-inventory-change] Updated admin_webhook log: id=${recentAdminLog.id}, new activity=${activity}`);
           results.push({ ok: true, updated: true, id: recentAdminLog.id });
           continue;
+        } else {
+          console.log(
+            `[api.log-inventory-change] No admin_webhook log found to update. Search criteria: shop=${shop}, inventoryItemIds=[${inventoryItemIdCandidates.join(", ")}], locationIds=[${locationIdCandidates.join(", ")}], timestamp between ${recentFrom.toISOString()} and ${recentTo.toISOString()}`
+          );
         }
         const log = await (db as any).inventoryChangeLog.create({
           data: {
@@ -303,7 +312,8 @@ export async function action({ request }: ActionFunctionArgs) {
         results.push({ ok: true, message: "Log already exists", id: existingLog.id });
         continue;
       }
-      const recentFrom = new Date(ts.getTime() - 10 * 60 * 1000);
+      // 検索範囲を30分前〜5分後に拡大（inventory_levels/updateとのタイムスタンプのずれを考慮）
+      const recentFrom = new Date(ts.getTime() - 30 * 60 * 1000);
       const recentTo = new Date(ts.getTime() + 5 * 60 * 1000);
       // inventory_levels/update Webhookは数値ID形式で保存しているが、念のため両方の形式を候補として検索
       const inventoryItemIdCandidates = [
@@ -325,6 +335,9 @@ export async function action({ request }: ActionFunctionArgs) {
         orderBy: { timestamp: "desc" },
       });
       if (recentAdminLog) {
+        console.log(
+          `[api.log-inventory-change] Found admin_webhook log to update: id=${recentAdminLog.id}, activity=${activity}, delta=${delta}, quantityAfter=${quantityAfter}`
+        );
         const updateData: Record<string, unknown> = {
           activity,
           sourceType: activity,
@@ -335,8 +348,13 @@ export async function action({ request }: ActionFunctionArgs) {
         if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
         if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
         await (db as any).inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
+        console.log(`[api.log-inventory-change] Updated admin_webhook log: id=${recentAdminLog.id}, new activity=${activity}`);
         results.push({ ok: true, updated: true, id: recentAdminLog.id });
         continue;
+      } else {
+        console.log(
+          `[api.log-inventory-change] No admin_webhook log found to update. Search criteria: shop=${shopId}, inventoryItemIds=[${inventoryItemIdCandidates.join(", ")}], locationIds=[${locationIdCandidates.join(", ")}], timestamp between ${recentFrom.toISOString()} and ${recentTo.toISOString()}`
+        );
       }
       const log = await (db as any).inventoryChangeLog.create({
         data: {
