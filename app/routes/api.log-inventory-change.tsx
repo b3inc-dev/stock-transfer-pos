@@ -108,6 +108,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
+    // デバッグログ: APIが呼ばれたことを記録
+    console.log(`[api.log-inventory-change] API endpoint called: method=${request.method}, url=${request.url}`);
+    
     // 401 の原因切り分け: トークン未送信 vs トークン検証失敗（秘密鍵不一致など）
     const authHeader = request.headers.get("authorization");
     const hasAuth = authHeader?.startsWith("Bearer ");
@@ -144,6 +147,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const body = await request.json();
     // バッチ: body.entries が配列なら複数件、なければ body 1件として扱う（後方互換）
     const entries: any[] = Array.isArray(body?.entries) && body.entries.length > 0 ? body.entries : [body];
+    
+    console.log(`[api.log-inventory-change] Request received: shop=${shop}, entries.length=${entries.length}, activities=${entries.map((e: any) => e?.activity).join(", ")}`);
 
     let sessions = await (sessionStorage as any).findSessionsByShop(shop);
     let session = sessions?.find((s: any) => s.isOnline === false) ?? sessions?.[0];
@@ -204,9 +209,12 @@ export async function action({ request }: ActionFunctionArgs) {
       } = singleBody;
 
       if (!inventoryItemId || !locationId || !activity) {
+        console.warn(`[api.log-inventory-change] Missing required fields: inventoryItemId=${!!inventoryItemId}, locationId=${!!locationId}, activity=${!!activity}`);
         results.push({ ok: false, error: "Missing required fields" });
         continue;
       }
+      
+      console.log(`[api.log-inventory-change] Processing entry: activity=${activity}, inventoryItemId=${inventoryItemId}, locationId=${locationId}, delta=${delta}`);
 
       const rawItemId = toRawId(inventoryItemId);
       const rawLocId = toRawId(locationId);
