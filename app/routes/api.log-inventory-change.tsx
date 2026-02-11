@@ -238,11 +238,20 @@ export async function action({ request }: ActionFunctionArgs) {
         }
         const recentFrom = new Date(ts.getTime() - 10 * 60 * 1000);
         const recentTo = new Date(ts.getTime() + 5 * 60 * 1000);
+        // inventory_levels/update Webhookは数値ID形式で保存しているが、念のため両方の形式を候補として検索
+        const inventoryItemIdCandidates = [
+          rawItemId,
+          `gid://shopify/InventoryItem/${rawItemId}`,
+        ];
+        const locationIdCandidates = [
+          rawLocId,
+          `gid://shopify/Location/${rawLocId}`,
+        ];
         const recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
           where: {
             shop,
-            inventoryItemId: rawItemId,
-            locationId: rawLocId,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
             activity: "admin_webhook",
             timestamp: { gte: recentFrom, lte: recentTo },
           },
@@ -296,11 +305,20 @@ export async function action({ request }: ActionFunctionArgs) {
       }
       const recentFrom = new Date(ts.getTime() - 10 * 60 * 1000);
       const recentTo = new Date(ts.getTime() + 5 * 60 * 1000);
+      // inventory_levels/update Webhookは数値ID形式で保存しているが、念のため両方の形式を候補として検索
+      const inventoryItemIdCandidates = [
+        rawItemId,
+        `gid://shopify/InventoryItem/${rawItemId}`,
+      ];
+      const locationIdCandidates = [
+        rawLocId,
+        `gid://shopify/Location/${rawLocId}`,
+      ];
       const recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
         where: {
           shop: shopId,
-          inventoryItemId: rawItemId,
-          locationId: rawLocId,
+          inventoryItemId: { in: inventoryItemIdCandidates },
+          locationId: { in: locationIdCandidates },
           activity: "admin_webhook",
           timestamp: { gte: recentFrom, lte: recentTo },
         },
