@@ -245,15 +245,43 @@ export async function loader({ request }: LoaderFunctionArgs) {
           });
 
           // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
+          // タイムアウト対策：バリアントIDの数を制限（最大500件まで）
           const variantIds = [...new Set(changeHistoryLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
+          const MAX_VARIANTS = 500; // タイムアウト対策：最大500件まで取得
+          const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS);
+          
+          if (limitedVariantIds.length < variantIds.length) {
+            console.warn(`[inventory-info] Variant IDs limited to ${MAX_VARIANTS} out of ${variantIds.length} total variants`);
+          }
+          
           const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
-          if (variantIds.length > 0 && session) {
+          if (limitedVariantIds.length > 0 && session) {
             const CHUNK = 250;
-            for (let i = 0; i < variantIds.length; i += CHUNK) {
-              const chunk = variantIds.slice(i, i + CHUNK);
+            const MAX_CHUNKS = 10; // タイムアウト対策：最大10チャンク（2500件）まで処理
+            const chunksToProcess = Math.min(Math.ceil(limitedVariantIds.length / CHUNK), MAX_CHUNKS);
+            
+            for (let i = 0; i < chunksToProcess * CHUNK && i < limitedVariantIds.length; i += CHUNK) {
+              const chunk = limitedVariantIds.slice(i, i + CHUNK);
               try {
-                const resp = await admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
+                // タイムアウト対策：各クエリに30秒のタイムアウトを設定（admin.graphql は直接タイムアウト設定できないため、Promise.race で実装）
+                const queryPromise = admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
+                const timeoutPromise = new Promise((_, reject) => 
+                  setTimeout(() => reject(new Error("GraphQL query timeout (30s)")), 30000)
+                );
+                
+                const resp = await Promise.race([queryPromise, timeoutPromise]) as Response;
                 const data = await resp.json();
+                
+                // GraphQLエラーをチェック
+                if (data?.errors) {
+                  const errorMessages = Array.isArray(data.errors)
+                    ? data.errors.map((e: any) => e?.message ?? String(e)).join(", ")
+                    : String(data.errors);
+                  console.error("[inventory-info] GraphQL error fetching variants:", errorMessages);
+                  // エラーが発生しても処理を続行（商品名なしで表示）
+                  continue;
+                }
+                
                 const nodes = (data?.data?.nodes ?? []).filter(Boolean);
                 for (const node of nodes) {
                   if (!node?.id) continue;
@@ -268,7 +296,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
                   });
                 }
               } catch (e) {
-                console.warn("[inventory-info] Variant batch for change history failed:", e);
+                console.error(`[inventory-info] Variant batch ${i / CHUNK + 1} failed:`, e);
+                // エラーが発生しても処理を続行（商品名なしで表示）
+                // タイムアウトやエラーが発生した場合は、残りのチャンクもスキップして続行
+                if (e instanceof Error && e.message.includes("timeout")) {
+                  console.warn(`[inventory-info] Timeout detected, skipping remaining variant batches`);
+                  break;
+                }
               }
             }
           }
@@ -1026,6 +1060,8 @@ export default function InventoryInfoPage() {
                           borderRadius: "8px",
                           border: "1px solid #e1e3e5",
                           backgroundColor: "#ffffff",
+                          minWidth: 0,
+                          overflow: "hidden",
                         }}
                       >
                         <div
@@ -1039,9 +1075,13 @@ export default function InventoryInfoPage() {
                         </div>
                         <div
                           style={{
-                            fontSize: "24px",
+                            fontSize: "clamp(14px, 3vw, 24px)",
                             fontWeight: 700,
                             color: "#202223",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            lineHeight: "1.2",
                           }}
                         >
                           {summary.totalQuantity.toLocaleString()}
@@ -1055,6 +1095,8 @@ export default function InventoryInfoPage() {
                           borderRadius: "8px",
                           border: "1px solid #e1e3e5",
                           backgroundColor: "#ffffff",
+                          minWidth: 0,
+                          overflow: "hidden",
                         }}
                       >
                         <div
@@ -1068,9 +1110,13 @@ export default function InventoryInfoPage() {
                         </div>
                         <div
                           style={{
-                            fontSize: "24px",
+                            fontSize: "clamp(14px, 3vw, 24px)",
                             fontWeight: 700,
                             color: "#202223",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            lineHeight: "1.2",
                           }}
                         >
                           ¥{Math.round(summary.totalRetailValue).toLocaleString()}
@@ -1084,6 +1130,8 @@ export default function InventoryInfoPage() {
                           borderRadius: "8px",
                           border: "1px solid #e1e3e5",
                           backgroundColor: "#ffffff",
+                          minWidth: 0,
+                          overflow: "hidden",
                         }}
                       >
                         <div
@@ -1097,9 +1145,13 @@ export default function InventoryInfoPage() {
                         </div>
                         <div
                           style={{
-                            fontSize: "24px",
+                            fontSize: "clamp(14px, 3vw, 24px)",
                             fontWeight: 700,
                             color: "#202223",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            lineHeight: "1.2",
                           }}
                         >
                           ¥{Math.round(summary.totalCompareAtPriceValue).toLocaleString()}
@@ -1113,6 +1165,8 @@ export default function InventoryInfoPage() {
                           borderRadius: "8px",
                           border: "1px solid #e1e3e5",
                           backgroundColor: "#ffffff",
+                          minWidth: 0,
+                          overflow: "hidden",
                         }}
                       >
                         <div
@@ -1126,9 +1180,13 @@ export default function InventoryInfoPage() {
                         </div>
                         <div
                           style={{
-                            fontSize: "24px",
+                            fontSize: "clamp(14px, 3vw, 24px)",
                             fontWeight: 700,
                             color: "#202223",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            lineHeight: "1.2",
                           }}
                         >
                           ¥{Math.round(summary.totalCostValue).toLocaleString()}
@@ -1140,10 +1198,11 @@ export default function InventoryInfoPage() {
 
                 {/* 在庫高テーブル */}
                 {snapshots.length > 0 && (
-                  <div style={{ marginTop: "16px" }}>
+                  <div style={{ marginTop: "16px", width: "100%", overflowX: "auto", overflowY: "visible" }}>
                     <table
                       style={{
                         width: "100%",
+                        minWidth: "600px",
                         borderCollapse: "collapse",
                         fontSize: "14px",
                       }}
@@ -1162,6 +1221,7 @@ export default function InventoryInfoPage() {
                               fontWeight: 600,
                               fontSize: "12px",
                               color: "#202223",
+                              whiteSpace: "nowrap",
                             }}
                           >
                             ロケーション
@@ -1173,6 +1233,7 @@ export default function InventoryInfoPage() {
                               fontWeight: 600,
                               fontSize: "12px",
                               color: "#202223",
+                              whiteSpace: "nowrap",
                             }}
                           >
                             合計数量
@@ -1184,6 +1245,7 @@ export default function InventoryInfoPage() {
                               fontWeight: 600,
                               fontSize: "12px",
                               color: "#202223",
+                              whiteSpace: "nowrap",
                             }}
                           >
                             販売価格合計
@@ -1195,6 +1257,7 @@ export default function InventoryInfoPage() {
                               fontWeight: 600,
                               fontSize: "12px",
                               color: "#202223",
+                              whiteSpace: "nowrap",
                             }}
                           >
                             割引前価格合計
@@ -1206,6 +1269,7 @@ export default function InventoryInfoPage() {
                               fontWeight: 600,
                               fontSize: "12px",
                               color: "#202223",
+                              whiteSpace: "nowrap",
                             }}
                           >
                             原価合計
@@ -1220,17 +1284,17 @@ export default function InventoryInfoPage() {
                               borderBottom: index < snapshots.length - 1 ? "1px solid #e1e3e5" : "none",
                             }}
                           >
-                            <td style={{ padding: "12px 16px" }}>{snapshot.locationName}</td>
-                            <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                            <td style={{ padding: "12px 16px", whiteSpace: "nowrap" }}>{snapshot.locationName}</td>
+                            <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                               {snapshot.totalQuantity.toLocaleString()}
                             </td>
-                            <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                            <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                               ¥{Math.round(snapshot.totalRetailValue).toLocaleString()}
                             </td>
-                            <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                            <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                               ¥{Math.round(snapshot.totalCompareAtPriceValue).toLocaleString()}
                             </td>
-                            <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                            <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                               ¥{Math.round(snapshot.totalCostValue).toLocaleString()}
                             </td>
                           </tr>

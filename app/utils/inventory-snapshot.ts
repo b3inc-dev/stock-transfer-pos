@@ -114,7 +114,7 @@ async function requestJson(admin: { request: AdminRequest }, data: string, varia
 /** 全在庫アイテムをページング取得 */
 export async function fetchAllInventoryItems(
   admin: { request: AdminRequest },
-  pageSize: number = 50
+  pageSize: number = 250
 ): Promise<any[]> {
   const allItems: any[] = [];
   let hasNextPage = true;
@@ -235,4 +235,326 @@ export async function fetchAndSaveSnapshotsForDate(
     return { ok: false, userErrors: userErrors.map((e: any) => e.message) };
   }
   return { ok: true };
+}
+
+// ==================== Bulk Operation 実装 ====================
+
+const BULK_OPERATION_QUERY = `#graphql
+  {
+    inventoryItems {
+      edges {
+        node {
+          id
+          unitCost {
+            amount
+            currencyCode
+          }
+          inventoryLevels {
+            edges {
+              node {
+                id
+                quantities(names: ["available"]) {
+                  name
+                  quantity
+                }
+                location {
+                  id
+                  name
+                }
+              }
+            }
+          }
+          variant {
+            id
+            sku
+            price
+            compareAtPrice
+            product {
+              id
+              title
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const BULK_OPERATION_RUN_QUERY = `#graphql
+  mutation BulkOperationRunQuery($query: String!) {
+    bulkOperationRunQuery(query: $query) {
+      bulkOperation {
+        id
+        status
+        errorCode
+        createdAt
+        completedAt
+        objectCount
+        fileSize
+        url
+        partialDataUrl
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
+
+const CURRENT_BULK_OPERATION_QUERY = `#graphql
+  query CurrentBulkOperation {
+    currentBulkOperation {
+      id
+      status
+      errorCode
+      createdAt
+      completedAt
+      objectCount
+      fileSize
+      url
+      partialDataUrl
+    }
+  }
+`;
+
+export type BulkOperationStatus = "CREATED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED" | "EXPIRED";
+
+export type BulkOperationResult = {
+  id: string;
+  status: BulkOperationStatus;
+  errorCode?: string;
+  createdAt: string;
+  completedAt?: string;
+  objectCount?: number;
+  fileSize?: number;
+  url?: string;
+  partialDataUrl?: string;
+};
+
+/** Bulk Operation を開始する */
+export async function startBulkOperation(
+  admin: { request: AdminRequest }
+): Promise<{ ok: boolean; bulkOperation?: BulkOperationResult; userErrors?: string[] }> {
+  try {
+    const data = await requestJson(admin, BULK_OPERATION_RUN_QUERY, {
+      query: BULK_OPERATION_QUERY,
+    });
+
+    if (data?.errors) {
+      return {
+        ok: false,
+        userErrors: Array.isArray(data.errors)
+          ? data.errors.map((e: any) => e?.message ?? String(e))
+          : [String(data.errors)],
+      };
+    }
+
+    const bulkOp = data?.data?.bulkOperationRunQuery?.bulkOperation;
+    const userErrors = data?.data?.bulkOperationRunQuery?.userErrors ?? [];
+
+    if (userErrors.length > 0) {
+      return {
+        ok: false,
+        userErrors: userErrors.map((e: any) => e.message ?? String(e)),
+      };
+    }
+
+    if (!bulkOp) {
+      return { ok: false, userErrors: ["Bulk operation not created"] };
+    }
+
+    return {
+      ok: true,
+      bulkOperation: {
+        id: bulkOp.id,
+        status: bulkOp.status,
+        errorCode: bulkOp.errorCode,
+        createdAt: bulkOp.createdAt,
+        completedAt: bulkOp.completedAt,
+        objectCount: bulkOp.objectCount,
+        fileSize: bulkOp.fileSize,
+        url: bulkOp.url,
+        partialDataUrl: bulkOp.partialDataUrl,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      userErrors: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+}
+
+/** 現在の Bulk Operation のステータスを取得する */
+export async function getCurrentBulkOperation(
+  admin: { request: AdminRequest }
+): Promise<{ ok: boolean; bulkOperation?: BulkOperationResult; error?: string }> {
+  try {
+    const data = await requestJson(admin, CURRENT_BULK_OPERATION_QUERY);
+
+    if (data?.errors) {
+      return {
+        ok: false,
+        error: Array.isArray(data.errors)
+          ? data.errors.map((e: any) => e?.message ?? String(e)).join(", ")
+          : String(data.errors),
+      };
+    }
+
+    const bulkOp = data?.data?.currentBulkOperation;
+    if (!bulkOp) {
+      return { ok: true, bulkOperation: undefined };
+    }
+
+    return {
+      ok: true,
+      bulkOperation: {
+        id: bulkOp.id,
+        status: bulkOp.status,
+        errorCode: bulkOp.errorCode,
+        createdAt: bulkOp.createdAt,
+        completedAt: bulkOp.completedAt,
+        objectCount: bulkOp.objectCount,
+        fileSize: bulkOp.fileSize,
+        url: bulkOp.url,
+        partialDataUrl: bulkOp.partialDataUrl,
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/** Bulk Operation の結果をダウンロードしてパースする */
+export async function downloadBulkOperationResult(
+  url: string
+): Promise<any[]> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download bulk operation result: ${response.statusText}`);
+  }
+
+  const text = await response.text();
+  const lines = text.trim().split("\n").filter((line) => line.trim());
+  const items: any[] = [];
+
+  for (const line of lines) {
+    try {
+      const item = JSON.parse(line);
+      items.push(item);
+    } catch (error) {
+      console.warn("Failed to parse bulk operation result line:", error, line);
+    }
+  }
+
+  return items;
+}
+
+/** Bulk Operation を使って在庫スナップショットを取得して保存 */
+export async function fetchAndSaveSnapshotsForDateUsingBulkOperation(
+  admin: { request: AdminRequest },
+  dateStr: string,
+  maxWaitSeconds: number = 300
+): Promise<{ ok: boolean; userErrors?: string[]; skipped?: boolean }> {
+  try {
+    // 既存の Bulk Operation が実行中か確認
+    const currentOp = await getCurrentBulkOperation(admin);
+    if (currentOp.ok && currentOp.bulkOperation) {
+      const status = currentOp.bulkOperation.status;
+      if (status === "RUNNING" || status === "CREATED") {
+        // 既に実行中の場合は、その完了を待つ
+        return await waitForBulkOperationAndSave(admin, currentOp.bulkOperation.id, dateStr, maxWaitSeconds);
+      }
+    }
+
+    // 新しい Bulk Operation を開始
+    const startResult = await startBulkOperation(admin);
+    if (!startResult.ok || !startResult.bulkOperation) {
+      return {
+        ok: false,
+        userErrors: startResult.userErrors ?? ["Failed to start bulk operation"],
+      };
+    }
+
+    // 完了を待つ
+    return await waitForBulkOperationAndSave(admin, startResult.bulkOperation.id, dateStr, maxWaitSeconds);
+  } catch (error) {
+    return {
+      ok: false,
+      userErrors: [error instanceof Error ? error.message : String(error)],
+    };
+  }
+}
+
+/** Bulk Operation の完了を待って結果を保存する */
+async function waitForBulkOperationAndSave(
+  admin: { request: AdminRequest },
+  bulkOperationId: string,
+  dateStr: string,
+  maxWaitSeconds: number
+): Promise<{ ok: boolean; userErrors?: string[]; skipped?: boolean }> {
+  const startTime = Date.now();
+  const maxWaitMs = maxWaitSeconds * 1000;
+  const pollIntervalMs = 2000; // 2秒ごとにポーリング
+
+  while (Date.now() - startTime < maxWaitMs) {
+    const currentOp = await getCurrentBulkOperation(admin);
+    if (!currentOp.ok || !currentOp.bulkOperation) {
+      return {
+        ok: false,
+        userErrors: [currentOp.error ?? "Failed to get bulk operation status"],
+      };
+    }
+
+    const status = currentOp.bulkOperation.status;
+
+    if (status === "COMPLETED") {
+      // 完了したら結果をダウンロード
+      const url = currentOp.bulkOperation.url;
+      if (!url) {
+        return {
+          ok: false,
+          userErrors: ["Bulk operation completed but no URL provided"],
+        };
+      }
+
+      const items = await downloadBulkOperationResult(url);
+      // Bulk Operation の結果は inventoryItems の配列なので、そのまま集計に使える
+      const newSnapshots = aggregateSnapshotsFromItems(items, dateStr);
+
+      const { shopId, savedSnapshots } = await getSavedSnapshots(admin);
+      const { userErrors } = await saveSnapshotsForDate(admin, shopId, savedSnapshots, newSnapshots, dateStr);
+
+      if (userErrors.length > 0) {
+        return {
+          ok: false,
+          userErrors: userErrors.map((e: any) => e.message),
+        };
+      }
+
+      return { ok: true };
+    }
+
+    if (status === "FAILED" || status === "CANCELED" || status === "EXPIRED") {
+      return {
+        ok: false,
+        userErrors: [
+          `Bulk operation ${status.toLowerCase()}: ${currentOp.bulkOperation.errorCode ?? "Unknown error"}`,
+        ],
+      };
+    }
+
+    // RUNNING または CREATED の場合は待つ
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  // タイムアウト
+  return {
+    ok: false,
+    userErrors: [`Bulk operation timeout after ${maxWaitSeconds} seconds`],
+  };
 }
