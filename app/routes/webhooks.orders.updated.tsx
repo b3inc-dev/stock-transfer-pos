@@ -177,7 +177,48 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
         
         if (!orderLocationId) {
-          console.log(`[orders/updated] No location found for order ${order.id}, skipping admin_webhook update`);
+          // 受注直後は FulfillmentOrder.assignedLocation が null になる仕様のためロケーションが取れない。
+          // この注文の line_items を一時テーブルに保存し、後から届く inventory_levels/update で order_sales に突き合わせる。
+          console.log(`[orders/updated] No location found for order ${order.id}, recording to OrderPendingLocation for inventory_levels/update match`);
+          if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+            for (const lineItem of order.line_items) {
+              if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) continue;
+              try {
+                const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
+                const variantResp = await admin.request({
+                  data: `
+                    #graphql
+                    query GetVariant($id: ID!) {
+                      productVariant(id: $id) {
+                        id
+                        inventoryItem { id }
+                      }
+                    }
+                  `,
+                  variables: { id: variantId },
+                });
+                const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+                const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
+                if (!inventoryItemId) continue;
+                const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+                await (db as any).orderPendingLocation.upsert({
+                  where: {
+                    shop_orderId_inventoryItemId: { shop, orderId: String(order.id), inventoryItemId: rawItemId },
+                  },
+                  create: {
+                    shop,
+                    orderId: String(order.id),
+                    orderCreatedAt: orderCreatedAt,
+                    inventoryItemId: rawItemId,
+                    quantity: lineItem.quantity ?? 1,
+                  },
+                  update: { orderCreatedAt: orderCreatedAt, quantity: lineItem.quantity ?? 1 },
+                });
+              } catch (e) {
+                console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${lineItem.id}:`, e);
+              }
+            }
+          }
         } else {
           // 各line_itemについて、直近のadmin_webhookを検索してorder_salesに上書き
           for (const lineItem of order.line_items) {

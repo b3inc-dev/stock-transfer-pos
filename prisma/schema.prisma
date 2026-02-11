@@ -62,3 +62,18 @@ model InventoryChangeLog {
   @@index([shop, activity])
   @@index([shop, timestamp])
 }
+
+// 受注直後は FulfillmentOrder.assignedLocation が null のため orders/updated でロケーションが取れない。
+// その場合に「この注文のこの商品は売上候補」を一時保存し、inventory_levels/update で突き合わせて order_sales にする。
+model OrderPendingLocation {
+  id               String   @id @default(cuid())
+  shop             String
+  orderId          String   // 注文ID（数値、例: 6844249964790）
+  orderCreatedAt   DateTime
+  inventoryItemId  String   // GID または数値
+  quantity         Int      @default(1)
+  createdAt        DateTime @default(now())
+
+  @@unique([shop, orderId, inventoryItemId])
+  @@index([shop, inventoryItemId, orderCreatedAt])
+}

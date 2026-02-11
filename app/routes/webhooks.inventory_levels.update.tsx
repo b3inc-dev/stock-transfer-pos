@@ -426,10 +426,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
+    // 受注直後は orders/updated でロケーションが取れず OrderPendingLocation に登録されている場合がある。
+    // 同一商品・時刻が近い保留注文があれば、この変動は「売上」として記録する。
+    let pendingOrder: { orderId: string; quantity: number } | null = null;
+    if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+      const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
+      const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
+      const pending = await (db as any).orderPendingLocation.findFirst({
+        where: {
+          shop,
+          inventoryItemId: inventoryItemIdRaw,
+          orderCreatedAt: { gte: pendingFrom, lte: pendingTo },
+        },
+        orderBy: { orderCreatedAt: "desc" },
+      });
+      if (pending) {
+        pendingOrder = { orderId: pending.orderId, quantity: pending.quantity };
+        console.log(`[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, will save as order_sales`);
+      }
+    }
+
+    const finalActivity = pendingOrder ? "order_sales" : activity;
+    const finalSourceId = pendingOrder ? `order_${pendingOrder.orderId}` : sourceId;
+    const finalNote = pendingOrder ? `注文: #${pendingOrder.orderId}` : null;
+
     // 在庫変動ログを保存（deltaがnullでも記録する）
     try {
       if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-        console.log(`[inventory_levels/update] Saving log: shop=${shop}, item=${inventoryItemIdRaw}, location=${locationIdRaw}, locationName=${locationName}, delta=${delta}, quantityAfter=${available}, date=${date}, activity=${activity}`);
+        console.log(`[inventory_levels/update] Saving log: shop=${shop}, item=${inventoryItemIdRaw}, location=${locationIdRaw}, locationName=${locationName}, delta=${delta}, quantityAfter=${available}, date=${date}, activity=${finalActivity}`);
         
         // deltaがnullの場合でも記録する（管理画面からの操作の場合、直前の値が取れないことがある）
         if (delta === null) {
@@ -446,16 +470,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             sku,
             locationId: locationIdRaw, // 元の形式を使用
             locationName, // ロケーション名は取得済み
-            activity,
+            activity: finalActivity,
             delta,
             quantityAfter: available,
-            sourceType: activity,
-            sourceId,
+            sourceType: finalActivity,
+            sourceId: finalSourceId,
             adjustmentGroupId,
-            idempotencyKey,
-            note: null,
+            idempotencyKey: pendingOrder ? `${shop}_order_sales_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingOrder.orderId}_${updatedAt.toISOString()}` : idempotencyKey,
+            note: finalNote,
           },
         });
+        
+        if (pendingOrder && typeof (db as any).orderPendingLocation !== "undefined") {
+          await (db as any).orderPendingLocation.deleteMany({
+            where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw },
+          });
+          console.log(`[inventory_levels/update] Removed OrderPendingLocation for order ${pendingOrder.orderId}, item ${inventoryItemIdRaw}`);
+        }
         
         console.log(`[inventory_levels/update] Log saved successfully`);
       } else {
