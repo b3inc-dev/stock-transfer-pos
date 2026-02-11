@@ -76,17 +76,36 @@ export async function logInventoryChangeToApi({
     }
 
     const body = entries.length === 1 ? entries[0] : { entries };
-    console.log(`[logInventoryChangeToApi] Sending request: entries.length=${entries.length}, activity=${activity}`);
+    console.log(`[logInventoryChangeToApi] Sending request: apiUrl=${apiUrl}, entries.length=${entries.length}, activity=${activity}, body=${JSON.stringify(body).substring(0, 200)}`);
     
-    const res = await fetch(apiUrl, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    let fetchError = null;
+    let res = null;
+    try {
+      res = await fetch(apiUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      console.log(`[logInventoryChangeToApi] Fetch completed: status=${res.status}, statusText=${res.statusText}, activity=${activity}`);
+    } catch (fetchErr) {
+      fetchError = fetchErr;
+      console.error(`[logInventoryChangeToApi] Fetch exception: activity=${activity}, locationId=${locationId}, error=${fetchErr?.message || String(fetchErr)}`, fetchErr);
+    }
+    
+    if (fetchError) {
+      // fetch自体が失敗した場合（ネットワークエラーなど）
+      console.error(`[logInventoryChangeToApi] Fetch failed: activity=${activity}, locationId=${locationId}, error=${fetchError?.message || String(fetchError)}`);
+      return;
+    }
+    
+    if (!res) {
+      console.error(`[logInventoryChangeToApi] No response object: activity=${activity}, locationId=${locationId}`);
+      return;
+    }
     
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error(`[logInventoryChangeToApi] API call failed: status=${res.status}, activity=${activity}, locationId=${locationId}, error=${text}`);
+      console.error(`[logInventoryChangeToApi] API call failed: status=${res.status}, statusText=${res.statusText}, activity=${activity}, locationId=${locationId}, error=${text.substring(0, 500)}`);
     } else {
       const responseData = await res.json().catch(() => null);
       console.log(`[logInventoryChangeToApi] API call succeeded: activity=${activity}, locationId=${locationId}, response=${JSON.stringify(responseData)}`);

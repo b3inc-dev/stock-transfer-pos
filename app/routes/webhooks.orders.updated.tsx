@@ -69,7 +69,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       financial_status?: string;
     };
 
+    console.log(`[orders/updated] Order details: id=${order.id}, line_items.length=${order.line_items?.length || 0}, fulfillments.length=${order.fulfillments?.length || 0}, cancelled_at=${order.cancelled_at || "null"}`);
+    
     if (!order.id || !order.line_items || order.line_items.length === 0) {
+      console.log(`[orders/updated] Skipping: no order.id or no line_items. order.id=${order.id}, line_items.length=${order.line_items?.length || 0}`);
       return new Response("OK", { status: 200 }); // 注文に商品がない場合はスキップ
     }
 
@@ -112,14 +115,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // 注文がキャンセルされている場合はスキップ
     if (order.cancelled_at) {
+      console.log(`[orders/updated] Skipping cancelled order: order.id=${order.id}, cancelled_at=${order.cancelled_at}`);
       return new Response("OK", { status: 200 });
     }
 
     // 履行された商品の在庫変動を記録
+    console.log(`[orders/updated] Checking fulfillments: fulfillments.length=${order.fulfillments?.length || 0}`);
     if (order.fulfillments && order.fulfillments.length > 0) {
       for (const fulfillment of order.fulfillments) {
+        console.log(`[orders/updated] Processing fulfillment: id=${fulfillment.id}, status=${fulfillment.status}, location_id=${fulfillment.location_id}, line_items.length=${fulfillment.line_items?.length || 0}`);
         // 履行が完了している場合のみ処理
         if (fulfillment.status !== "success" && fulfillment.status !== "open") {
+          console.log(`[orders/updated] Skipping fulfillment: status=${fulfillment.status} (not success or open)`);
           continue;
         }
 
@@ -414,8 +421,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
         }
       }
+    } else {
+      console.log(`[orders/updated] No fulfillments found: order.id=${order.id}, fulfillments=${order.fulfillments ? "exists but empty" : "null/undefined"}`);
     }
 
+    console.log(`[orders/updated] Webhook processing completed: order.id=${order.id}`);
     return new Response("OK", { status: 200 });
   } catch (error) {
     console.error("[orders/updated] Webhook error:", error);
