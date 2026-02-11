@@ -11,9 +11,26 @@ const API_VERSION = "2025-10";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {
-    const { payload, shop, topic, session } = await authenticate.webhook(request);
+    let payload, shop, topic, session;
+    try {
+      const result = await authenticate.webhook(request);
+      payload = result.payload;
+      shop = result.shop;
+      topic = result.topic;
+      session = result.session;
+    } catch (authError) {
+      console.error(`[refunds.create] Webhook authentication error:`, authError);
+      if (authError instanceof Error) {
+        console.error(`[refunds.create] Auth error message:`, authError.message);
+        console.error(`[refunds.create] Auth error stack:`, authError.stack);
+      }
+      return new Response("Authentication failed", { status: 401 });
+    }
+
+    console.log(`[refunds.create] Webhook received: shop=${shop}, topic=${topic}, hasSession=${!!session}`);
 
     if (topic !== "refunds/create") {
+      console.log(`[refunds.create] Invalid topic: ${topic}, returning 400`);
       return new Response("Invalid topic", { status: 400 });
     }
 

@@ -11,9 +11,26 @@ const API_VERSION = "2025-10";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {
-    const { payload, shop, topic, session } = await authenticate.webhook(request);
+    let payload, shop, topic, session;
+    try {
+      const result = await authenticate.webhook(request);
+      payload = result.payload;
+      shop = result.shop;
+      topic = result.topic;
+      session = result.session;
+    } catch (authError) {
+      console.error(`[orders/updated] Webhook authentication error:`, authError);
+      if (authError instanceof Error) {
+        console.error(`[orders/updated] Auth error message:`, authError.message);
+        console.error(`[orders/updated] Auth error stack:`, authError.stack);
+      }
+      return new Response("Authentication failed", { status: 401 });
+    }
+
+    console.log(`[orders/updated] Webhook received: shop=${shop}, topic=${topic}, hasSession=${!!session}`);
 
     if (topic !== "orders/updated") {
+      console.log(`[orders/updated] Invalid topic: ${topic}, returning 400`);
       return new Response("Invalid topic", { status: 400 });
     }
 
@@ -48,7 +65,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // セッションからadminクライアントを作成
     if (!session) {
-      console.error("No session found for webhook");
+      console.error(`[orders/updated] No session found for webhook: shop=${shop}`);
       return new Response("No session", { status: 401 });
     }
 
@@ -292,7 +309,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     return new Response("OK", { status: 200 });
   } catch (error) {
-    console.error("orders/updated webhook error:", error);
+    console.error("[orders/updated] Webhook error:", error);
+    // エラーの詳細をログに出力
+    if (error instanceof Error) {
+      console.error("[orders/updated] Error message:", error.message);
+      console.error("[orders/updated] Error stack:", error.stack);
+    }
     return new Response("Internal Server Error", { status: 500 });
   }
 };
