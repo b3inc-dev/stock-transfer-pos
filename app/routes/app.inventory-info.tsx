@@ -921,7 +921,7 @@ export default function InventoryInfoPage() {
                         <div style={{ marginTop: "4px" }}>
                           {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
                           <s-text tone="subdued" size="small">
-                            {firstSnapshotDate.replace(/-/g, "/")}以降の履歴を確認できます
+                            {firstSnapshotDate.replace(/-/g, "/")}以降の履歴を確認できます。
                           </s-text>
                         </div>
                       )}
