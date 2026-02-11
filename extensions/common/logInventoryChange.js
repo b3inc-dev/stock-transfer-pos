@@ -36,7 +36,9 @@ export async function logInventoryChangeToApi({
   }
   
   try {
+    console.log(`[logInventoryChangeToApi] Getting session token: session=${!!session}, getSessionToken=${!!session?.getSessionToken}`);
     const token = await session.getSessionToken();
+    console.log(`[logInventoryChangeToApi] Session token obtained: token=${!!token}, tokenLength=${token?.length || 0}, tokenPreview=${token ? token.substring(0, 20) + "..." : "null"}`);
     if (!token) {
       console.warn(`[logInventoryChangeToApi] Failed to get session token`);
       return;
@@ -45,6 +47,7 @@ export async function logInventoryChangeToApi({
     const { getAppUrl } = await import("./appUrl.js");
     const appUrl = getAppUrl();
     const apiUrl = `${appUrl}/api/log-inventory-change`;
+    console.log(`[logInventoryChangeToApi] URL resolved: appUrl=${appUrl}, apiUrl=${apiUrl}`);
     const timestamp = new Date().toISOString();
     const locName = locationName || locationId;
 

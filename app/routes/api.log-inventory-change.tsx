@@ -100,7 +100,10 @@ const CORS_HEADERS = {
 };
 
 export async function loader({ request }: LoaderFunctionArgs) {
+  // CORSプリフライトリクエスト（OPTIONS）のログを追加
+  console.log(`[api.log-inventory-change] Loader called: method=${request.method}, url=${request.url}, origin=${request.headers.get("origin") || "none"}`);
   if (request.method === "OPTIONS") {
+    console.log(`[api.log-inventory-change] CORS preflight (OPTIONS) request received`);
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
   return new Response(null, { status: 405, headers: CORS_HEADERS });
