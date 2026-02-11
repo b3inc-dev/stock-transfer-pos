@@ -1361,9 +1361,6 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
             <s-text size="small" tone="subdued">
               仕入先: {conds?.supplierName || "未選択"}
             </s-text>
-            <s-text size="small" tone="subdued">
-              スタッフ: {conds?.staffName || "-"}
-            </s-text>
           </s-stack>
           <s-box paddingBlockStart="small" paddingBlockEnd="small">
             <s-divider />

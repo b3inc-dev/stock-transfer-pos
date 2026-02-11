@@ -1,8 +1,13 @@
 // アプリのベース URL 設定
 // 
 // 【使い方】
-// - 公開アプリ用: このファイルの APP_MODE を "public" のままにしておく
-// - 自社用カスタムアプリ: APP_MODE を "inhouse" に変更してビルド
+// 方法1（推奨）: このファイルの APP_MODE を直接変更
+//   - 公開アプリ用: APP_MODE = "public"
+//   - 自社用カスタムアプリ: APP_MODE = "inhouse"
+//
+// 方法2: 環境変数を使用（Viteビルド時のみ有効）
+//   - ビルド時に環境変数を設定: VITE_APP_MODE=public または VITE_APP_MODE=inhouse
+//   - 例: VITE_APP_MODE=public shopify app deploy
 //
 // 【各環境の URL】
 // - 開発環境（localhost）: http://localhost:3000
@@ -12,7 +17,11 @@
 // ============================================
 // ここを変更して切り替え
 // ============================================
-const APP_MODE = "public"; // "public" または "inhouse"
+// 環境変数 VITE_APP_MODE が設定されている場合はそれを使用、なければ "inhouse" をデフォルトとする
+// 手動で変更する場合は、下記の "inhouse" を "public" に変更してください
+const APP_MODE = (typeof import !== "undefined" && import.meta?.env?.VITE_APP_MODE) 
+  ? import.meta.env.VITE_APP_MODE 
+  : "inhouse"; // "public" または "inhouse"（手動で変更可能）
 
 // ============================================
 // 以下は通常変更不要
