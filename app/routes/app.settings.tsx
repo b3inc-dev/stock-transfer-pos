@@ -3003,6 +3003,13 @@ export default function SettingsPage() {
                       <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>入出庫履歴CSV出力項目設定</div>
                       <s-text tone="subdued" size="small">
                         入出庫履歴のCSV出力時に含める項目を選択し、並び順を変更できます。出庫は入庫と同じ設定を共有します。チェックを外すとその項目は出力されません。
+                        <br />
+                        <br />
+                        <strong>項目名の変更について：</strong>
+                        <br />
+                        各項目の入力欄にデフォルト値が薄く表示されます。クリックしてカスタム名を入力すると、CSV出力時にその名前が使用されます。
+                        <br />
+                        空欄のままフォーカスを外すと、デフォルト値に戻ります。
                       </s-text>
                     </div>
                     <div style={{ flex: "1 1 320px", minWidth: 280 }}>
@@ -3247,6 +3254,13 @@ export default function SettingsPage() {
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>仕入履歴CSV出力項目設定</div>
                     <s-text tone="subdued" size="small">
                       仕入履歴のCSV出力時に含める項目を選択し、並び順を変更できます。チェックを外すとその項目は出力されません。
+                      <br />
+                      <br />
+                      <strong>項目名の変更について：</strong>
+                      <br />
+                      各項目の入力欄にデフォルト値が薄く表示されます。クリックしてカスタム名を入力すると、CSV出力時にその名前が使用されます。
+                      <br />
+                      空欄のままフォーカスを外すと、デフォルト値に戻ります。
                     </s-text>
                   </div>
                   <div style={{ flex: "1 1 320px", minWidth: 280 }}>
@@ -4087,6 +4101,13 @@ export default function SettingsPage() {
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>ロス履歴CSV出力項目設定</div>
                     <s-text tone="subdued" size="small">
                       ロス履歴のCSV出力時に含める項目を選択し、並び順を変更できます。チェックを外すとその項目は出力されません。
+                      <br />
+                      <br />
+                      <strong>項目名の変更について：</strong>
+                      <br />
+                      各項目の入力欄にデフォルト値が薄く表示されます。クリックしてカスタム名を入力すると、CSV出力時にその名前が使用されます。
+                      <br />
+                      空欄のままフォーカスを外すと、デフォルト値に戻ります。
                     </s-text>
                   </div>
                   <div style={{ flex: "1 1 320px", minWidth: 280 }}>
@@ -4148,6 +4169,13 @@ export default function SettingsPage() {
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>棚卸履歴CSV出力項目設定</div>
                     <s-text tone="subdued" size="small">
                       棚卸履歴のCSV出力時に含める項目を選択し、並び順を変更できます。明細ありのCSVに適用されます。チェックを外すとその項目は出力されません。
+                      <br />
+                      <br />
+                      <strong>項目名の変更について：</strong>
+                      <br />
+                      各項目の入力欄にデフォルト値が薄く表示されます。クリックしてカスタム名を入力すると、CSV出力時にその名前が使用されます。
+                      <br />
+                      空欄のままフォーカスを外すと、デフォルト値に戻ります。
                     </s-text>
                   </div>
                   <div style={{ flex: "1 1 320px", minWidth: 280 }}>

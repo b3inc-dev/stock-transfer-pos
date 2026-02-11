@@ -1,7 +1,7 @@
 # 管理画面・ロス登録・棚卸 実装要件書
 
-**最終更新日**: 2026年2月11日（**入出庫・仕入・ロス・棚卸のCSV出力項目設定（設定タブ4画面＋各履歴CSV連動）**まで反映済み）  
-**コード確認日**: 2026年2月（上記に加え、4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・発注機能実装・仕入POS拡張・在庫高・在庫変動履歴・api/log-inventory-change 種別上書き・ロケーション名取得・公開/自社用 appUrl・リリース時必須対策・希望納品日/到着予定日ボタン設定・入出庫/仕入/ロス/棚卸CSV出力項目設定 反映済み）
+**最終更新日**: 2026年2月11日（**在庫高日次Cron：オフライントークン自動リフレッシュ**まで反映済み）  
+**コード確認日**: 2026年2月（上記に加え、4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・発注機能実装・仕入POS拡張・在庫高・在庫変動履歴・api/log-inventory-change 種別上書き・ロケーション名取得・公開/自社用 appUrl・リリース時必須対策・希望納品日/到着予定日ボタン設定・入出庫/仕入/ロス/棚卸CSV出力項目設定・在庫高Cronトークンリフレッシュ 反映済み）
 
 ---
 
@@ -64,6 +64,7 @@
 
 - POS や Webhook から `api/log-inventory-change` 等を呼ぶときは **オフラインアクセストークン** を使います。このトークンは **「管理画面でアプリを開いたとき」に OAuth が完了し、初めて Session テーブルに保存**されます。
 - そのため、**「インストール後（または初回利用前）に、必ず1回は Shopify 管理画面でアプリを開く」** ことを利用手順・オンボーディングに明記する運用が必須です。多くの Shopify アプリが同じ前提です。1回開いた後は、管理画面を開かなくとも不備なく情報を取得できます。
+- **在庫高の日次スナップショット**（Cron で `/api/inventory-snapshot-daily` を呼ぶ運用）では、**オフラインアクセストークンが期限切れの場合に Cron 実行時にリフレッシュトークンで自動更新**する処理を入れているため、**Cron が毎日動いていれば管理画面の開き直しは不要**です。リフレッシュトークンが90日使われないと失効する場合のみ「管理画面でアプリを1回開く」案内が必要です。詳細は `docs/INVENTORY_INFO_SNAPSHOT_AND_HISTORY_DATES.md`。
 - 詳細・Prisma 設定例・手順は **RELEASE_REQUIREMENTS_PUBLIC_APP.md の「5. 本番で必須の2つの対策」** を参照してください。
 
 ---
@@ -77,6 +78,7 @@
 | 区分 | 問題 | 対応内容 |
 |------|------|----------|
 | **①在庫高** | 日付が変わるタイミングで自動保存されていない。管理画面を開いていなくても確実に保存したい。 | **Cron 必須**：`/api/inventory-snapshot-daily` を Render の Cron Job で毎日（例: 23:59）呼ぶ設定が必須。手順は `docs/CRON_JOB_SETUP_GUIDE.md` 参照。**フォールバック**：管理画面「在庫高」タブを開いたときに、前日分のスナップショットが無ければその場で1回だけ保存する `ensureYesterdaySnapshot` を追加（Cron が動いていない日も補完）。 |
+| **①在庫高** | 管理画面を閉じたあと Cron 実行で「Invalid API key or access token」になる。 | **原因**：有効期限付きオフライントークン（`expiringOfflineAccessTokens: true`）で、アクセストークンが約1時間で期限切れになる。管理画面を閉じていると更新されず、Cron が期限切れトークンで API を呼ぶためエラーになる。**対応**：`/api/inventory-snapshot-daily` 実行時に、期限切れ（またはまもなく期限切れ）ならリフレッシュトークンで自動更新してから在庫取得・保存する処理を追加。Cron が毎日動いていれば**開き直し不要**で日次スナップショットが継続する。リフレッシュトークンが90日使われないと失効するため、その場合のみ「管理画面でアプリを1回開く」案内。詳細は `docs/INVENTORY_INFO_SNAPSHOT_AND_HISTORY_DATES.md`。 |
 | **①在庫高** | 日付選択の枠がスマホで領域をはみ出している。 | 日付入力の親要素に `width: 100%`, `minWidth: 0`, `overflow: hidden` を指定し、領域内に収まるよう修正（`app.inventory-info.tsx`）。 |
 | **②変動履歴** | POS からの変動がロスしかアクティビティが振り分けられず、他が全て「管理」になる。参照IDも空。 | **原因**：①インストール後しばらく管理画面を開いていないとオフラインセッションが無く、POS から `api/log-inventory-change` が 401 で失敗する。②その場合、後から `inventory_levels/update` Webhook だけが記録され「管理」・参照IDなしになる。**対策**：利用手順で「初回は必ず1回管理画面でアプリを開く」を案内（上記「本番リリース時の2つの課題」と同一）。各 POS 確定処理では既に `api/log-inventory-change` と `sourceId` を渡す実装済み。詳細は `docs/INVENTORY_CHANGE_ACTIVITY_WHY_MANAGEMENT.md`・`docs/INVENTORY_HISTORY_ADMIN_AND_DELTA_CAUSE.md`。 |
 | **②変動履歴** | 履歴の項目を、商品名・オプションを含め他商品リスト・CSV と同等にしたい。「変動量」→「変動数」に変更したい。 | **一覧・CSV**：表示項目を「発生日時・商品名・SKU・オプション・ロケーション・アクティビティ・**変動数**・変動後数量・参照ID・備考」に変更。商品名・オプションはバリアントを GraphQL で一括取得して付与。CSV はオプションを「オプション1」「オプション2」「オプション3」列で出力。 |
@@ -91,6 +93,7 @@
 |------|------|------|
 | **在庫高** | スナップショット取得・集計・保存のロジックを共通モジュール化（`app/utils/inventory-snapshot.ts`）。在庫高タブ・Cron API・前日フォールバックの3箇所で共有。 | ✅ 完了 |
 | **在庫高** | Metafield 肥大化への注意を `docs/INVENTORY_INFO_SNAPSHOT_AND_HISTORY_DATES.md` に追記（長期運用時の保持日数・別ストレージ検討）。 | ✅ 完了 |
+| **在庫高** | Cron 実行時にオフラインアクセストークンが期限切れの場合、リフレッシュトークンで自動更新してからスナップショット保存する処理を追加（`api.inventory-snapshot-daily.tsx`）。管理画面を閉じていても、Cron が毎日動いていれば開き直し不要で日次保存が継続する。 | ✅ 完了 |
 | **変動履歴** | 変動の日付をショップタイムゾーンに統一。Webhook（orders/refunds）・仕入の `logInventoryChange` で `date` を渡すように変更。`inventory-change-log.ts` は `data.date` があればそれを使用。 | ✅ 完了 |
 | **変動履歴** | `api/log-inventory-change` をバッチ対応（`body.entries` で複数件受付）。POS 共通 `logInventoryChange.js` は1回の POST で複数件送信。 | ✅ 完了 |
 | **変動履歴** | 入庫・出庫・棚卸・仕入を**ロスと全く同じ処理**に統一。Webhook では adjustment_group の有無にかかわらず種別を判定せず常に `admin_webhook` で保存し、種別はすべて API で上書き（`webhooks.inventory_levels.update.tsx` の adjustment 判定を廃止）。 | ✅ 完了 |
@@ -144,6 +147,7 @@
 | **微調整済み** | 棚卸ページ：上部メニュー下の余白を狭く（タブ＋区切り線を1ブロックにまとめて余白削減）。設定ページ：「破棄」「保存」ボタンを右寄せし、上下余白を抑えて浮き感を軽減 |
 
 **直近の主な更新（2026-02）**:
+- **在庫高日次Cron：オフライントークン自動リフレッシュ（2026-02-11）**: 管理画面を閉じたあと Cron 実行で「Invalid API key or access token」になる現象に対応。**原因**：有効期限付きオフライントークン（約1時間で期限切れ）のため、管理画面を閉じているとトークンが更新されず Cron が失敗する。**対応**：`/api/inventory-snapshot-daily` で、各ショップ処理前に「期限切れまたはまもなく期限切れならリフレッシュトークンで更新」する `refreshOfflineSessionIfNeeded` を実行。Cron が毎日動いていれば開き直し不要で日次スナップショットが保存される。ドキュメント：`docs/INVENTORY_INFO_SNAPSHOT_AND_HISTORY_DATES.md` に「管理画面を閉じたあと Cron でエラーになる理由」を追記。
 - **在庫変動履歴のロケーション名修正（別チャットで実装）**: 在庫変動履歴一覧・CSVで「ロケーション」列に正しいロケーション名が表示されるよう修正。**api/log-inventory-change** で `locationName` が未設定または「出庫元」等のラベルのとき、GraphQL（`location(id)`）で実ロケーション名を取得し DB に保存。管理画面の在庫変動履歴タブの一覧・CSV出力の「ロケーション」列で、ID やラベルではなくショップのロケーション名が表示される。実装: `app/routes/api.log-inventory-change.tsx`（`resolveLocationName`、保存時の `resolvedLocationName`）。
 - **希望納品日・到着予定日ボタン設定のUI改善（2026-02-11）**: ①**希望納品日の表示箇所**: 発注先マスタと分離し、仕入先マスタと同様に「左：タイトル＋説明／右：白カード」で「希望納品日の使用」を独立ブロックに。右側にラジオ（使用する/使用しない）＋日程ボタンリストを配置。②**日程ボタンのリストUI**: 希望納品日・到着予定日ともに、CSV出力項目設定に似た縦リストに変更（チェック・並び順・**ボタン名**・日数・↑↓）。チェックを外すとリストから削除、並び順は数字入力または上下ボタンで変更。③**ボタン名の編集**: アプリに表示するボタン名を管理画面で編集可能に。`order.desiredDeliveryQuickDayLabels` / `outbound.arrivalQuickDayLabels`（日数→ラベル）を保存。未設定時は日数から自動（7→1週間後、30→1ヶ月後、それ以外→○日後）。④**初期値**: 希望納品日は 1,2,3,7,30 日後（1週間後・1ヶ月後含む）、到着予定日は 1,2 日後。いずれも編集・追加可能。⑤**POSでの表示**: OrderConditions（発注）・ModalOutbound（出庫）でカスタムラベルを参照し、設定したボタン名を表示。実装: `app.settings.tsx`（型・サニタイザー・ヘルパー・UI）、`OrderConditions.jsx`、`ModalOutbound.jsx`。
 - **入出庫・仕入・ロス・棚卸のCSV出力項目設定（2026-02-11）**: ①**設定画面**: 入庫設定タブに「入出庫履歴CSV出力項目設定」、仕入設定タブに「仕入履歴CSV出力項目設定」、ロス設定タブに「ロス履歴CSV出力項目設定」、棚卸設定タブに「棚卸履歴CSV出力項目設定」を追加。いずれも発注のCSV出力項目設定と同様のUI（左：タイトル＋説明、右：選択中項目のチェック・並び番号・項目名・上下ボタン、未選択項目の追加、デフォルトに戻す）。②**型・サニタイザー**: `SettingsV1` に `inbound.csvExportColumns` / `purchase.csvExportColumns` / `loss.csvExportColumns` / `inventoryCount.csvExportColumns` を追加。`sanitizeSettings` で各配列を検証し、空の場合はデフォルト並びを代入。③**各履歴画面のCSV連動**: 入出庫（app.history）・仕入（app.purchase）・ロス（app.loss）・棚卸（app.inventory-count）の loader で設定から該当 `csvExportColumns` を取得し、一括・モーダル両方のCSV出力で設定の並び・含める列でヘッダーと行を生成。入出庫は出庫も入庫と同じ設定を共有。棚卸は明細あり/明細なしの両方に対応（明細なしは設定のうち先頭7項目のみ）。実装: `app.settings.tsx`（定数・サニタイザー・4タブのCSV設定UI）、`app.history.tsx` / `app.purchase.tsx` / `app.loss.tsx` / `app.inventory-count.tsx`（loader で設定取得・CSV生成で設定参照）。
