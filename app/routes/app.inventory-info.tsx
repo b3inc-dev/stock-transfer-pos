@@ -906,6 +906,13 @@ export default function InventoryInfoPage() {
                           本日集計
                         </button>
                       </div>
+                      {/* 本日集計の注釈 */}
+                      <div style={{ marginTop: "4px" }}>
+                        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
+                        <s-text tone="subdued" size="small">
+                          本日集計表示はSKU数ロケーション数により時間を要する可能性があります。
+                        </s-text>
+                      </div>
                       {/* 最初のスナップショット日付を表示 */}
                       {firstSnapshotDate && (
                         <div style={{ marginTop: "4px" }}>
