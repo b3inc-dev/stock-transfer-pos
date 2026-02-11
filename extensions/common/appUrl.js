@@ -17,11 +17,10 @@
 // ============================================
 // ここを変更して切り替え
 // ============================================
-// 環境変数 VITE_APP_MODE が設定されている場合はそれを使用、なければ "inhouse" をデフォルトとする
-// 手動で変更する場合は、下記の "inhouse" を "public" に変更してください
-const APP_MODE = (typeof import !== "undefined" && import.meta?.env?.VITE_APP_MODE) 
-  ? import.meta.env.VITE_APP_MODE 
-  : "inhouse"; // "public" または "inhouse"（手動で変更可能）
+// shopify.app.toml を使用する場合（自社用カスタムアプリ）: APP_MODE = "inhouse"
+// shopify.app.public.toml を使用する場合（公開アプリ）: APP_MODE = "public"
+// デプロイ前に、使用する設定ファイルに応じてこの値を変更してください
+const APP_MODE = "inhouse"; // "public" または "inhouse"
 
 // ============================================
 // 以下は通常変更不要
