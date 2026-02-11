@@ -407,22 +407,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       if (recentNonAdminLog) {
-        try {
-          console.log(
-            `[inventory_levels/update] Updating existing log from webhook: id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter=${recentNonAdminLog.quantityAfter} -> ${available}`
-          );
-          await (db as any).inventoryChangeLog.update({
-            where: { id: recentNonAdminLog.id },
-            data: { quantityAfter: available },
-          });
-        } catch (e: any) {
-          console.error(
-            "[inventory_levels/update] Failed to update existing log from webhook:",
-            e?.message || String(e)
-          );
-          // 失敗しても新規に「管理」行を追加しないようにする（履歴が二重にならないことを優先）
+        // 既存ログの変動後数量と今回の available が同じ＝同一イベントの追報なので quantityAfter のみ更新して終了。
+        // 異なる＝別イベント（例: 仕入の直後に FLOW で 0 に戻した）なので、新規「管理」行を作成する。
+        const existingQty = recentNonAdminLog.quantityAfter ?? null;
+        if (existingQty === available) {
+          try {
+            console.log(
+              `[inventory_levels/update] Updating existing log from webhook: id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter=${recentNonAdminLog.quantityAfter} -> ${available}`
+            );
+            await (db as any).inventoryChangeLog.update({
+              where: { id: recentNonAdminLog.id },
+              data: { quantityAfter: available },
+            });
+          } catch (e: any) {
+            console.error(
+              "[inventory_levels/update] Failed to update existing log from webhook:",
+              e?.message || String(e)
+            );
+          }
+          return new Response("OK", { status: 200 });
         }
-        return new Response("OK", { status: 200 });
+        console.log(
+          `[inventory_levels/update] Existing log quantityAfter (${existingQty}) !== available (${available}); treating as new event, will create admin_webhook row`
+        );
       }
     }
 

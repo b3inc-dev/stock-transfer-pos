@@ -219,6 +219,74 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               }
             }
           }
+          // 救済: inventory_levels/update が先に届いてすでに admin_webhook で保存されている場合、
+          // 後から届いた orders/updated でその行を order_sales に上書きする（連続取引・到達順で判定漏れするため）
+          if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+            const searchFrom = new Date(orderCreatedAt.getTime() - 30 * 60 * 1000);
+            const searchTo = new Date(orderCreatedAt.getTime() + 5 * 60 * 1000);
+            for (const lineItem of order.line_items) {
+              if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) continue;
+              try {
+                const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
+                const variantResp = await admin.request({
+                  data: `
+                    #graphql
+                    query GetVariant($id: ID!) {
+                      productVariant(id: $id) { id inventoryItem { id } }
+                    }
+                  `,
+                  variables: { id: variantId },
+                });
+                const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+                const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
+                if (!inventoryItemId) continue;
+                const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+                const itemIdCandidates = [
+                  inventoryItemId,
+                  rawItemId,
+                  `gid://shopify/InventoryItem/${rawItemId}`,
+                ].filter((id, i, arr) => arr.indexOf(id) === i);
+                const existingAdmin = await (db as any).inventoryChangeLog.findFirst({
+                  where: {
+                    shop,
+                    inventoryItemId: { in: itemIdCandidates },
+                    activity: "admin_webhook",
+                    timestamp: { gte: searchFrom, lte: searchTo },
+                  },
+                  orderBy: { timestamp: "desc" },
+                });
+                if (existingAdmin) {
+                  const prevLog = await (db as any).inventoryChangeLog.findFirst({
+                    where: {
+                      shop,
+                      inventoryItemId: { in: itemIdCandidates },
+                      locationId: existingAdmin.locationId,
+                      timestamp: { lt: existingAdmin.timestamp },
+                    },
+                    orderBy: { timestamp: "desc" },
+                  });
+                  const delta = (existingAdmin.quantityAfter != null && prevLog?.quantityAfter != null)
+                    ? existingAdmin.quantityAfter - prevLog.quantityAfter
+                    : -(lineItem.quantity ?? 0);
+                  const orderIdRef = `order_${order.id}`;
+                  await (db as any).inventoryChangeLog.update({
+                    where: { id: existingAdmin.id },
+                    data: {
+                      activity: "order_sales",
+                      delta,
+                      sourceType: "order_sales",
+                      sourceId: orderIdRef,
+                      idempotencyKey: `${shop}_order_sales_${existingAdmin.inventoryItemId}_${existingAdmin.locationId}_${orderIdRef}_${orderCreatedAt.toISOString()}`,
+                      note: `注文: #${order.id}`,
+                    },
+                  });
+                  console.log(`[orders/updated] Remediated admin_webhook to order_sales (no location): id=${existingAdmin.id}, order.id=${order.id}`);
+                }
+              } catch (e) {
+                console.error(`[orders/updated] Failed to remediate admin_webhook for line_item ${lineItem.id}:`, e);
+              }
+            }
+          }
         } else {
           // 各line_itemについて、直近のadmin_webhookを検索してorder_salesに上書き
           for (const lineItem of order.line_items) {
