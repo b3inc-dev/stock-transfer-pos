@@ -147,8 +147,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   );
 
-    // 在庫変動履歴用のデータ取得（タブが「change-history」の場合）
+    // 在庫変動履歴用のデータ取得（タブが「change-history」の場合のみ）
     const tab = url.searchParams.get("tab") || "inventory-level";
+    
+    // 在庫高タブの場合はバリアント取得をスキップ（パフォーマンス対策）
+    const isChangeHistoryTab = tab === "change-history";
+    
     const startDateParam = url.searchParams.get("startDate");
     const endDateParam = url.searchParams.get("endDate");
 
@@ -212,7 +216,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const sortOrder = url.searchParams.get("sortOrder") || "desc";
 
     let changeHistoryLogs: any[] = [];
-    if (tab === "change-history" && session) {
+    if (isChangeHistoryTab && session) {
       try {
         const whereClause: any = {
           shop: session.shop,
@@ -245,9 +249,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
           });
 
           // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
-          // タイムアウト対策：バリアントIDの数を制限（最大500件まで）
+          // タイムアウト対策：バリアントIDの数を制限（最大200件まで、さらに厳しく）
           const variantIds = [...new Set(changeHistoryLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
-          const MAX_VARIANTS = 500; // タイムアウト対策：最大500件まで取得
+          const MAX_VARIANTS = 200; // タイムアウト対策：最大200件まで取得（500→200に削減）
           const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS);
           
           if (limitedVariantIds.length < variantIds.length) {
@@ -257,16 +261,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
           const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
           if (limitedVariantIds.length > 0 && session) {
             const CHUNK = 250;
-            const MAX_CHUNKS = 10; // タイムアウト対策：最大10チャンク（2500件）まで処理
+            const MAX_CHUNKS = 2; // タイムアウト対策：最大2チャンク（500件）まで処理（10→2に削減）
             const chunksToProcess = Math.min(Math.ceil(limitedVariantIds.length / CHUNK), MAX_CHUNKS);
             
             for (let i = 0; i < chunksToProcess * CHUNK && i < limitedVariantIds.length; i += CHUNK) {
               const chunk = limitedVariantIds.slice(i, i + CHUNK);
               try {
-                // タイムアウト対策：各クエリに30秒のタイムアウトを設定（admin.graphql は直接タイムアウト設定できないため、Promise.race で実装）
+                // タイムアウト対策：各クエリに20秒のタイムアウトを設定（30秒→20秒に短縮）
                 const queryPromise = admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
                 const timeoutPromise = new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error("GraphQL query timeout (30s)")), 30000)
+                  setTimeout(() => reject(new Error("GraphQL query timeout (20s)")), 20000)
                 );
                 
                 const resp = await Promise.race([queryPromise, timeoutPromise]) as Response;
@@ -279,7 +283,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
                     : String(data.errors);
                   console.error("[inventory-info] GraphQL error fetching variants:", errorMessages);
                   // エラーが発生しても処理を続行（商品名なしで表示）
-                  continue;
+                  break; // エラーが発生したら残りもスキップ
                 }
                 
                 const nodes = (data?.data?.nodes ?? []).filter(Boolean);
@@ -299,7 +303,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
                 console.error(`[inventory-info] Variant batch ${i / CHUNK + 1} failed:`, e);
                 // エラーが発生しても処理を続行（商品名なしで表示）
                 // タイムアウトやエラーが発生した場合は、残りのチャンクもスキップして続行
-                if (e instanceof Error && e.message.includes("timeout")) {
+                if (e instanceof Error && (e.message.includes("timeout") || e.message.includes("Timeout"))) {
                   console.warn(`[inventory-info] Timeout detected, skipping remaining variant batches`);
                   break;
                 }
