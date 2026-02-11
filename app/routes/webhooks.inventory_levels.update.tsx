@@ -302,7 +302,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         "order_sales",
         "refund", // 売上・返品（orders.updated / refunds.create で記録済み）
       ];
-      const recentThreshold = new Date(updatedAt.getTime() - 1 * 60 * 1000); // 1分前（まずは短めに運用し、必要に応じて調整）
+      // タイムウィンドウを10分に拡大（refunds/createとinventory_levels/updateのタイムスタンプのずれを考慮）
+      const recentThreshold = new Date(updatedAt.getTime() - 10 * 60 * 1000); // 10分前
 
       // 直近で同一商品・ロケーションの既知アクティビティが記録されていれば、
       // それをこの webhook で上書き（quantityAfter のみ更新）し、新しい「管理」行は作らない。
@@ -322,7 +323,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         `gid://shopify/Location/${locationIdRaw}`,
       ];
 
-      const recentNonAdminLog = await (db as any).inventoryChangeLog.findFirst({
+      // まず10分前のウィンドウで検索
+      let recentNonAdminLog = await (db as any).inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: { in: inventoryItemIdCandidates },
@@ -332,6 +334,61 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
         orderBy: { timestamp: "desc" },
       });
+
+      // 見つからない場合、タイムウィンドウを広げて再検索（30分前まで）
+      if (!recentNonAdminLog) {
+        const extendedThreshold = new Date(updatedAt.getTime() - 30 * 60 * 1000);
+        recentNonAdminLog = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            activity: { in: knownActivities },
+            timestamp: { gte: extendedThreshold },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        
+        if (recentNonAdminLog) {
+          console.log(
+            `[inventory_levels/update] Found log with extended window (30min): id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, timestamp=${recentNonAdminLog.timestamp}`
+          );
+        }
+      }
+
+      // デバッグログ：検索結果を出力
+      if (!recentNonAdminLog) {
+        // より詳細なデバッグ：実際に存在するログを確認
+        const allRecentLogs = await (db as any).inventoryChangeLog.findMany({
+          where: {
+            shop,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            timestamp: { gte: new Date(updatedAt.getTime() - 30 * 60 * 1000) },
+          },
+          orderBy: { timestamp: "desc" },
+          take: 10,
+        });
+        console.log(
+          `[inventory_levels/update] No recent non-admin log found. Search criteria: shop=${shop}, inventoryItemIds=[${inventoryItemIdCandidates.join(", ")}], locationIds=[${locationIdCandidates.join(", ")}], activities=[${knownActivities.join(", ")}], timestamp >= ${recentThreshold.toISOString()}`
+        );
+        if (allRecentLogs.length > 0) {
+          console.log(
+            `[inventory_levels/update] Found ${allRecentLogs.length} recent logs (but none match activity filter):`,
+            allRecentLogs.map((log: any) => ({
+              id: log.id,
+              activity: log.activity,
+              timestamp: log.timestamp,
+              inventoryItemId: log.inventoryItemId,
+              locationId: log.locationId,
+            }))
+          );
+        } else {
+          console.log(`[inventory_levels/update] No logs found at all for this item/location combination.`);
+        }
+      }
+
+      if (recentNonAdminLog) {
 
       if (recentNonAdminLog) {
         try {

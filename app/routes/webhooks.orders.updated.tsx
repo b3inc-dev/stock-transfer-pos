@@ -123,11 +123,47 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           continue;
         }
 
-        const fulfillmentLocationId = fulfillment.location_id 
-          ? `gid://shopify/Location/${fulfillment.location_id}`
-          : null;
+        // fulfillment.location_idがnullの場合、注文のデフォルトロケーションを取得
+        let fulfillmentLocationId: string | null = null;
+        if (fulfillment.location_id) {
+          fulfillmentLocationId = `gid://shopify/Location/${fulfillment.location_id}`;
+        } else {
+          // location_idがnullの場合、注文のデフォルトロケーションを取得
+          try {
+            const orderResp = await admin.request({
+              data: `
+                #graphql
+                query GetOrder($id: ID!) {
+                  order(id: $id) {
+                    id
+                    fulfillmentOrders(first: 1) {
+                      edges {
+                        node {
+                          assignedLocation {
+                            location {
+                              id
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `,
+              variables: { id: `gid://shopify/Order/${order.id}` },
+            });
+            const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
+            const fulfillmentOrder = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
+            if (fulfillmentOrder?.assignedLocation?.location?.id) {
+              fulfillmentLocationId = fulfillmentOrder.assignedLocation.location.id;
+            }
+          } catch (error) {
+            console.error(`[orders.updated] Failed to get order location for order ${order.id}:`, error);
+          }
+        }
 
         if (!fulfillmentLocationId || !fulfillment.line_items || fulfillment.line_items.length === 0) {
+          console.log(`[orders.updated] Skipping fulfillment: locationId=${fulfillmentLocationId}, hasLineItems=${!!fulfillment.line_items && fulfillment.line_items.length > 0}`);
           continue;
         }
 
