@@ -48,6 +48,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
     let processedCount = 0;
     const errors: string[] = [];
+    const skipped: string[] = []; // 対象日付が既に保存済みのためスキップしたショップ
 
     // 各ショップのスナップショットを保存
     for (const sessionRecord of sessions) {
@@ -107,6 +108,7 @@ export async function action({ request }: ActionFunctionArgs) {
           : getDateInShopTimezone(yesterdayDate, shopTimezone);
 
         if (savedSnapshots.snapshots.some((s) => s.date === dateToSaveStr)) {
+          skipped.push(`${sessionRecord.shop}: ${dateToSaveStr} は既に保存済みのためスキップ`);
           continue;
         }
 
@@ -138,6 +140,7 @@ export async function action({ request }: ActionFunctionArgs) {
         message: `Processed ${processedCount} shops`,
         processed: processedCount,
         total: sessions.length,
+        skipped: skipped.length > 0 ? skipped : undefined,
         errors: errors.length > 0 ? errors : undefined,
       }),
       {
