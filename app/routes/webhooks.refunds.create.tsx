@@ -213,6 +213,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             delta = prevAvailable !== null && quantityAfter !== null 
               ? quantityAfter - prevAvailable 
               : quantity; // 直前値が取れない場合は、返品数量をプラスとして記録
+          } else {
+            // dbがundefinedの場合でも、返品数量をプラスとして記録
+            delta = quantity;
           }
         } catch (error) {
           console.error("Error checking previous log:", error);

@@ -217,6 +217,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 delta = prevAvailable !== null && quantityAfter !== null 
                   ? quantityAfter - prevAvailable 
                   : -quantity; // 直前値が取れない場合は、履行数量をマイナスとして記録
+              } else {
+                // dbがundefinedの場合でも、履行数量をマイナスとして記録
+                delta = -quantity;
               }
             } catch (error) {
               console.error("Error checking previous log:", error);

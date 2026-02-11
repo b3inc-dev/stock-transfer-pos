@@ -94,12 +94,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const now = new Date();
   const todayInShopTimezone = getDateInShopTimezone(now, shopTimezone);
   
-  const selectedDate = url.searchParams.get("date") || todayInShopTimezone;
-
-  // 今日の場合はリアルタイムで在庫情報を取得（共通モジュールで取得・集計）
-  const today = todayInShopTimezone;
-  const isToday = selectedDate === today;
-  
   const snapshotDates = savedSnapshots.snapshots.map((s) => s.date).sort();
   const firstSnapshotDate = snapshotDates.length > 0 ? snapshotDates[0] : todayInShopTimezone;
 
@@ -107,6 +101,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const yesterdayDate = new Date(y, m - 1, d - 1);
   const yesterdayDateStr = yesterdayDate.toISOString().slice(0, 10);
   const hasYesterdaySnapshot = savedSnapshots.snapshots.some((s) => s.date === yesterdayDateStr);
+
+  // デフォルト日付: URLパラメータがあればそれを使用、なければ前日のスナップショットがあれば前日、なければ今日
+  const defaultDate = url.searchParams.get("date") || (hasYesterdaySnapshot ? yesterdayDateStr : todayInShopTimezone);
+  const selectedDate = defaultDate;
+
+  // 今日の場合はリアルタイムで在庫情報を取得（共通モジュールで取得・集計）
+  const today = todayInShopTimezone;
+  const isToday = selectedDate === today;
 
   const snapshotForDate = savedSnapshots.snapshots
     .filter((s) => s.date === selectedDate)
@@ -186,6 +188,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
       defaultStartForHistory = firstChangeHistoryDate;
     }
 
+    // フィルターが明示的に適用されているかチェック（URLパラメータにstartDateまたはendDateがある場合のみデータを取得）
+    const hasExplicitFilters = startDateParam !== null || endDateParam !== null;
+    
     let startDate = startDateParam || defaultStartForHistory;
     let endDate = endDateParam || defaultEndForHistory;
 
@@ -216,7 +221,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const sortOrder = url.searchParams.get("sortOrder") || "desc";
 
     let changeHistoryLogs: any[] = [];
-    if (isChangeHistoryTab && session) {
+    // フィルターが明示的に適用されている場合のみデータを取得（初回表示時のパフォーマンス改善）
+    if (isChangeHistoryTab && session && hasExplicitFilters) {
       try {
         const whereClause: any = {
           shop: session.shop,
@@ -350,6 +356,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       firstChangeHistoryDate,
       // 在庫変動履歴用のデータ
       changeHistoryLogs: changeHistoryLogs || [],
+      hasExplicitFilters, // フィルターが明示的に適用されているか（初回表示時のパフォーマンス改善用）
       changeHistoryFilters: {
         startDate,
         endDate,
@@ -444,7 +451,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function InventoryInfoPage() {
-  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, firstChangeHistoryDate, changeHistoryLogs, changeHistoryFilters } =
+  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, firstChangeHistoryDate, changeHistoryLogs, hasExplicitFilters, changeHistoryFilters } =
     useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher<typeof action>();
@@ -856,23 +863,48 @@ export default function InventoryInfoPage() {
                       {/* 日付選択（スマホで枠がはみ出さないよう親で幅を制約） */}
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
                       <s-text emphasis="bold" size="small">日付</s-text>
-                      <div style={{ width: "100%", minWidth: 0, overflow: "hidden" }}>
-                        <input
-                          type="date"
-                          value={dateValue}
-                          onChange={handleDateChange}
-                          min={firstSnapshotDate}
-                          max={todayInShopTimezone}
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center", width: "100%" }}>
+                        <div style={{ flex: "1 1 0", minWidth: 0, overflow: "hidden" }}>
+                          <input
+                            type="date"
+                            value={dateValue}
+                            onChange={handleDateChange}
+                            min={firstSnapshotDate}
+                            max={todayInShopTimezone}
+                            style={{
+                              padding: "8px 12px",
+                              border: "1px solid #d1d5db",
+                              borderRadius: "6px",
+                              fontSize: "14px",
+                              width: "100%",
+                              maxWidth: "100%",
+                              boxSizing: "border-box",
+                            }}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const params = new URLSearchParams(searchParams);
+                            params.set("date", todayInShopTimezone);
+                            setSearchParams(params);
+                            setDateValue(todayInShopTimezone);
+                          }}
                           style={{
-                            padding: "8px 12px",
-                            border: "1px solid #d1d5db",
+                            padding: "8px 16px",
+                            backgroundColor: "#2563eb",
+                            color: "#ffffff",
+                            border: "none",
                             borderRadius: "6px",
                             fontSize: "14px",
-                            width: "100%",
-                            maxWidth: "100%",
-                            boxSizing: "border-box",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            whiteSpace: "nowrap",
+                            flexShrink: 0,
                           }}
-                        />
+                        >
+                          本日集計
+                        </button>
                       </div>
                       {/* 最初のスナップショット日付を表示 */}
                       {firstSnapshotDate && (
@@ -1079,13 +1111,12 @@ export default function InventoryInfoPage() {
                         </div>
                         <div
                           style={{
-                            fontSize: "clamp(14px, 3vw, 24px)",
+                            fontSize: "clamp(12px, 2.5vw, 20px)",
                             fontWeight: 700,
                             color: "#202223",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
                             lineHeight: "1.2",
+                            wordBreak: "break-all",
+                            overflowWrap: "break-word",
                           }}
                         >
                           {summary.totalQuantity.toLocaleString()}
@@ -1114,13 +1145,12 @@ export default function InventoryInfoPage() {
                         </div>
                         <div
                           style={{
-                            fontSize: "clamp(14px, 3vw, 24px)",
+                            fontSize: "clamp(12px, 2.5vw, 20px)",
                             fontWeight: 700,
                             color: "#202223",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
                             lineHeight: "1.2",
+                            wordBreak: "break-all",
+                            overflowWrap: "break-word",
                           }}
                         >
                           ¥{Math.round(summary.totalRetailValue).toLocaleString()}
@@ -1149,13 +1179,12 @@ export default function InventoryInfoPage() {
                         </div>
                         <div
                           style={{
-                            fontSize: "clamp(14px, 3vw, 24px)",
+                            fontSize: "clamp(12px, 2.5vw, 20px)",
                             fontWeight: 700,
                             color: "#202223",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
                             lineHeight: "1.2",
+                            wordBreak: "break-all",
+                            overflowWrap: "break-word",
                           }}
                         >
                           ¥{Math.round(summary.totalCompareAtPriceValue).toLocaleString()}
@@ -1184,13 +1213,12 @@ export default function InventoryInfoPage() {
                         </div>
                         <div
                           style={{
-                            fontSize: "clamp(14px, 3vw, 24px)",
+                            fontSize: "clamp(12px, 2.5vw, 20px)",
                             fontWeight: 700,
                             color: "#202223",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
                             lineHeight: "1.2",
+                            wordBreak: "break-all",
+                            overflowWrap: "break-word",
                           }}
                         >
                           ¥{Math.round(summary.totalCostValue).toLocaleString()}
@@ -1764,7 +1792,13 @@ export default function InventoryInfoPage() {
                     >
                       <s-stack gap="base">
                         {/* 一覧表示 */}
-                        {changeHistoryLogs && changeHistoryLogs.length > 0 ? (
+                        {!hasExplicitFilters ? (
+                          <div style={{ padding: "24px", textAlign: "center" }}>
+                            <s-text tone="subdued" size="large">
+                              フィルターを設定して「フィルター適用」ボタンを押すと、在庫変動履歴が表示されます。
+                            </s-text>
+                          </div>
+                        ) : changeHistoryLogs && changeHistoryLogs.length > 0 ? (
                           <>
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
                               <s-text tone="subdued" size="small">
@@ -1880,6 +1914,12 @@ export default function InventoryInfoPage() {
                                   ))}
                                 </tbody>
                               </table>
+                            </div>
+                            {/* 注釈情報 */}
+                            <div style={{ marginTop: "12px", padding: "8px 12px", backgroundColor: "#f6f6f7", borderRadius: "6px", border: "1px solid #e1e3e5" }}>
+                              <s-text tone="subdued" size="small" style={{ fontSize: "11px", lineHeight: "1.4" }}>
+                                管理画面からの在庫数量変更：対象SKUとロケーションの変動が初回の場合は「-」表記になります。
+                              </s-text>
                             </div>
                           </>
                         ) : (

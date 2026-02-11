@@ -196,7 +196,62 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         });
 
         prevAvailable = prevLog?.quantityAfter ?? null;
-        delta = prevAvailable !== null ? available - prevAvailable : null;
+        
+        // deltaの計算: 直前のログがあればそれから計算、なければinventory_adjustment_group_idから取得を試みる
+        if (prevAvailable !== null) {
+          // 直前のログがある場合: 通常の計算
+          delta = available - prevAvailable;
+        } else if (adjustmentGroupId && session) {
+          // 直前のログがない場合: inventory_adjustment_group_idがあればそこからdeltaを取得
+          try {
+            console.log(`[inventory_levels/update] No previous log found, fetching delta from InventoryAdjustmentGroup: ${adjustmentGroupId}`);
+            const adjustmentGroupIdGid = adjustmentGroupId.startsWith("gid://") ? adjustmentGroupId : `gid://shopify/InventoryAdjustmentGroup/${adjustmentGroupId}`;
+            const adjustmentGroupResp = await admin.request({
+              data: `
+                #graphql
+                query GetInventoryAdjustmentGroup($id: ID!, $itemId: ID!, $locationId: ID!) {
+                  node(id: $id) {
+                    ... on InventoryAdjustmentGroup {
+                      id
+                      changes(inventoryItemIds: [$itemId], locationIds: [$locationId]) {
+                        deltaQuantity
+                        inventoryItem {
+                          id
+                        }
+                        location {
+                          id
+                        }
+                      }
+                    }
+                  }
+                }
+              `,
+              variables: { 
+                id: adjustmentGroupIdGid,
+                itemId: inventoryItemId,
+                locationId: locationId,
+              },
+            });
+            const adjustmentGroupData = await adjustmentGroupResp.json();
+            const node = adjustmentGroupData?.data?.node;
+            const matchingChange = node?.changes?.find((change: any) => 
+              change?.inventoryItem?.id === inventoryItemId && change?.location?.id === locationId
+            );
+            if (matchingChange?.deltaQuantity !== undefined && matchingChange?.deltaQuantity !== null) {
+              delta = matchingChange.deltaQuantity;
+              console.log(`[inventory_levels/update] Calculated delta from InventoryAdjustmentGroup: delta=${delta}`);
+            } else {
+              delta = null;
+              console.log(`[inventory_levels/update] No matching change found in InventoryAdjustmentGroup, delta remains null`);
+            }
+          } catch (error) {
+            console.error("[inventory_levels/update] Error fetching InventoryAdjustmentGroup:", error);
+            delta = null;
+          }
+        } else {
+          // 直前のログもなく、inventory_adjustment_group_idもない場合
+          delta = null;
+        }
 
         // idempotencyKeyを生成（重複防止、元の形式を使用）
         idempotencyKey = `${shop}:${inventoryItemIdRaw}:${locationIdRaw}:${updatedAt.toISOString()}:${available}`;
