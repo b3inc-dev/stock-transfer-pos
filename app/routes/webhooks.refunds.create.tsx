@@ -29,8 +29,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     console.log(`[refunds.create] Webhook received: shop=${shop}, topic=${topic}, hasSession=${!!session}`);
 
-    if (topic !== "refunds/create") {
-      console.log(`[refunds.create] Invalid topic: ${topic}, returning 400`);
+    // topicの形式を正規化（大文字小文字、スラッシュ/アンダースコアの違いに対応）
+    const topicStr = String(topic || "").toLowerCase();
+    let normalizedTopic = topicStr;
+    if (topicStr === "refunds_create") {
+      normalizedTopic = "refunds/create";
+    } else if (topicStr.includes("_")) {
+      // 最後のアンダースコアをスラッシュに変換（例: refunds_create → refunds/create）
+      normalizedTopic = topicStr.replace(/_([^_]+)$/, "/$1");
+    }
+
+    if (normalizedTopic !== "refunds/create") {
+      console.log(`[refunds.create] Invalid topic: ${topic} (normalized: ${normalizedTopic}), returning 400`);
       return new Response("Invalid topic", { status: 400 });
     }
 
