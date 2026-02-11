@@ -288,7 +288,12 @@ export async function logInventoryChangesFromAdjustment(
       }
 
       // 二重登録防止用キーを生成
-      const idempotencyKey = `${shop}_${activity}_${change.inventoryItemId}_${change.locationId}_${sourceId || "unknown"}_${Date.now()}`;
+      // sourceIdがある場合はそれを使用、ない場合はタイムスタンプを秒単位に丸めて使用
+      // Date.now()は使用しない（同じ操作でも異なるキーになってしまうため）
+      const timestampRounded = new Date(Math.floor(Date.now() / 1000) * 1000);
+      const idempotencyKey = sourceId 
+        ? `${shop}_${activity}_${change.inventoryItemId}_${change.locationId}_${sourceId}`
+        : `${shop}_${activity}_${change.inventoryItemId}_${change.locationId}_${timestampRounded.toISOString()}`;
 
       const logData: InventoryChangeLogData = {
         shop,

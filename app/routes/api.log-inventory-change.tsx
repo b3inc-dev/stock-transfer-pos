@@ -212,7 +212,12 @@ export async function action({ request }: ActionFunctionArgs) {
       const rawLocId = toRawId(locationId);
       const ts = timestamp ? new Date(timestamp) : new Date();
       const date = getDateInShopTimezone(ts, shopTimezone);
-      const idempotencyKey = `${shop}:${inventoryItemId}:${locationId}:${timestamp || ts.toISOString()}:${quantityAfter || 0}`;
+      // idempotencyKeyの生成: sourceIdがある場合はそれを使用、ない場合はタイムスタンプを秒単位に丸めて使用
+      // quantityAfterは含めない（同じ操作でもquantityAfterが異なる可能性があるため）
+      const tsRounded = timestamp ? new Date(Math.floor(new Date(timestamp).getTime() / 1000) * 1000) : new Date(Math.floor(ts.getTime() / 1000) * 1000);
+      const idempotencyKey = sourceId 
+        ? `${shop}_${activity}_${inventoryItemId}_${locationId}_${sourceId}`
+        : `${shop}_${activity}_${inventoryItemId}_${locationId}_${tsRounded.toISOString()}`;
 
       // 入庫・出庫・仕入・ロス・棚卸で変動があったロケーション名を確実に保存する。
       // 未設定またはラベル（出庫元）のときは GraphQL で実ロケーション名を取得する。

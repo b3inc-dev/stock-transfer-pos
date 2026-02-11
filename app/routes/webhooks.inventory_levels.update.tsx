@@ -254,7 +254,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
 
         // idempotencyKeyを生成（重複防止、元の形式を使用）
-        idempotencyKey = `${shop}:${inventoryItemIdRaw}:${locationIdRaw}:${updatedAt.toISOString()}:${available}`;
+        // updatedAtは秒単位に丸めて使用（ミリ秒の違いで重複チェックが失敗するのを防ぐ）
+        // availableは含めない（同じ操作でもavailableが異なる可能性があるため）
+        const updatedAtRounded = new Date(Math.floor(updatedAt.getTime() / 1000) * 1000);
+        idempotencyKey = `${shop}:${inventoryItemIdRaw}:${locationIdRaw}:${updatedAtRounded.toISOString()}`;
 
         // 既に同じidempotencyKeyのログが存在する場合はスキップ（二重登録防止）
         existingLog = await (db as any).inventoryChangeLog.findUnique({
