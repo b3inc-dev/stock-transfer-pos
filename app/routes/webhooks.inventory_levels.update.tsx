@@ -306,11 +306,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       // 直近で同一商品・ロケーションの既知アクティビティが記録されていれば、
       // それをこの webhook で上書き（quantityAfter のみ更新）し、新しい「管理」行は作らない。
+      //
+      // ⚠ 重要:
+      // - 売上（orders.updated）や返品（refunds.create）では inventoryItemId / locationId を
+      //   「GID 形式（gid://shopify/...）」で保存している。
+      // - inventory_levels/update Webhook では数値ID（raw）で受け取っており、そのまま保存している。
+      // そのため、ここでは **両方の形式** を候補として検索しないと、同じ在庫変動でも
+      // 「order_sales」と「admin_webhook」が別々の行として二重に記録されてしまう。
+      const inventoryItemIdCandidates = [
+        inventoryItemIdRaw,
+        `gid://shopify/InventoryItem/${inventoryItemIdRaw}`,
+      ];
+      const locationIdCandidates = [
+        locationIdRaw,
+        `gid://shopify/Location/${locationIdRaw}`,
+      ];
+
       const recentNonAdminLog = await (db as any).inventoryChangeLog.findFirst({
         where: {
           shop,
-          inventoryItemId: inventoryItemIdRaw,
-          locationId: locationIdRaw,
+          inventoryItemId: { in: inventoryItemIdCandidates },
+          locationId: { in: locationIdCandidates },
           activity: { in: knownActivities },
           timestamp: { gte: recentThreshold },
         },
