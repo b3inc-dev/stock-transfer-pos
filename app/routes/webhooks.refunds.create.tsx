@@ -260,9 +260,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
 
         // 二重登録防止用キーを生成
+        // refundCreatedAtは秒単位に丸めて使用（ミリ秒の違いで重複チェックが失敗するのを防ぐ）
+        const refundCreatedAtRounded = new Date(Math.floor(refundCreatedAt.getTime() / 1000) * 1000);
         const refundId = `refund_${refund.id}`;
         const lineItemIdStr = refundLineItem.line_item_id ? `line_item_${refundLineItem.line_item_id}` : "";
-        const idempotencyKey = `${shop}_refund_${inventoryItemId}_${locationId}_${refundId}_${lineItemIdStr}_${refundCreatedAt.toISOString()}`;
+        const idempotencyKey = `${shop}_refund_${inventoryItemId}_${locationId}_${refundId}_${lineItemIdStr}_${refundCreatedAtRounded.toISOString()}`;
 
         // 既に同じidempotencyKeyのログが存在する場合はスキップ（二重登録防止）
         try {

@@ -264,10 +264,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             }
 
             // 二重登録防止用キーを生成
+            // fulfillmentCreatedAtは秒単位に丸めて使用（ミリ秒の違いで重複チェックが失敗するのを防ぐ）
+            const fulfillmentCreatedAtRounded = new Date(Math.floor(fulfillmentCreatedAt.getTime() / 1000) * 1000);
             const orderId = `order_${order.id}`;
             const fulfillmentId = fulfillment.id ? `fulfillment_${fulfillment.id}` : "";
             const lineItemId = fulfillmentLineItem.id ? `line_item_${fulfillmentLineItem.id}` : "";
-            const idempotencyKey = `${shop}_order_sales_${inventoryItemId}_${fulfillmentLocationId}_${orderId}_${fulfillmentId}_${lineItemId}_${fulfillmentCreatedAt.toISOString()}`;
+            const idempotencyKey = `${shop}_order_sales_${inventoryItemId}_${fulfillmentLocationId}_${orderId}_${fulfillmentId}_${lineItemId}_${fulfillmentCreatedAtRounded.toISOString()}`;
 
             // 既に同じidempotencyKeyのログが存在する場合はスキップ（二重登録防止）
             try {
