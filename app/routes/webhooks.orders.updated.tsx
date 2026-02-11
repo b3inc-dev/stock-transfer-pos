@@ -179,20 +179,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           : new Date();
 
         // 履行された商品ごとに在庫変動を記録
+        console.log(`[orders/updated] Processing fulfillment.line_items: fulfillment.id=${fulfillment.id}, line_items.length=${fulfillment.line_items?.length || 0}`);
         for (const fulfillmentLineItem of fulfillment.line_items) {
+          console.log(`[orders/updated] Processing fulfillmentLineItem: id=${fulfillmentLineItem.id}, quantity=${fulfillmentLineItem.quantity}`);
           // 注文のline_itemsから該当する商品を検索
           const orderLineItem = order.line_items.find(
             (item) => item.id === fulfillmentLineItem.id
           );
 
           if (!orderLineItem || !orderLineItem.variant_id) {
+            console.log(`[orders/updated] Skipping fulfillmentLineItem: orderLineItem=${!!orderLineItem}, variant_id=${orderLineItem?.variant_id || "null"}, fulfillmentLineItem.id=${fulfillmentLineItem.id}`);
             continue;
           }
+          console.log(`[orders/updated] Found orderLineItem: id=${orderLineItem.id}, variant_id=${orderLineItem.variant_id}`);
 
           const variantId = `gid://shopify/ProductVariant/${orderLineItem.variant_id}`;
           const quantity = fulfillmentLineItem.quantity || 0;
 
+          console.log(`[orders/updated] Processing variant: variantId=${variantId}, quantity=${quantity}`);
           if (quantity <= 0) {
+            console.log(`[orders/updated] Skipping fulfillmentLineItem: quantity=${quantity} <= 0`);
             continue;
           }
 
@@ -218,8 +224,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             const inventoryItemId = variant?.inventoryItem?.id;
             const sku = variant?.sku || orderLineItem.sku || "";
 
+            console.log(`[orders/updated] Variant query result: variant=${!!variant}, inventoryItemId=${inventoryItemId || "null"}, sku=${sku}`);
             if (!inventoryItemId) {
-              console.warn(`InventoryItem not found for variant ${variantId}`);
+              console.warn(`[orders/updated] InventoryItem not found for variant ${variantId}, skipping`);
               continue;
             }
 
