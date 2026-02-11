@@ -695,10 +695,11 @@ export default function InventoryInfoPage() {
   };
 
 
-  // 選択解除
+  // 選択解除（「選択済み」表示も解除して検索結果一覧に戻す）
   const handleChangeHistoryProductDeselectAll = () => {
     setChangeHistorySelectedInventoryItemIds(new Set());
     setChangeHistorySelectedProductsInfo(new Map());
+    setChangeHistoryShowSelectedProducts(false);
   };
 
 

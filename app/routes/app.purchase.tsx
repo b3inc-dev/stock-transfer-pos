@@ -470,9 +470,10 @@ export async function action({ request }: ActionFunctionArgs) {
     // コレクション検索（新規仕入の「コレクション」タブ用）
     if (intent === "searchCollectionsForPurchase") {
       const query = String(formData.get("query") || "").trim();
+      if (!query) return { ok: true, collections: [] };
       try {
         const gql = `#graphql
-          query SearchCollections($first: Int!, $query: String) {
+          query SearchCollections($first: Int!, $query: String!) {
             collections(first: $first, query: $query) {
               nodes {
                 id
@@ -481,8 +482,7 @@ export async function action({ request }: ActionFunctionArgs) {
             }
           }
         `;
-        const variables: { first: number; query?: string } = { first: 50 };
-        if (query) variables.query = `title:${query.replace(/"/g, '\\"').trim()}`;
+        const variables = { first: 50, query: query.replace(/"/g, '\\"') };
         const resp = await admin.graphql(gql, { variables });
         const data = await resp.json();
         const nodes = data?.data?.collections?.nodes ?? [];
@@ -550,20 +550,30 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
 
-    // CSVで商品を一括解決（新規仕入の「CSVで追加」用）。形式: SKU,数量 または SKU のみ（数量1）
+    // CSVで商品を一括解決（新規仕入の「CSVで追加」用）。形式: SKU,数量 または SKU のみ（数量1）。1行目はヘッダー（SKU,数量）可。
     if (intent === "resolveCsvForPurchase") {
       const csvRaw = String(formData.get("csv") || "").trim();
       if (!csvRaw) return { error: "CSVデータが空です" };
       const lines = csvRaw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       const rows: { sku: string; quantity: number }[] = [];
-      for (const line of lines) {
-        const parts = line.split(",").map((p) => p.trim());
+      // 1行目がヘッダーかどうか（SKU,数量 など）→ 棚卸と同様にスキップ
+      let startIndex = 0;
+      if (lines[0]) {
+        const firstParts = lines[0].split(",").map((p) => p.trim());
+        const col0 = (firstParts[0] || "").toLowerCase();
+        const col1 = (firstParts[1] || "").toLowerCase();
+        if (col0 === "sku" && (col1 === "" || col1 === "数量" || col1 === "quantity")) {
+          startIndex = 1;
+        }
+      }
+      for (let i = startIndex; i < lines.length; i++) {
+        const parts = lines[i].split(",").map((p) => p.trim());
         const sku = parts[0] || "";
         if (!sku) continue;
         const qty = Math.max(0, parseInt(parts[1], 10) || 1);
         rows.push({ sku, quantity: qty });
       }
-      if (rows.length === 0) return { error: "有効な行（SKU,数量）がありません" };
+      if (rows.length === 0) return { error: "有効な行（SKU,数量）がありません。1行目はヘッダー（SKU,数量）にできます。" };
       const BATCH = 25;
       const items: OrderRequestItem[] = [];
       const errors: string[] = [];
@@ -966,7 +976,7 @@ export default function PurchasePage() {
   }>>(new Map());
   // 選択済み商品を検索結果リストに表示するかどうか
   const [newPurchaseShowSelectedProducts, setNewPurchaseShowSelectedProducts] = useState(false);
-  // CSVタブ: アップロードしたCSVのプレビュー（チェックした行だけ「商品を追加」で追加）
+  // CSVタブ: アップロードしたCSVの表示（チェックした行だけ「商品を追加」で追加）
   const [newPurchaseCsvPreviewItems, setNewPurchaseCsvPreviewItems] = useState<OrderRequestItem[]>([]);
   const [newPurchaseCsvSelectedIds, setNewPurchaseCsvSelectedIds] = useState<Set<string>>(new Set()); // inventoryItemId で選択
   const newPurchaseCsvFileInputRef = useRef<HTMLInputElement>(null);
@@ -991,13 +1001,18 @@ export default function PurchasePage() {
   // コレクションタブ用
   const [newPurchaseCollectionSearchQuery, setNewPurchaseCollectionSearchQuery] = useState("");
   const [newPurchaseCollectionSearchResults, setNewPurchaseCollectionSearchResults] = useState<Array<{ id: string; title: string }>>([]);
-  const [newPurchaseSelectedCollectionId, setNewPurchaseSelectedCollectionId] = useState("");
   const [newPurchaseCollectionProducts, setNewPurchaseCollectionProducts] = useState<Array<{ variantId: string; inventoryItemId: string; sku: string; title: string; barcode?: string; quantity: number }>>([]);
-  const [newPurchaseCollectionSelectedIds, setNewPurchaseCollectionSelectedIds] = useState<Set<string>>(new Set());
-  const [newPurchaseCollectionShowSelected, setNewPurchaseCollectionShowSelected] = useState(false);
-  const [newPurchaseCollectionQuantities, setNewPurchaseCollectionQuantities] = useState<Record<string, number>>({});
   const newPurchaseCollectionSearchFetcher = useFetcher<typeof action>();
   const newPurchaseCollectionProductsFetcher = useFetcher<typeof action>();
+  // コレクション「商品を選ぶ」モーダル（棚卸と同様：検索枠・選択済み/全選択/全解除）
+  const [purchaseCollectionModalOpen, setPurchaseCollectionModalOpen] = useState(false);
+  const [purchaseCollectionModalCollectionId, setPurchaseCollectionModalCollectionId] = useState("");
+  const [purchaseCollectionModalCollectionTitle, setPurchaseCollectionModalCollectionTitle] = useState("");
+  const [purchaseCollectionModalSelectedQuantities, setPurchaseCollectionModalSelectedQuantities] = useState<Record<string, number>>({});
+  const [purchaseCollectionModalSearchQuery, setPurchaseCollectionModalSearchQuery] = useState("");
+  const [purchaseCollectionModalShowOnlySelected, setPurchaseCollectionModalShowOnlySelected] = useState(false);
+  const [purchaseCollectionModalPage, setPurchaseCollectionModalPage] = useState(1);
+  const PURCHASE_MODAL_ITEMS_PER_PAGE = 1000;
   const [confirmModalOpen, setConfirmModalOpen] = useState(false);
   const [confirmMessage, setConfirmMessage] = useState("");
   const [confirmCallback, setConfirmCallback] = useState<(() => void) | null>(null);
@@ -1266,7 +1281,7 @@ export default function PurchasePage() {
     if (fetcher.data && "items" in fetcher.data && Array.isArray((fetcher.data as { items?: unknown }).items)) {
       const payload = fetcher.data as { items: OrderRequestItem[]; errors?: string[] };
       if (payload.items.length > 0) {
-        // CSVタブの「プレビュー」に入れて、チェックで選んでから追加する（棚卸の選択式に合わせる）
+        // CSVタブの「表示」に入れて、チェックで選んでから追加する（棚卸の選択式に合わせる）
         setNewPurchaseCsvPreviewItems(payload.items);
         setNewPurchaseCsvSelectedIds(new Set(payload.items.map((it) => String(it.inventoryItemId ?? ""))));
       }
@@ -1292,15 +1307,38 @@ export default function PurchasePage() {
     }
   }, [newPurchaseCollectionSearchFetcher.data]);
 
-  // コレクション商品一覧の反映
+  // コレクション商品一覧の反映（モーダル用）
   useEffect(() => {
     const d = newPurchaseCollectionProductsFetcher.data;
     if (d && (d as { ok?: boolean }).ok && Array.isArray((d as { products?: unknown }).products)) {
       setNewPurchaseCollectionProducts((d as { products: Array<{ variantId: string; inventoryItemId: string; sku: string; title: string; barcode?: string; quantity: number }> }).products);
-      setNewPurchaseCollectionSelectedIds(new Set());
-      setNewPurchaseCollectionQuantities({});
     }
   }, [newPurchaseCollectionProductsFetcher.data]);
+
+  // コレクション商品モーダル用の絞り込み・表示・ページング（棚卸と同様）
+  const purchaseCollectionFilteredProducts = useMemo(() => {
+    const list = newPurchaseCollectionProducts;
+    if (!purchaseCollectionModalSearchQuery.trim()) return list;
+    const q = purchaseCollectionModalSearchQuery.trim().toLowerCase();
+    return list.filter(
+      (p) =>
+        (p.sku || "").toLowerCase().includes(q) ||
+        (p.title || "").toLowerCase().includes(q) ||
+        (p.barcode || "").toLowerCase().includes(q)
+    );
+  }, [newPurchaseCollectionProducts, purchaseCollectionModalSearchQuery]);
+  const purchaseCollectionDisplayProducts = useMemo(() => {
+    if (!purchaseCollectionModalShowOnlySelected) return purchaseCollectionFilteredProducts;
+    return purchaseCollectionFilteredProducts.filter((p) => (purchaseCollectionModalSelectedQuantities[p.variantId] ?? 0) > 0);
+  }, [purchaseCollectionModalShowOnlySelected, purchaseCollectionFilteredProducts, purchaseCollectionModalSelectedQuantities]);
+  const purchaseCollectionPaginatedProducts = useMemo(() => {
+    const start = (purchaseCollectionModalPage - 1) * PURCHASE_MODAL_ITEMS_PER_PAGE;
+    return purchaseCollectionDisplayProducts.slice(start, start + PURCHASE_MODAL_ITEMS_PER_PAGE);
+  }, [purchaseCollectionDisplayProducts, purchaseCollectionModalPage]);
+  const purchaseCollectionModalTotalPages = Math.max(1, Math.ceil(purchaseCollectionDisplayProducts.length / PURCHASE_MODAL_ITEMS_PER_PAGE));
+  useEffect(() => {
+    setPurchaseCollectionModalPage(1);
+  }, [purchaseCollectionModalSearchQuery, purchaseCollectionModalShowOnlySelected]);
 
   const closeItemsModal = () => {
     setModalOpen(false);
@@ -1757,49 +1795,9 @@ export default function PurchasePage() {
 
                         {newPurchaseProductMethod === "collection" && (
                           <s-stack gap="base">
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                              <s-text emphasis="bold" size="small">コレクションから追加</s-text>
-                              <div style={{ display: "flex", gap: "8px" }}>
-                                <button
-                                  type="button"
-                                  onClick={() => setNewPurchaseCollectionShowSelected(!newPurchaseCollectionShowSelected)}
-                                  disabled={newPurchaseCollectionSelectedIds.size === 0}
-                                  style={{
-                                    padding: "4px 12px",
-                                    borderRadius: "6px",
-                                    border: "1px solid #d1d5db",
-                                    backgroundColor: newPurchaseCollectionShowSelected && newPurchaseCollectionSelectedIds.size > 0 ? "#eff6ff" : newPurchaseCollectionSelectedIds.size === 0 ? "#f3f4f6" : "#ffffff",
-                                    color: newPurchaseCollectionSelectedIds.size === 0 ? "#9ca3af" : "#202223",
-                                    fontSize: "12px",
-                                    fontWeight: 500,
-                                    cursor: newPurchaseCollectionSelectedIds.size === 0 ? "not-allowed" : "pointer",
-                                  }}
-                                >
-                                  選択済み ({newPurchaseCollectionSelectedIds.size})
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setNewPurchaseCollectionSelectedIds(new Set());
-                                    setNewPurchaseCollectionQuantities({});
-                                  }}
-                                  disabled={newPurchaseCollectionSelectedIds.size === 0}
-                                  style={{
-                                    padding: "4px 12px",
-                                    borderRadius: "6px",
-                                    border: "1px solid #d1d5db",
-                                    backgroundColor: newPurchaseCollectionSelectedIds.size === 0 ? "#f3f4f6" : "#ffffff",
-                                    color: newPurchaseCollectionSelectedIds.size === 0 ? "#9ca3af" : "#d72c0d",
-                                    fontSize: "12px",
-                                    fontWeight: 500,
-                                    cursor: newPurchaseCollectionSelectedIds.size === 0 ? "not-allowed" : "pointer",
-                                  }}
-                                >
-                                  選択解除
-                                </button>
-                              </div>
-                            </div>
-                            <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                            <s-text emphasis="bold" size="small">コレクションから追加</s-text>
+                            <s-text tone="subdued" size="small">コレクションを検索し、行の「商品を選ぶ」からモーダルで商品を選択して追加します。</s-text>
+                            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                               <input
                                 type="text"
                                 value={newPurchaseCollectionSearchQuery}
@@ -1833,155 +1831,72 @@ export default function PurchasePage() {
                                 {newPurchaseCollectionSearchFetcher.state === "submitting" ? "検索中..." : "検索"}
                               </button>
                             </div>
-                            {newPurchaseCollectionSearchResults.length > 0 && !newPurchaseSelectedCollectionId && (
-                              <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
-                                {newPurchaseCollectionSearchResults.map((c) => (
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              <s-text tone="subdued" size="small">表示: {newPurchaseCollectionSearchResults.length}件</s-text>
+                            </div>
+                            <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                              {newPurchaseCollectionSearchResults.length > 0 ? (
+                                newPurchaseCollectionSearchResults.map((c, idx) => (
                                   <div
                                     key={c.id}
-                                    role="button"
-                                    tabIndex={0}
-                                    onClick={() => {
-                                      setNewPurchaseSelectedCollectionId(c.id);
-                                      const fd = new FormData();
-                                      fd.set("intent", "getCollectionProductsForPurchase");
-                                      fd.set("collectionId", c.id);
-                                      newPurchaseCollectionProductsFetcher.submit(fd, { method: "post", action: location.pathname });
+                                    style={{
+                                      padding: "10px 12px",
+                                      borderRadius: "6px",
+                                      border: "1px solid #e5e7eb",
+                                      marginTop: idx === 0 ? 0 : "4px",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "space-between",
+                                      gap: "8px",
                                     }}
-                                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setNewPurchaseSelectedCollectionId(c.id); const fd = new FormData(); fd.set("intent", "getCollectionProductsForPurchase"); fd.set("collectionId", c.id); newPurchaseCollectionProductsFetcher.submit(fd, { method: "post", action: location.pathname }); } }}
-                                    style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", border: "1px solid #e5e7eb", display: "flex", alignItems: "center", gap: "8px" }}
                                   >
-                                    <span style={{ fontWeight: 500 }}>{c.title}</span>
+                                    <span style={{ fontWeight: 500, flex: "1 1 auto", minWidth: 0 }}>{c.title}</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setPurchaseCollectionModalCollectionId(c.id);
+                                        setPurchaseCollectionModalCollectionTitle(c.title);
+                                        setPurchaseCollectionModalOpen(true);
+                                        setPurchaseCollectionModalSelectedQuantities({});
+                                        setPurchaseCollectionModalSearchQuery("");
+                                        setPurchaseCollectionModalShowOnlySelected(false);
+                                        setPurchaseCollectionModalPage(1);
+                                        const fd = new FormData();
+                                        fd.set("intent", "getCollectionProductsForPurchase");
+                                        fd.set("collectionId", c.id);
+                                        newPurchaseCollectionProductsFetcher.submit(fd, { method: "post", action: location.pathname });
+                                      }}
+                                      style={{
+                                        padding: "4px 8px",
+                                        fontSize: "12px",
+                                        border: "1px solid #c9cccf",
+                                        borderRadius: "6px",
+                                        background: "#fff",
+                                        cursor: "pointer",
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      商品を選ぶ
+                                    </button>
                                   </div>
-                                ))}
-                              </div>
-                            )}
-                            {newPurchaseSelectedCollectionId && (
-                              <>
-                                <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                                  <span style={{ fontSize: "13px", color: "#6d7175" }}>選択中: {newPurchaseCollectionSearchResults.find((c) => c.id === newPurchaseSelectedCollectionId)?.title ?? newPurchaseSelectedCollectionId}</span>
-                                  <button
-                                    type="button"
-                                    onClick={() => { setNewPurchaseSelectedCollectionId(""); setNewPurchaseCollectionProducts([]); setNewPurchaseCollectionSelectedIds(new Set()); }}
-                                    style={{ padding: "4px 8px", fontSize: "12px", border: "1px solid #d1d5db", borderRadius: "6px", background: "#fff", cursor: "pointer" }}
-                                  >
-                                    別のコレクションを選ぶ
-                                  </button>
-                                </div>
-                                {newPurchaseCollectionProductsFetcher.state === "submitting" ? (
-                                  <div style={{ padding: "12px", color: "#6d7175", fontSize: "13px" }}>商品を読み込み中...</div>
-                                ) : newPurchaseCollectionProducts.length > 0 ? (
-                                  <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
-                                    {(newPurchaseCollectionShowSelected ? newPurchaseCollectionProducts.filter((p) => newPurchaseCollectionSelectedIds.has(p.variantId)) : newPurchaseCollectionProducts).map((p) => {
-                                      const isSelected = newPurchaseCollectionSelectedIds.has(p.variantId);
-                                      const qty = newPurchaseCollectionQuantities[p.variantId] ?? 1;
-                                      return (
-                                        <div
-                                          key={p.variantId}
-                                          role="button"
-                                          tabIndex={0}
-                                          onClick={() => {
-                                            setNewPurchaseCollectionSelectedIds((prev) => {
-                                              const next = new Set(prev);
-                                              if (next.has(p.variantId)) next.delete(p.variantId);
-                                              else next.add(p.variantId);
-                                              return next;
-                                            });
-                                          }}
-                                          onKeyDown={(e) => {
-                                            if (e.key === "Enter" || e.key === " ") {
-                                              e.preventDefault();
-                                              setNewPurchaseCollectionSelectedIds((prev) => {
-                                                const next = new Set(prev);
-                                                if (next.has(p.variantId)) next.delete(p.variantId);
-                                                else next.add(p.variantId);
-                                                return next;
-                                              });
-                                            }
-                                          }}
-                                          style={{
-                                            padding: "10px 12px",
-                                            borderRadius: "6px",
-                                            cursor: "pointer",
-                                            backgroundColor: isSelected ? "#eff6ff" : "transparent",
-                                            border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
-                                            display: "flex",
-                                            alignItems: "center",
-                                            gap: "8px",
-                                          }}
-                                        >
-                                          <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                                          <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-                                            <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>{p.title || "(商品名なし)"}</span>
-                                            {p.sku ? <span style={{ fontSize: "12px", color: "#6d7175", display: "block" }}>SKU：{p.sku}</span> : null}
-                                          </div>
-                                          <input
-                                            type="number"
-                                            min={1}
-                                            value={qty}
-                                            onChange={(e) => { e.stopPropagation(); const n = Math.max(1, parseInt(e.target.value, 10) || 1); setNewPurchaseCollectionQuantities((prev) => ({ ...prev, [p.variantId]: n })); }}
-                                            onClick={(e) => e.stopPropagation()}
-                                            style={{ width: 56, padding: "4px 8px", fontSize: 13, border: "1px solid #c9cccf", borderRadius: "6px" }}
-                                          />
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                ) : (
-                                  <div style={{ padding: "12px", color: "#6d7175", fontSize: "13px" }}>このコレクションに商品はありません</div>
-                                )}
-                              </>
-                            )}
-                            <s-text tone="subdued" size="small">
-                              {newPurchaseCollectionSearchResults.length === 0 && !newPurchaseCollectionSearchQuery && "コレクション名を入力して検索してください。"}
-                              {newPurchaseCollectionSearchResults.length > 0 && !newPurchaseSelectedCollectionId && "コレクションをクリックして商品一覧を表示し、チェックして「商品を追加」で追加します。"}
-                            </s-text>
+                                ))
+                              ) : (
+                                <s-box padding="base">
+                                  <s-text tone="subdued" size="small">
+                                    {newPurchaseCollectionSearchFetcher.state === "submitting" ? "検索中..." : (newPurchaseCollectionSearchFetcher.data?.collections?.length === 0 && newPurchaseCollectionSearchQuery.trim()) ? "別キーワードで検索してください" : "コレクション名を入力して検索してください"}
+                                  </s-text>
+                                </s-box>
+                              )}
+                            </div>
                           </s-stack>
                         )}
                         {newPurchaseProductMethod === "search" && (
                           <s-stack gap="base">
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                            {/* 1行目: タイトルのみ */}
+                            <div style={{ display: "block" }}>
                               <s-text emphasis="bold" size="small">商品検索</s-text>
-                              <div style={{ display: "flex", gap: "8px" }}>
-                                <button
-                                  type="button"
-                                  onClick={() => setNewPurchaseShowSelectedProducts(!newPurchaseShowSelectedProducts)}
-                                  disabled={newPurchaseSearchSelectedIds.size === 0}
-                                  style={{
-                                    padding: "4px 12px",
-                                    borderRadius: "6px",
-                                    border: "1px solid #d1d5db",
-                                    backgroundColor: newPurchaseShowSelectedProducts && newPurchaseSearchSelectedIds.size > 0 ? "#eff6ff" : (newPurchaseSearchSelectedIds.size === 0 ? "#f3f4f6" : "#ffffff"),
-                                    color: newPurchaseSearchSelectedIds.size === 0 ? "#9ca3af" : "#202223",
-                                    fontSize: "12px",
-                                    fontWeight: 500,
-                                    cursor: newPurchaseSearchSelectedIds.size === 0 ? "not-allowed" : "pointer",
-                                  }}
-                                >
-                                  選択済み ({newPurchaseSearchSelectedIds.size})
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setNewPurchaseSearchSelectedIds(new Set());
-                                    setNewPurchaseSelectedProductsInfo(new Map());
-                                    setNewPurchaseSearchQuantities({});
-                                  }}
-                                  disabled={newPurchaseSearchSelectedIds.size === 0}
-                                  style={{
-                                    padding: "4px 12px",
-                                    borderRadius: "6px",
-                                    border: "1px solid #d1d5db",
-                                    backgroundColor: newPurchaseSearchSelectedIds.size === 0 ? "#f3f4f6" : "#ffffff",
-                                    color: newPurchaseSearchSelectedIds.size === 0 ? "#9ca3af" : "#d72c0d",
-                                    fontSize: "12px",
-                                    fontWeight: 500,
-                                    cursor: newPurchaseSearchSelectedIds.size === 0 ? "not-allowed" : "pointer",
-                                  }}
-                                >
-                                  選択解除
-                                </button>
-                              </div>
                             </div>
+                            {/* 2行目: 検索窓＋検索ボタン */}
                             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                               <input
                                 type="text"
@@ -2035,20 +1950,64 @@ export default function PurchasePage() {
                                 {fetcher.state === "submitting" ? "検索中..." : "検索"}
                               </button>
                             </div>
-                            {(newPurchaseSearchVariants.length > 0 || (newPurchaseShowSelectedProducts && newPurchaseSelectedProductsInfo.size > 0)) && (
-                              <>
-                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                                  <s-text tone="subdued" size="small">
-                                    {newPurchaseSearchSelectedIds.size > 0
-                                      ? `選択中: ${newPurchaseSearchSelectedIds.size}件 / 表示: ${newPurchaseShowSelectedProducts ? Array.from(newPurchaseSelectedProductsInfo.values()).length : newPurchaseSearchVariants.length}件`
-                                      : `表示: ${newPurchaseSearchVariants.length}件`}
-                                  </s-text>
-                                </div>
-                                <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                            {/* 3行目: 表示件数（左）・選択済み・選択解除（右寄せ） */}
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                              <s-text tone="subdued" size="small">
+                                {newPurchaseShowSelectedProducts
+                                  ? `選択済み: ${Array.from(newPurchaseSelectedProductsInfo.values()).length}件`
+                                  : newPurchaseSearchVariants.length <= 0
+                                    ? "表示: 0件"
+                                    : `表示: ${newPurchaseSearchVariants.length}件`}
+                              </s-text>
+                              <div style={{ display: "flex", gap: "8px", marginLeft: "auto" }}>
+                                <button
+                                  type="button"
+                                  onClick={() => setNewPurchaseShowSelectedProducts(!newPurchaseShowSelectedProducts)}
+                                  disabled={newPurchaseSearchSelectedIds.size === 0}
+                                  style={{
+                                    padding: "4px 12px",
+                                    borderRadius: "6px",
+                                    border: "1px solid #d1d5db",
+                                    backgroundColor: newPurchaseShowSelectedProducts && newPurchaseSearchSelectedIds.size > 0 ? "#eff6ff" : newPurchaseSearchSelectedIds.size === 0 ? "#f3f4f6" : "#ffffff",
+                                    color: newPurchaseSearchSelectedIds.size === 0 ? "#9ca3af" : "#202223",
+                                    fontSize: "12px",
+                                    fontWeight: 500,
+                                    cursor: newPurchaseSearchSelectedIds.size === 0 ? "not-allowed" : "pointer",
+                                  }}
+                                >
+                                  選択済み ({newPurchaseSearchSelectedIds.size})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setNewPurchaseSearchSelectedIds(new Set());
+                                    setNewPurchaseSelectedProductsInfo(new Map());
+                                    setNewPurchaseSearchQuantities({});
+                                    setNewPurchaseShowSelectedProducts(false);
+                                  }}
+                                  disabled={newPurchaseSearchSelectedIds.size === 0}
+                                  style={{
+                                    padding: "4px 12px",
+                                    borderRadius: "6px",
+                                    border: "1px solid #d1d5db",
+                                    backgroundColor: newPurchaseSearchSelectedIds.size === 0 ? "#f3f4f6" : "#ffffff",
+                                    color: newPurchaseSearchSelectedIds.size === 0 ? "#9ca3af" : "#d72c0d",
+                                    fontSize: "12px",
+                                    fontWeight: 500,
+                                    cursor: newPurchaseSearchSelectedIds.size === 0 ? "not-allowed" : "pointer",
+                                  }}
+                                >
+                                  選択解除
+                                </button>
+                              </div>
+                            </div>
+                            <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                              {newPurchaseSearchVariants.length > 0 || (newPurchaseShowSelectedProducts && newPurchaseSelectedProductsInfo.size > 0) ? (
+                                <>
                                   {/* 選択済みボタンが押されている場合は選択済み商品のみ表示、押されていない場合は検索結果を表示 */}
                                   {newPurchaseShowSelectedProducts ? (
                                     /* 選択済み商品のみ表示 */
-                                    Array.from(newPurchaseSelectedProductsInfo.values()).map((v) => {
+                                    Array.from(newPurchaseSelectedProductsInfo.values()).map((v, selectedIdx) => {
                                       const isSelected = newPurchaseSearchSelectedIds.has(v.variantId);
                                       return (
                                         <div
@@ -2106,6 +2065,7 @@ export default function PurchasePage() {
                                             cursor: "pointer",
                                             backgroundColor: isSelected ? "#eff6ff" : "transparent",
                                             border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
+                                            marginTop: selectedIdx === 0 ? 0 : "4px",
                                             display: "flex",
                                             alignItems: "center",
                                             gap: "8px",
@@ -2153,7 +2113,7 @@ export default function PurchasePage() {
                                     })
                                   ) : (
                                     /* 検索結果を表示 */
-                                    newPurchaseSearchVariants.map((v) => {
+                                    newPurchaseSearchVariants.map((v, searchIdx) => {
                                       const isSelected = newPurchaseSearchSelectedIds.has(v.variantId);
                                       return (
                                         <div
@@ -2213,6 +2173,7 @@ export default function PurchasePage() {
                                             cursor: "pointer",
                                             backgroundColor: isSelected ? "#eff6ff" : "transparent",
                                             border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
+                                            marginTop: searchIdx === 0 ? 0 : "4px",
                                             display: "flex",
                                             alignItems: "center",
                                             gap: "8px",
@@ -2262,16 +2223,22 @@ export default function PurchasePage() {
                                       );
                                     })
                                   )}
-                                </div>
-                              </>
-                            )}
+                                </>
+                              ) : (
+                                <s-box padding="base">
+                                  <s-text tone="subdued" size="small">
+                                    {fetcher.state === "submitting" ? "検索中..." : (fetcher.data?.variants?.length === 0 && newPurchaseSearchQuery.trim()) ? "別キーワードで検索してください" : "キーワードを入力して検索してください"}
+                                  </s-text>
+                                </s-box>
+                              )}
+                            </div>
                           </s-stack>
                         )}
                         {newPurchaseProductMethod === "csv" && (
                           <s-stack gap="base">
                             <s-text emphasis="bold" size="small">CSVアップロード</s-text>
                             <s-text tone="subdued" size="small">
-                              テンプレートをダウンロードしてCSVを作成し、アップロードしてください。アップ後にプレビューが出るので、チェックした商品だけ「商品を追加」で追加します。
+                              テンプレートをダウンロードしてCSVを作成し、アップロードしてください。アップロード後にリストが表示されるので、チェックした商品だけ「商品を追加」で追加します。
                             </s-text>
                             <input
                               type="file"
@@ -2321,8 +2288,8 @@ export default function PurchasePage() {
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
                                   <s-text tone="subdued" size="small">
                                     {newPurchaseCsvSelectedIds.size > 0
-                                      ? `選択中: ${newPurchaseCsvSelectedIds.size}件 / プレビュー: ${newPurchaseCsvPreviewItems.length}件`
-                                      : `プレビュー: ${newPurchaseCsvPreviewItems.length}件`}
+                                      ? `選択中: ${newPurchaseCsvSelectedIds.size}件 / 表示: ${newPurchaseCsvPreviewItems.length}件`
+                                      : `表示: ${newPurchaseCsvPreviewItems.length}件`}
                                   </s-text>
                                 </div>
                                 <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
@@ -2398,7 +2365,7 @@ export default function PurchasePage() {
                             disabled={
                               fetcher.state === "submitting" ||
                               (newPurchaseProductMethod === "search" && newPurchaseSearchSelectedIds.size === 0) ||
-                              (newPurchaseProductMethod === "collection" && newPurchaseCollectionSelectedIds.size === 0) ||
+                              (newPurchaseProductMethod === "collection") ||
                               (newPurchaseProductMethod === "csv" && newPurchaseCsvSelectedIds.size === 0)
                             }
                             onClick={() => {
@@ -2414,15 +2381,7 @@ export default function PurchasePage() {
                                   setNewPurchaseError("");
                                 }
                               } else if (newPurchaseProductMethod === "collection") {
-                                const toAdd = newPurchaseCollectionProducts
-                                  .filter((p) => newPurchaseCollectionSelectedIds.has(p.variantId))
-                                  .map((p) => ({ ...p, quantity: Math.max(1, newPurchaseCollectionQuantities[p.variantId] ?? 1) }));
-                                if (toAdd.length > 0) {
-                                  setNewPurchaseItems((prev) => [...prev, ...toAdd.map(({ variantId, inventoryItemId, sku, title, barcode, quantity }) => ({ variantId, inventoryItemId, sku, title, barcode, quantity }))]);
-                                  setNewPurchaseCollectionSelectedIds(new Set());
-                                  setNewPurchaseCollectionQuantities({});
-                                  setNewPurchaseError("");
-                                }
+                                // コレクションはモーダルから追加するためここでは何もしない
                               } else if (newPurchaseProductMethod === "csv") {
                                 const toAdd = newPurchaseCsvPreviewItems.filter((it) => {
                                   const invId = String(it.inventoryItemId ?? "");
@@ -2440,7 +2399,7 @@ export default function PurchasePage() {
                               padding: "8px 16px",
                               backgroundColor: (fetcher.state === "submitting" ||
                                 (newPurchaseProductMethod === "search" && newPurchaseSearchSelectedIds.size === 0) ||
-                                (newPurchaseProductMethod === "collection" && newPurchaseCollectionSelectedIds.size === 0) ||
+                                (newPurchaseProductMethod === "collection") ||
                                 (newPurchaseProductMethod === "csv" && newPurchaseCsvSelectedIds.size === 0)) ? "#d1d5db" : "#2563eb",
                               color: "#ffffff",
                               border: "none",
@@ -2449,7 +2408,7 @@ export default function PurchasePage() {
                               fontWeight: 600,
                               cursor: (fetcher.state === "submitting" ||
                                 (newPurchaseProductMethod === "search" && newPurchaseSearchSelectedIds.size === 0) ||
-                                (newPurchaseProductMethod === "collection" && newPurchaseCollectionSelectedIds.size === 0) ||
+                                (newPurchaseProductMethod === "collection") ||
                                 (newPurchaseProductMethod === "csv" && newPurchaseCsvSelectedIds.size === 0)) ? "not-allowed" : "pointer",
                               width: "100%",
                             }}
@@ -3202,6 +3161,324 @@ export default function PurchasePage() {
                 キャンセル
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* コレクション「商品を選ぶ」モーダル（棚卸と同様：検索枠・選択済み/全選択/全解除・ページング） */}
+      {purchaseCollectionModalOpen && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+          onClick={() => {
+            setPurchaseCollectionModalOpen(false);
+            setPurchaseCollectionModalCollectionId("");
+            setPurchaseCollectionModalCollectionTitle("");
+            setPurchaseCollectionModalSelectedQuantities({});
+            setPurchaseCollectionModalSearchQuery("");
+            setPurchaseCollectionModalShowOnlySelected(false);
+            setPurchaseCollectionModalPage(1);
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: "white",
+              borderRadius: "8px",
+              padding: "24px",
+              maxWidth: "90%",
+              maxHeight: "90%",
+              overflow: "auto",
+              boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h2 style={{ margin: 0, fontSize: "20px", fontWeight: "bold" }}>
+                商品選択: {purchaseCollectionModalCollectionTitle || "コレクション"}
+              </h2>
+              <button
+                type="button"
+                onClick={() => {
+                  setPurchaseCollectionModalOpen(false);
+                  setPurchaseCollectionModalCollectionId("");
+                  setPurchaseCollectionModalCollectionTitle("");
+                  setPurchaseCollectionModalSelectedQuantities({});
+                  setPurchaseCollectionModalSearchQuery("");
+                  setPurchaseCollectionModalShowOnlySelected(false);
+                  setPurchaseCollectionModalPage(1);
+                }}
+                style={{ background: "none", border: "none", fontSize: "24px", cursor: "pointer", padding: 0, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center" }}
+              >
+                ×
+              </button>
+            </div>
+
+            <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#f5f5f5", borderRadius: "4px" }}>
+              <div style={{ fontSize: "14px", marginBottom: "4px" }}>
+                <strong>コレクション:</strong> {purchaseCollectionModalCollectionTitle || "コレクション"}
+              </div>
+              <div style={{ fontSize: "14px" }}>
+                <strong>選択:</strong> {Object.keys(purchaseCollectionModalSelectedQuantities).length}件 / <strong>合計:</strong> {newPurchaseCollectionProducts.length}件
+              </div>
+            </div>
+
+            {newPurchaseCollectionProductsFetcher.state === "submitting" ? (
+              <div style={{ padding: "24px", textAlign: "center" }}>商品リストを取得中...</div>
+            ) : newPurchaseCollectionProducts.length === 0 ? (
+              <div style={{ padding: "24px", textAlign: "center" }}>このコレクションに商品はありません</div>
+            ) : (
+              <div>
+                <div style={{ marginBottom: "12px" }}>
+                  <input
+                    type="text"
+                    value={purchaseCollectionModalSearchQuery}
+                    onChange={(e) => setPurchaseCollectionModalSearchQuery(e.target.value)}
+                    placeholder="SKU・商品名・JANの一部で絞り込み"
+                    style={{
+                      width: "100%",
+                      padding: "8px 12px",
+                      border: "1px solid #e1e3e5",
+                      borderRadius: "6px",
+                      fontSize: "14px",
+                      marginBottom: "8px",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: "13px", color: "#6d7175" }}>
+                      {purchaseCollectionModalShowOnlySelected
+                        ? `表示: 選択済み${purchaseCollectionDisplayProducts.length}件`
+                        : purchaseCollectionDisplayProducts.length <= PURCHASE_MODAL_ITEMS_PER_PAGE
+                          ? `表示: ${purchaseCollectionDisplayProducts.length}件 / 全${newPurchaseCollectionProducts.length}件`
+                          : `表示: ${(purchaseCollectionModalPage - 1) * PURCHASE_MODAL_ITEMS_PER_PAGE + 1}-${Math.min(purchaseCollectionModalPage * PURCHASE_MODAL_ITEMS_PER_PAGE, purchaseCollectionDisplayProducts.length)}件 / 全${newPurchaseCollectionProducts.length}件`}
+                    </span>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => setPurchaseCollectionModalShowOnlySelected((prev) => !prev)}
+                        style={{
+                          padding: "6px 12px",
+                          backgroundColor: purchaseCollectionModalShowOnlySelected ? "#2563eb" : "#e5e7eb",
+                          color: purchaseCollectionModalShowOnlySelected ? "#fff" : "#202223",
+                          border: "none",
+                          borderRadius: "6px",
+                          cursor: "pointer",
+                          fontSize: "13px",
+                        }}
+                      >
+                        {purchaseCollectionModalShowOnlySelected ? "一覧表示に戻る" : "選択済み"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next: Record<string, number> = {};
+                          newPurchaseCollectionProducts.forEach((p) => { next[p.variantId] = 1; });
+                          setPurchaseCollectionModalSelectedQuantities(next);
+                        }}
+                        style={{
+                          padding: "6px 12px",
+                          backgroundColor: "#007bff",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "6px",
+                          cursor: "pointer",
+                          fontSize: "13px",
+                        }}
+                      >
+                        全選択
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPurchaseCollectionModalSelectedQuantities({})}
+                        style={{
+                          padding: "6px 12px",
+                          backgroundColor: "#6c757d",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "6px",
+                          cursor: "pointer",
+                          fontSize: "13px",
+                        }}
+                      >
+                        全解除
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div style={{ maxHeight: "400px", overflowY: "auto" }}>
+                  {purchaseCollectionDisplayProducts.length === 0 ? (
+                    <div style={{ padding: "24px", textAlign: "center", fontSize: "14px", color: "#6d7175" }}>
+                      {purchaseCollectionModalShowOnlySelected ? "選択済みの商品がありません" : "該当する商品がありません"}
+                    </div>
+                  ) : (
+                    purchaseCollectionPaginatedProducts.map((p) => {
+                      const qty = purchaseCollectionModalSelectedQuantities[p.variantId] ?? 0;
+                      const isSelected = qty > 0;
+                      return (
+                        <div
+                          key={p.variantId}
+                          style={{
+                            padding: "12px",
+                            marginBottom: 0,
+                            borderBottom: "1px solid #e5e7eb",
+                            backgroundColor: isSelected ? "#e7f3ff" : "#f5f5f5",
+                            borderRadius: 0,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "12px",
+                          }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(e) => {
+                              setPurchaseCollectionModalSelectedQuantities((prev) => {
+                                const next = { ...prev };
+                                if (e.target.checked) {
+                                  next[p.variantId] = 1;
+                                } else {
+                                  delete next[p.variantId];
+                                }
+                                return next;
+                              });
+                            }}
+                            style={{ width: "20px", height: "20px", cursor: "pointer", flexShrink: 0 }}
+                          />
+                          <div style={{ flex: 1, fontSize: "14px" }}>
+                            {p.title || "(商品名なし)"}
+                            {p.sku ? <span style={{ color: "#666", marginLeft: "8px" }}>(SKU: {p.sku})</span> : null}
+                          </div>
+                          <input
+                            type="number"
+                            min={1}
+                            value={isSelected ? qty : ""}
+                            placeholder="数量"
+                            onChange={(e) => {
+                              const n = Math.max(1, parseInt(e.target.value, 10) || 1);
+                              setPurchaseCollectionModalSelectedQuantities((prev) => ({ ...prev, [p.variantId]: n }));
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{ width: 64, padding: "6px 8px", fontSize: 13, border: "1px solid #c9cccf", borderRadius: "6px", boxSizing: "border-box" }}
+                          />
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                {purchaseCollectionDisplayProducts.length > PURCHASE_MODAL_ITEMS_PER_PAGE && (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "12px", padding: "12px 0" }}>
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseCollectionModalPage((p) => Math.max(1, p - 1))}
+                      disabled={purchaseCollectionModalPage <= 1}
+                      style={{
+                        padding: "6px 12px",
+                        border: "1px solid #c9cccf",
+                        borderRadius: "6px",
+                        background: purchaseCollectionModalPage <= 1 ? "#f6f6f7" : "#fff",
+                        cursor: purchaseCollectionModalPage <= 1 ? "not-allowed" : "pointer",
+                        fontSize: "13px",
+                        color: purchaseCollectionModalPage <= 1 ? "#8c9196" : "#202223",
+                      }}
+                    >
+                      前へ
+                    </button>
+                    <span style={{ fontSize: "13px", color: "#6d7175" }}>
+                      {(purchaseCollectionModalPage - 1) * PURCHASE_MODAL_ITEMS_PER_PAGE + 1}-{Math.min(purchaseCollectionModalPage * PURCHASE_MODAL_ITEMS_PER_PAGE, purchaseCollectionDisplayProducts.length)} / {purchaseCollectionDisplayProducts.length}件
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseCollectionModalPage((p) => Math.min(purchaseCollectionModalTotalPages, p + 1))}
+                      disabled={purchaseCollectionModalPage >= purchaseCollectionModalTotalPages}
+                      style={{
+                        padding: "6px 12px",
+                        border: "1px solid #c9cccf",
+                        borderRadius: "6px",
+                        background: purchaseCollectionModalPage >= purchaseCollectionModalTotalPages ? "#f6f6f7" : "#fff",
+                        cursor: purchaseCollectionModalPage >= purchaseCollectionModalTotalPages ? "not-allowed" : "pointer",
+                        fontSize: "13px",
+                        color: purchaseCollectionModalPage >= purchaseCollectionModalTotalPages ? "#8c9196" : "#202223",
+                      }}
+                    >
+                      次へ
+                    </button>
+                  </div>
+                )}
+                <div style={{ marginTop: "24px", display: "flex", justifyContent: "flex-end", gap: "12px" }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPurchaseCollectionModalOpen(false);
+                      setPurchaseCollectionModalCollectionId("");
+                      setPurchaseCollectionModalCollectionTitle("");
+                      setPurchaseCollectionModalSelectedQuantities({});
+                      setPurchaseCollectionModalSearchQuery("");
+                      setPurchaseCollectionModalShowOnlySelected(false);
+                      setPurchaseCollectionModalPage(1);
+                    }}
+                    style={{
+                      padding: "8px 16px",
+                      backgroundColor: "#6c757d",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: "pointer",
+                      fontSize: "14px",
+                    }}
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const toAdd = newPurchaseCollectionProducts
+                        .filter((p) => (purchaseCollectionModalSelectedQuantities[p.variantId] ?? 0) > 0)
+                        .map((p) => ({
+                          variantId: p.variantId,
+                          inventoryItemId: p.inventoryItemId,
+                          sku: p.sku,
+                          title: p.title,
+                          barcode: p.barcode,
+                          quantity: Math.max(1, purchaseCollectionModalSelectedQuantities[p.variantId] ?? 1),
+                        }));
+                      if (toAdd.length > 0) {
+                        setNewPurchaseItems((prev) => [...prev, ...toAdd]);
+                      }
+                      setPurchaseCollectionModalOpen(false);
+                      setPurchaseCollectionModalCollectionId("");
+                      setPurchaseCollectionModalCollectionTitle("");
+                      setPurchaseCollectionModalSelectedQuantities({});
+                      setPurchaseCollectionModalSearchQuery("");
+                      setPurchaseCollectionModalShowOnlySelected(false);
+                      setPurchaseCollectionModalPage(1);
+                    }}
+                    disabled={Object.keys(purchaseCollectionModalSelectedQuantities).length === 0}
+                    style={{
+                      padding: "8px 16px",
+                      backgroundColor: Object.keys(purchaseCollectionModalSelectedQuantities).length === 0 ? "#d1d5db" : "#28a745",
+                      color: "#ffffff",
+                      border: "none",
+                      borderRadius: "4px",
+                      cursor: Object.keys(purchaseCollectionModalSelectedQuantities).length === 0 ? "not-allowed" : "pointer",
+                      fontSize: "14px",
+                      fontWeight: 600,
+                    }}
+                  >
+                    追加
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

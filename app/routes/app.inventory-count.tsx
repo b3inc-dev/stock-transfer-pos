@@ -463,9 +463,10 @@ export async function action({ request }: ActionFunctionArgs) {
   // 棚卸: コレクション検索（検索結果のみ返す。全件読み込みを避ける）
   if (actionType === "searchCollectionsForInventoryCount") {
     const query = String(formData.get("query") ?? "").trim();
+    if (!query) return { ok: true, collections: [] };
     try {
       const gql = `#graphql
-        query SearchCollections($first: Int!, $query: String) {
+        query SearchCollections($first: Int!, $query: String!) {
           collections(first: $first, query: $query) {
             nodes {
               id
@@ -474,8 +475,7 @@ export async function action({ request }: ActionFunctionArgs) {
             }
           }
         }`;
-      const variables: { first: number; query?: string } = { first: 50 };
-      if (query) variables.query = `title:${query.replace(/"/g, '\\"').trim()}`;
+      const variables = { first: 50, query: query.replace(/"/g, '\\"') };
       const resp = await admin.graphql(gql, { variables });
       const json = await resp.json();
       const nodes = json?.data?.collections?.nodes ?? [];
@@ -1602,7 +1602,7 @@ export default function InventoryCountPage() {
   }, [skuSearchFetcher.data]);
 
   const [activeTab, setActiveTab] = useState<"groups" | "create" | "history">("groups");
-  const [groupCreateMethod, setGroupCreateMethod] = useState<"collection" | "sku" | "csv">("collection");
+  const [groupCreateMethod, setGroupCreateMethod] = useState<"collection" | "sku" | "csv">("sku");
   // SKU/CSV由来のグループ編集時、loader一覧にないinventoryItemIdを保存しておき、更新時に欠落しないようにする
   const [editingSkuOnlyPreservedIds, setEditingSkuOnlyPreservedIds] = useState<string[]>([]);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
@@ -2541,13 +2541,30 @@ export default function InventoryCountPage() {
                             onChange={(e: any) => setGroupName(readValue(e))}
                             placeholder="例: 食品、衣類、雑貨"
                           />
-                          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-                            <s-text-field
-                              label="コレクションを検索"
+                          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                            <input
+                              type="text"
                               value={collectionSearchQuery}
-                              onInput={(e: any) => setCollectionSearchQuery(readValue(e))}
-                              onChange={(e: any) => setCollectionSearchQuery(readValue(e))}
+                              onChange={(e) => setCollectionSearchQuery(e.target.value)}
                               placeholder="コレクション名で検索"
+                              style={{
+                                flex: "1 1 auto",
+                                minWidth: 0,
+                                padding: "8px 12px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "6px",
+                                fontSize: "14px",
+                                boxSizing: "border-box",
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && collectionSearchQuery.trim() && collectionSearchFetcher.state !== "submitting") {
+                                  e.preventDefault();
+                                  const fd = new FormData();
+                                  fd.set("action", "searchCollectionsForInventoryCount");
+                                  fd.set("query", collectionSearchQuery.trim());
+                                  collectionSearchFetcher.submit(fd, { method: "post" });
+                                }
+                              }}
                             />
                             <button
                               type="button"
@@ -2568,7 +2585,7 @@ export default function InventoryCountPage() {
                                 fontSize: "13px",
                                 fontWeight: 500,
                                 cursor: !collectionSearchQuery.trim() || collectionSearchFetcher.state === "submitting" ? "not-allowed" : "pointer",
-                                alignSelf: "flex-end",
+                                whiteSpace: "nowrap",
                               }}
                             >
                               {collectionSearchFetcher.state === "submitting" ? "検索中..." : "検索"}
@@ -2606,6 +2623,7 @@ export default function InventoryCountPage() {
                                   setSelectedCollectionIds([]);
                                   setCollectionConfigs(new Map());
                                   setSelectedCollectionInfo(new Map());
+                                  setShowOnlySelectedCollection(false);
                                 }}
                                 disabled={selectedCollectionIds.length === 0}
                                 style={{
@@ -2623,16 +2641,16 @@ export default function InventoryCountPage() {
                               </button>
                             </div>
                           </div>
-                          <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                          <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                             {displayCollections.length === 0 ? (
                               <s-box padding="base">
                                 <s-text tone="subdued" size="small">
-                                  {showOnlySelectedCollection ? "選択済みのコレクションがありません" : collectionSearchFetcher.state === "submitting" ? "検索中..." : "コレクション名を入力して検索してください"}
+                                  {showOnlySelectedCollection ? "選択済みのコレクションがありません" : collectionSearchFetcher.state === "submitting" ? "検索中..." : collectionSearchFetcher.data?.collections?.length === 0 && collectionSearchQuery.trim() ? "別キーワードで検索してください" : "コレクション名を入力して検索してください"}
                                 </s-text>
                               </s-box>
                             ) : (
                               <>
-                                {paginatedCollections.map((col) => {
+                                {paginatedCollections.map((col, colIndex) => {
                                   const isSelected = selectedCollectionIds.includes(col.id);
                                   const config = collectionConfigs.get(col.id);
                                   const selectedCount = config?.selectedVariantIds?.length ?? 0;
@@ -2647,7 +2665,7 @@ export default function InventoryCountPage() {
                                         cursor: "pointer",
                                         backgroundColor: isSelected ? "#eff6ff" : "transparent",
                                         border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
-                                        borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
+                                        marginTop: colIndex === 0 ? 0 : "4px",
                                         display: "flex",
                                         alignItems: "center",
                                         gap: "8px",
@@ -2848,13 +2866,30 @@ export default function InventoryCountPage() {
                             onChange={(e: any) => setGroupName(readValue(e))}
                             placeholder="例: 食品グループ"
                           />
-                          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
-                            <s-text-field
-                              label="SKU・商品名で検索"
+                          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                            <input
+                              type="text"
                               value={skuSearchQuery}
-                              onInput={(e: any) => setSkuSearchQuery(readValue(e))}
-                              onChange={(e: any) => setSkuSearchQuery(readValue(e))}
+                              onChange={(e) => setSkuSearchQuery(e.target.value)}
                               placeholder="SKU・商品名・JANの一部を入力"
+                              style={{
+                                flex: "1 1 auto",
+                                minWidth: 0,
+                                padding: "8px 12px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "6px",
+                                fontSize: "14px",
+                                boxSizing: "border-box",
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && skuSearchQuery.trim() && skuSearchFetcher.state !== "submitting") {
+                                  e.preventDefault();
+                                  const fd = new FormData();
+                                  fd.set("action", "searchVariantsForInventoryCount");
+                                  fd.set("query", skuSearchQuery.trim());
+                                  skuSearchFetcher.submit(fd, { method: "post" });
+                                }
+                              }}
                             />
                             <button
                               type="button"
@@ -2875,7 +2910,7 @@ export default function InventoryCountPage() {
                                 fontSize: "13px",
                                 fontWeight: 500,
                                 cursor: !skuSearchQuery.trim() || skuSearchFetcher.state === "submitting" ? "not-allowed" : "pointer",
-                                alignSelf: "flex-end",
+                                whiteSpace: "nowrap",
                               }}
                             >
                               {skuSearchFetcher.state === "submitting" ? "検索中..." : "検索"}
@@ -2909,7 +2944,10 @@ export default function InventoryCountPage() {
                               </button>
                               <button
                                 type="button"
-                                onClick={() => setSelectedSkuVariants([])}
+                                onClick={() => {
+                                  setSelectedSkuVariants([]);
+                                  setShowOnlySelectedSku(false);
+                                }}
                                 disabled={selectedSkuVariants.length === 0}
                                 style={{
                                   padding: "4px 12px",
@@ -2926,8 +2964,8 @@ export default function InventoryCountPage() {
                               </button>
                             </div>
                           </div>
-                          <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
-                            {displaySkuVariants.length > 0 ? paginatedSkuVariants.map((v) => {
+                          <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                            {displaySkuVariants.length > 0 ? paginatedSkuVariants.map((v, skuIndex) => {
                               const isSelected = selectedSkuVariants.some((x) => x.inventoryItemId === v.inventoryItemId);
                               return (
                                 <div
@@ -2939,7 +2977,7 @@ export default function InventoryCountPage() {
                                     cursor: "pointer",
                                     backgroundColor: isSelected ? "#eff6ff" : "transparent",
                                     border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
-                                    borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
+                                    marginTop: skuIndex === 0 ? 0 : "4px",
                                     display: "flex",
                                     alignItems: "center",
                                     gap: "8px",
@@ -2967,7 +3005,7 @@ export default function InventoryCountPage() {
                             }) : (
                               <s-box padding="base">
                                 <s-text tone="subdued" size="small">
-                                  {showOnlySelectedSku ? "選択済みの商品がありません" : skuSearchFetcher.state === "submitting" ? "検索中..." : "SKU・商品名を入力して検索してください"}
+                                  {showOnlySelectedSku ? "選択済みの商品がありません" : skuSearchFetcher.state === "submitting" ? "検索中..." : (skuSearchFetcher.data?.variants?.length === 0 && skuSearchQuery.trim()) ? "別キーワードで検索してください" : "キーワードを入力して検索してください"}
                                 </s-text>
                               </s-box>
                             )}
@@ -3065,12 +3103,12 @@ export default function InventoryCountPage() {
                         </s-stack>
                       )}
 
-                      {/* 3. CSVアップロード（仕入同様: アップロード後にプレビューリスト表示 → チェックで選択 → グループを追加） */}
+                      {/* 3. CSVアップロード（仕入同様: アップロード後にリスト表示 → チェックで選択 → グループを追加） */}
                       {groupCreateMethod === "csv" && (
                         <s-stack gap="base">
                           <s-text emphasis="bold" size="small">CSVアップロード（グループ名＋SKU）</s-text>
                           <s-text tone="subdued" size="small">
-                            テンプレートをダウンロードしてCSVを作成し、アップロードしてください。アップ後にプレビューが出るので、チェックした行だけ「グループを追加」で追加します。
+                            テンプレートをダウンロードしてCSVを作成し、アップロードしてください。アップロード後にリストが表示されるので、チェックした行だけ「グループを追加」で追加します。
                           </s-text>
                           <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                             <s-text tone="subdued" size="small">インポート時の動作</s-text>
@@ -3167,7 +3205,7 @@ export default function InventoryCountPage() {
                                 <s-text tone="subdued" size="small">
                                   {csvShowOnlySelected
                                     ? `選択済み: ${csvPreviewSelected.size}件`
-                                    : `プレビュー: ${csvPreviewRows.length}件 / 選択中: ${csvPreviewSelected.size}件`}
+                                    : `表示: ${csvPreviewRows.length}件 / 選択中: ${csvPreviewSelected.size}件`}
                                 </s-text>
                                 <div style={{ display: "flex", gap: "8px" }}>
                                   <button
@@ -3188,7 +3226,10 @@ export default function InventoryCountPage() {
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => setCsvPreviewSelected(new Set())}
+                                    onClick={() => {
+                                      setCsvPreviewSelected(new Set());
+                                      setCsvShowOnlySelected(false);
+                                    }}
                                     disabled={csvPreviewSelected.size === 0}
                                     style={{
                                       padding: "4px 12px",
