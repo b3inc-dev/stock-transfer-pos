@@ -130,37 +130,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
 
-  // コレクション: ページネーションで全件取得（250件以上対応）
+  // コレクション: 検索時のみ action で取得するため、loader では返さない（重いストア対策）
   const collections: CollectionNode[] = [];
-  let collectionsCursor: string | null = null;
-  const COLLECTIONS_QUERY = `#graphql
-    query Collections($first: Int!, $after: String) {
-      collections(first: $first, after: $after) {
-        nodes {
-          id
-          title
-          image {
-            url
-            altText
-          }
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-      }
-    }
-  `;
-  do {
-    const collectionsResp: Response = await admin.graphql(COLLECTIONS_QUERY, {
-      variables: { first: 250, after: collectionsCursor },
-    });
-    const collectionsData = (await collectionsResp.json()) as { data?: { collections?: { nodes?: CollectionNode[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } } } };
-    const nodes = collectionsData?.data?.collections?.nodes ?? [];
-    const pageInfo = collectionsData?.data?.collections?.pageInfo ?? {};
-    collections.push(...nodes);
-    collectionsCursor = pageInfo.hasNextPage ? pageInfo.endCursor ?? null : null;
-  } while (collectionsCursor);
 
   let productGroups: ProductGroup[] = [];
   const groupsRaw = appData?.data?.currentAppInstallation?.productGroupsMetafield?.value;
@@ -254,69 +225,40 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
-  // SKU一覧: ページネーションで全商品・バリアントを取得（250件以上のショップ対応）。画面上で入力により絞り込み。
+  // SKU一覧: 検索時のみ action で取得するため、loader では返さない（重いストア対策）
   const skuVariantList: Array<{ variantId: string; inventoryItemId: string; sku: string; barcode?: string; variantTitle: string; productTitle: string; title: string; option1?: string; option2?: string; option3?: string }> = [];
-  try {
-    const PRODUCTS_QUERY = `#graphql
-      query ProductsWithVariants($first: Int!, $after: String, $variantsFirst: Int!) {
-        products(first: $first, after: $after) {
-          nodes {
-            id
-            title
-            variants(first: $variantsFirst) {
-              nodes {
+
+  // 右パネル表示用: 登録済みグループで参照されているコレクションIDのみ取得（全件取得しない）
+  const collectionIdsInGroups = new Set<string>();
+  for (const g of productGroups) {
+    for (const cid of g.collectionIds ?? []) collectionIdsInGroups.add(cid);
+  }
+  let collectionDisplayMap: Record<string, CollectionNode> = {};
+  if (collectionIdsInGroups.size > 0) {
+    const ids = Array.from(collectionIdsInGroups);
+    try {
+      const nodesResp = await admin.graphql(
+        `#graphql
+          query GetCollectionNodes($ids: [ID!]!) {
+            nodes(ids: $ids) {
+              ... on Collection {
                 id
                 title
-                sku
-                barcode
-                inventoryItem { id }
-                selectedOptions { name value }
+                image { url altText }
               }
             }
           }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-        }
+        `,
+        { variables: { ids } }
+      );
+      const nodesJson = await nodesResp.json();
+      const nodes = nodesJson?.data?.nodes ?? [];
+      for (const n of nodes) {
+        if (n?.id) collectionDisplayMap[n.id] = { id: n.id, title: n.title ?? "", image: n.image ?? null };
       }
-    `;
-    let productsCursor: string | null = null;
-    const VARIANTS_FIRST = 250; // 商品あたり最大250バリアント（API上限）
-    do {
-      const skuResp: Response = await admin.graphql(PRODUCTS_QUERY, {
-        variables: { first: 250, after: productsCursor, variantsFirst: VARIANTS_FIRST },
-      });
-      const skuJson = (await skuResp.json()) as { data?: { products?: { nodes?: unknown[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } } } };
-      const products = skuJson?.data?.products?.nodes ?? [];
-      const pageInfo = skuJson?.data?.products?.pageInfo ?? {};
-      for (const p of products) {
-        const productTitle = p.title ?? "";
-        for (const v of p.variants?.nodes ?? []) {
-          const invId = v.inventoryItem?.id;
-          if (!invId) continue;
-          const opts = (v.selectedOptions as { name: string; value: string }[] | undefined) ?? [];
-          const option1 = opts[0]?.value?.trim() ?? "";
-          const option2 = opts[1]?.value?.trim() ?? "";
-          const option3 = opts[2]?.value?.trim() ?? "";
-          skuVariantList.push({
-            variantId: v.id,
-            inventoryItemId: invId,
-            sku: v.sku ?? "",
-            barcode: v.barcode ?? "",
-            variantTitle: v.title ?? "",
-            productTitle,
-            title: productTitle + (v.title && v.title !== "Default Title" ? ` / ${v.title}` : ""),
-            option1: option1 || undefined,
-            option2: option2 || undefined,
-            option3: option3 || undefined,
-          });
-        }
-      }
-      productsCursor = pageInfo.hasNextPage ? (pageInfo.endCursor ?? null) : null;
-    } while (productsCursor);
-  } catch {
-    // skuVariantList は空のまま
+    } catch {
+      collectionDisplayMap = {};
+    }
   }
 
   // サーバー側で「今日の日付」を計算
@@ -339,6 +281,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   return {
     locations,
     collections,
+    collectionDisplayMap,
     productGroups,
     inventoryCounts,
     skuVariantList,
@@ -511,6 +454,176 @@ export async function action({ request }: ActionFunctionArgs) {
         productTitle: n.product?.title ?? "",
         title: (n.product?.title ?? "") + (n.title && n.title !== "Default Title" ? ` / ${n.title}` : ""),
       })).filter((v: { inventoryItemId?: string }) => v.inventoryItemId);
+      return { ok: true, variants };
+    } catch {
+      return { ok: true, variants: [] };
+    }
+  }
+
+  // 棚卸: コレクション検索（検索結果のみ返す。全件読み込みを避ける）
+  if (actionType === "searchCollectionsForInventoryCount") {
+    const query = String(formData.get("query") ?? "").trim();
+    try {
+      const gql = `#graphql
+        query SearchCollections($first: Int!, $query: String) {
+          collections(first: $first, query: $query) {
+            nodes {
+              id
+              title
+              image { url altText }
+            }
+          }
+        }`;
+      const variables: { first: number; query?: string } = { first: 50 };
+      if (query) variables.query = `title:${query.replace(/"/g, '\\"').trim()}`;
+      const resp = await admin.graphql(gql, { variables });
+      const json = await resp.json();
+      const nodes = json?.data?.collections?.nodes ?? [];
+      const collections = nodes.map((c: { id: string; title?: string; image?: { url?: string; altText?: string } | null }) => ({
+        id: c.id,
+        title: c.title ?? "",
+        image: c.image ?? null,
+      }));
+      return { ok: true, collections };
+    } catch {
+      return { ok: true, collections: [] };
+    }
+  }
+
+  // 棚卸: バリアント検索（SKU・商品名。仕入と同様に検索結果のみ返す）
+  if (actionType === "searchVariantsForInventoryCount") {
+    const query = String(formData.get("query") ?? "").trim();
+    if (!query) return { ok: true, variants: [] };
+    try {
+      const gql = `#graphql
+        query SearchVariantsForInventoryCount($first: Int!, $query: String!) {
+          productVariants(first: $first, query: $query) {
+            nodes {
+              id
+              title
+              sku
+              barcode
+              inventoryItem { id }
+              product { title }
+              selectedOptions { name value }
+            }
+          }
+        }`;
+      const escaped = query.replace(/"/g, '\\"');
+      const resp = await admin.graphql(gql, {
+        variables: { first: 50, query: `sku:*${escaped}* OR title:*${escaped}*` },
+      });
+      const json = await resp.json();
+      const nodes = json?.data?.productVariants?.nodes ?? [];
+      const variants = nodes.map((v: { id: string; title?: string; sku?: string; barcode?: string; inventoryItem?: { id: string }; product?: { title?: string }; selectedOptions?: Array<{ value?: string }> }) => {
+        const opts = v.selectedOptions ?? [];
+        const productTitle = v.product?.title ?? "";
+        const variantTitle = v.title ?? "";
+        return {
+          variantId: v.id,
+          inventoryItemId: v.inventoryItem?.id ?? "",
+          sku: v.sku ?? "",
+          barcode: v.barcode ?? "",
+          variantTitle,
+          productTitle,
+          title: productTitle + (variantTitle && variantTitle !== "Default Title" ? ` / ${variantTitle}` : ""),
+          option1: opts[0]?.value?.trim() || undefined,
+          option2: opts[1]?.value?.trim() || undefined,
+          option3: opts[2]?.value?.trim() || undefined,
+        };
+      }).filter((v: { inventoryItemId: string }) => v.inventoryItemId);
+      return { ok: true, variants };
+    } catch {
+      return { ok: true, variants: [] };
+    }
+  }
+
+  // 棚卸: 編集時・選択済み表示用にコレクション id/title を取得
+  if (actionType === "getCollectionsByIds") {
+    const idsStr = formData.get("ids") as string;
+    let ids: string[] = [];
+    try {
+      if (idsStr) ids = JSON.parse(idsStr);
+      if (!Array.isArray(ids)) ids = [];
+    } catch {}
+    if (ids.length === 0) return { ok: true, collections: [] };
+    try {
+      const gql = `#graphql
+        query GetCollectionNodes($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Collection {
+              id
+              title
+              image { url altText }
+            }
+          }
+        }`;
+      const resp = await admin.graphql(gql, { variables: { ids } });
+      const json = await resp.json();
+      const nodes = json?.data?.nodes ?? [];
+      const collections = nodes
+        .filter((n: unknown) => n && typeof n === "object" && "id" in n)
+        .map((c: { id: string; title?: string; image?: { url?: string; altText?: string } | null }) => ({
+          id: c.id,
+          title: c.title ?? "",
+          image: c.image ?? null,
+        }));
+      return { ok: true, collections };
+    } catch {
+      return { ok: true, collections: [] };
+    }
+  }
+
+  // 棚卸: 編集時・選択済み表示用に inventoryItemId からバリアント情報を取得
+  if (actionType === "getVariantsByInventoryItemIds") {
+    const idsStr = formData.get("ids") as string;
+    let ids: string[] = [];
+    try {
+      if (idsStr) ids = JSON.parse(idsStr);
+      if (!Array.isArray(ids)) ids = [];
+    } catch {}
+    if (ids.length === 0) return { ok: true, variants: [] };
+    try {
+      const gql = `#graphql
+        query GetInventoryItemNodes($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on InventoryItem {
+              id
+              variant {
+                id
+                title
+                sku
+                barcode
+                inventoryItem { id }
+                product { title }
+                selectedOptions { name value }
+              }
+            }
+          }
+        }`;
+      const resp = await admin.graphql(gql, { variables: { ids } });
+      const json = await resp.json();
+      const nodes = json?.data?.nodes ?? [];
+      const variants: SkuSearchVariant[] = [];
+      for (const n of nodes) {
+        const v = n?.variant;
+        if (!v?.inventoryItem?.id) continue;
+        const opts = v.selectedOptions ?? [];
+        const productTitle = v.product?.title ?? "";
+        const variantTitle = v.title ?? "";
+        variants.push({
+          variantId: v.id,
+          inventoryItemId: v.inventoryItem.id,
+          sku: v.sku ?? "",
+          barcode: v.barcode ?? "",
+          variantTitle,
+          productTitle,
+          title: productTitle + (variantTitle && variantTitle !== "Default Title" ? ` / ${variantTitle}` : ""),
+          option1: opts[0]?.value?.trim() || undefined,
+          option2: opts[1]?.value?.trim() || undefined,
+          option3: opts[2]?.value?.trim() || undefined,
+        });
+      }
       return { ok: true, variants };
     } catch {
       return { ok: true, variants: [] };
@@ -820,6 +933,48 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     return { ok: true };
+  }
+
+  // CSVプレビュー: パースのみ行い、行リストを返す（保存しない）。仕入同様アップロード後にリスト表示してからグループを追加する用
+  if (actionType === "preview_csv_inventory_count") {
+    const csvRaw = formData.get("csv") as string;
+    if (!csvRaw || typeof csvRaw !== "string") {
+      return { ok: false, error: "CSVデータが送信されていません" as const };
+    }
+    const parseCsvLine = (line: string): string[] => {
+      const result: string[] = [];
+      let current = "";
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (c === '"') {
+          inQuotes = !inQuotes;
+        } else if ((c === "," && !inQuotes) || (c === "\t" && !inQuotes)) {
+          result.push(current.trim());
+          current = "";
+        } else {
+          current += c;
+        }
+      }
+      result.push(current.trim());
+      return result;
+    };
+    const isHeader = (cells: string[]) =>
+      cells.length >= 2 &&
+      (cells[0] === "グループ名" || cells[0].toLowerCase() === "group" || cells[0] === "group_name") &&
+      (cells[1] === "SKU" || cells[1].toLowerCase() === "sku");
+
+    const lines = csvRaw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const rows: { groupName: string; sku: string }[] = [];
+    const firstCells = lines[0] ? parseCsvLine(lines[0]) : [];
+    const startIndex = isHeader(firstCells) ? 1 : 0;
+    for (let i = startIndex; i < lines.length; i++) {
+      const cells = parseCsvLine(lines[i]);
+      const groupName = cells[0]?.trim() ?? "";
+      const sku = cells[1]?.trim() ?? "";
+      if (groupName && sku) rows.push({ groupName, sku });
+    }
+    return { ok: true, rows };
   }
 
   // CSVインポート: グループ名＋SKUの行で商品グループを一括登録（コレクションに依存しない）
@@ -1405,9 +1560,10 @@ export type SkuSearchVariant = {
 
 export default function InventoryCountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, collections, productGroups, inventoryCounts, skuVariantList, shopTimezone, todayInShopTimezone, stocktakeCsvExportColumns } = loaderData || {
+  const { locations, collections, collectionDisplayMap = {}, productGroups, inventoryCounts, skuVariantList, shopTimezone, todayInShopTimezone, stocktakeCsvExportColumns } = loaderData || {
     locations: [],
     collections: [],
+    collectionDisplayMap: {} as Record<string, CollectionNode>,
     productGroups: [],
     inventoryCounts: [],
     skuVariantList: [],
@@ -1417,28 +1573,33 @@ export default function InventoryCountPage() {
   const csvColumns = stocktakeCsvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS;
   const csvColumnsSummary = csvColumns.filter((id) => STOCKTAKE_SUMMARY_IDS.includes(id));
   const fetcher = useFetcher<typeof action>();
-  const allSkuVariants: SkuSearchVariant[] = Array.isArray(skuVariantList) ? skuVariantList : [];
+  // 棚卸: 検索結果のみ表示（loader の全件取得は廃止）。検索結果・選択済みは state で保持。
+  const [collectionSearchResults, setCollectionSearchResults] = useState<CollectionNode[]>([]);
+  const [selectedCollectionInfo, setSelectedCollectionInfo] = useState<Map<string, CollectionNode>>(new Map());
+  const collectionSearchFetcher = useFetcher<typeof action>();
+  const collectionResolveFetcher = useFetcher<typeof action>();
+  const [skuSearchResults, setSkuSearchResults] = useState<SkuSearchVariant[]>([]);
   const [skuSearchQuery, setSkuSearchQuery] = useState("");
   const [showOnlySelectedSku, setShowOnlySelectedSku] = useState(false);
   const [selectedSkuVariants, setSelectedSkuVariants] = useState<SkuSearchVariant[]>([]);
-  const filteredSkuVariants = useMemo(() => {
-    if (!skuSearchQuery.trim()) return allSkuVariants;
-    const q = skuSearchQuery.trim().toLowerCase();
-    return allSkuVariants.filter(
-      (v) =>
-        (v.sku || "").toLowerCase().includes(q) ||
-        (v.barcode || "").toLowerCase().includes(q) ||
-        (v.title || "").toLowerCase().includes(q) ||
-        (v.productTitle || "").toLowerCase().includes(q) ||
-        (v.variantTitle || "").toLowerCase().includes(q)
-    );
-  }, [allSkuVariants, skuSearchQuery]);
+  const skuSearchFetcher = useFetcher<typeof action>();
+  const skuResolveFetcher = useFetcher<typeof action>();
 
-  const displaySkuVariants = useMemo(() => {
-    if (!showOnlySelectedSku) return filteredSkuVariants;
-    const selectedIds = new Set(selectedSkuVariants.map((s) => s.inventoryItemId));
-    return filteredSkuVariants.filter((v) => selectedIds.has(v.inventoryItemId));
-  }, [showOnlySelectedSku, filteredSkuVariants, selectedSkuVariants]);
+  // 検索結果の反映（コレクション）
+  useEffect(() => {
+    const d = collectionSearchFetcher.data;
+    if (d && (d as { ok?: boolean }).ok && Array.isArray((d as { collections?: CollectionNode[] }).collections)) {
+      setCollectionSearchResults((d as { collections: CollectionNode[] }).collections);
+    }
+  }, [collectionSearchFetcher.data]);
+
+  // 検索結果の反映（SKU）
+  useEffect(() => {
+    const d = skuSearchFetcher.data;
+    if (d && (d as { ok?: boolean }).ok && Array.isArray((d as { variants?: SkuSearchVariant[] }).variants)) {
+      setSkuSearchResults((d as { variants: SkuSearchVariant[] }).variants);
+    }
+  }, [skuSearchFetcher.data]);
 
   const [activeTab, setActiveTab] = useState<"groups" | "create" | "history">("groups");
   const [groupCreateMethod, setGroupCreateMethod] = useState<"collection" | "sku" | "csv">("collection");
@@ -1448,6 +1609,22 @@ export default function InventoryCountPage() {
   const [groupName, setGroupName] = useState("");
   const [selectedCollectionIds, setSelectedCollectionIds] = useState<string[]>([]);
   const [collectionConfigs, setCollectionConfigs] = useState<Map<string, CollectionConfig>>(new Map()); // コレクションごとの選択商品設定
+  const [showOnlySelectedCollection, setShowOnlySelectedCollection] = useState(false);
+
+  // 表示用: コレクションは検索結果 or 選択済みのみ。選択済みは selectedCollectionInfo から表示
+  const displayCollections = useMemo(() => {
+    if (showOnlySelectedCollection) {
+      return selectedCollectionIds.map((id) => selectedCollectionInfo.get(id)).filter(Boolean) as CollectionNode[];
+    }
+    return collectionSearchResults;
+  }, [showOnlySelectedCollection, selectedCollectionIds, selectedCollectionInfo, collectionSearchResults]);
+
+  const displaySkuVariants = useMemo(() => {
+    if (showOnlySelectedSku) {
+      return selectedSkuVariants; // 選択済みは state のリストをそのまま表示
+    }
+    return skuSearchResults;
+  }, [showOnlySelectedSku, selectedSkuVariants, skuSearchResults]);
 
   // コレクション検索・モーダル関連
   const [collectionSearchQuery, setCollectionSearchQuery] = useState("");
@@ -1515,15 +1692,17 @@ export default function InventoryCountPage() {
   const incompleteGroupIdsForListRef = useRef<Map<string, string[]>>(new Map());
   const csvFileInputRef = useRef<HTMLInputElement>(null);
   const [csvImportMode, setCsvImportMode] = useState<"append" | "replace" | "new_only">("append");
+  const [csvPreviewRows, setCsvPreviewRows] = useState<{ groupName: string; sku: string }[]>([]);
+  const [csvPreviewSelected, setCsvPreviewSelected] = useState<Set<number>>(new Set());
+  const [csvShowOnlySelected, setCsvShowOnlySelected] = useState(false);
+  const csvPreviewFetcher = useFetcher<typeof action>();
 
   const editingGroup = editingGroupId
     ? productGroups.find((g) => g.id === editingGroupId)
     : null;
 
   // 編集モードの初期化（editingGroupId が変わったときだけ実行）
-  // ✅ editingGroupId のみ依存にし、productGroups は含めない。これにより編集中にコレクションを解除しても、
-  // ✅ loader の再検証などで productGroups の参照が変わってもフォームが上書きされず、解除が維持される。
-  // ✅ SKU/CSV由来のグループの場合は「SKU選択から作成」タブに切り替え、選択済みSKUを復元する。
+  // ✅ SKU/CSV由来の場合は getVariantsByInventoryItemIds で選択済み情報を取得。コレクション由来の場合は getCollectionsByIds で取得。
   useEffect(() => {
     if (!editingGroupId) return;
     const g = productGroups.find((pg) => pg.id === editingGroupId);
@@ -1536,10 +1715,17 @@ export default function InventoryCountPage() {
     if (isSkuOnly) {
       setGroupCreateMethod("sku");
       const ids = g.inventoryItemIds ?? [];
-      setSelectedSkuVariants(allSkuVariants.filter((v) => ids.includes(v.inventoryItemId)));
-      setEditingSkuOnlyPreservedIds(ids.filter((id) => !allSkuVariants.some((v) => v.inventoryItemId === id)));
+      setEditingSkuOnlyPreservedIds([]);
       setSelectedCollectionIds([]);
       setCollectionConfigs(new Map());
+      if (ids.length > 0) {
+        const fd = new FormData();
+        fd.set("action", "getVariantsByInventoryItemIds");
+        fd.set("ids", JSON.stringify(ids));
+        skuResolveFetcher.submit(fd, { method: "post" });
+      } else {
+        setSelectedSkuVariants([]);
+      }
     } else {
       setGroupCreateMethod("collection");
       setSelectedCollectionIds(g.collectionIds || []);
@@ -1551,8 +1737,37 @@ export default function InventoryCountPage() {
         }
       }
       setCollectionConfigs(configMap);
+      if ((g.collectionIds ?? []).length > 0) {
+        const fd = new FormData();
+        fd.set("action", "getCollectionsByIds");
+        fd.set("ids", JSON.stringify(g.collectionIds));
+        collectionResolveFetcher.submit(fd, { method: "post" });
+      } else {
+        setSelectedCollectionInfo(new Map());
+      }
     }
   }, [editingGroupId]);
+
+  // getCollectionsByIds の結果を selectedCollectionInfo に反映
+  useEffect(() => {
+    const d = collectionResolveFetcher.data;
+    if (d && (d as { ok?: boolean }).ok && Array.isArray((d as { collections?: CollectionNode[] }).collections)) {
+      const list = (d as { collections: CollectionNode[] }).collections;
+      setSelectedCollectionInfo((prev) => {
+        const next = new Map(prev);
+        for (const c of list) next.set(c.id, c);
+        return next;
+      });
+    }
+  }, [collectionResolveFetcher.data]);
+
+  // getVariantsByInventoryItemIds の結果を selectedSkuVariants に反映
+  useEffect(() => {
+    const d = skuResolveFetcher.data;
+    if (d && (d as { ok?: boolean }).ok && Array.isArray((d as { variants?: SkuSearchVariant[] }).variants)) {
+      setSelectedSkuVariants((d as { variants: SkuSearchVariant[] }).variants);
+    }
+  }, [skuResolveFetcher.data]);
 
   // ✅ モーダルが開いたときに未完了グループの商品リストを取得
   useEffect(() => {
@@ -1627,22 +1842,6 @@ export default function InventoryCountPage() {
       }
     }
   }, [incompleteGroupProductsFetcher.data, modalCount]);
-
-  // コレクション検索結果
-  const filteredCollections = useMemo(() => {
-    if (!collectionSearchQuery.trim()) {
-      return collections;
-    }
-    const query = collectionSearchQuery.toLowerCase();
-    return collections.filter((col) => col.title.toLowerCase().includes(query));
-  }, [collections, collectionSearchQuery]);
-
-  const [showOnlySelectedCollection, setShowOnlySelectedCollection] = useState(false);
-  const displayCollections = useMemo(() => {
-    if (!showOnlySelectedCollection) return filteredCollections;
-    const selectedSet = new Set(selectedCollectionIds);
-    return filteredCollections.filter((col) => selectedSet.has(col.id));
-  }, [showOnlySelectedCollection, filteredCollections, selectedCollectionIds]);
 
   const ITEMS_PER_PAGE = 1000;
   const [collectionPage, setCollectionPage] = useState(1);
@@ -1959,16 +2158,41 @@ export default function InventoryCountPage() {
         return;
       }
       const formData = new FormData();
-      formData.append("action", "import_product_groups_csv");
+      formData.append("action", "preview_csv_inventory_count");
       formData.append("csv", text);
-      formData.append("csvImportMode", csvImportMode);
-      fetcher.submit(formData, { method: "post" });
+      csvPreviewFetcher.submit(formData, { method: "post" });
     };
     reader.readAsText(file, "UTF-8");
     e.target.value = "";
   };
 
-  // SKU一覧は loader で取得済み。画面上の入力で filteredSkuVariants に絞り込み表示。
+  useEffect(() => {
+    const d = csvPreviewFetcher.data;
+    if (d && (d as { ok?: boolean }).ok && Array.isArray((d as { rows?: { groupName: string; sku: string }[] }).rows)) {
+      const rows = (d as { rows: { groupName: string; sku: string }[] }).rows;
+      setCsvPreviewRows(rows);
+      setCsvPreviewSelected(new Set(rows.map((_, i) => i)));
+      setCsvShowOnlySelected(false);
+    }
+  }, [csvPreviewFetcher.data]);
+
+  const handleCsvGroupAdd = () => {
+    const selectedRows = csvPreviewRows.filter((_, i) => csvPreviewSelected.has(i));
+    if (selectedRows.length === 0) {
+      alert("1行以上選択してください。");
+      return;
+    }
+    const csvContent = [["グループ名", "SKU"], ...selectedRows.map((r) => [r.groupName, r.sku])]
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const formData = new FormData();
+    formData.append("action", "import_product_groups_csv");
+    formData.append("csv", csvContent);
+    formData.append("csvImportMode", csvImportMode);
+    fetcher.submit(formData, { method: "post" });
+    setCsvPreviewRows([]);
+    setCsvPreviewSelected(new Set());
+  };
 
   const toggleSkuVariant = (v: SkuSearchVariant) => {
     setSelectedSkuVariants((prev) => {
@@ -2249,22 +2473,6 @@ export default function InventoryCountPage() {
                         <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
                         <button
                           type="button"
-                          onClick={() => setGroupCreateMethod("collection")}
-                          style={{
-                            padding: "8px 16px",
-                            border: "none",
-                            borderRadius: "8px",
-                            background: groupCreateMethod === "collection" ? "#e5e7eb" : "transparent",
-                            color: "#202223",
-                            fontSize: "14px",
-                            fontWeight: 500,
-                            cursor: "pointer",
-                          }}
-                        >
-                          コレクション検索
-                        </button>
-                        <button
-                          type="button"
                           onClick={() => setGroupCreateMethod("sku")}
                           style={{
                             padding: "8px 16px",
@@ -2278,6 +2486,22 @@ export default function InventoryCountPage() {
                           }}
                         >
                           商品検索
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setGroupCreateMethod("collection")}
+                          style={{
+                            padding: "8px 16px",
+                            border: "none",
+                            borderRadius: "8px",
+                            background: groupCreateMethod === "collection" ? "#e5e7eb" : "transparent",
+                            color: "#202223",
+                            fontSize: "14px",
+                            fontWeight: 500,
+                            cursor: "pointer",
+                          }}
+                        >
+                          コレクション検索
                         </button>
                         <button
                           type="button"
@@ -2308,7 +2532,7 @@ export default function InventoryCountPage() {
                           )}
                           <s-text emphasis="bold" size="small">コレクション検索</s-text>
                           <s-text tone="subdued" size="small">
-                            グループ名を入力し、コレクションを選択してグループを作成します。初回からコレクションを選択できます。
+                            グループ名を入力し、コレクションを検索して選択し、グループを作成します。検索結果のみ表示されるため、多数のコレクションがあるストアでも軽く使えます。
                           </s-text>
                           <s-text-field
                             label="グループ名"
@@ -2317,36 +2541,93 @@ export default function InventoryCountPage() {
                             onChange={(e: any) => setGroupName(readValue(e))}
                             placeholder="例: 食品、衣類、雑貨"
                           />
-                          <s-text-field
-                            label="コレクションで絞り込み"
-                            value={collectionSearchQuery}
-                            onInput={(e: any) => setCollectionSearchQuery(readValue(e))}
-                            onChange={(e: any) => setCollectionSearchQuery(readValue(e))}
-                            placeholder="コレクション名で絞り込み"
-                          />
-                          {collections.length > 0 && (
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                              <s-text tone="subdued" size="small">
-                                {showOnlySelectedCollection
-                                  ? `表示: 選択済み${displayCollections.length}件`
-                                  : displayCollections.length <= ITEMS_PER_PAGE
-                                    ? `表示: ${filteredCollections.length}件 / 全${collections.length}件`
-                                    : `表示: ${(collectionPage - 1) * ITEMS_PER_PAGE + 1}-${Math.min(collectionPage * ITEMS_PER_PAGE, displayCollections.length)}件 / 全${displayCollections.length}件`}
-                              </s-text>
-                              <s-button
-                                size="small"
-                                tone={showOnlySelectedCollection ? "success" : undefined}
+                          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                            <s-text-field
+                              label="コレクションを検索"
+                              value={collectionSearchQuery}
+                              onInput={(e: any) => setCollectionSearchQuery(readValue(e))}
+                              onChange={(e: any) => setCollectionSearchQuery(readValue(e))}
+                              placeholder="コレクション名で検索"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!collectionSearchQuery.trim() || collectionSearchFetcher.state === "submitting") return;
+                                const fd = new FormData();
+                                fd.set("action", "searchCollectionsForInventoryCount");
+                                fd.set("query", collectionSearchQuery.trim());
+                                collectionSearchFetcher.submit(fd, { method: "post" });
+                              }}
+                              disabled={!collectionSearchQuery.trim() || collectionSearchFetcher.state === "submitting"}
+                              style={{
+                                padding: "6px 12px",
+                                backgroundColor: !collectionSearchQuery.trim() || collectionSearchFetcher.state === "submitting" ? "#d1d5db" : "#2563eb",
+                                color: "#ffffff",
+                                border: "none",
+                                borderRadius: "6px",
+                                fontSize: "13px",
+                                fontWeight: 500,
+                                cursor: !collectionSearchQuery.trim() || collectionSearchFetcher.state === "submitting" ? "not-allowed" : "pointer",
+                                alignSelf: "flex-end",
+                              }}
+                            >
+                              {collectionSearchFetcher.state === "submitting" ? "検索中..." : "検索"}
+                            </button>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                            <s-text tone="subdued" size="small">
+                              {showOnlySelectedCollection
+                                ? `選択済み: ${displayCollections.length}件`
+                                : displayCollections.length <= ITEMS_PER_PAGE
+                                  ? `表示: ${displayCollections.length}件`
+                                  : `表示: ${(collectionPage - 1) * ITEMS_PER_PAGE + 1}-${Math.min(collectionPage * ITEMS_PER_PAGE, displayCollections.length)}件 / ${displayCollections.length}件`}
+                            </s-text>
+                            <div style={{ display: "flex", gap: "8px" }}>
+                              <button
+                                type="button"
                                 onClick={() => setShowOnlySelectedCollection((prev) => !prev)}
+                                disabled={selectedCollectionIds.length === 0}
+                                style={{
+                                  padding: "4px 12px",
+                                  borderRadius: "6px",
+                                  border: "1px solid #d1d5db",
+                                  backgroundColor: showOnlySelectedCollection && selectedCollectionIds.length > 0 ? "#eff6ff" : selectedCollectionIds.length === 0 ? "#f3f4f6" : "#ffffff",
+                                  color: selectedCollectionIds.length === 0 ? "#9ca3af" : "#202223",
+                                  fontSize: "12px",
+                                  fontWeight: 500,
+                                  cursor: selectedCollectionIds.length === 0 ? "not-allowed" : "pointer",
+                                }}
                               >
-                                {showOnlySelectedCollection ? "一覧表示に戻る" : "選択済み"}
-                              </s-button>
+                                選択済み ({selectedCollectionIds.length})
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedCollectionIds([]);
+                                  setCollectionConfigs(new Map());
+                                  setSelectedCollectionInfo(new Map());
+                                }}
+                                disabled={selectedCollectionIds.length === 0}
+                                style={{
+                                  padding: "4px 12px",
+                                  borderRadius: "6px",
+                                  border: "1px solid #d1d5db",
+                                  backgroundColor: selectedCollectionIds.length === 0 ? "#f3f4f6" : "#ffffff",
+                                  color: selectedCollectionIds.length === 0 ? "#9ca3af" : "#d72c0d",
+                                  fontSize: "12px",
+                                  fontWeight: 500,
+                                  cursor: selectedCollectionIds.length === 0 ? "not-allowed" : "pointer",
+                                }}
+                              >
+                                選択解除
+                              </button>
                             </div>
-                          )}
-                          <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                          </div>
+                          <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
                             {displayCollections.length === 0 ? (
                               <s-box padding="base">
                                 <s-text tone="subdued" size="small">
-                                  {showOnlySelectedCollection ? "選択済みのコレクションがありません" : "コレクションが見つかりません"}
+                                  {showOnlySelectedCollection ? "選択済みのコレクションがありません" : collectionSearchFetcher.state === "submitting" ? "検索中..." : "コレクション名を入力して検索してください"}
                                 </s-text>
                               </s-box>
                             ) : (
@@ -2360,7 +2641,6 @@ export default function InventoryCountPage() {
                                   return (
                                     <div
                                       key={col.id}
-                                      onClick={() => handleOpenCollectionModal(col.id)}
                                       style={{
                                         padding: "10px 12px",
                                         borderRadius: "6px",
@@ -2368,14 +2648,36 @@ export default function InventoryCountPage() {
                                         backgroundColor: isSelected ? "#eff6ff" : "transparent",
                                         border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
                                         borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
-                                        marginTop: "4px",
                                         display: "flex",
                                         alignItems: "center",
                                         gap: "8px",
                                       }}
                                     >
-                                      <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                                      <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        readOnly
+                                        style={{ width: "16px", height: "16px", flexShrink: 0 }}
+                                        onClick={(e) => e.stopPropagation()}
+                                      />
+                                      <div
+                                        style={{ flex: "1 1 auto", minWidth: 0 }}
+                                        onClick={() => {
+                                          const nextSelected = isSelected ? selectedCollectionIds.filter((id) => id !== col.id) : [...selectedCollectionIds, col.id];
+                                          setSelectedCollectionIds(nextSelected);
+                                          setSelectedCollectionInfo((prev) => {
+                                            const next = new Map(prev);
+                                            if (isSelected) next.delete(col.id);
+                                            else next.set(col.id, col);
+                                            return next;
+                                          });
+                                          if (isSelected) {
+                                            const newConfigs = new Map(collectionConfigs);
+                                            newConfigs.delete(col.id);
+                                            setCollectionConfigs(newConfigs);
+                                          }
+                                        }}
+                                      >
                                         <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
                                           {col.title}
                                         </span>
@@ -2389,6 +2691,11 @@ export default function InventoryCountPage() {
                                           onClick={(e) => {
                                             e.stopPropagation();
                                             setSelectedCollectionIds(selectedCollectionIds.filter((id) => id !== col.id));
+                                            setSelectedCollectionInfo((prev) => {
+                                              const next = new Map(prev);
+                                              next.delete(col.id);
+                                              return next;
+                                            });
                                             const newConfigs = new Map(collectionConfigs);
                                             newConfigs.delete(col.id);
                                             setCollectionConfigs(newConfigs);
@@ -2407,6 +2714,24 @@ export default function InventoryCountPage() {
                                           解除
                                         </button>
                                       )}
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleOpenCollectionModal(col.id);
+                                        }}
+                                        style={{
+                                          padding: "4px 8px",
+                                          fontSize: "12px",
+                                          border: "1px solid #c9cccf",
+                                          borderRadius: "6px",
+                                          background: "#fff",
+                                          cursor: "pointer",
+                                          flexShrink: 0,
+                                        }}
+                                      >
+                                        商品を選ぶ
+                                      </button>
                                     </div>
                                   );
                                 })}
@@ -2457,28 +2782,50 @@ export default function InventoryCountPage() {
                               選択中: {selectedCollectionIds.length}件
                             </s-text>
                           )}
-                          <s-stack direction="inline" gap="base">
-                            <s-button
+                          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                            <button
+                              type="button"
                               onClick={handleSaveGroup}
                               disabled={fetcher.state !== "idle" || !groupName.trim()}
-                              tone={editingGroupId ? undefined : "success"}
+                              style={{
+                                padding: "8px 16px",
+                                backgroundColor: fetcher.state !== "idle" || !groupName.trim() ? "#d1d5db" : "#2563eb",
+                                color: "#ffffff",
+                                border: "none",
+                                borderRadius: "6px",
+                                fontSize: "14px",
+                                fontWeight: 600,
+                                cursor: fetcher.state !== "idle" || !groupName.trim() ? "not-allowed" : "pointer",
+                                width: "100%",
+                              }}
                             >
-                              {editingGroupId ? "更新" : "グループを追加する"}
-                            </s-button>
+                              {editingGroupId ? "更新" : "グループを追加"}
+                            </button>
                             {editingGroupId && (
-                              <s-button
-                                tone="critical"
+                              <button
+                                type="button"
                                 onClick={() => {
                                   setEditingGroupId(null);
                                   setGroupName("");
                                   setSelectedCollectionIds([]);
                                   setCollectionConfigs(new Map());
                                 }}
+                                style={{
+                                  padding: "8px 16px",
+                                  backgroundColor: "#ffffff",
+                                  color: "#d72c0d",
+                                  border: "1px solid #d1d5db",
+                                  borderRadius: "6px",
+                                  fontSize: "14px",
+                                  fontWeight: 500,
+                                  cursor: "pointer",
+                                  width: "100%",
+                                }}
                               >
                                 キャンセル
-                              </s-button>
+                              </button>
                             )}
-                          </s-stack>
+                          </div>
                         </s-stack>
                       )}
 
@@ -2492,7 +2839,7 @@ export default function InventoryCountPage() {
                           )}
                           <s-text emphasis="bold" size="small">商品検索</s-text>
                           <s-text tone="subdued" size="small">
-                            グループ名を入力し、一覧から商品を選択してグループを作成します。全商品・全バリアントを読み込み（多数の場合は初回ロードに時間がかかります）。入力で絞り込み。
+                            グループ名を入力し、SKU・商品名で検索して選択し、グループを作成します。検索結果のみ表示されるため、商品が多いストアでも軽く使えます。
                           </s-text>
                           <s-text-field
                             label="グループ名"
@@ -2501,80 +2848,130 @@ export default function InventoryCountPage() {
                             onChange={(e: any) => setGroupName(readValue(e))}
                             placeholder="例: 食品グループ"
                           />
-                          <s-text-field
-                            label="SKUで絞り込み"
-                            value={skuSearchQuery}
-                            onInput={(e: any) => setSkuSearchQuery(readValue(e))}
-                            onChange={(e: any) => setSkuSearchQuery(readValue(e))}
-                            placeholder="SKU・商品名・JANの一部を入力"
-                          />
-                          {allSkuVariants.length > 0 && (
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                              <s-text tone="subdued" size="small">
-                                {showOnlySelectedSku
-                                  ? `表示: 選択済み${displaySkuVariants.length}件`
-                                  : displaySkuVariants.length <= ITEMS_PER_PAGE
-                                    ? `表示: ${filteredSkuVariants.length}件 / 全${allSkuVariants.length}件`
-                                    : `表示: ${(skuPage - 1) * ITEMS_PER_PAGE + 1}-${Math.min(skuPage * ITEMS_PER_PAGE, displaySkuVariants.length)}件 / 全${displaySkuVariants.length}件`}
-                              </s-text>
-                              <s-button
-                                size="small"
-                                tone={showOnlySelectedSku ? "success" : undefined}
+                          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                            <s-text-field
+                              label="SKU・商品名で検索"
+                              value={skuSearchQuery}
+                              onInput={(e: any) => setSkuSearchQuery(readValue(e))}
+                              onChange={(e: any) => setSkuSearchQuery(readValue(e))}
+                              placeholder="SKU・商品名・JANの一部を入力"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!skuSearchQuery.trim() || skuSearchFetcher.state === "submitting") return;
+                                const fd = new FormData();
+                                fd.set("action", "searchVariantsForInventoryCount");
+                                fd.set("query", skuSearchQuery.trim());
+                                skuSearchFetcher.submit(fd, { method: "post" });
+                              }}
+                              disabled={!skuSearchQuery.trim() || skuSearchFetcher.state === "submitting"}
+                              style={{
+                                padding: "6px 12px",
+                                backgroundColor: !skuSearchQuery.trim() || skuSearchFetcher.state === "submitting" ? "#d1d5db" : "#2563eb",
+                                color: "#ffffff",
+                                border: "none",
+                                borderRadius: "6px",
+                                fontSize: "13px",
+                                fontWeight: 500,
+                                cursor: !skuSearchQuery.trim() || skuSearchFetcher.state === "submitting" ? "not-allowed" : "pointer",
+                                alignSelf: "flex-end",
+                              }}
+                            >
+                              {skuSearchFetcher.state === "submitting" ? "検索中..." : "検索"}
+                            </button>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                            <s-text tone="subdued" size="small">
+                              {showOnlySelectedSku
+                                ? `選択済み: ${displaySkuVariants.length}件`
+                                : displaySkuVariants.length <= ITEMS_PER_PAGE
+                                  ? `表示: ${displaySkuVariants.length}件`
+                                  : `表示: ${(skuPage - 1) * ITEMS_PER_PAGE + 1}-${Math.min(skuPage * ITEMS_PER_PAGE, displaySkuVariants.length)}件 / ${displaySkuVariants.length}件`}
+                            </s-text>
+                            <div style={{ display: "flex", gap: "8px" }}>
+                              <button
+                                type="button"
                                 onClick={() => setShowOnlySelectedSku((prev) => !prev)}
+                                disabled={selectedSkuVariants.length === 0}
+                                style={{
+                                  padding: "4px 12px",
+                                  borderRadius: "6px",
+                                  border: "1px solid #d1d5db",
+                                  backgroundColor: showOnlySelectedSku && selectedSkuVariants.length > 0 ? "#eff6ff" : selectedSkuVariants.length === 0 ? "#f3f4f6" : "#ffffff",
+                                  color: selectedSkuVariants.length === 0 ? "#9ca3af" : "#202223",
+                                  fontSize: "12px",
+                                  fontWeight: 500,
+                                  cursor: selectedSkuVariants.length === 0 ? "not-allowed" : "pointer",
+                                }}
                               >
-                                {showOnlySelectedSku ? "一覧表示に戻る" : "選択済み"}
-                              </s-button>
+                                選択済み ({selectedSkuVariants.length})
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedSkuVariants([])}
+                                disabled={selectedSkuVariants.length === 0}
+                                style={{
+                                  padding: "4px 12px",
+                                  borderRadius: "6px",
+                                  border: "1px solid #d1d5db",
+                                  backgroundColor: selectedSkuVariants.length === 0 ? "#f3f4f6" : "#ffffff",
+                                  color: selectedSkuVariants.length === 0 ? "#9ca3af" : "#d72c0d",
+                                  fontSize: "12px",
+                                  fontWeight: 500,
+                                  cursor: selectedSkuVariants.length === 0 ? "not-allowed" : "pointer",
+                                }}
+                              >
+                                選択解除
+                              </button>
                             </div>
-                          )}
-                          {allSkuVariants.length > 0 && (
-                            <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                              {displaySkuVariants.length > 0 ? paginatedSkuVariants.map((v) => {
-                                const isSelected = selectedSkuVariants.some((x) => x.inventoryItemId === v.inventoryItemId);
-                                return (
-                                  <div
-                                    key={v.inventoryItemId}
-                                    onClick={() => toggleSkuVariant(v)}
-                                    style={{
-                                      padding: "10px 12px",
-                                      borderRadius: "6px",
-                                      cursor: "pointer",
-                                      backgroundColor: isSelected ? "#eff6ff" : "transparent",
-                                      border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
-                                      borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
-                                      marginTop: "4px",
-                                      display: "flex",
-                                      alignItems: "center",
-                                      gap: "8px",
-                                    }}
-                                  >
-                                    <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                                    <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-                                      <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
-                                        {v.productTitle || "(商品名なし)"}
+                          </div>
+                          <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                            {displaySkuVariants.length > 0 ? paginatedSkuVariants.map((v) => {
+                              const isSelected = selectedSkuVariants.some((x) => x.inventoryItemId === v.inventoryItemId);
+                              return (
+                                <div
+                                  key={v.inventoryItemId}
+                                  onClick={() => toggleSkuVariant(v)}
+                                  style={{
+                                    padding: "10px 12px",
+                                    borderRadius: "6px",
+                                    cursor: "pointer",
+                                    backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                    border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
+                                    borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: "8px",
+                                  }}
+                                >
+                                  <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                                  <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                                    <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
+                                      {v.productTitle || "(商品名なし)"}
+                                    </span>
+                                    {v.sku ? (
+                                      <span style={{ fontSize: "12px", color: "#6d7175", display: "block" }}>SKU：{v.sku}</span>
+                                    ) : null}
+                                    {v.barcode ? (
+                                      <span style={{ fontSize: "12px", color: "#6d7175", display: "block" }}>JAN：{v.barcode}</span>
+                                    ) : null}
+                                    {(v.option1 || v.option2 || v.option3) ? (
+                                      <span style={{ fontSize: "11px", color: "#8c9196", display: "block" }}>
+                                        {[v.option1, v.option2, v.option3].filter(Boolean).join(" / ")}
                                       </span>
-                                      {v.sku ? (
-                                        <span style={{ fontSize: "12px", color: "#6d7175", display: "block" }}>SKU：{v.sku}</span>
-                                      ) : null}
-                                      {v.barcode ? (
-                                        <span style={{ fontSize: "12px", color: "#6d7175", display: "block" }}>JAN：{v.barcode}</span>
-                                      ) : null}
-                                      {(v.option1 || v.option2 || v.option3) ? (
-                                        <span style={{ fontSize: "11px", color: "#8c9196", display: "block" }}>
-                                          {[v.option1, v.option2, v.option3].filter(Boolean).join(" / ")}
-                                        </span>
-                                      ) : null}
-                                    </div>
+                                    ) : null}
                                   </div>
-                                );
-                              }                              ) : (
-                                <s-box padding="base">
-                                  <s-text tone="subdued" size="small">
-                                    {showOnlySelectedSku ? "選択済みの商品がありません" : "該当するSKUがありません"}
-                                  </s-text>
-                                </s-box>
-                              )}
-                            </div>
-                          )}
+                                </div>
+                              );
+                            }) : (
+                              <s-box padding="base">
+                                <s-text tone="subdued" size="small">
+                                  {showOnlySelectedSku ? "選択済みの商品がありません" : skuSearchFetcher.state === "submitting" ? "検索中..." : "SKU・商品名を入力して検索してください"}
+                                </s-text>
+                              </s-box>
+                            )}
+                          </div>
                           {displaySkuVariants.length > ITEMS_PER_PAGE && (
                             <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "12px", padding: "8px 0" }}>
                               <button
@@ -2621,37 +3018,59 @@ export default function InventoryCountPage() {
                                 : `選択中: ${selectedSkuVariants.length}件`}
                             </s-text>
                           )}
-                          <s-stack direction="inline" gap="base">
-                            <s-button
+                          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                            <button
+                              type="button"
                               onClick={handleSaveGroupFromSkuSelection}
                               disabled={fetcher.state !== "idle" || !groupName.trim() || (selectedSkuVariants.length === 0 && editingSkuOnlyPreservedIds.length === 0)}
-                              tone={editingGroupId ? undefined : "success"}
+                              style={{
+                                padding: "8px 16px",
+                                backgroundColor: fetcher.state !== "idle" || !groupName.trim() || (selectedSkuVariants.length === 0 && editingSkuOnlyPreservedIds.length === 0) ? "#d1d5db" : "#2563eb",
+                                color: "#ffffff",
+                                border: "none",
+                                borderRadius: "6px",
+                                fontSize: "14px",
+                                fontWeight: 600,
+                                cursor: fetcher.state !== "idle" || !groupName.trim() || (selectedSkuVariants.length === 0 && editingSkuOnlyPreservedIds.length === 0) ? "not-allowed" : "pointer",
+                                width: "100%",
+                              }}
                             >
-                              {editingGroupId ? "更新" : "選択したSKUでグループを作成"}
-                            </s-button>
+                              {editingGroupId ? "更新" : "グループを追加"}
+                            </button>
                             {editingGroupId && (
-                              <s-button
-                                tone="critical"
+                              <button
+                                type="button"
                                 onClick={() => {
                                   setEditingGroupId(null);
                                   setGroupName("");
                                   setSelectedSkuVariants([]);
                                   setEditingSkuOnlyPreservedIds([]);
                                 }}
+                                style={{
+                                  padding: "8px 16px",
+                                  backgroundColor: "#ffffff",
+                                  color: "#d72c0d",
+                                  border: "1px solid #d1d5db",
+                                  borderRadius: "6px",
+                                  fontSize: "14px",
+                                  fontWeight: 500,
+                                  cursor: "pointer",
+                                  width: "100%",
+                                }}
                               >
                                 キャンセル
-                              </s-button>
+                              </button>
                             )}
-                          </s-stack>
+                          </div>
                         </s-stack>
                       )}
 
-                      {/* 3. CSVアップロード */}
+                      {/* 3. CSVアップロード（仕入同様: アップロード後にプレビューリスト表示 → チェックで選択 → グループを追加） */}
                       {groupCreateMethod === "csv" && (
                         <s-stack gap="base">
                           <s-text emphasis="bold" size="small">CSVアップロード（グループ名＋SKU）</s-text>
                           <s-text tone="subdued" size="small">
-                            1行目: グループ名,SKU（ヘッダー可）。同じグループ名の行は1グループにまとまります。1ファイル: グループ数は無制限、SKU行数は最大10000行です。
+                            テンプレートをダウンロードしてCSVを作成し、アップロードしてください。アップ後にプレビューが出るので、チェックした行だけ「グループを追加」で追加します。
                           </s-text>
                           <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                             <s-text tone="subdued" size="small">インポート時の動作</s-text>
@@ -2692,21 +3111,172 @@ export default function InventoryCountPage() {
                             style={{ display: "none" }}
                             onChange={handleCsvFileChange}
                           />
-                          <s-stack direction="inline" gap="base">
-                            <s-button onClick={handleCsvImportClick} disabled={fetcher.state !== "idle"} tone="secondary">
-                              CSVアップロード
-                            </s-button>
-                            <s-button onClick={handleCsvTemplateDownload} tone="secondary">
+                          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCsvPreviewRows([]);
+                                setCsvPreviewSelected(new Set());
+                                csvFileInputRef.current?.click();
+                              }}
+                              disabled={csvPreviewFetcher.state === "submitting"}
+                              style={{
+                                padding: "6px 12px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "6px",
+                                background: "#fff",
+                                cursor: csvPreviewFetcher.state === "submitting" ? "not-allowed" : "pointer",
+                                fontSize: "13px",
+                              }}
+                            >
+                              {csvPreviewFetcher.state === "submitting" ? "読み込み中..." : "CSVアップロード"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCsvTemplateDownload}
+                              style={{
+                                padding: "6px 12px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "6px",
+                                background: "#fff",
+                                cursor: "pointer",
+                                fontSize: "13px",
+                              }}
+                            >
                               テンプレートダウンロード
-                            </s-button>
-                            <s-button
+                            </button>
+                            <button
+                              type="button"
                               onClick={handleCsvExport}
                               disabled={productGroups.length === 0}
-                              tone="secondary"
+                              style={{
+                                padding: "6px 12px",
+                                border: "1px solid #d1d5db",
+                                borderRadius: "6px",
+                                background: productGroups.length === 0 ? "#f3f4f6" : "#fff",
+                                cursor: productGroups.length === 0 ? "not-allowed" : "pointer",
+                                fontSize: "13px",
+                              }}
                             >
                               登録済みをCSVダウンロード
-                            </s-button>
-                          </s-stack>
+                            </button>
+                          </div>
+                          {csvPreviewRows.length > 0 && (
+                            <>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
+                                <s-text tone="subdued" size="small">
+                                  {csvShowOnlySelected
+                                    ? `選択済み: ${csvPreviewSelected.size}件`
+                                    : `プレビュー: ${csvPreviewRows.length}件 / 選択中: ${csvPreviewSelected.size}件`}
+                                </s-text>
+                                <div style={{ display: "flex", gap: "8px" }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => setCsvShowOnlySelected((prev) => !prev)}
+                                    disabled={csvPreviewSelected.size === 0}
+                                    style={{
+                                      padding: "4px 12px",
+                                      borderRadius: "6px",
+                                      border: "1px solid #d1d5db",
+                                      backgroundColor: csvShowOnlySelected && csvPreviewSelected.size > 0 ? "#eff6ff" : csvPreviewSelected.size === 0 ? "#f3f4f6" : "#ffffff",
+                                      color: csvPreviewSelected.size === 0 ? "#9ca3af" : "#202223",
+                                      fontSize: "12px",
+                                      cursor: csvPreviewSelected.size === 0 ? "not-allowed" : "pointer",
+                                    }}
+                                  >
+                                    選択済み ({csvPreviewSelected.size})
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setCsvPreviewSelected(new Set())}
+                                    disabled={csvPreviewSelected.size === 0}
+                                    style={{
+                                      padding: "4px 12px",
+                                      borderRadius: "6px",
+                                      border: "1px solid #d1d5db",
+                                      backgroundColor: csvPreviewSelected.size === 0 ? "#f3f4f6" : "#ffffff",
+                                      color: csvPreviewSelected.size === 0 ? "#9ca3af" : "#d72c0d",
+                                      fontSize: "12px",
+                                      cursor: csvPreviewSelected.size === 0 ? "not-allowed" : "pointer",
+                                    }}
+                                  >
+                                    選択解除
+                                  </button>
+                                </div>
+                              </div>
+                              <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                                {(csvShowOnlySelected ? csvPreviewRows.map((row, i) => ({ row, i })).filter(({ i }) => csvPreviewSelected.has(i)) : csvPreviewRows.map((row, i) => ({ row, i }))).map(({ row, i: realIndex }) => {
+                                  const isSelected = csvPreviewSelected.has(realIndex);
+                                  return (
+                                    <div
+                                      key={`${realIndex}-${row.groupName}-${row.sku}`}
+                                      role="button"
+                                      tabIndex={0}
+                                      onClick={() => {
+                                        setCsvPreviewSelected((prev) => {
+                                          const next = new Set(prev);
+                                          if (next.has(realIndex)) next.delete(realIndex);
+                                          else next.add(realIndex);
+                                          return next;
+                                        });
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                          e.preventDefault();
+                                          setCsvPreviewSelected((prev) => {
+                                            const next = new Set(prev);
+                                            if (next.has(realIndex)) next.delete(realIndex);
+                                            else next.add(realIndex);
+                                            return next;
+                                          });
+                                        }
+                                      }}
+                                      style={{
+                                        padding: "10px 12px",
+                                        borderRadius: "6px",
+                                        cursor: "pointer",
+                                        backgroundColor: isSelected ? "#eff6ff" : "transparent",
+                                        border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
+                                        borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: "8px",
+                                      }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        readOnly
+                                        style={{ width: "16px", height: "16px", flexShrink: 0 }}
+                                      />
+                                      <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                                        <span style={{ fontWeight: isSelected ? 600 : 500, display: "block" }}>{row.groupName}</span>
+                                        <span style={{ fontSize: "12px", color: "#6d7175", display: "block" }}>SKU：{row.sku}</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={handleCsvGroupAdd}
+                                disabled={fetcher.state !== "idle" || csvPreviewSelected.size === 0}
+                                style={{
+                                  padding: "8px 16px",
+                                  backgroundColor: fetcher.state !== "idle" || csvPreviewSelected.size === 0 ? "#d1d5db" : "#2563eb",
+                                  color: "#ffffff",
+                                  border: "none",
+                                  borderRadius: "6px",
+                                  fontSize: "14px",
+                                  fontWeight: 600,
+                                  cursor: fetcher.state !== "idle" || csvPreviewSelected.size === 0 ? "not-allowed" : "pointer",
+                                  width: "100%",
+                                }}
+                              >
+                                {fetcher.state !== "idle" ? "登録中..." : "グループを追加"}
+                              </button>
+                            </>
+                          )}
                           <s-text tone="subdued" size="small">
                             登録済みをCSVダウンロードで現在のグループ（SKU指定のみ）を取得できます。編集して「上書き」で再アップロードすると同じグループ名のSKUが置き換わります。
                           </s-text>
@@ -2775,14 +3345,14 @@ export default function InventoryCountPage() {
                             return (
                               <s-box key={g.id} padding="base" background="subdued">
                                 <s-stack gap="base">
-                                  <s-stack direction="inline" gap="base" inlineAlignment="space-between">
-                                    <s-stack direction="inline" gap="base" inlineAlignment="center">
+                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
                                       <s-text emphasis="bold">{g.name}</s-text>
                                       <s-text tone="subdued" size="small">
                                         {isSkuOnly ? `SKU指定: ${skuCount}件` : `合計: 選択 ${groupSelectedTotal} / ${groupTotalTotal}`}
                                       </s-text>
-                                    </s-stack>
-                                    <s-stack direction="inline" gap="base">
+                                    </div>
+                                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
                                       <s-button
                                         size="small"
                                         onClick={() => {
@@ -2790,11 +3360,9 @@ export default function InventoryCountPage() {
                                           setGroupName(g.name);
                                           if (isSkuOnly) {
                                             setGroupCreateMethod("sku");
-                                            const ids = g.inventoryItemIds ?? [];
-                                            setSelectedSkuVariants(allSkuVariants.filter((v) => ids.includes(v.inventoryItemId)));
-                                            setEditingSkuOnlyPreservedIds(ids.filter((id) => !allSkuVariants.some((v) => v.inventoryItemId === id)));
                                             setSelectedCollectionIds([]);
                                             setCollectionConfigs(new Map());
+                                            setEditingSkuOnlyPreservedIds([]);
                                           } else {
                                             setGroupCreateMethod("collection");
                                             setSelectedCollectionIds(g.collectionIds || []);
@@ -2818,12 +3386,12 @@ export default function InventoryCountPage() {
                                       >
                                         削除
                                       </s-button>
-                                    </s-stack>
-                                  </s-stack>
+                                    </div>
+                                  </div>
                                   {g.collectionIds.length > 0 ? (
                                     <div style={{ display: "flex", flexDirection: "column", gap: "6px", width: "100%" }}>
                                       {g.collectionIds.map((cid) => {
-                                        const col = collections.find((c) => c.id === cid);
+                                        const col = collectionDisplayMap[cid] ?? collections.find((c) => c.id === cid);
                                         const config = collectionConfigsMap.get(cid);
                                         const selectedCount = config?.selectedVariantIds?.length ?? 0;
                                         const totalCount = config?.totalVariantCount ?? 0;
@@ -2915,11 +3483,9 @@ export default function InventoryCountPage() {
                                         setEditingGroupId(g.id);
                                         setGroupName(g.name);
                                         setGroupCreateMethod("sku");
-                                        const ids = g.inventoryItemIds ?? [];
-                                        setSelectedSkuVariants(allSkuVariants.filter((v) => ids.includes(v.inventoryItemId)));
-                                        setEditingSkuOnlyPreservedIds(ids.filter((id) => !allSkuVariants.some((v) => v.inventoryItemId === id)));
                                         setSelectedCollectionIds([]);
                                         setCollectionConfigs(new Map());
+                                        setEditingSkuOnlyPreservedIds([]);
                                       }}
                                       onKeyDown={(e: React.KeyboardEvent) => {
                                         if (e.key === "Enter" || e.key === " ") {
