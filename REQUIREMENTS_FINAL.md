@@ -1,7 +1,7 @@
 # 管理画面・ロス登録・棚卸 実装要件書
 
-**最終更新日**: 2026年2月11日（**在庫高日次Cron：オフライントークン自動リフレッシュ**まで反映済み）  
-**コード確認日**: 2026年2月（上記に加え、4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・発注機能実装・仕入POS拡張・在庫高・在庫変動履歴・api/log-inventory-change 種別上書き・ロケーション名取得・公開/自社用 appUrl・リリース時必須対策・希望納品日/到着予定日ボタン設定・入出庫/仕入/ロス/棚卸CSV出力項目設定・在庫高Cronトークンリフレッシュ 反映済み）
+**最終更新日**: 2026年2月11日（**在庫変動履歴の二重記録防止・UI改善**まで反映済み）  
+**コード確認日**: 2026年2月（上記に加え、4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・発注機能実装・仕入POS拡張・在庫高・在庫変動履歴・api/log-inventory-change 種別上書き・ロケーション名取得・公開/自社用 appUrl・リリース時必須対策・希望納品日/到着予定日ボタン設定・入出庫/仕入/ロス/棚卸CSV出力項目設定・在庫高Cronトークンリフレッシュ・在庫変動履歴の二重記録防止・UI改善 反映済み）
 
 ---
 
@@ -99,6 +99,14 @@
 | **変動履歴** | 入庫・出庫・棚卸・仕入を**ロスと全く同じ処理**に統一。Webhook では adjustment_group の有無にかかわらず種別を判定せず常に `admin_webhook` で保存し、種別はすべて API で上書き（`webhooks.inventory_levels.update.tsx` の adjustment 判定を廃止）。 | ✅ 完了 |
 | **変動履歴** | 履歴一覧のオプション表示を「オプション1」「オプション2」「オプション3」の3列に分割（`app.inventory-info.tsx`）。CSV はもともと3列のため変更なし。 | ✅ 完了 |
 | **ドキュメント** | `docs/INVENTORY_CHANGE_ACTIVITY_WHY_MANAGEMENT.md` に実装の所在・「ロスしか記録されていないときの確認」チェックリストを追記。ロスと他を「同じ処理」に統一した旨を反映。 | ✅ 完了 |
+| **変動履歴** | 二重記録防止の改善：`idempotencyKey`生成時にタイムスタンプを秒単位に丸めて使用するように修正（`webhooks.orders.updated.tsx`、`webhooks.refunds.create.tsx`、`api.log-inventory-change.tsx`、`inventory-change-log.ts`）。ミリ秒の違いで重複チェックが失敗するのを防止。 | ✅ 完了 |
+| **変動履歴** | `inventory_levels/update` WebhookでGID形式と数値ID形式の両方を候補として検索するように修正（`webhooks.inventory_levels.update.tsx`）。`orders/updated`や`refunds/create`ではGID形式で保存、`inventory_levels/update`では数値IDで保存しているため、重複チェック時に両方の形式を検索することで、同じ在庫変動に対して`order_sales`と`admin_webhook`が別々に記録されることを防止。 | ✅ 完了 |
+| **変動履歴** | `api.log-inventory-change.tsx`の`recentAdminLog`検索時にも、GID形式と数値ID形式の両方を候補として検索するように修正。入庫・出庫・仕入・ロス・棚卸などのアクティビティでも、`inventory_levels/update` Webhookが先に`admin_webhook`として記録された場合に正しく上書きできるように改善。 | ✅ 完了 |
+| **在庫高** | スマホでの日付入力と「本日集計」ボタンの重なりを解消。日付入力とボタンの親要素の`flexDirection`を`column`に変更して縦並びに（`app.inventory-info.tsx`）。 | ✅ 完了 |
+| **在庫高** | 「本日集計」ボタンの下に注釈を追加：「本日集計表示はSKU数ロケーション数により時間を要する可能性があります。」（`app.inventory-info.tsx`）。 | ✅ 完了 |
+| **在庫高** | 「2026/02/10以降の履歴を確認できます」の末尾に「。」を追加（`app.inventory-info.tsx`）。 | ✅ 完了 |
+| **変動履歴** | フィルターが明示的に適用されるまで一覧内容を表示しないように改善。初回表示時のパフォーマンス向上（`app.inventory-info.tsx`）。 | ✅ 完了 |
+| **変動履歴** | エラーハンドリングを改善し、エラーメッセージとスタックトレースを詳細にログ出力するように修正（`app.inventory-info.tsx`）。 | ✅ 完了 |
 
 ---
 

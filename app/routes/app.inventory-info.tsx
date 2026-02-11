@@ -13,6 +13,7 @@ import {
   fetchAllInventoryItems,
   aggregateSnapshotsFromItems,
   fetchAndSaveSnapshotsForDate,
+  saveSnapshotsForDate,
 } from "../utils/inventory-snapshot";
 
 // 型の再エクスポート（他ルートで参照している場合に備える）
@@ -117,10 +118,28 @@ export async function loader({ request }: LoaderFunctionArgs) {
       totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0,
     }));
 
+  // 今日のスナップショットが存在するかチェック
+  const todaySnapshot = savedSnapshots.snapshots.find((s) => s.date === todayInShopTimezone);
+  const todaySnapshotUpdatedAt = todaySnapshot?.updatedAt || null;
+
   let currentInventory: DailyInventorySnapshot[] = [];
   if (isToday) {
-    const allItems = await fetchAllInventoryItems(adminForSnapshot);
-    currentInventory = aggregateSnapshotsFromItems(allItems, todayInShopTimezone);
+    // 今日のスナップショットが存在する場合はそれを使用、存在しない場合はリアルタイムで取得して保存
+    if (todaySnapshot) {
+      // 既存のスナップショットを使用（updatedAtは既に設定されている）
+      currentInventory = [todaySnapshot].map((s) => ({
+        ...s,
+        totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0,
+      }));
+    } else {
+      // スナップショットが存在しない場合はリアルタイムで取得して保存
+      const allItems = await fetchAllInventoryItems(adminForSnapshot);
+      currentInventory = aggregateSnapshotsFromItems(allItems, todayInShopTimezone);
+      // バックグラウンドでスナップショットを保存（エラーが発生しても表示は続行）
+      saveSnapshotsForDate(adminForSnapshot, shopId, savedSnapshots, currentInventory, todayInShopTimezone).catch((error) => {
+        console.error("[inventory-info] Failed to save today's snapshot:", error);
+      });
+    }
   }
 
   // 選択されたロケーションでフィルター（複数選択対応）
@@ -224,118 +243,128 @@ export async function loader({ request }: LoaderFunctionArgs) {
     // フィルターが明示的に適用されている場合のみデータを取得（初回表示時のパフォーマンス改善）
     if (isChangeHistoryTab && session && hasExplicitFilters) {
       try {
-        const whereClause: any = {
-          shop: session.shop,
-          date: {
-            gte: startDate,
-            lte: endDate,
-          },
-        };
-
-        if (changeHistoryLocationIds.length > 0) {
-          whereClause.locationId = { in: changeHistoryLocationIds };
-        }
-
-        if (inventoryItemIds.length > 0) {
-          whereClause.inventoryItemId = { in: inventoryItemIds };
-        }
-
-        if (activityTypes.length > 0) {
-          whereClause.activity = { in: activityTypes };
-        }
-
-        // PrismaクライアントがInventoryChangeLogを認識しているか確認
-        if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-          changeHistoryLogs = await (db as any).inventoryChangeLog.findMany({
-            where: whereClause,
-            orderBy: {
-              timestamp: sortOrder === "asc" ? "asc" : "desc",
+        // タイムアウト対策：データベースクエリ全体に30秒のタイムアウトを設定
+        const dbQueryPromise = (async () => {
+          const whereClause: any = {
+            shop: session.shop,
+            date: {
+              gte: startDate,
+              lte: endDate,
             },
-            take: 1000, // 最大1000件まで表示
-          });
+          };
 
-          // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
-          // タイムアウト対策：バリアントIDの数を制限（最大200件まで、さらに厳しく）
-          const variantIds = [...new Set(changeHistoryLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
-          const MAX_VARIANTS = 200; // タイムアウト対策：最大200件まで取得（500→200に削減）
-          const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS);
-          
-          if (limitedVariantIds.length < variantIds.length) {
-            console.warn(`[inventory-info] Variant IDs limited to ${MAX_VARIANTS} out of ${variantIds.length} total variants`);
+          if (changeHistoryLocationIds.length > 0) {
+            whereClause.locationId = { in: changeHistoryLocationIds };
           }
+
+          if (inventoryItemIds.length > 0) {
+            whereClause.inventoryItemId = { in: inventoryItemIds };
+          }
+
+          if (activityTypes.length > 0) {
+            whereClause.activity = { in: activityTypes };
+          }
+
+          // PrismaクライアントがInventoryChangeLogを認識しているか確認
+          if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+            return await (db as any).inventoryChangeLog.findMany({
+              where: whereClause,
+              orderBy: {
+                timestamp: sortOrder === "asc" ? "asc" : "desc",
+              },
+              take: 1000, // 最大1000件まで表示
+            });
+          }
+          return [];
+        })();
+
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Database query timeout (30s)")), 30000)
+        );
+
+        changeHistoryLogs = await Promise.race([dbQueryPromise, timeoutPromise]) as any[];
+
+        // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
+        // タイムアウト対策：バリアントIDの数を制限（最大200件まで、さらに厳しく）
+        const variantIds = [...new Set(changeHistoryLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
+        const MAX_VARIANTS = 200; // タイムアウト対策：最大200件まで取得（500→200に削減）
+        const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS);
+        
+        if (limitedVariantIds.length < variantIds.length) {
+          console.warn(`[inventory-info] Variant IDs limited to ${MAX_VARIANTS} out of ${variantIds.length} total variants`);
+        }
+        
+        const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
+        if (limitedVariantIds.length > 0 && session) {
+          const CHUNK = 250;
+          const MAX_CHUNKS = 2; // タイムアウト対策：最大2チャンク（500件）まで処理（10→2に削減）
+          const chunksToProcess = Math.min(Math.ceil(limitedVariantIds.length / CHUNK), MAX_CHUNKS);
           
-          const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
-          if (limitedVariantIds.length > 0 && session) {
-            const CHUNK = 250;
-            const MAX_CHUNKS = 2; // タイムアウト対策：最大2チャンク（500件）まで処理（10→2に削減）
-            const chunksToProcess = Math.min(Math.ceil(limitedVariantIds.length / CHUNK), MAX_CHUNKS);
-            
-            for (let i = 0; i < chunksToProcess * CHUNK && i < limitedVariantIds.length; i += CHUNK) {
-              const chunk = limitedVariantIds.slice(i, i + CHUNK);
-              try {
-                // タイムアウト対策：各クエリに20秒のタイムアウトを設定（30秒→20秒に短縮）
-                const queryPromise = admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
-                const timeoutPromise = new Promise((_, reject) => 
-                  setTimeout(() => reject(new Error("GraphQL query timeout (20s)")), 20000)
-                );
-                
-                const resp = await Promise.race([queryPromise, timeoutPromise]) as Response;
-                const data = await resp.json();
-                
-                // GraphQLエラーをチェック
-                if (data?.errors) {
-                  const errorMessages = Array.isArray(data.errors)
-                    ? data.errors.map((e: any) => e?.message ?? String(e)).join(", ")
-                    : String(data.errors);
-                  console.error("[inventory-info] GraphQL error fetching variants:", errorMessages);
-                  // エラーが発生しても処理を続行（商品名なしで表示）
-                  break; // エラーが発生したら残りもスキップ
-                }
-                
-                const nodes = (data?.data?.nodes ?? []).filter(Boolean);
-                for (const node of nodes) {
-                  if (!node?.id) continue;
-                  const opts = (node.selectedOptions as Array<{ name?: string; value?: string }>) ?? [];
-                  const productTitle = (node.product?.title ?? node.displayName ?? "") as string;
-                  variantInfoMap.set(node.id, {
-                    productTitle,
-                    barcode: (node.barcode as string) ?? "",
-                    option1: opts[0]?.value ?? "",
-                    option2: opts[1]?.value ?? "",
-                    option3: opts[2]?.value ?? "",
-                  });
-                }
-              } catch (e) {
-                console.error(`[inventory-info] Variant batch ${i / CHUNK + 1} failed:`, e);
+          for (let i = 0; i < chunksToProcess * CHUNK && i < limitedVariantIds.length; i += CHUNK) {
+            const chunk = limitedVariantIds.slice(i, i + CHUNK);
+            try {
+              // タイムアウト対策：各クエリに20秒のタイムアウトを設定（30秒→20秒に短縮）
+              const queryPromise = admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
+              const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error("GraphQL query timeout (20s)")), 20000)
+              );
+              
+              const resp = await Promise.race([queryPromise, timeoutPromise]) as Response;
+              const data = await resp.json();
+              
+              // GraphQLエラーをチェック
+              if (data?.errors) {
+                const errorMessages = Array.isArray(data.errors)
+                  ? data.errors.map((e: any) => e?.message ?? String(e)).join(", ")
+                  : String(data.errors);
+                console.error("[inventory-info] GraphQL error fetching variants:", errorMessages);
                 // エラーが発生しても処理を続行（商品名なしで表示）
-                // タイムアウトやエラーが発生した場合は、残りのチャンクもスキップして続行
-                if (e instanceof Error && (e.message.includes("timeout") || e.message.includes("Timeout"))) {
-                  console.warn(`[inventory-info] Timeout detected, skipping remaining variant batches`);
-                  break;
-                }
+                break; // エラーが発生したら残りもスキップ
+              }
+              
+              const nodes = (data?.data?.nodes ?? []).filter(Boolean);
+              for (const node of nodes) {
+                if (!node?.id) continue;
+                const opts = (node.selectedOptions as Array<{ name?: string; value?: string }>) ?? [];
+                const productTitle = (node.product?.title ?? node.displayName ?? "") as string;
+                variantInfoMap.set(node.id, {
+                  productTitle,
+                  barcode: (node.barcode as string) ?? "",
+                  option1: opts[0]?.value ?? "",
+                  option2: opts[1]?.value ?? "",
+                  option3: opts[2]?.value ?? "",
+                });
+              }
+            } catch (e) {
+              console.error(`[inventory-info] Variant batch ${i / CHUNK + 1} failed:`, e);
+              // エラーが発生しても処理を続行（商品名なしで表示）
+              // タイムアウトやエラーが発生した場合は、残りのチャンクもスキップして続行
+              if (e instanceof Error && (e.message.includes("timeout") || e.message.includes("Timeout"))) {
+                console.warn(`[inventory-info] Timeout detected, skipping remaining variant batches`);
+                break;
               }
             }
           }
-          changeHistoryLogs = changeHistoryLogs.map((log: any) => {
-            const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
-            return {
-              ...log,
-              productTitle: info?.productTitle ?? null,
-              barcode: info?.barcode ?? null,
-              option1: info?.option1 ?? null,
-              option2: info?.option2 ?? null,
-              option3: info?.option3 ?? null,
-            };
-          });
-        } else {
-          console.warn(
-            "[inventory-info] InventoryChangeLog model not found in Prisma client. Please restart the dev server."
-          );
         }
+        changeHistoryLogs = changeHistoryLogs.map((log: any) => {
+          const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
+          return {
+            ...log,
+            productTitle: info?.productTitle ?? null,
+            barcode: info?.barcode ?? null,
+            option1: info?.option1 ?? null,
+            option2: info?.option2 ?? null,
+            option3: info?.option3 ?? null,
+          };
+        });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         const errorStack = error instanceof Error ? error.stack : undefined;
         console.error("[inventory-info] Error fetching change history logs:", errorMessage, errorStack);
+        // タイムアウトエラーの場合は詳細をログに記録
+        if (errorMessage.includes("timeout") || errorMessage.includes("Timeout")) {
+          console.error("[inventory-info] Change history query timed out. This may be due to large dataset or slow database connection.");
+        }
         // エラーが発生しても空配列を返して処理を続行（画面は表示されるがデータは空）
         changeHistoryLogs = [];
       }
@@ -356,6 +385,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       hasYesterdaySnapshot, // 前日分のスナップショットが既に保存されているか
       yesterdayDateStr, // 前日の日付（YYYY-MM-DD）
       snapshotRefreshTokenExpires, // 日次スナップショット用リフレッシュトークン有効期限（ISO文字列 or null）
+      todaySnapshotUpdatedAt, // 今日のスナップショットの最終更新時刻（ISO文字列 or null）
       firstChangeHistoryDate,
       // 在庫変動履歴用のデータ
       changeHistoryLogs: changeHistoryLogs || [],
@@ -370,11 +400,46 @@ export async function loader({ request }: LoaderFunctionArgs) {
       },
     };
   } catch (error) {
-    console.error("Inventory info loader error:", error);
-    throw new Response(
-      error instanceof Error ? error.message : "在庫情報の取得中にエラーが発生しました。",
-      { status: 500 }
-    );
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    console.error("[inventory-info] Loader error:", errorMessage, errorStack);
+    
+    // JSONレスポンスを返す（React RouterのloaderはJSONを期待している）
+    // エラーが発生しても、可能な限りデータを返して画面を表示できるようにする
+    return {
+      locations: [],
+      selectedDate: new Date().toISOString().slice(0, 10),
+      selectedLocationIds: [],
+      snapshots: [],
+      summary: {
+        totalQuantity: 0,
+        totalRetailValue: 0,
+        totalCompareAtPriceValue: 0,
+        totalCostValue: 0,
+      },
+      isToday: false,
+      shopId: "",
+      shopName: "",
+      shopTimezone: "UTC",
+      todayInShopTimezone: new Date().toISOString().slice(0, 10),
+      firstSnapshotDate: new Date().toISOString().slice(0, 10),
+      hasYesterdaySnapshot: false,
+      yesterdayDateStr: new Date().toISOString().slice(0, 10),
+      snapshotRefreshTokenExpires: null,
+      todaySnapshotUpdatedAt: null,
+      firstChangeHistoryDate: null,
+      changeHistoryLogs: [],
+      hasExplicitFilters: false,
+      changeHistoryFilters: {
+        startDate: new Date().toISOString().slice(0, 10),
+        endDate: new Date().toISOString().slice(0, 10),
+        locationIds: [],
+        inventoryItemIds: [],
+        activityTypes: [],
+        sortOrder: "desc",
+      },
+      error: errorMessage, // エラーメッセージを追加
+    };
   }
 }
 
@@ -405,6 +470,26 @@ export async function action({ request }: ActionFunctionArgs) {
         return { ok: false, error: result.userErrors.join(", ") };
       }
       return { ok: true, saved: true, date: dateToSaveStr, message: "前日分のスナップショットを保存しました。" };
+    }
+
+    // 本日集計ボタンがクリックされた場合、今日のスナップショットを保存
+    if (intent === "saveTodaySnapshot") {
+      const adminForSnapshot = {
+        request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
+          admin.graphql(opts.data, { variables: opts.variables ?? {} }),
+      };
+      const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
+      const now = new Date();
+      const todayStr = getDateInShopTimezone(now, shopTimezone);
+      // リアルタイムで在庫情報を取得
+      const allItems = await fetchAllInventoryItems(adminForSnapshot);
+      const newSnapshots = aggregateSnapshotsFromItems(allItems, todayStr);
+      // スナップショットを保存
+      const { userErrors } = await saveSnapshotsForDate(adminForSnapshot, shopId, savedSnapshots, newSnapshots, todayStr);
+      if (userErrors.length > 0) {
+        return { ok: false, error: userErrors.map((e: any) => e.message).join(", ") };
+      }
+      return { ok: true, saved: true, date: todayStr, message: "本日のスナップショットを保存しました。" };
     }
 
     // SKU・商品名で検索（在庫変動履歴の商品検索用）
@@ -454,7 +539,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function InventoryInfoPage() {
-  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, firstChangeHistoryDate, changeHistoryLogs, hasExplicitFilters, changeHistoryFilters } =
+  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, todaySnapshotUpdatedAt, firstChangeHistoryDate, changeHistoryLogs, hasExplicitFilters, changeHistoryFilters } =
     useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher<typeof action>();
@@ -888,25 +973,32 @@ export default function InventoryInfoPage() {
                         <button
                           type="button"
                           onClick={() => {
+                            // スナップショットを保存するactionを呼び出す
+                            fetcher.submit(
+                              { intent: "saveTodaySnapshot" },
+                              { method: "post" }
+                            );
+                            // 日付を今日に設定
                             const params = new URLSearchParams(searchParams);
                             params.set("date", todayInShopTimezone);
                             setSearchParams(params);
                             setDateValue(todayInShopTimezone);
                           }}
+                          disabled={fetcher.state === "submitting"}
                           style={{
                             padding: "8px 16px",
-                            backgroundColor: "#2563eb",
+                            backgroundColor: fetcher.state === "submitting" ? "#9ca3af" : "#2563eb",
                             color: "#ffffff",
                             border: "none",
                             borderRadius: "6px",
                             fontSize: "14px",
                             fontWeight: 600,
-                            cursor: "pointer",
+                            cursor: fetcher.state === "submitting" ? "not-allowed" : "pointer",
                             whiteSpace: "nowrap",
                             width: "100%",
                           }}
                         >
-                          本日集計
+                          {fetcher.state === "submitting" ? "保存中..." : "本日集計"}
                         </button>
                       </div>
                       {/* 本日集計の注釈 */}
@@ -1343,6 +1435,31 @@ export default function InventoryInfoPage() {
                         ))}
                       </tbody>
                     </table>
+                    {/* 今日のスナップショットの保存時間を表示 */}
+                    {isToday && todaySnapshotUpdatedAt && (() => {
+                      const date = new Date(todaySnapshotUpdatedAt);
+                      const formatted = new Intl.DateTimeFormat("ja-JP", {
+                        timeZone: shopTimezone,
+                        year: "numeric",
+                        month: "2-digit",
+                        day: "2-digit",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      }).format(date).replace(/\//g, "/").replace(/,/g, "");
+                      // "2026/02/11 14:30" 形式に変換
+                      const parts = formatted.split(" ");
+                      const datePart = parts[0] || "";
+                      const timePart = parts[1] || "";
+                      const displayTime = `${datePart} ${timePart}`;
+                      return (
+                        <div style={{ marginTop: "12px", textAlign: "right" }}>
+                          {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
+                          <s-text tone="subdued" size="small" style={{ fontSize: "12px" }}>
+                            保存時間：{displayTime}
+                          </s-text>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
                   </s-stack>

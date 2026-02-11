@@ -12,6 +12,7 @@ export type DailyInventorySnapshot = {
   totalRetailValue: number;
   totalCompareAtPriceValue: number;
   totalCostValue: number;
+  updatedAt?: string; // スナップショットの最終更新時刻（ISO文字列）
 };
 
 export type InventorySnapshotsData = {
@@ -206,7 +207,13 @@ export async function saveSnapshotsForDate(
   dateToReplace: string
 ): Promise<{ userErrors: Array<{ field?: string; message: string }> }> {
   const updated = savedSnapshots.snapshots.filter((s) => s.date !== dateToReplace);
-  updated.push(...newSnapshots);
+  // スナップショットに更新時刻を設定
+  const now = new Date().toISOString();
+  const snapshotsWithTimestamp = newSnapshots.map((s) => ({
+    ...s,
+    updatedAt: now,
+  }));
+  updated.push(...snapshotsWithTimestamp);
   const data = await requestJson(admin, SAVE_SNAPSHOTS_MUTATION, {
     metafields: [
       {
