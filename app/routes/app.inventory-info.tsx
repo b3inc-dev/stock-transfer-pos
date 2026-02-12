@@ -1438,7 +1438,7 @@ export default function InventoryInfoPage() {
                         ))}
                       </tbody>
                     </table>
-                    {/* 備考：表示中のスナップショットの保存日時（いつの情報か可視化） */}
+                    {/* 表示中のスナップショットの保存日時（今日・過去日とも選択日付の保存情報を表示） */}
                     {snapshotDisplayUpdatedAt && (() => {
                       const date = new Date(snapshotDisplayUpdatedAt);
                       const formatted = new Intl.DateTimeFormat("ja-JP", {
@@ -1457,7 +1457,7 @@ export default function InventoryInfoPage() {
                         <div style={{ marginTop: "12px", textAlign: "left" }}>
                           {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
                           <s-text tone="subdued" size="small" style={{ fontSize: "12px" }}>
-                            備考：保存日時：{displayTime}
+                            保存日時：{displayTime}
                           </s-text>
                         </div>
                       );
