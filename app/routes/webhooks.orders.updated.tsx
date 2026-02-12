@@ -120,15 +120,137 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // 履行された商品の在庫変動を記録
-    // オンラインストアの場合、受注時（fulfillmentsがない時）のみ記録し、
-    // フルフィルメント時は記録しない（二重記録を防ぐ）
+    // オンライン：受注時(fulfillments=0)と配送完了時(fulfillments>0)の2段階で在庫変動が起きうる。
+    // POS：売上時に即履行のため fulfillments>0 で届くことが多い。
+    // 変動数はオーダー情報(line_items)を正とするため、fulfillments ありのときも
+    // 直近の admin_webhook を order_sales に救済する（delta = -line_item.quantity）。
     console.log(`[orders/updated] Checking fulfillments: fulfillments.length=${order.fulfillments?.length || 0}`);
     if (order.fulfillments && order.fulfillments.length > 0) {
-      // fulfillmentsがある場合は、既に受注時に記録されている可能性があるためスキップ
-      // （オンラインストアでは受注時に在庫が減り、フルフィルメント時には在庫変動がない）
-      // POSアプリからの売上の場合は、api/log-inventory-changeで記録されるため、ここでは記録しない
-      console.log(`[orders/updated] Skipping fulfillment processing: fulfillments exist, order.id=${order.id} (online store orders are recorded at order creation time only, POS sales are recorded via api/log-inventory-change)`);
-      // fulfillmentsがある場合は処理をスキップ（受注時のみ記録するため）
+      // 受注時を優先：この注文で order_sales が1件でも既にあれば配送完了時の救済は行わない（オンラインは別日に配送完了になるため）
+      const orderIdRef = `order_${order.id}`;
+      const orderCreatedAt = (payload as any).created_at
+        ? new Date((payload as any).created_at)
+        : new Date();
+      const searchFrom = new Date(orderCreatedAt.getTime() - 30 * 60 * 1000);
+      const searchTo = new Date(Math.max(orderCreatedAt.getTime() + 5 * 60 * 1000, Date.now() + 2 * 60 * 1000));
+      let alreadyRecordedAtOrder: { id: number } | null = null;
+      if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+        alreadyRecordedAtOrder = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop,
+            activity: "order_sales",
+            sourceId: orderIdRef,
+            timestamp: { gte: searchFrom, lte: searchTo },
+          },
+        });
+        if (alreadyRecordedAtOrder) {
+          console.log(`[orders/updated] Skipping fulfillment remediation: order_sales already exists for order.id=${order.id} (recorded at 受注時)`);
+        }
+      }
+
+      if (!alreadyRecordedAtOrder) {
+        // fulfillments あり：救済のみ行う（注文の line_items で admin_webhook を order_sales に更新）
+        const fulfillmentLocationId = order.fulfillments[0]?.location_id != null
+          ? String(order.fulfillments[0].location_id)
+          : null;
+        const locationIdRaw = fulfillmentLocationId;
+        const locationIdGid = fulfillmentLocationId?.startsWith("gid://")
+          ? fulfillmentLocationId
+          : fulfillmentLocationId
+            ? `gid://shopify/Location/${fulfillmentLocationId}`
+            : null;
+
+        if (locationIdRaw && order.line_items && order.line_items.length > 0 && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+          for (const lineItem of order.line_items) {
+            if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) continue;
+            try {
+            const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
+            const variantResp = await admin.request({
+              data: `
+                #graphql
+                query GetVariant($id: ID!) {
+                  productVariant(id: $id) { id inventoryItem { id } }
+                }
+              `,
+              variables: { id: variantId },
+            });
+            const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+            const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
+            if (!inventoryItemId) continue;
+            const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+            const itemIdCandidates = [
+              inventoryItemId,
+              rawItemId,
+              `gid://shopify/InventoryItem/${rawItemId}`,
+            ].filter((id, i, arr) => arr.indexOf(id) === i);
+            const locationIdCandidates = [
+              locationIdRaw,
+              locationIdGid,
+              locationIdRaw?.startsWith("gid://") ? locationIdRaw : null,
+            ].filter(Boolean) as string[];
+
+            // 既にこの order で order_sales が記録されていればスキップ（二重救済防止）
+            const existingOrderSales = await (db as any).inventoryChangeLog.findFirst({
+              where: {
+                shop,
+                inventoryItemId: { in: itemIdCandidates },
+                locationId: { in: locationIdCandidates },
+                activity: "order_sales",
+                sourceId: orderIdRef,
+                timestamp: { gte: searchFrom, lte: searchTo },
+              },
+            });
+            if (existingOrderSales) continue;
+
+            // 時間窓内で最も古い admin_webhook を1件だけ order_sales に更新（販売可能・手持ちの2回更新のうち1件だけ救済）
+            const adminWebhookToUpdate = await (db as any).inventoryChangeLog.findFirst({
+              where: {
+                shop,
+                inventoryItemId: { in: itemIdCandidates },
+                locationId: { in: locationIdCandidates },
+                activity: "admin_webhook",
+                timestamp: { gte: searchFrom, lte: searchTo },
+              },
+              orderBy: { timestamp: "asc" },
+            });
+
+            if (adminWebhookToUpdate) {
+              const orderDelta = -(lineItem.quantity ?? 0);
+              const idempotencyKey = `${shop}_order_sales_${rawItemId}_${locationIdRaw}_${orderIdRef}_${orderCreatedAt.toISOString()}`;
+              await (db as any).inventoryChangeLog.update({
+                where: { id: adminWebhookToUpdate.id },
+                data: {
+                  activity: "order_sales",
+                  delta: orderDelta,
+                  sourceType: "order_sales",
+                  sourceId: orderIdRef,
+                  idempotencyKey,
+                  note: `注文: #${order.id}`,
+                },
+              });
+              console.log(`[orders/updated] Remediated admin_webhook to order_sales (fulfillments exist): id=${adminWebhookToUpdate.id}, order.id=${order.id}, delta=${orderDelta}`);
+            } else if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+              // POS等で orders/updated が inventory_levels/update より先に届いた場合：admin_webhook がまだ無いので OrderPendingLocation に登録し、後から届く inventory_levels/update で order_sales にマッチさせる
+              await (db as any).orderPendingLocation.upsert({
+                where: {
+                  shop_orderId_inventoryItemId: { shop, orderId: String(order.id), inventoryItemId: rawItemId },
+                },
+                create: {
+                  shop,
+                  orderId: String(order.id),
+                  orderCreatedAt: orderCreatedAt,
+                  inventoryItemId: rawItemId,
+                  quantity: lineItem.quantity ?? 1,
+                },
+                update: { orderCreatedAt: orderCreatedAt, quantity: lineItem.quantity ?? 1 },
+              });
+            }
+            } catch (err) {
+              console.error(`[orders/updated] Error remediating line_item for order ${order.id}:`, err);
+            }
+          }
+        }
+      }
     } else {
       console.log(`[orders/updated] No fulfillments found: order.id=${order.id}, fulfillments=${order.fulfillments ? "exists but empty" : "null/undefined"}`);
       
@@ -175,50 +297,48 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         } catch (error) {
           console.error(`[orders/updated] Failed to get order location for order ${order.id}:`, error);
         }
-        
-        if (!orderLocationId) {
-          // 受注直後は FulfillmentOrder.assignedLocation が null になる仕様のためロケーションが取れない。
-          // この注文の line_items を一時テーブルに保存し、後から届く inventory_levels/update で order_sales に突き合わせる。
-          console.log(`[orders/updated] No location found for order ${order.id}, recording to OrderPendingLocation for inventory_levels/update match`);
-          if (db && typeof (db as any).orderPendingLocation !== "undefined") {
-            for (const lineItem of order.line_items) {
-              if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) continue;
-              try {
-                const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
-                const variantResp = await admin.request({
-                  data: `
-                    #graphql
-                    query GetVariant($id: ID!) {
-                      productVariant(id: $id) {
-                        id
-                        inventoryItem { id }
-                      }
-                    }
-                  `,
-                  variables: { id: variantId },
-                });
-                const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
-                const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
-                if (!inventoryItemId) continue;
-                const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
-                await (db as any).orderPendingLocation.upsert({
-                  where: {
-                    shop_orderId_inventoryItemId: { shop, orderId: String(order.id), inventoryItemId: rawItemId },
-                  },
-                  create: {
-                    shop,
-                    orderId: String(order.id),
-                    orderCreatedAt: orderCreatedAt,
-                    inventoryItemId: rawItemId,
-                    quantity: lineItem.quantity ?? 1,
-                  },
-                  update: { orderCreatedAt: orderCreatedAt, quantity: lineItem.quantity ?? 1 },
-                });
-              } catch (e) {
-                console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${lineItem.id}:`, e);
-              }
+
+        // 到着順に依存しないよう、受注時は常に OrderPendingLocation を登録する（後から届く inventory_levels/update がマッチできる）
+        if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+          for (const lineItem of order.line_items) {
+            if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) continue;
+            try {
+              const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
+              const variantResp = await admin.request({
+                data: `
+                  #graphql
+                  query GetVariant($id: ID!) {
+                    productVariant(id: $id) { id inventoryItem { id } }
+                  }
+                `,
+                variables: { id: variantId },
+              });
+              const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+              const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
+              if (!inventoryItemId) continue;
+              const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+              await (db as any).orderPendingLocation.upsert({
+                where: {
+                  shop_orderId_inventoryItemId: { shop, orderId: String(order.id), inventoryItemId: rawItemId },
+                },
+                create: {
+                  shop,
+                  orderId: String(order.id),
+                  orderCreatedAt: orderCreatedAt,
+                  inventoryItemId: rawItemId,
+                  quantity: lineItem.quantity ?? 1,
+                },
+                update: { orderCreatedAt: orderCreatedAt, quantity: lineItem.quantity ?? 1 },
+              });
+            } catch (e) {
+              console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${lineItem.id}:`, e);
             }
           }
+        }
+
+        if (!orderLocationId) {
+          // 受注直後は FulfillmentOrder.assignedLocation が null になりロケーションが取れない。OrderPendingLocation は上で登録済み。
+          console.log(`[orders/updated] No location found for order ${order.id}; OrderPendingLocation already recorded for inventory_levels/update match`);
           // 救済: inventory_levels/update が先に届いてすでに admin_webhook で保存されている場合、
           // 後から届いた orders/updated でその行を order_sales に上書きする（連続取引・到達順で判定漏れするため）
           if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
@@ -256,24 +376,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   orderBy: { timestamp: "desc" },
                 });
                 if (existingAdmin) {
-                  const prevLog = await (db as any).inventoryChangeLog.findFirst({
-                    where: {
-                      shop,
-                      inventoryItemId: { in: itemIdCandidates },
-                      locationId: existingAdmin.locationId,
-                      timestamp: { lt: existingAdmin.timestamp },
-                    },
-                    orderBy: { timestamp: "desc" },
-                  });
-                  const delta = (existingAdmin.quantityAfter != null && prevLog?.quantityAfter != null)
-                    ? existingAdmin.quantityAfter - prevLog.quantityAfter
-                    : -(lineItem.quantity ?? 0);
+                  // 売上はオーダー数量を変動数に反映（-数量）。履歴に売上点数を表示するため
+                  const orderDelta = -(lineItem.quantity ?? 0);
                   const orderIdRef = `order_${order.id}`;
                   await (db as any).inventoryChangeLog.update({
                     where: { id: existingAdmin.id },
                     data: {
                       activity: "order_sales",
-                      delta,
+                      delta: orderDelta,
                       sourceType: "order_sales",
                       sourceId: orderIdRef,
                       idempotencyKey: `${shop}_order_sales_${existingAdmin.inventoryItemId}_${existingAdmin.locationId}_${orderIdRef}_${orderCreatedAt.toISOString()}`,
@@ -281,6 +391,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                     },
                   });
                   console.log(`[orders/updated] Remediated admin_webhook to order_sales (no location): id=${existingAdmin.id}, order.id=${order.id}`);
+                  if (typeof (db as any).orderPendingLocation !== "undefined") {
+                    await (db as any).orderPendingLocation.deleteMany({
+                      where: { shop, orderId: String(order.id), inventoryItemId: rawItemId },
+                    });
+                  }
                 }
               } catch (e) {
                 console.error(`[orders/updated] Failed to remediate admin_webhook for line_item ${lineItem.id}:`, e);
@@ -351,33 +466,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   console.log(`[orders/updated] Found admin_webhook log to update (no fulfillments): id=${existingAdminLog.id}, order.id=${order.id}`);
                   const orderId = `order_${order.id}`;
                   const idempotencyKey = `${shop}_order_sales_${inventoryItemId}_${orderLocationId}_${orderId}_${orderCreatedAt.toISOString()}`;
-                  
-                  // deltaを計算（quantityAfterから前のログのquantityAfterを引く）
-                  let delta: number | null = null;
-                  try {
-                    const prevLog = await (db as any).inventoryChangeLog.findFirst({
-                      where: {
-                        shop,
-                        inventoryItemId: { in: inventoryItemIdCandidates },
-                        locationId: { in: locationIdCandidates },
-                        timestamp: { lt: existingAdminLog.timestamp },
-                      },
-                      orderBy: { timestamp: "desc" },
-                    });
-                    if (prevLog?.quantityAfter !== null && existingAdminLog.quantityAfter !== null) {
-                      delta = existingAdminLog.quantityAfter - prevLog.quantityAfter;
-                    } else {
-                      delta = -(lineItem.quantity || 0);
-                    }
-                  } catch (error) {
-                    delta = -(lineItem.quantity || 0);
-                  }
-                  
+                  // 売上はオーダー数量を変動数に反映（-数量）。履歴に売上点数を表示するため
+                  const orderDelta = -(lineItem.quantity || 0);
+                  const rawItemIdForPending = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+
                   await (db as any).inventoryChangeLog.update({
                     where: { id: existingAdminLog.id },
                     data: {
                       activity: "order_sales",
-                      delta: delta !== null ? delta : existingAdminLog.delta,
+                      delta: orderDelta,
                       sourceType: "order_sales",
                       sourceId: orderId,
                       idempotencyKey,
@@ -385,6 +482,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                     },
                   });
                   console.log(`[orders/updated] Updated admin_webhook log to order_sales (no fulfillments): id=${existingAdminLog.id}`);
+                  // 救済したため OrderPendingLocation を削除し、後の inventory_levels/update で二重記録にならないようにする
+                  if (typeof (db as any).orderPendingLocation !== "undefined") {
+                    await (db as any).orderPendingLocation.deleteMany({
+                      where: { shop, orderId: String(order.id), inventoryItemId: rawItemIdForPending },
+                    });
+                  }
                 }
               }
             } catch (error) {
