@@ -125,12 +125,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   // 開くたびに集計すると重いため、常に保存済みスナップショットのみ表示する。
   // 本日を選択時は「本日集計」で保存済みならその内容を表示し、未保存なら空で「本日集計」実行を促す。
+  // 本日分は「日付が今日のスナップショット」をすべて使う（.find()だと1ロケーション分しか取れないため .filter で全件取得）
   let currentInventory: DailyInventorySnapshot[] = [];
   if (isToday && todaySnapshot) {
-    currentInventory = [todaySnapshot].map((s) => ({
-      ...s,
-      totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0,
-    }));
+    currentInventory = savedSnapshots.snapshots
+      .filter((s) => s.date === todayInShopTimezone)
+      .map((s) => ({
+        ...s,
+        totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0,
+      }));
   }
   // 表示中のスナップショットの保存日時（備考表示用）
   const snapshotDisplayUpdatedAt =
