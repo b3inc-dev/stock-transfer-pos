@@ -485,6 +485,47 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
+    // OrderPendingLocation にマッチした場合、既存の admin_webhook 行を order_sales に更新して新規行を作らない（20:11/20:14 型の二重「管理」防止）
+    if (pendingOrder && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+      const searchFrom = new Date(updatedAt.getTime() - 30 * 60 * 1000);
+      const searchTo = new Date(updatedAt.getTime() + 5 * 60 * 1000);
+      const expectedPrevQty = available + pendingOrder.quantity;
+      const existingAdmin = await (db as any).inventoryChangeLog.findFirst({
+        where: {
+          shop,
+          inventoryItemId: inventoryItemIdRaw,
+          locationId: locationIdRaw,
+          activity: "admin_webhook",
+          quantityAfter: expectedPrevQty,
+          timestamp: { gte: searchFrom, lte: searchTo },
+        },
+        orderBy: { timestamp: "desc" },
+      });
+      if (existingAdmin) {
+        const orderIdRef = `order_${pendingOrder.orderId}`;
+        const idempotencyKeyNew = `${shop}_order_sales_${inventoryItemIdRaw}_${locationIdRaw}_${orderIdRef}_${existingAdmin.timestamp.toISOString()}`;
+        await (db as any).inventoryChangeLog.update({
+          where: { id: existingAdmin.id },
+          data: {
+            activity: "order_sales",
+            sourceType: "order_sales",
+            sourceId: orderIdRef,
+            delta: -pendingOrder.quantity,
+            quantityAfter: available,
+            note: `注文: #${pendingOrder.orderId}`,
+            idempotencyKey: idempotencyKeyNew,
+          },
+        });
+        if (typeof (db as any).orderPendingLocation !== "undefined") {
+          await (db as any).orderPendingLocation.deleteMany({
+            where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw },
+          });
+        }
+        console.log(`[inventory_levels/update] Updated existing admin_webhook to order_sales (avoid duplicate row): id=${existingAdmin.id}, orderId=${pendingOrder.orderId}, quantityAfter ${existingAdmin.quantityAfter} -> ${available}`);
+        return new Response("OK", { status: 200 });
+      }
+    }
+
     // 在庫変動ログを保存（deltaがnullでも記録する）
     try {
       if (db && typeof (db as any).inventoryChangeLog !== "undefined") {

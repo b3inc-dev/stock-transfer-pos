@@ -267,6 +267,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const orderCreatedAt = (payload as any).created_at 
           ? new Date((payload as any).created_at)
           : new Date();
+        // 救済の時間窓は「注文の更新日時」基準にする（注文編集は作成から時間が経っていても、編集直後の admin_webhook を拾うため）
+        const orderUpdatedAt = (payload as any).updated_at
+          ? new Date((payload as any).updated_at)
+          : new Date();
+        const searchFrom = new Date(orderUpdatedAt.getTime() - 30 * 60 * 1000);
+        const searchTo = new Date(orderUpdatedAt.getTime() + 5 * 60 * 1000);
         
         // 注文のデフォルトロケーションを取得
         let orderLocationId: string | null = null;
@@ -347,8 +353,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           // 救済: inventory_levels/update が先に届いてすでに admin_webhook で保存されている場合、
           // 後から届いた orders/updated でその行を order_sales に上書きする（連続取引・到達順で判定漏れするため）
           if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-            const searchFrom = new Date(orderCreatedAt.getTime() - 30 * 60 * 1000);
-            const searchTo = new Date(orderCreatedAt.getTime() + 5 * 60 * 1000);
             for (const lineItem of order.line_items) {
               const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
               if (!lineItem.variant_id || lineItemQty <= 0) continue;
@@ -441,10 +445,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 continue;
               }
               
-              // 直近のadmin_webhookを検索（30分前〜5分後）
-              const searchFrom = new Date(orderCreatedAt.getTime() - 30 * 60 * 1000);
-              const searchTo = new Date(orderCreatedAt.getTime() + 5 * 60 * 1000);
-              
+              // 直近のadmin_webhookを検索（注文更新日時を基準に30分前〜5分後。注文編集で作成が古くても編集直後の行を拾う）
               const inventoryItemIdCandidates = [
                 inventoryItemId,
                 inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, ""),

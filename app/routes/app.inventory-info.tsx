@@ -2062,7 +2062,9 @@ export default function InventoryInfoPage() {
                             {/* 注釈情報 */}
                             <div style={{ marginTop: "12px", padding: "8px 12px", backgroundColor: "#f6f6f7", borderRadius: "6px", border: "1px solid #e1e3e5" }}>
                               <s-text tone="subdued" size="small" style={{ fontSize: "11px", lineHeight: "1.4" }}>
-                                管理画面からの在庫数量変更：対象SKUとロケーションの変動が初回の場合は「-」表記になります。
+                                管理画面からの在庫数量変更：
+                                <br />
+                                対象SKUとロケーションの変動が初回の場合は変動数が「-」表記になります。
                               </s-text>
                             </div>
                           </>
