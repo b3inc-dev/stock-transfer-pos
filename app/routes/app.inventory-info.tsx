@@ -102,12 +102,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const yesterdayDate = new Date(y, m - 1, d - 1);
   const yesterdayDateStr = yesterdayDate.toISOString().slice(0, 10);
   const hasYesterdaySnapshot = savedSnapshots.snapshots.some((s) => s.date === yesterdayDateStr);
+  const todaySnapshot = savedSnapshots.snapshots.find((s) => s.date === todayInShopTimezone);
 
-  // デフォルト日付: URLパラメータがあればそれを使用、なければ前日のスナップショットがあれば前日、なければ今日
-  const defaultDate = url.searchParams.get("date") || (hasYesterdaySnapshot ? yesterdayDateStr : todayInShopTimezone);
+  // デフォルト日付: URLパラメータがあればそれを使用。本日集計未実施の場合は前日を指定して前日の内容を表示する。
+  const defaultDate =
+    url.searchParams.get("date") ||
+    (todaySnapshot ? todayInShopTimezone : (hasYesterdaySnapshot ? yesterdayDateStr : todayInShopTimezone));
   const selectedDate = defaultDate;
 
-  // 今日の場合はリアルタイムで在庫情報を取得（共通モジュールで取得・集計）
   const today = todayInShopTimezone;
   const isToday = selectedDate === today;
 
@@ -118,29 +120,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
       totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0,
     }));
 
-  // 今日のスナップショットが存在するかチェック
-  const todaySnapshot = savedSnapshots.snapshots.find((s) => s.date === todayInShopTimezone);
+  // 今日のスナップショットが存在するかチェック（表示用・備考用）
   const todaySnapshotUpdatedAt = todaySnapshot?.updatedAt || null;
 
+  // 開くたびに集計すると重いため、常に保存済みスナップショットのみ表示する。
+  // 本日を選択時は「本日集計」で保存済みならその内容を表示し、未保存なら空で「本日集計」実行を促す。
   let currentInventory: DailyInventorySnapshot[] = [];
-  if (isToday) {
-    // 今日のスナップショットが存在する場合はそれを使用、存在しない場合はリアルタイムで取得して保存
-    if (todaySnapshot) {
-      // 既存のスナップショットを使用（updatedAtは既に設定されている）
-      currentInventory = [todaySnapshot].map((s) => ({
-        ...s,
-        totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0,
-      }));
-    } else {
-      // スナップショットが存在しない場合はリアルタイムで取得して保存
-      const allItems = await fetchAllInventoryItems(adminForSnapshot);
-      currentInventory = aggregateSnapshotsFromItems(allItems, todayInShopTimezone);
-      // バックグラウンドでスナップショットを保存（エラーが発生しても表示は続行）
-      saveSnapshotsForDate(adminForSnapshot, shopId, savedSnapshots, currentInventory, todayInShopTimezone).catch((error) => {
-        console.error("[inventory-info] Failed to save today's snapshot:", error);
-      });
-    }
+  if (isToday && todaySnapshot) {
+    currentInventory = [todaySnapshot].map((s) => ({
+      ...s,
+      totalCompareAtPriceValue: s.totalCompareAtPriceValue ?? s.totalRetailValue ?? 0,
+    }));
   }
+  // 表示中のスナップショットの保存日時（備考表示用）
+  const snapshotDisplayUpdatedAt =
+    isToday ? (todaySnapshot?.updatedAt ?? null) : (snapshotForDate[0]?.updatedAt ?? null);
 
   // 選択されたロケーションでフィルター（複数選択対応）
   const filteredSnapshots =
@@ -386,6 +380,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       yesterdayDateStr, // 前日の日付（YYYY-MM-DD）
       snapshotRefreshTokenExpires, // 日次スナップショット用リフレッシュトークン有効期限（ISO文字列 or null）
       todaySnapshotUpdatedAt, // 今日のスナップショットの最終更新時刻（ISO文字列 or null）
+      snapshotDisplayUpdatedAt, // 表示中スナップショットの保存日時（備考「保存日時」表示用）
       firstChangeHistoryDate,
       // 在庫変動履歴用のデータ
       changeHistoryLogs: changeHistoryLogs || [],
@@ -427,6 +422,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       yesterdayDateStr: new Date().toISOString().slice(0, 10),
       snapshotRefreshTokenExpires: null,
       todaySnapshotUpdatedAt: null,
+      snapshotDisplayUpdatedAt: null,
       firstChangeHistoryDate: null,
       changeHistoryLogs: [],
       hasExplicitFilters: false,
@@ -539,7 +535,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function InventoryInfoPage() {
-  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, todaySnapshotUpdatedAt, firstChangeHistoryDate, changeHistoryLogs, hasExplicitFilters, changeHistoryFilters } =
+  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, todaySnapshotUpdatedAt, snapshotDisplayUpdatedAt, firstChangeHistoryDate, changeHistoryLogs, hasExplicitFilters, changeHistoryFilters } =
     useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher<typeof action>();
@@ -948,11 +944,11 @@ export default function InventoryInfoPage() {
                       {/* @ts-expect-error s-divider は App Bridge の Web コンポーネント */}
                       <s-divider />
                       
-                      {/* 日付選択（スマホで枠がはみ出さないよう親で幅を制約） */}
+                      {/* 日付選択＋本日集計（同行で日付欄を100%・スマホで枠がはみ出さない） */}
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
                       <s-text emphasis="bold" size="small">日付</s-text>
-                      <div style={{ display: "flex", flexDirection: "column", gap: "8px", width: "100%" }}>
-                        <div style={{ width: "100%", minWidth: 0, overflow: "hidden" }}>
+                      <div style={{ display: "flex", flexDirection: "row", gap: "8px", width: "100%", minWidth: 0, alignItems: "center" }}>
+                        <div style={{ flex: "1 1 0", minWidth: 0, overflow: "hidden" }}>
                           <input
                             type="date"
                             value={dateValue}
@@ -973,12 +969,10 @@ export default function InventoryInfoPage() {
                         <button
                           type="button"
                           onClick={() => {
-                            // スナップショットを保存するactionを呼び出す
                             fetcher.submit(
                               { intent: "saveTodaySnapshot" },
                               { method: "post" }
                             );
-                            // 日付を今日に設定
                             const params = new URLSearchParams(searchParams);
                             params.set("date", todayInShopTimezone);
                             setSearchParams(params);
@@ -995,7 +989,7 @@ export default function InventoryInfoPage() {
                             fontWeight: 600,
                             cursor: fetcher.state === "submitting" ? "not-allowed" : "pointer",
                             whiteSpace: "nowrap",
-                            width: "100%",
+                            flexShrink: 0,
                           }}
                         >
                           {fetcher.state === "submitting" ? "保存中..." : "本日集計"}
@@ -1330,6 +1324,15 @@ export default function InventoryInfoPage() {
                   </div>
                 )}
 
+                {/* 本日選択かつ未集計時はメッセージのみ表示 */}
+                {snapshots.length === 0 && isToday && (
+                  <div style={{ marginTop: "16px", padding: "16px", background: "#f6f6f7", borderRadius: "8px", border: "1px solid #e1e3e5" }}>
+                    {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
+                    <s-text tone="subdued" size="small">
+                      本日集計を実行すると表示されます。上記フィルターの「本日集計」ボタンを押してください。
+                    </s-text>
+                  </div>
+                )}
                 {/* 在庫高テーブル */}
                 {snapshots.length > 0 && (
                   <div style={{ marginTop: "16px", width: "100%", overflowX: "auto", overflowY: "visible" }}>
@@ -1435,9 +1438,9 @@ export default function InventoryInfoPage() {
                         ))}
                       </tbody>
                     </table>
-                    {/* 今日のスナップショットの保存時間を表示 */}
-                    {isToday && todaySnapshotUpdatedAt && (() => {
-                      const date = new Date(todaySnapshotUpdatedAt);
+                    {/* 備考：表示中のスナップショットの保存日時（いつの情報か可視化） */}
+                    {snapshotDisplayUpdatedAt && (() => {
+                      const date = new Date(snapshotDisplayUpdatedAt);
                       const formatted = new Intl.DateTimeFormat("ja-JP", {
                         timeZone: shopTimezone,
                         year: "numeric",
@@ -1446,16 +1449,15 @@ export default function InventoryInfoPage() {
                         hour: "2-digit",
                         minute: "2-digit",
                       }).format(date).replace(/\//g, "/").replace(/,/g, "");
-                      // "2026/02/11 14:30" 形式に変換
                       const parts = formatted.split(" ");
                       const datePart = parts[0] || "";
                       const timePart = parts[1] || "";
                       const displayTime = `${datePart} ${timePart}`;
                       return (
-                        <div style={{ marginTop: "12px", textAlign: "right" }}>
+                        <div style={{ marginTop: "12px", textAlign: "left" }}>
                           {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
                           <s-text tone="subdued" size="small" style={{ fontSize: "12px" }}>
-                            保存時間：{displayTime}
+                            備考：保存日時：{displayTime}
                           </s-text>
                         </div>
                       );

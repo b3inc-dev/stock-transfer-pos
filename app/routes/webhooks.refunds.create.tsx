@@ -304,9 +304,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               `gid://shopify/Location/${locationId}`,
             ].filter((id, index, arr) => arr.indexOf(id) === index); // 重複を除去
 
-            // 検索範囲を30分前〜5分後に拡大（inventory_levels/updateとのタイムスタンプのずれを考慮）
+            // 検索範囲: 30分前〜「返品作成+5分」と「現在+2分」の遅い方（inventory_levels/update が先に届いた場合を拾う）
             const searchFrom = new Date(refundCreatedAt.getTime() - 30 * 60 * 1000); // 30分前
-            const searchTo = new Date(refundCreatedAt.getTime() + 5 * 60 * 1000); // 5分後
+            const searchTo = new Date(Math.max(refundCreatedAt.getTime() + 5 * 60 * 1000, Date.now() + 2 * 60 * 1000)); // 5分後 または 現在+2分
 
             const existingAdminLog = await (db as any).inventoryChangeLog.findFirst({
               where: {

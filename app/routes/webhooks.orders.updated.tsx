@@ -45,6 +45,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // Webhookのペイロードから注文情報を取得
+    // REST Webhookでは line_items に quantity が含まれない場合があるため current_quantity も参照する
     const order = payload as {
       id?: number;
       name?: string;
@@ -53,6 +54,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         variant_id?: number;
         sku?: string;
         quantity?: number;
+        current_quantity?: number;
         fulfillable_quantity?: number;
       }>;
       fulfillments?: Array<{
@@ -162,7 +164,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         if (locationIdRaw && order.line_items && order.line_items.length > 0 && db && typeof (db as any).inventoryChangeLog !== "undefined") {
           for (const lineItem of order.line_items) {
-            if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) continue;
+            const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
+            if (!lineItem.variant_id || lineItemQty <= 0) continue;
             try {
             const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
             const variantResp = await admin.request({
@@ -215,7 +218,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             });
 
             if (adminWebhookToUpdate) {
-              const orderDelta = -(lineItem.quantity ?? 0);
+              const orderDelta = -lineItemQty;
               const idempotencyKey = `${shop}_order_sales_${rawItemId}_${locationIdRaw}_${orderIdRef}_${orderCreatedAt.toISOString()}`;
               await (db as any).inventoryChangeLog.update({
                 where: { id: adminWebhookToUpdate.id },
@@ -240,10 +243,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   orderId: String(order.id),
                   orderCreatedAt: orderCreatedAt,
                   inventoryItemId: rawItemId,
-                  quantity: lineItem.quantity ?? 1,
+                  quantity: lineItemQty,
                 },
-                update: { orderCreatedAt: orderCreatedAt, quantity: lineItem.quantity ?? 1 },
+                update: { orderCreatedAt: orderCreatedAt, quantity: lineItemQty },
               });
+              console.log(`[orders/updated] OrderPendingLocation upserted: orderId=${order.id}, inventoryItemId=${rawItemId}, quantity=${lineItemQty}`);
             }
             } catch (err) {
               console.error(`[orders/updated] Error remediating line_item for order ${order.id}:`, err);
@@ -301,7 +305,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // 到着順に依存しないよう、受注時は常に OrderPendingLocation を登録する（後から届く inventory_levels/update がマッチできる）
         if (db && typeof (db as any).orderPendingLocation !== "undefined") {
           for (const lineItem of order.line_items) {
-            if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) continue;
+            const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
+            if (!lineItem.variant_id || lineItemQty <= 0) continue;
             try {
               const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
               const variantResp = await admin.request({
@@ -326,9 +331,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   orderId: String(order.id),
                   orderCreatedAt: orderCreatedAt,
                   inventoryItemId: rawItemId,
-                  quantity: lineItem.quantity ?? 1,
+                  quantity: lineItemQty,
                 },
-                update: { orderCreatedAt: orderCreatedAt, quantity: lineItem.quantity ?? 1 },
+                update: { orderCreatedAt: orderCreatedAt, quantity: lineItemQty },
               });
             } catch (e) {
               console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${lineItem.id}:`, e);
@@ -345,7 +350,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             const searchFrom = new Date(orderCreatedAt.getTime() - 30 * 60 * 1000);
             const searchTo = new Date(orderCreatedAt.getTime() + 5 * 60 * 1000);
             for (const lineItem of order.line_items) {
-              if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) continue;
+              const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
+              if (!lineItem.variant_id || lineItemQty <= 0) continue;
               try {
                 const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
                 const variantResp = await admin.request({
@@ -377,7 +383,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 });
                 if (existingAdmin) {
                   // 売上はオーダー数量を変動数に反映（-数量）。履歴に売上点数を表示するため
-                  const orderDelta = -(lineItem.quantity ?? 0);
+                  const orderDelta = -lineItemQty;
                   const orderIdRef = `order_${order.id}`;
                   await (db as any).inventoryChangeLog.update({
                     where: { id: existingAdmin.id },
@@ -405,7 +411,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         } else {
           // 各line_itemについて、直近のadmin_webhookを検索してorder_salesに上書き
           for (const lineItem of order.line_items) {
-            if (!lineItem.variant_id || !lineItem.quantity || lineItem.quantity <= 0) {
+            const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
+            if (!lineItem.variant_id || lineItemQty <= 0) {
               continue;
             }
             
@@ -467,7 +474,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   const orderId = `order_${order.id}`;
                   const idempotencyKey = `${shop}_order_sales_${inventoryItemId}_${orderLocationId}_${orderId}_${orderCreatedAt.toISOString()}`;
                   // 売上はオーダー数量を変動数に反映（-数量）。履歴に売上点数を表示するため
-                  const orderDelta = -(lineItem.quantity || 0);
+                  const orderDelta = -lineItemQty;
                   const rawItemIdForPending = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
 
                   await (db as any).inventoryChangeLog.update({

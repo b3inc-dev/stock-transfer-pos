@@ -448,22 +448,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         orderBy: { orderCreatedAt: "desc" },
       });
       if (pending) {
-        pendingOrder = { orderId: pending.orderId, quantity: pending.quantity };
-        console.log(`[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, will save as order_sales`);
+        // ペイロードに quantity が含まれず OrderPendingLocation が 0 や未設定で保存されている場合に備え、1 以上に正規化
+        const qty = Math.max(1, Number(pending.quantity) || 1);
+        pendingOrder = { orderId: pending.orderId, quantity: qty };
+        console.log(`[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, quantity=${qty} (raw=${pending.quantity}), will save as order_sales`);
       }
     }
 
     const finalActivity = pendingOrder ? "order_sales" : activity;
     const finalSourceId = pendingOrder ? `order_${pendingOrder.orderId}` : sourceId;
     const finalNote = pendingOrder ? `注文: #${pendingOrder.orderId}` : null;
+    // 売上はオーダー数量を変動数に反映（-数量）。POS・オンライン共通で履歴に変動数を表示するため（pendingOrder.quantity は上で 1 以上に正規化済み）
+    const finalDelta = pendingOrder ? -pendingOrder.quantity : delta;
 
     // 在庫変動ログを保存（deltaがnullでも記録する）
     try {
       if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-        console.log(`[inventory_levels/update] Saving log: shop=${shop}, item=${inventoryItemIdRaw}, location=${locationIdRaw}, locationName=${locationName}, delta=${delta}, quantityAfter=${available}, date=${date}, activity=${finalActivity}`);
+        console.log(`[inventory_levels/update] Saving log: shop=${shop}, item=${inventoryItemIdRaw}, location=${locationIdRaw}, locationName=${locationName}, delta=${finalDelta}, quantityAfter=${available}, date=${date}, activity=${finalActivity}`);
         
         // deltaがnullの場合でも記録する（管理画面からの操作の場合、直前の値が取れないことがある）
-        if (delta === null) {
+        if (finalDelta === null) {
           console.log(`[inventory_levels/update] Warning: delta is null, but saving log anyway`);
         }
         
@@ -478,7 +482,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             locationId: locationIdRaw, // 元の形式を使用
             locationName, // ロケーション名は取得済み
             activity: finalActivity,
-            delta,
+            delta: finalDelta,
             quantityAfter: available,
             sourceType: finalActivity,
             sourceId: finalSourceId,
