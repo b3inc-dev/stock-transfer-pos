@@ -455,11 +455,35 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
-    const finalActivity = pendingOrder ? "order_sales" : activity;
-    const finalSourceId = pendingOrder ? `order_${pendingOrder.orderId}` : sourceId;
-    const finalNote = pendingOrder ? `注文: #${pendingOrder.orderId}` : null;
+    let finalActivity = pendingOrder ? "order_sales" : activity;
+    let finalSourceId = pendingOrder ? `order_${pendingOrder.orderId}` : sourceId;
+    let finalNote = pendingOrder ? `注文: #${pendingOrder.orderId}` : null;
     // 売上はオーダー数量を変動数に反映（-数量）。POS・オンライン共通で履歴に変動数を表示するため（pendingOrder.quantity は上で 1 以上に正規化済み）
-    const finalDelta = pendingOrder ? -pendingOrder.quantity : delta;
+    let finalDelta: number | null = pendingOrder ? -pendingOrder.quantity : delta;
+
+    // 保存直前に OrderPendingLocation を再チェック（レース対策）
+    // 処理開始時には無くても、その間に orders/updated が登録している場合がある（18:29・19:30 型の「管理」残りを防ぐ）
+    if (!pendingOrder && finalActivity === "admin_webhook" && db && typeof (db as any).orderPendingLocation !== "undefined") {
+      const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
+      const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
+      const pendingAgain = await (db as any).orderPendingLocation.findFirst({
+        where: {
+          shop,
+          inventoryItemId: inventoryItemIdRaw,
+          orderCreatedAt: { gte: pendingFrom, lte: pendingTo },
+        },
+        orderBy: { orderCreatedAt: "desc" },
+      });
+      if (pendingAgain) {
+        const qty = Math.max(1, Number(pendingAgain.quantity) || 1);
+        pendingOrder = { orderId: pendingAgain.orderId, quantity: qty };
+        finalActivity = "order_sales";
+        finalSourceId = `order_${pendingOrder.orderId}`;
+        finalNote = `注文: #${pendingOrder.orderId}`;
+        finalDelta = -pendingOrder.quantity;
+        console.log(`[inventory_levels/update] Before create: matched OrderPendingLocation orderId=${pendingOrder.orderId}, quantity=${qty}, will save as order_sales`);
+      }
+    }
 
     // 在庫変動ログを保存（deltaがnullでも記録する）
     try {

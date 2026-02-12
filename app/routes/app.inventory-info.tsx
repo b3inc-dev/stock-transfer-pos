@@ -884,9 +884,9 @@ export default function InventoryInfoPage() {
           <s-box padding="base">
             {/* タブごとの内容 */}
             {activeTab === "inventory-level" && (
-              <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
-                {/* 左: フィルター領域 */}
-                <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+              <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap", minWidth: 0, maxWidth: "100%" }}>
+                {/* 左: フィルター領域（スマホで日付欄がはみ出さないよう overflow を効かせる） */}
+                <div style={{ flex: "1 1 260px", minWidth: 0, maxWidth: "100%", overflow: "hidden" }}>
                   {/* @ts-expect-error s-stack は App Bridge の Web コンポーネント */}
                   <s-stack gap="base">
                     {/* 画面タイトル */}
@@ -931,6 +931,8 @@ export default function InventoryInfoPage() {
                       borderRadius: 12,
                       boxShadow: "0 0 0 1px #e1e3e5",
                       padding: 16,
+                      minWidth: 0,
+                      overflow: "hidden",
                     }}
                   >
                     {/* @ts-expect-error s-stack は App Bridge の Web コンポーネント */}
@@ -944,10 +946,22 @@ export default function InventoryInfoPage() {
                       {/* @ts-expect-error s-divider は App Bridge の Web コンポーネント */}
                       <s-divider />
                       
-                      {/* 日付選択＋本日集計（同行で日付欄を100%・スマホで枠がはみ出さない） */}
+                      {/* 日付選択＋本日集計（同一行・改行なし・スマホではみ出さない） */}
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
                       <s-text emphasis="bold" size="small">日付</s-text>
-                      <div style={{ display: "flex", flexDirection: "row", gap: "8px", width: "100%", minWidth: 0, alignItems: "center" }}>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "row",
+                          flexWrap: "nowrap",
+                          gap: "8px",
+                          width: "100%",
+                          maxWidth: "100%",
+                          minWidth: 0,
+                          overflow: "hidden",
+                          alignItems: "center",
+                        }}
+                      >
                         <div style={{ flex: "1 1 0", minWidth: 0, overflow: "hidden" }}>
                           <input
                             type="date"
@@ -962,6 +976,7 @@ export default function InventoryInfoPage() {
                               fontSize: "14px",
                               width: "100%",
                               maxWidth: "100%",
+                              minWidth: 0,
                               boxSizing: "border-box",
                             }}
                           />
