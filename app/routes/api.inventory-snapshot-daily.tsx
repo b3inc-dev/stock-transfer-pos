@@ -48,9 +48,8 @@ export async function action({ request }: ActionFunctionArgs) {
 
     let processedCount = 0;
     const errors: string[] = [];
-    const skipped: string[] = []; // 対象日付が既に保存済みのためスキップしたショップ
 
-    // 各ショップのスナップショットを保存
+    // 各ショップのスナップショットを保存（Cron は最終確定なので既存があっても上書きする）
     for (const sessionRecord of sessions) {
       try {
         // オフラインアクセストークンが期限切れ（またはまもなく期限切れ）ならリフレッシュしてから使う
@@ -107,11 +106,7 @@ export async function action({ request }: ActionFunctionArgs) {
           ? getDateInShopTimezone(now, shopTimezone)
           : getDateInShopTimezone(yesterdayDate, shopTimezone);
 
-        if (savedSnapshots.snapshots.some((s) => s.date === dateToSaveStr)) {
-          skipped.push(`${sessionRecord.shop}: ${dateToSaveStr} は既に保存済みのためスキップ`);
-          continue;
-        }
-
+        // Cron は最終確定として扱うため、既にその日付のスナップショットがあっても上書きする（スキップしない）
         const allItems = await fetchAllInventoryItems(adminForSnapshot);
         const newSnapshots = aggregateSnapshotsFromItems(allItems, dateToSaveStr);
         const { userErrors } = await saveSnapshotsForDate(
@@ -140,7 +135,6 @@ export async function action({ request }: ActionFunctionArgs) {
         message: `Processed ${processedCount} shops`,
         processed: processedCount,
         total: sessions.length,
-        skipped: skipped.length > 0 ? skipped : undefined,
         errors: errors.length > 0 ? errors : undefined,
       }),
       {
