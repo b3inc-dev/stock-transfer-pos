@@ -10,6 +10,14 @@ import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session"
 
 const API_VERSION = "2025-10";
 
+/** admin_webhook 未検出時の再検索：Webhook の create 遅延（GraphQL・OrderPendingLocation 待機）を吸収し二重登録を防ぐ */
+const ADMIN_WEBHOOK_RETRY_WAIT_MS = 2500;
+const ADMIN_WEBHOOK_RETRY_TIMES = 1;
+/** recentFrom の下限：クライアントの timestamp が未来寄りでも直近の「管理」行を必ず検索対象にする（秒） */
+const RECENT_FROM_AT_LEAST_SEC = 60;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 // dest が "https://xxx.myshopify.com" のときホスト名だけにする（findSessionsByShop は "xxx.myshopify.com" で保存されている）
 function shopFromDest(dest: string): string {
   try {
@@ -248,7 +256,8 @@ export async function action({ request }: ActionFunctionArgs) {
           continue;
         }
         // 検索範囲: 30分前〜「リクエスト時刻+5分」と「現在+2分」の遅い方（POS/Webhookの到達順で admin_webhook が後から保存されるケースを拾う）
-        const recentFrom = new Date(ts.getTime() - 30 * 60 * 1000);
+        // recentFrom は「いま」から RECENT_FROM_AT_LEAST_SEC 秒前より過去にしない（クライアント timestamp が未来寄りでも直近の管理行を拾う）
+        const recentFrom = new Date(Math.min(ts.getTime() - 30 * 60 * 1000, Date.now() - RECENT_FROM_AT_LEAST_SEC * 1000));
         const recentTo = new Date(Math.max(ts.getTime() + 5 * 60 * 1000, Date.now() + 2 * 60 * 1000));
         // inventory_levels/update Webhookは数値ID形式で保存しているが、念のため両方の形式を候補として検索
         const inventoryItemIdCandidates = [
@@ -259,7 +268,7 @@ export async function action({ request }: ActionFunctionArgs) {
           rawLocId,
           `gid://shopify/Location/${rawLocId}`,
         ];
-        const recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
+        let recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
           where: {
             shop,
             inventoryItemId: { in: inventoryItemIdCandidates },
@@ -269,6 +278,21 @@ export async function action({ request }: ActionFunctionArgs) {
           },
           orderBy: { timestamp: "desc" },
         });
+        if (!recentAdminLog && ADMIN_WEBHOOK_RETRY_TIMES > 0) {
+          console.log(`[api.log-inventory-change] admin_webhook not found, waiting ${ADMIN_WEBHOOK_RETRY_WAIT_MS}ms and retrying (race with webhook create)...`);
+          await sleep(ADMIN_WEBHOOK_RETRY_WAIT_MS);
+          recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
+            where: {
+              shop,
+              inventoryItemId: { in: inventoryItemIdCandidates },
+              locationId: { in: locationIdCandidates },
+              activity: "admin_webhook",
+              timestamp: { gte: recentFrom, lte: recentTo },
+            },
+            orderBy: { timestamp: "desc" },
+          });
+          if (recentAdminLog) console.log(`[api.log-inventory-change] Found admin_webhook on retry: id=${recentAdminLog.id}`);
+        }
         if (recentAdminLog) {
           console.log(
             `[api.log-inventory-change] Found admin_webhook log to update: id=${recentAdminLog.id}, activity=${activity}, delta=${delta}, quantityAfter=${quantityAfter}`
@@ -280,6 +304,8 @@ export async function action({ request }: ActionFunctionArgs) {
             adjustmentGroupId: adjustmentGroupId || null,
             locationName: resolvedLocationName,
           };
+          if (variantId != null && variantId !== "") updateData.variantId = variantId;
+          if (sku != null && sku !== "") updateData.sku = String(sku);
           if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
           await (db as any).inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
@@ -368,7 +394,7 @@ export async function action({ request }: ActionFunctionArgs) {
         continue;
       }
       // 検索範囲: 30分前〜「リクエスト時刻+5分」と「現在+2分」の遅い方（POS/Webhookの到達順で admin_webhook が後から保存されるケースを拾う）
-      const recentFrom = new Date(ts.getTime() - 30 * 60 * 1000);
+      const recentFrom = new Date(Math.min(ts.getTime() - 30 * 60 * 1000, Date.now() - RECENT_FROM_AT_LEAST_SEC * 1000));
       const recentTo = new Date(Math.max(ts.getTime() + 5 * 60 * 1000, Date.now() + 2 * 60 * 1000));
       // inventory_levels/update Webhookは数値ID形式で保存しているが、念のため両方の形式を候補として検索
       const inventoryItemIdCandidates = [
@@ -379,7 +405,7 @@ export async function action({ request }: ActionFunctionArgs) {
         rawLocId,
         `gid://shopify/Location/${rawLocId}`,
       ];
-      const recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
+      let recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
         where: {
           shop: shopId,
           inventoryItemId: { in: inventoryItemIdCandidates },
@@ -389,6 +415,21 @@ export async function action({ request }: ActionFunctionArgs) {
         },
         orderBy: { timestamp: "desc" },
       });
+      if (!recentAdminLog && ADMIN_WEBHOOK_RETRY_TIMES > 0) {
+        console.log(`[api.log-inventory-change] admin_webhook not found (session path), waiting ${ADMIN_WEBHOOK_RETRY_WAIT_MS}ms and retrying...`);
+        await sleep(ADMIN_WEBHOOK_RETRY_WAIT_MS);
+        recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop: shopId,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            activity: "admin_webhook",
+            timestamp: { gte: recentFrom, lte: recentTo },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (recentAdminLog) console.log(`[api.log-inventory-change] Found admin_webhook on retry: id=${recentAdminLog.id}`);
+      }
       if (recentAdminLog) {
         console.log(
           `[api.log-inventory-change] Found admin_webhook log to update: id=${recentAdminLog.id}, activity=${activity}, delta=${delta}, quantityAfter=${quantityAfter}`
@@ -400,6 +441,8 @@ export async function action({ request }: ActionFunctionArgs) {
           adjustmentGroupId: adjustmentGroupId || null,
           locationName: resolvedLocationName,
         };
+        if (variantId != null && variantId !== "") updateData.variantId = variantId;
+        if (sku != null && sku !== "") updateData.sku = String(sku);
         if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
         if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
         await (db as any).inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
