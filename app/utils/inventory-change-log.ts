@@ -11,7 +11,7 @@ export type InventoryChangeLogData = {
   sku: string;
   locationId: string;
   locationName: string;
-  activity: "inbound_transfer" | "outbound_transfer" | "loss_entry" | "inventory_count" | "purchase_entry" | "purchase_cancel" | "order_sales" | "refund" | "admin_webhook";
+  activity: "inbound_transfer" | "outbound_transfer" | "loss_entry" | "inventory_count" | "purchase_entry" | "purchase_cancel" | "order_sales" | "refund" | "order_cancel" | "admin_webhook";
   delta: number | null; // 変動量（+/-、nullの場合は直前値が取れなかった）
   quantityAfter: number | null; // 変動後数量（取れない場合はnull）
   sourceType: string; // 変動の原因種別（activityと同じ値）

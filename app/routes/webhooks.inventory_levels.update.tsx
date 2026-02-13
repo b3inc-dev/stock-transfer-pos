@@ -196,8 +196,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         });
 
         prevAvailable = prevLog?.quantityAfter ?? null;
+
+        // 強固な delta 算出: 直前ログの quantityAfter が null でも、同一商品・ロケーションで
+        // quantityAfter が null でない直近1件を遡って取得し、変動数「-」を減らす
+        if (prevAvailable === null && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+          const prevLogWithQty = await (db as any).inventoryChangeLog.findFirst({
+            where: {
+              shop,
+              inventoryItemId: inventoryItemIdRaw,
+              locationId: locationIdRaw,
+              quantityAfter: { not: null },
+            },
+            orderBy: { timestamp: "desc" },
+          });
+          if (prevLogWithQty?.quantityAfter != null) {
+            prevAvailable = prevLogWithQty.quantityAfter;
+            console.log(`[inventory_levels/update] Using previous log with quantityAfter for delta: id=${prevLogWithQty.id}, quantityAfter=${prevAvailable}`);
+          }
+        }
         
-        // deltaの計算: 直前のログがあればそれから計算、なければinventory_adjustment_group_idから取得を試みる
+        // deltaの計算: 直前のログ（または遡ったログ）があればそれから計算、なければinventory_adjustment_group_idから取得を試みる
         if (prevAvailable !== null) {
           // 直前のログがある場合: 通常の計算
           delta = available - prevAvailable;
@@ -326,11 +344,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const knownActivities = [
         "loss_entry",
         "purchase_entry",
+        "purchase_cancel", // 仕入キャンセル（api/log-inventory-change で記録）
         "inbound_transfer",
         "outbound_transfer",
         "inventory_count",
         "order_sales",
         "refund", // 売上・返品（orders.updated / refunds.create で記録済み）
+        "order_cancel", // キャンセル戻り（orders.updated で記録済み）
       ];
       // タイムウィンドウを拡大（orders/updatedやrefunds/createとinventory_levels/updateのタイムスタンプのずれを考慮）
       // 過去30分前から未来5分後まで検索（orders/updatedが先に来る場合も考慮）
@@ -408,7 +428,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       if (recentNonAdminLog) {
         // 既存ログの変動後数量と今回の available が同じ＝同一イベントの追報なので quantityAfter のみ更新して終了。
-        // 異なる＝別イベント（例: 仕入の直後に FLOW で 0 に戻した）なので、新規「管理」行を作成する。
+        // 既存ログの quantityAfter が null＝API（api/log-inventory-change）が先に作成した行で数量未確定。
+        //   → 同一イベントの追報とみなし、quantityAfter を available で更新するだけにして新規「管理」行は作らない（二重記録防止）。
+        // 異なる（両方とも数値で不一致）＝別イベント（例: 仕入の直後に FLOW で 0 に戻した）なので、新規「管理」行を作成する。
         const existingQty = recentNonAdminLog.quantityAfter ?? null;
         if (existingQty === available) {
           try {
@@ -427,9 +449,91 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
           return new Response("OK", { status: 200 });
         }
+        if (existingQty === null) {
+          // 大量入庫時: API が inbound_transfer で quantityAfter=null を作成→Webhook が後から届くパターン。新規 admin_webhook を作らず既存行を確定させる。
+          // POS 由来で API が delta を入れられていない場合に備え、既存行の delta が null なら「直前の確定数量」から算出して補完する。
+          let updateData: { quantityAfter: number; delta?: number } = { quantityAfter: available };
+          if (recentNonAdminLog.delta == null && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+            const prevWithQty = await (db as any).inventoryChangeLog.findFirst({
+              where: {
+                shop,
+                inventoryItemId: { in: inventoryItemIdCandidates },
+                locationId: { in: locationIdCandidates },
+                quantityAfter: { not: null },
+                timestamp: { lt: recentNonAdminLog.timestamp },
+              },
+              orderBy: { timestamp: "desc" },
+            });
+            if (prevWithQty?.quantityAfter != null) {
+              const computedDelta = available - prevWithQty.quantityAfter;
+              updateData.delta = computedDelta;
+              console.log(
+                `[inventory_levels/update] Complementing delta for same-event update: id=${recentNonAdminLog.id}, prevAvailable=${prevWithQty.quantityAfter}, delta=${computedDelta}`
+              );
+            }
+          }
+          try {
+            console.log(
+              `[inventory_levels/update] Existing log quantityAfter is null; updating to available (same event): id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter -> ${available}`
+            );
+            await (db as any).inventoryChangeLog.update({
+              where: { id: recentNonAdminLog.id },
+              data: updateData,
+            });
+          } catch (e: any) {
+            console.error(
+              "[inventory_levels/update] Failed to update existing log (quantityAfter null):",
+              e?.message || String(e)
+            );
+          }
+          return new Response("OK", { status: 200 });
+        }
         console.log(
           `[inventory_levels/update] Existing log quantityAfter (${existingQty}) !== available (${available}); treating as new event, will create admin_webhook row`
         );
+      }
+
+      // 直近が admin_webhook のみの場合: 同一変動の2本目（販売可能→手持ちの2回更新など）で二重にならないよう、
+      // 時間が非常に近い admin_webhook で quantityAfter が一致または null ならその行を更新して新規を作らない
+      if (!recentNonAdminLog) {
+        const sameEventWindowFrom = new Date(updatedAt.getTime() - 2 * 60 * 1000); // 2分前
+        const sameEventWindowTo = new Date(updatedAt.getTime() + 1 * 60 * 1000);   // 1分後
+        const recentAdminOnly = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            activity: "admin_webhook",
+            timestamp: { gte: sameEventWindowFrom, lte: sameEventWindowTo },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (recentAdminOnly && (recentAdminOnly.quantityAfter === available || recentAdminOnly.quantityAfter == null)) {
+          let updateSameEvent: { quantityAfter: number; delta?: number } = { quantityAfter: available };
+          if (recentAdminOnly.delta == null) {
+            const prevForDelta = await (db as any).inventoryChangeLog.findFirst({
+              where: {
+                shop,
+                inventoryItemId: { in: inventoryItemIdCandidates },
+                locationId: { in: locationIdCandidates },
+                quantityAfter: { not: null },
+                timestamp: { lt: recentAdminOnly.timestamp },
+              },
+              orderBy: { timestamp: "desc" },
+            });
+            if (prevForDelta?.quantityAfter != null) {
+              updateSameEvent.delta = available - prevForDelta.quantityAfter;
+            }
+          }
+          await (db as any).inventoryChangeLog.update({
+            where: { id: recentAdminOnly.id },
+            data: updateSameEvent,
+          });
+          console.log(
+            `[inventory_levels/update] Updated recent admin_webhook (same event, avoid duplicate): id=${recentAdminOnly.id}, quantityAfter -> ${available}`
+          );
+          return new Response("OK", { status: 200 });
+        }
       }
     }
 

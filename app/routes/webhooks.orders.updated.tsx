@@ -115,9 +115,146 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       };
     }
 
-    // 注文がキャンセルされている場合はスキップ
+    // 注文がキャンセルされている場合: 在庫戻りを「キャンセル戻り」として確実に記録する
     if (order.cancelled_at) {
-      console.log(`[orders/updated] Skipping cancelled order: order.id=${order.id}, cancelled_at=${order.cancelled_at}`);
+      console.log(`[orders/updated] Processing cancelled order (inventory restore): order.id=${order.id}, cancelled_at=${order.cancelled_at}`);
+      const cancelledAt = new Date(order.cancelled_at);
+      let orderLocationId: string | null = null;
+      const locationIdRawFromFulfillment = order.fulfillments?.[0]?.location_id != null
+        ? String(order.fulfillments[0].location_id)
+        : null;
+      if (locationIdRawFromFulfillment) {
+        orderLocationId = locationIdRawFromFulfillment.startsWith("gid://")
+          ? locationIdRawFromFulfillment
+          : `gid://shopify/Location/${locationIdRawFromFulfillment}`;
+      }
+      if (!orderLocationId) {
+        try {
+          const orderResp = await admin.request({
+            data: `
+              #graphql
+              query GetOrder($id: ID!) {
+                order(id: $id) {
+                  id
+                  fulfillmentOrders(first: 1) {
+                    edges {
+                      node {
+                        assignedLocation {
+                          location {
+                            id
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `,
+            variables: { id: `gid://shopify/Order/${order.id}` },
+          });
+          const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
+          const fo = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
+          if (fo?.assignedLocation?.location?.id) {
+            orderLocationId = fo.assignedLocation.location.id;
+          }
+        } catch (e) {
+          console.error(`[orders/updated] Failed to get location for cancelled order ${order.id}:`, e);
+        }
+      }
+      const locationIdRaw = orderLocationId?.replace(/^gid:\/\/shopify\/Location\//, "") ?? orderLocationId;
+      if (orderLocationId && order.line_items && order.line_items.length > 0 && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+        const { date: cancelDate } = await getShopTimezoneAndDate(admin, cancelledAt);
+        const locationName = await getLocationName(admin, orderLocationId);
+        for (const lineItem of order.line_items) {
+          const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
+          if (!lineItem.variant_id || lineItemQty <= 0) continue;
+          try {
+            const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
+            const variantResp = await admin.request({
+              data: `
+                #graphql
+                query GetVariant($id: ID!) {
+                  productVariant(id: $id) { id sku inventoryItem { id } }
+                }
+              `,
+              variables: { id: variantId },
+            });
+            const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+            const variant = variantData?.data?.productVariant;
+            const inventoryItemId = variant?.inventoryItem?.id;
+            const sku = variant?.sku ?? "";
+            if (!inventoryItemId) continue;
+            const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+            const idempotencyKey = `${shop}_order_cancel_${order.id}_${rawItemId}_${locationIdRaw ?? orderLocationId}`;
+            const existing = await (db as any).inventoryChangeLog.findFirst({
+              where: { shop, idempotencyKey },
+            });
+            if (existing) {
+              console.log(`[orders/updated] Skipping duplicate order_cancel: order.id=${order.id}, item=${rawItemId}`);
+              continue;
+            }
+            // inventory_levels/update が先に届いて admin_webhook で保存されている場合は、その行を order_cancel に更新して二重を防ぐ
+            const cancelSearchFrom = new Date(cancelledAt.getTime() - 30 * 60 * 1000);
+            const cancelSearchTo = new Date(cancelledAt.getTime() + 5 * 60 * 1000);
+            const itemIdCandidates = [inventoryItemId, rawItemId, `gid://shopify/InventoryItem/${rawItemId}`];
+            const locIdCandidates = [orderLocationId, locationIdRaw, `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
+            const existingAdminForCancel = await (db as any).inventoryChangeLog.findFirst({
+              where: {
+                shop,
+                inventoryItemId: { in: itemIdCandidates },
+                locationId: { in: locIdCandidates },
+                activity: "admin_webhook",
+                timestamp: { gte: cancelSearchFrom, lte: cancelSearchTo },
+              },
+              orderBy: { timestamp: "desc" },
+            });
+            if (existingAdminForCancel) {
+              const orderIdRef = `order_${order.id}`;
+              const delta = lineItemQty;
+              // quantityAfter は inventory_levels/update で既に「戻り後」が入っているのでそのまま
+              await (db as any).inventoryChangeLog.update({
+                where: { id: existingAdminForCancel.id },
+                data: {
+                  activity: "order_cancel",
+                  sourceType: "order_cancel",
+                  sourceId: orderIdRef,
+                  delta,
+                  idempotencyKey,
+                  note: `注文キャンセル: #${order.id}`,
+                },
+              });
+              console.log(`[orders/updated] Updated admin_webhook to order_cancel (avoid duplicate): id=${existingAdminForCancel.id}, order.id=${order.id}, item=${rawItemId}`);
+              continue;
+            }
+            const orderIdRef = `order_${order.id}`;
+            const delta = lineItemQty; // 在庫戻りは正の数
+            const success = await logInventoryChange({
+              shop,
+              timestamp: cancelledAt,
+              inventoryItemId,
+              variantId,
+              sku,
+              locationId: orderLocationId,
+              locationName,
+              activity: "order_cancel",
+              delta,
+              quantityAfter: null, // 直前ログからは算出可能だが、確実性のため null 許容
+              sourceType: "order_cancel",
+              sourceId: orderIdRef,
+              idempotencyKey,
+              date: cancelDate,
+              note: `注文キャンセル: #${order.id}`,
+            });
+            if (success) {
+              console.log(`[orders/updated] Recorded order_cancel: order.id=${order.id}, item=${rawItemId}, delta=+${lineItemQty}`);
+            }
+          } catch (err) {
+            console.error(`[orders/updated] Error recording order_cancel for order ${order.id} line_item ${lineItem.id}:`, err);
+          }
+        }
+      } else if (!orderLocationId) {
+        console.log(`[orders/updated] Cancelled order has no location; skipping inventory restore log: order.id=${order.id}`);
+      }
       return new Response("OK", { status: 200 });
     }
 

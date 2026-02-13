@@ -53,8 +53,12 @@ const ACTIVITY_LABELS: Record<string, string> = {
   loss_entry: "ロス",
   inventory_count: "棚卸",
   purchase_entry: "仕入",
+  purchase_cancel: "仕入キャンセル",
   sale: "売上",
+  order_sales: "売上",
   refund: "返品",
+  order_cancel: "キャンセル戻り",
+  admin_webhook: "管理",
   inventory_adjustment: "在庫調整",
 };
 
@@ -2075,6 +2079,7 @@ export default function InventoryInfoPage() {
                               { value: "purchase_cancel", label: "仕入" },
                               { value: "order_sales", label: "売上" },
                               { value: "refund", label: "返品" },
+                              { value: "order_cancel", label: "キャンセル戻り" },
                               { value: "admin_webhook", label: "管理" },
                             ].map((activity) => {
                               const isSelected = changeHistoryActivityTypes.has(activity.value);

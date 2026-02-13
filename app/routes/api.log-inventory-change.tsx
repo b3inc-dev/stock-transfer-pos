@@ -312,6 +312,29 @@ export async function action({ request }: ActionFunctionArgs) {
           results.push({ ok: true, updated: true, id: recentSameLog.id });
           continue;
         }
+        // 入庫・出庫・ロス・棚卸・仕入の重複送信: 同一 item/location/activity の既存行があれば更新して新規作成しない
+        const posActivities = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "purchase_entry", "purchase_cancel"];
+        if (posActivities.includes(activity)) {
+          const recentSameActivityLog = await (db as any).inventoryChangeLog.findFirst({
+            where: {
+              shop,
+              inventoryItemId: { in: inventoryItemIdCandidates },
+              locationId: { in: locationIdCandidates },
+              activity,
+              timestamp: { gte: recentFrom, lte: recentTo },
+            },
+            orderBy: { timestamp: "desc" },
+          });
+          if (recentSameActivityLog) {
+            const updateDataPos: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null };
+            if (delta !== undefined && delta !== null) updateDataPos.delta = Number(delta);
+            if (quantityAfter !== undefined && quantityAfter !== null) updateDataPos.quantityAfter = Number(quantityAfter);
+            await (db as any).inventoryChangeLog.update({ where: { id: recentSameActivityLog.id }, data: updateDataPos });
+            console.log(`[api.log-inventory-change] Updated existing ${activity} log (avoid duplicate): id=${recentSameActivityLog.id}`);
+            results.push({ ok: true, updated: true, id: recentSameActivityLog.id });
+            continue;
+          }
+        }
         const log = await (db as any).inventoryChangeLog.create({
           data: {
             shop,
@@ -408,6 +431,29 @@ export async function action({ request }: ActionFunctionArgs) {
         console.log(`[api.log-inventory-change] Updated existing ${sameActivitySession} log (avoid duplicate): id=${recentSameLogSession.id}`);
         results.push({ ok: true, updated: true, id: recentSameLogSession.id });
         continue;
+      }
+      // 入庫・出庫・ロス・棚卸・仕入の重複送信: 同一 item/location/activity の既存行があれば更新して新規作成しない（セッションあり）
+      const posActivitiesSession = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "purchase_entry", "purchase_cancel"];
+      if (posActivitiesSession.includes(activity)) {
+        const recentSameActivityLogSession = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop: shopId,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            activity,
+            timestamp: { gte: recentFrom, lte: recentTo },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (recentSameActivityLogSession) {
+          const updateDataPosSession: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null };
+          if (delta !== undefined && delta !== null) updateDataPosSession.delta = Number(delta);
+          if (quantityAfter !== undefined && quantityAfter !== null) updateDataPosSession.quantityAfter = Number(quantityAfter);
+          await (db as any).inventoryChangeLog.update({ where: { id: recentSameActivityLogSession.id }, data: updateDataPosSession });
+          console.log(`[api.log-inventory-change] Updated existing ${activity} log (avoid duplicate): id=${recentSameActivityLogSession.id}`);
+          results.push({ ok: true, updated: true, id: recentSameActivityLogSession.id });
+          continue;
+        }
       }
       const log = await (db as any).inventoryChangeLog.create({
         data: {
