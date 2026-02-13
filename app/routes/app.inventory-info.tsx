@@ -616,16 +616,19 @@ export async function action({ request }: ActionFunctionArgs) {
           }
         }
 
+        // タイムゾーン取得はCSV出力を止めないよう失敗時はUTCのまま続行（GraphQLの syntax error 等で落ちない）
         let shopTimezone = "UTC";
         try {
-          const shopTzResp = await admin.graphql(
-            `#graphql query GetShopTimezone { shop { ianaTimezone } }`,
-            {}
-          );
-          const shopTzData = await shopTzResp.json();
-          shopTimezone = shopTzData?.data?.shop?.ianaTimezone ?? "UTC";
+          const shopTzQuery = "query GetShopTimezone { shop { ianaTimezone } }";
+          const shopTzResp = await admin.graphql(shopTzQuery, {});
+          if (shopTzResp && typeof shopTzResp.json === "function") {
+            const shopTzData = (await shopTzResp.json()) as { data?: { shop?: { ianaTimezone?: string } }; errors?: Array<{ message?: string }> };
+            if (shopTzData?.data?.shop?.ianaTimezone) {
+              shopTimezone = shopTzData.data.shop.ianaTimezone;
+            }
+          }
         } catch (e) {
-          console.error("[inventory-info] Export CSV shop timezone failed:", e);
+          console.warn("[inventory-info] Export CSV shop timezone failed (using UTC):", e instanceof Error ? e.message : String(e));
         }
 
         const headers = [
