@@ -816,6 +816,7 @@ export default function InventoryInfoPage() {
   const [changeHistoryStartDate, setChangeHistoryStartDate] = useState(
     changeHistoryFilters?.startDate || defaultStartDate
   );
+  const [changeHistoryCsvExporting, setChangeHistoryCsvExporting] = useState(false);
   const [changeHistoryEndDate, setChangeHistoryEndDate] = useState(
     changeHistoryFilters?.endDate || defaultEndDate
   );
@@ -2247,50 +2248,66 @@ export default function InventoryInfoPage() {
                                 )}
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    const form = document.createElement("form");
-                                    form.method = "post";
-                                    // 同一タブのURL（pathname + search）を指定しないと、別タブでショップ情報が渡らずドメイン入力画面になる
-                                    form.action = location.pathname + (location.search || "");
-                                    form.target = "_blank";
-                                    const fields: [string, string][] = [
-                                      ["intent", "exportChangeHistoryCsv"],
-                                      ["startDate", changeHistoryStartDate],
-                                      ["endDate", changeHistoryEndDate],
-                                      ["sortOrder", changeHistorySortOrder],
-                                    ];
+                                  disabled={changeHistoryCsvExporting}
+                                  onClick={async () => {
+                                    // 埋め込みアプリでは別タブのPOSTが認証されず同じページが開くため、同一コンテキストでfetchしてダウンロードする
+                                    setChangeHistoryCsvExporting(true);
+                                    const formData = new FormData();
+                                    formData.set("intent", "exportChangeHistoryCsv");
+                                    formData.set("startDate", changeHistoryStartDate);
+                                    formData.set("endDate", changeHistoryEndDate);
+                                    formData.set("sortOrder", changeHistorySortOrder);
                                     if (changeHistoryLocationFilters.size > 0) {
-                                      fields.push(["changeHistoryLocationIds", Array.from(changeHistoryLocationFilters).join(",")]);
+                                      formData.set("changeHistoryLocationIds", Array.from(changeHistoryLocationFilters).join(","));
                                     }
                                     if (changeHistorySelectedInventoryItemIds.size > 0) {
-                                      fields.push(["inventoryItemIds", Array.from(changeHistorySelectedInventoryItemIds).join(",")]);
+                                      formData.set("inventoryItemIds", Array.from(changeHistorySelectedInventoryItemIds).join(","));
                                     }
                                     if (changeHistoryActivityTypes.size > 0) {
-                                      fields.push(["activityTypes", Array.from(changeHistoryActivityTypes).join(",")]);
+                                      formData.set("activityTypes", Array.from(changeHistoryActivityTypes).join(","));
                                     }
-                                    for (const [name, value] of fields) {
-                                      const input = document.createElement("input");
-                                      input.type = "hidden";
-                                      input.name = name;
-                                      input.value = value;
-                                      form.appendChild(input);
+                                    try {
+                                      const res = await fetch(location.pathname + (location.search || ""), {
+                                        method: "POST",
+                                        body: formData,
+                                        credentials: "include",
+                                      });
+                                      const contentType = res.headers.get("Content-Type") || "";
+                                      if (res.ok && contentType.includes("text/csv")) {
+                                        const blob = await res.blob();
+                                        const disp = res.headers.get("Content-Disposition");
+                                        const match = disp && /filename\*?=(?:UTF-8'')?([^;]+)/i.exec(disp);
+                                        const raw = match ? match[1].trim().replace(/^["']|["']$/g, "") : "";
+                                        const filename = raw ? (raw.startsWith("%") ? decodeURIComponent(raw) : raw) : `在庫変動履歴_${changeHistoryStartDate}_${changeHistoryEndDate}.csv`;
+                                        const a = document.createElement("a");
+                                        a.href = URL.createObjectURL(blob);
+                                        a.download = filename;
+                                        a.click();
+                                        URL.revokeObjectURL(a.href);
+                                      } else {
+                                        const text = await res.text();
+                                        const errMsg = text.includes("CSV出力エラー") || text.includes("<!DOCTYPE") ? (text.match(/<p[^>]*>([^<]+)</)?.[1] || "CSVの出力に失敗しました。") : text.slice(0, 200);
+                                        alert(errMsg);
+                                      }
+                                    } catch (e) {
+                                      console.error("[inventory-info] CSV export fetch failed:", e);
+                                      alert("CSVの出力に失敗しました。");
+                                    } finally {
+                                      setChangeHistoryCsvExporting(false);
                                     }
-                                    document.body.appendChild(form);
-                                    form.submit();
-                                    document.body.removeChild(form);
                                   }}
                                   style={{
                                     padding: "8px 16px",
-                                    backgroundColor: "#2563eb",
+                                    backgroundColor: changeHistoryCsvExporting ? "#9ca3af" : "#2563eb",
                                     color: "#ffffff",
                                     border: "none",
                                     borderRadius: "6px",
                                     fontSize: "14px",
                                     fontWeight: 600,
-                                    cursor: "pointer",
+                                    cursor: changeHistoryCsvExporting ? "not-allowed" : "pointer",
                                   }}
                                 >
-                                  CSV出力
+                                  {changeHistoryCsvExporting ? "出力中…" : "CSV出力"}
                                 </button>
                             </div>
                             </div>
