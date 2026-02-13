@@ -1,7 +1,7 @@
 // app/routes/app.inventory-info.tsx
 // 在庫情報画面（在庫高表示・変動履歴）
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useSearchParams, useFetcher } from "react-router";
+import { useLoaderData, useSearchParams, useFetcher, useLocation } from "react-router";
 import { useState, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import { getDateInShopTimezone, formatDateTimeInShopTimezone } from "../utils/timezone";
@@ -69,6 +69,16 @@ function getActivityDisplayLabel(activity: string | null | undefined): string {
   const key = String(activity).trim();
   if (!key) return "その他";
   return ACTIVITY_LABELS[key] ?? ACTIVITY_LABELS[key.toLowerCase()] ?? "その他";
+}
+
+/** 在庫変動履歴CSV出力でエラー時に、別タブ用のHTMLレスポンスを返す */
+function csvExportErrorResponse(message: string): Response {
+  const escaped = message.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>CSV出力エラー</title></head><body><p>${escaped}</p><button onclick="window.close()">閉じる</button></body></html>`;
+  return new Response(html, {
+    status: 200,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -524,7 +534,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const startDate = String(formData.get("startDate") || "").trim();
       const endDate = String(formData.get("endDate") || "").trim();
       if (!startDate || !endDate) {
-        return { ok: false, error: "期間（開始日・終了日）を指定してください。" };
+        return csvExportErrorResponse("期間（開始日・終了日）を指定してください。");
       }
       const changeHistoryLocationIds = String(formData.get("changeHistoryLocationIds") || "")
         .split(",")
@@ -552,102 +562,125 @@ export async function action({ request }: ActionFunctionArgs) {
       }
 
       if (!db || typeof (db as any).inventoryChangeLog === "undefined") {
-        return { ok: false, error: "在庫変動履歴のデータを取得できません。" };
+        return csvExportErrorResponse("在庫変動履歴のデータを取得できません。");
       }
 
       const MAX_EXPORT = 50000;
-      const count = await (db as any).inventoryChangeLog.count({ where: whereClause });
+      let count: number;
+      try {
+        count = await (db as any).inventoryChangeLog.count({ where: whereClause });
+      } catch (e) {
+        console.error("[inventory-info] Export CSV count failed:", e);
+        return csvExportErrorResponse("件数取得に失敗しました。しばらく経ってからお試しください。");
+      }
       if (count > MAX_EXPORT) {
-        return {
-          ok: false,
-          error: `件数が多すぎます（${MAX_EXPORT.toLocaleString()}件まで）。期間や条件を絞ってください。（該当: ${count.toLocaleString()}件）`,
-        };
+        return csvExportErrorResponse(
+          `件数が多すぎます（${MAX_EXPORT.toLocaleString()}件まで）。期間や条件を絞ってください。（該当: ${count.toLocaleString()}件）`
+        );
       }
 
-      const allLogs = await (db as any).inventoryChangeLog.findMany({
-        where: whereClause,
-        orderBy: { timestamp: sortOrder },
-        take: MAX_EXPORT,
-      });
+      try {
+        const allLogs = await (db as any).inventoryChangeLog.findMany({
+          where: whereClause,
+          orderBy: { timestamp: sortOrder },
+          take: MAX_EXPORT,
+        });
 
-      const variantIds = [...new Set(allLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
-      const MAX_VARIANTS_FOR_EXPORT = 5000;
-      const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS_FOR_EXPORT);
-      const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
+        const variantIds = [...new Set(allLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
+        const MAX_VARIANTS_FOR_EXPORT = 5000;
+        const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS_FOR_EXPORT);
+        const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
 
-      if (limitedVariantIds.length > 0) {
-        const CHUNK = 250;
-        for (let i = 0; i < limitedVariantIds.length; i += CHUNK) {
-          const chunk = limitedVariantIds.slice(i, i + CHUNK);
-          try {
-            const resp = await admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
-            const data = await resp.json();
-            const nodes = (data?.data?.nodes ?? []).filter(Boolean);
-            for (const node of nodes) {
-              if (!node?.id) continue;
-              const opts = (node.selectedOptions as Array<{ name?: string; value?: string }>) ?? [];
-              variantInfoMap.set(node.id, {
-                productTitle: (node.product?.title ?? node.displayName ?? "") as string,
-                barcode: (node.barcode as string) ?? "",
-                option1: opts[0]?.value ?? "",
-                option2: opts[1]?.value ?? "",
-                option3: opts[2]?.value ?? "",
-              });
+        if (limitedVariantIds.length > 0) {
+          const CHUNK = 250;
+          for (let i = 0; i < limitedVariantIds.length; i += CHUNK) {
+            const chunk = limitedVariantIds.slice(i, i + CHUNK);
+            try {
+              const resp = await admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
+              const data = await resp.json();
+              const nodes = (data?.data?.nodes ?? []).filter(Boolean);
+              for (const node of nodes) {
+                if (!node?.id) continue;
+                const opts = (node.selectedOptions as Array<{ name?: string; value?: string }>) ?? [];
+                variantInfoMap.set(node.id, {
+                  productTitle: (node.product?.title ?? node.displayName ?? "") as string,
+                  barcode: (node.barcode as string) ?? "",
+                  option1: opts[0]?.value ?? "",
+                  option2: opts[1]?.value ?? "",
+                  option3: opts[2]?.value ?? "",
+                });
+              }
+            } catch (e) {
+              console.error("[inventory-info] Export CSV variant batch failed:", e);
             }
-          } catch (e) {
-            console.error("[inventory-info] Export CSV variant batch failed:", e);
           }
         }
-      }
 
-      const shopTzResp = await admin.graphql(
-        `#graphql query GetShopTimezone { shop { ianaTimezone } }`,
-        {}
-      );
-      const shopTzData = await shopTzResp.json();
-      const shopTimezone = shopTzData?.data?.shop?.ianaTimezone ?? "UTC";
+        let shopTimezone = "UTC";
+        try {
+          const shopTzResp = await admin.graphql(
+            `#graphql query GetShopTimezone { shop { ianaTimezone } }`,
+            {}
+          );
+          const shopTzData = await shopTzResp.json();
+          shopTimezone = shopTzData?.data?.shop?.ianaTimezone ?? "UTC";
+        } catch (e) {
+          console.error("[inventory-info] Export CSV shop timezone failed:", e);
+        }
 
-      const headers = [
-        "発生日時",
-        "商品名",
-        "SKU",
-        "JAN",
-        "オプション1",
-        "オプション2",
-        "オプション3",
-        "ロケーション",
-        "アクティビティ",
-        "変動数",
-        "変動後在庫数",
-        "参照ID",
-        "備考",
-      ];
-      const rows = allLogs.map((log: any) => {
-        const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
-        return [
-          formatDateTimeInShopTimezone(log.timestamp, shopTimezone),
-          info?.productTitle ?? log.sku ?? "",
-          log.sku || "",
-          info?.barcode ?? "",
-          info?.option1 ?? "",
-          info?.option2 ?? "",
-          info?.option3 ?? "",
-          log.locationName || "",
-          getActivityDisplayLabel(log.activity),
-          log.delta !== null ? String(log.delta) : "",
-          log.quantityAfter !== null ? String(log.quantityAfter) : "",
-          log.sourceId || "",
-          log.note || "",
+        const headers = [
+          "発生日時",
+          "商品名",
+          "SKU",
+          "JAN",
+          "オプション1",
+          "オプション2",
+          "オプション3",
+          "ロケーション",
+          "アクティビティ",
+          "変動数",
+          "変動後在庫数",
+          "参照ID",
+          "備考",
         ];
-      });
-      const csvContent = [headers, ...rows]
-        .map((row) => row.map((cell: string) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
-        .join("\n");
-      const filename =
-        startDate === endDate
-          ? `在庫変動履歴_${startDate}.csv`
-          : `在庫変動履歴_${startDate}_${endDate}.csv`;
-      return { ok: true, csvContent: "\uFEFF" + csvContent, filename };
+        const rows = allLogs.map((log: any) => {
+          const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
+          return [
+            formatDateTimeInShopTimezone(log.timestamp, shopTimezone),
+            info?.productTitle ?? log.sku ?? "",
+            log.sku || "",
+            info?.barcode ?? "",
+            info?.option1 ?? "",
+            info?.option2 ?? "",
+            info?.option3 ?? "",
+            log.locationName || "",
+            getActivityDisplayLabel(log.activity),
+            log.delta !== null ? String(log.delta) : "",
+            log.quantityAfter !== null ? String(log.quantityAfter) : "",
+            log.sourceId || "",
+            log.note || "",
+          ];
+        });
+        const csvContent = [headers, ...rows]
+          .map((row) => row.map((cell: string) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+          .join("\n");
+        const filename =
+          startDate === endDate
+            ? `在庫変動履歴_${startDate}.csv`
+            : `在庫変動履歴_${startDate}_${endDate}.csv`;
+        // 大量件数でJSONに載せるとレスポンスが途切れ「syntax error, unexpected end of file」になるため、CSVをそのままResponseで返す
+        return new Response("\uFEFF" + csvContent, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${encodeURIComponent(filename)}"`,
+          },
+        });
+      } catch (e) {
+        console.error("[inventory-info] Export CSV failed:", e);
+        const message = e instanceof Error ? e.message : String(e);
+        return csvExportErrorResponse(`CSVの作成に失敗しました。${message ? `（${message}）` : ""}`);
+      }
     }
 
     // 前日分スナップショットが無い場合に保存（共通モジュールで取得・保存）
@@ -742,9 +775,9 @@ export default function InventoryInfoPage() {
   const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, todaySnapshotUpdatedAt, snapshotDisplayUpdatedAt, firstChangeHistoryDate, changeHistoryLogs, changeHistoryPagination, hasExplicitFilters, changeHistoryFilters } =
     useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
   const fetcher = useFetcher<typeof action>();
   const ensuredYesterdayRef = useRef(false);
-  const exportCsvSubmittedRef = useRef(false);
 
   // タブ管理（URLパラメータから取得、デフォルトは在庫高）
   type InventoryTabId = "inventory-level" | "change-history";
@@ -841,23 +874,7 @@ export default function InventoryInfoPage() {
     setLocationFilters(new Set(selectedLocationIds));
   }, [selectedDate, selectedLocationIds]);
 
-  // 全件CSV出力のレスポンス処理：ダウンロードまたはエラー表示
-  useEffect(() => {
-    if (fetcher.state !== "idle" || !exportCsvSubmittedRef.current || !fetcher.data || typeof fetcher.data !== "object") return;
-    const data = fetcher.data as { ok?: boolean; csvContent?: string; filename?: string; error?: string };
-    if (data.filename && data.csvContent) {
-      const blob = new Blob([data.csvContent], { type: "text/csv;charset=utf-8;" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = data.filename;
-      a.click();
-      URL.revokeObjectURL(url);
-    } else if (data.ok === false && data.error) {
-      alert(data.error);
-    }
-    exportCsvSubmittedRef.current = false;
-  }, [fetcher.state, fetcher.data]);
+  // 在庫変動履歴CSVは form target=_blank で送信し、action が Response でファイルを返すため、fetcher のレスポンス処理は不要
 
   useEffect(() => {
     if (changeHistoryFilters) {
@@ -2230,37 +2247,49 @@ export default function InventoryInfoPage() {
                                 )}
                                 <button
                                   type="button"
-                                  disabled={fetcher.state === "submitting"}
                                   onClick={() => {
-                                    const fd = new FormData();
-                                    fd.set("intent", "exportChangeHistoryCsv");
-                                    fd.set("startDate", changeHistoryStartDate);
-                                    fd.set("endDate", changeHistoryEndDate);
+                                    const form = document.createElement("form");
+                                    form.method = "post";
+                                    form.action = location.pathname;
+                                    form.target = "_blank";
+                                    const fields: [string, string][] = [
+                                      ["intent", "exportChangeHistoryCsv"],
+                                      ["startDate", changeHistoryStartDate],
+                                      ["endDate", changeHistoryEndDate],
+                                      ["sortOrder", changeHistorySortOrder],
+                                    ];
                                     if (changeHistoryLocationFilters.size > 0) {
-                                      fd.set("changeHistoryLocationIds", Array.from(changeHistoryLocationFilters).join(","));
+                                      fields.push(["changeHistoryLocationIds", Array.from(changeHistoryLocationFilters).join(",")]);
                                     }
                                     if (changeHistorySelectedInventoryItemIds.size > 0) {
-                                      fd.set("inventoryItemIds", Array.from(changeHistorySelectedInventoryItemIds).join(","));
+                                      fields.push(["inventoryItemIds", Array.from(changeHistorySelectedInventoryItemIds).join(",")]);
                                     }
                                     if (changeHistoryActivityTypes.size > 0) {
-                                      fd.set("activityTypes", Array.from(changeHistoryActivityTypes).join(","));
+                                      fields.push(["activityTypes", Array.from(changeHistoryActivityTypes).join(",")]);
                                     }
-                                    fd.set("sortOrder", changeHistorySortOrder);
-                                    exportCsvSubmittedRef.current = true;
-                                    fetcher.submit(fd, { method: "post" });
+                                    for (const [name, value] of fields) {
+                                      const input = document.createElement("input");
+                                      input.type = "hidden";
+                                      input.name = name;
+                                      input.value = value;
+                                      form.appendChild(input);
+                                    }
+                                    document.body.appendChild(form);
+                                    form.submit();
+                                    document.body.removeChild(form);
                                   }}
                                   style={{
                                     padding: "8px 16px",
-                                    backgroundColor: fetcher.state === "submitting" ? "#9ca3af" : "#2563eb",
+                                    backgroundColor: "#2563eb",
                                     color: "#ffffff",
                                     border: "none",
                                     borderRadius: "6px",
                                     fontSize: "14px",
                                     fontWeight: 600,
-                                    cursor: fetcher.state === "submitting" ? "wait" : "pointer",
+                                    cursor: "pointer",
                                   }}
                                 >
-                                  {fetcher.state === "submitting" ? "出力中..." : "CSV出力"}
+                                  CSV出力
                                 </button>
                             </div>
                             </div>
