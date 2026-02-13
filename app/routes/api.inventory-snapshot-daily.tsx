@@ -16,6 +16,97 @@ export type { DailyInventorySnapshot, InventorySnapshotsData } from "../utils/in
 
 const API_VERSION = "2025-10";
 
+/** 同時に処理するショップ数（ストア増加時の実行時間短縮用）。環境変数 SNAPSHOT_CONCURRENCY で上書き可能 */
+const DEFAULT_CONCURRENCY = 3;
+
+/** 1 ショップ分のスナップショット保存を行う。並列実行用。 */
+async function processOneShop(sessionRecord: {
+  id: string;
+  shop: string;
+  expires: Date | null;
+  refreshToken: string | null;
+}): Promise<{ success: boolean; error?: string }> {
+  try {
+    await refreshOfflineSessionIfNeeded(
+      sessionRecord.id,
+      sessionRecord.shop,
+      sessionRecord.expires,
+      sessionRecord.refreshToken
+    );
+
+    const session = await sessionStorage.loadSession(sessionRecord.id);
+    if (!session) {
+      return { success: false, error: `${sessionRecord.shop}: Session not found` };
+    }
+
+    const shopDomain = session.shop;
+    const accessToken = session.accessToken || "";
+    const admin = {
+      request: async (queryOrOpts: string | { data?: string; variables?: any }, maybeVars?: any) => {
+        const queryStr = typeof queryOrOpts === "string" ? queryOrOpts : (queryOrOpts.data || "");
+        const variables = typeof queryOrOpts === "string" ? (maybeVars?.variables ?? maybeVars ?? {}) : (queryOrOpts.variables || {});
+        const res = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": accessToken,
+          },
+          body: JSON.stringify({
+            query: queryStr.replace(/^#graphql\s*/m, "").trim(),
+            variables: variables || {},
+          }),
+        });
+        return res;
+      },
+    };
+
+    const adminForSnapshot = {
+      request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
+        admin.request(opts.data, opts.variables ?? {}),
+    };
+
+    const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
+
+    const now = new Date();
+    const hourInShop = getHourInShopTimezone(now, shopTimezone);
+    const isEndOfDayRun = hourInShop === 23;
+    const yesterdayDate = new Date(now);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const dateToSaveStr = isEndOfDayRun
+      ? getDateInShopTimezone(now, shopTimezone)
+      : getDateInShopTimezone(yesterdayDate, shopTimezone);
+
+    const allItems = await fetchAllInventoryItems(adminForSnapshot);
+    const newSnapshots = aggregateSnapshotsFromItems(allItems, dateToSaveStr);
+    const { userErrors } = await saveSnapshotsForDate(
+      adminForSnapshot,
+      shopId,
+      savedSnapshots,
+      newSnapshots,
+      dateToSaveStr
+    );
+
+    if (userErrors.length > 0) {
+      return { success: false, error: `${sessionRecord.shop}: ${userErrors.map((e: any) => e.message).join(", ")}` };
+    }
+    console.log(`Auto-saved snapshot for ${sessionRecord.shop} (${dateToSaveStr}${isEndOfDayRun ? ", 23:59 run" : ", 0:00 run"})`);
+    return { success: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Error processing ${sessionRecord.shop}:`, error);
+    return { success: false, error: `${sessionRecord.shop}: ${message}` };
+  }
+}
+
+/** 配列を指定サイズのチャンクに分割 */
+function chunk<T>(arr: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    result.push(arr.slice(i, i + size));
+  }
+  return result;
+}
+
 export async function action({ request }: ActionFunctionArgs) {
   try {
     // APIキーで認証（Cronジョブからの呼び出し用）
@@ -46,86 +137,16 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    let processedCount = 0;
+    const concurrency = Math.max(1, Math.min(10, parseInt(process.env.SNAPSHOT_CONCURRENCY ?? "", 10) || DEFAULT_CONCURRENCY));
+    const chunks = chunk(sessions, concurrency);
     const errors: string[] = [];
+    let processedCount = 0;
 
-    // 各ショップのスナップショットを保存（Cron は最終確定なので既存があっても上書きする）
-    for (const sessionRecord of sessions) {
-      try {
-        // オフラインアクセストークンが期限切れ（またはまもなく期限切れ）ならリフレッシュしてから使う
-        await refreshOfflineSessionIfNeeded(
-          sessionRecord.id,
-          sessionRecord.shop,
-          sessionRecord.expires,
-          sessionRecord.refreshToken
-        );
-
-        // セッションを読み込む（リフレッシュ済みの場合は新しいトークンが入る）
-        const session = await sessionStorage.loadSession(sessionRecord.id);
-        if (!session) {
-          errors.push(`${sessionRecord.shop}: Session not found`);
-          continue;
-        }
-
-        // セッションからGraphQLクライアントを作成（shopify.clients は React Router 環境で undefined のため手動で fetch）
-        const shopDomain = session.shop;
-        const accessToken = session.accessToken || "";
-        const admin = {
-          request: async (queryOrOpts: string | { data?: string; variables?: any }, maybeVars?: any) => {
-            const queryStr = typeof queryOrOpts === "string" ? queryOrOpts : (queryOrOpts.data || "");
-            const variables = typeof queryOrOpts === "string" ? (maybeVars?.variables ?? maybeVars ?? {}) : (queryOrOpts.variables || {});
-            const res = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "X-Shopify-Access-Token": accessToken,
-              },
-              body: JSON.stringify({
-                query: queryStr.replace(/^#graphql\s*/m, "").trim(),
-                variables: variables || {},
-              }),
-            });
-            return res;
-          },
-        };
-
-        // 共通モジュール用に admin を { request({ data, variables }) } 形式でラップ
-        const adminForSnapshot = {
-          request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
-            admin.request(opts.data, opts.variables ?? {}),
-        };
-
-        const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
-
-        const now = new Date();
-        const hourInShop = getHourInShopTimezone(now, shopTimezone);
-        const isEndOfDayRun = hourInShop === 23;
-        const yesterdayDate = new Date(now);
-        yesterdayDate.setDate(yesterdayDate.getDate() - 1);
-        const dateToSaveStr = isEndOfDayRun
-          ? getDateInShopTimezone(now, shopTimezone)
-          : getDateInShopTimezone(yesterdayDate, shopTimezone);
-
-        // Cron は最終確定として扱うため、既にその日付のスナップショットがあっても上書きする（スキップしない）
-        const allItems = await fetchAllInventoryItems(adminForSnapshot);
-        const newSnapshots = aggregateSnapshotsFromItems(allItems, dateToSaveStr);
-        const { userErrors } = await saveSnapshotsForDate(
-          adminForSnapshot,
-          shopId,
-          savedSnapshots,
-          newSnapshots,
-          dateToSaveStr
-        );
-
-        if (userErrors.length > 0) {
-          errors.push(`${sessionRecord.shop}: ${userErrors.map((e: any) => e.message).join(", ")}`);
-        } else {
-          processedCount++;
-          console.log(`Auto-saved snapshot for ${sessionRecord.shop} (${dateToSaveStr}${isEndOfDayRun ? ", 23:59 run" : ", 0:00 run"})`);
-        }
-      } catch (error) {
-        errors.push(`${sessionRecord.shop}: ${error instanceof Error ? error.message : String(error)}`);
-        console.error(`Error processing ${sessionRecord.shop}:`, error);
+    for (const batch of chunks) {
+      const results = await Promise.all(batch.map((s) => processOneShop(s)));
+      for (const r of results) {
+        if (r.success) processedCount++;
+        else if (r.error) errors.push(r.error);
       }
     }
 
