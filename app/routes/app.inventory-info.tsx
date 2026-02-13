@@ -46,6 +46,18 @@ const VARIANTS_FOR_CHANGE_HISTORY_QUERY = `#graphql
   }
 `;
 
+// 在庫変動履歴のアクティビティ種別ラベル（一覧・CSV・アクションで共通）
+const ACTIVITY_LABELS: Record<string, string> = {
+  inbound_transfer: "入庫",
+  outbound_transfer: "出庫",
+  loss_entry: "ロス",
+  inventory_count: "棚卸",
+  purchase_entry: "仕入",
+  sale: "売上",
+  refund: "返品",
+  inventory_adjustment: "在庫調整",
+};
+
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
     const { admin, session } = await authenticate.admin(request);
@@ -235,56 +247,91 @@ export async function loader({ request }: LoaderFunctionArgs) {
         ?.split(",")
         .filter((t) => t.trim()) || [];
     const sortOrder = url.searchParams.get("sortOrder") || "desc";
+    const changeHistoryPage = Math.max(1, parseInt(url.searchParams.get("changeHistoryPage") ?? "1", 10) || 1);
+    const CHANGE_HISTORY_PAGE_SIZE = 5000;
 
     let changeHistoryLogs: any[] = [];
+    let changeHistoryPagination: {
+      total: number;
+      startIndex: number;
+      pageSize: number;
+      currentPage: number;
+      totalPages: number;
+      hasNextPage: boolean;
+      hasPreviousPage: boolean;
+    } = {
+      total: 0,
+      startIndex: 0,
+      pageSize: CHANGE_HISTORY_PAGE_SIZE,
+      currentPage: 1,
+      totalPages: 0,
+      hasNextPage: false,
+      hasPreviousPage: false,
+    };
+
     // フィルターが明示的に適用されている場合のみデータを取得（初回表示時のパフォーマンス改善）
     if (isChangeHistoryTab && session && hasExplicitFilters) {
       try {
+        const whereClause: any = {
+          shop: session.shop,
+          date: {
+            gte: startDate,
+            lte: endDate,
+          },
+        };
+
+        if (changeHistoryLocationIds.length > 0) {
+          whereClause.locationId = { in: changeHistoryLocationIds };
+        }
+
+        if (inventoryItemIds.length > 0) {
+          whereClause.inventoryItemId = { in: inventoryItemIds };
+        }
+
+        if (activityTypes.length > 0) {
+          whereClause.activity = { in: activityTypes };
+        }
+
         // タイムアウト対策：データベースクエリ全体に30秒のタイムアウトを設定
         const dbQueryPromise = (async () => {
-          const whereClause: any = {
-            shop: session.shop,
-            date: {
-              gte: startDate,
-              lte: endDate,
-            },
-          };
-
-          if (changeHistoryLocationIds.length > 0) {
-            whereClause.locationId = { in: changeHistoryLocationIds };
+          if (!db || typeof (db as any).inventoryChangeLog === "undefined") {
+            return { logs: [], total: 0 };
           }
-
-          if (inventoryItemIds.length > 0) {
-            whereClause.inventoryItemId = { in: inventoryItemIds };
-          }
-
-          if (activityTypes.length > 0) {
-            whereClause.activity = { in: activityTypes };
-          }
-
-          // PrismaクライアントがInventoryChangeLogを認識しているか確認
-          if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-            return await (db as any).inventoryChangeLog.findMany({
+          const [logs, total] = await Promise.all([
+            (db as any).inventoryChangeLog.findMany({
               where: whereClause,
               orderBy: {
                 timestamp: sortOrder === "asc" ? "asc" : "desc",
               },
-              take: 1000, // 最大1000件まで表示
-            });
-          }
-          return [];
+              skip: (changeHistoryPage - 1) * CHANGE_HISTORY_PAGE_SIZE,
+              take: CHANGE_HISTORY_PAGE_SIZE,
+            }),
+            (db as any).inventoryChangeLog.count({ where: whereClause }),
+          ]);
+          return { logs, total };
         })();
 
-        const timeoutPromise = new Promise((_, reject) => 
+        const timeoutPromise = new Promise<{ logs: any[]; total: number }>((_, reject) =>
           setTimeout(() => reject(new Error("Database query timeout (30s)")), 30000)
         );
 
-        changeHistoryLogs = await Promise.race([dbQueryPromise, timeoutPromise]) as any[];
+        const { logs, total } = await Promise.race([dbQueryPromise, timeoutPromise]);
+        changeHistoryLogs = logs;
+        const totalPages = Math.max(1, Math.ceil(total / CHANGE_HISTORY_PAGE_SIZE));
+        const currentPage = Math.min(changeHistoryPage, totalPages);
+        changeHistoryPagination = {
+          total,
+          startIndex: total === 0 ? 0 : (currentPage - 1) * CHANGE_HISTORY_PAGE_SIZE + 1,
+          pageSize: CHANGE_HISTORY_PAGE_SIZE,
+          currentPage,
+          totalPages,
+          hasNextPage: currentPage < totalPages,
+          hasPreviousPage: currentPage > 1,
+        };
 
         // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
-        // タイムアウト対策：バリアントIDの数を制限（最大200件まで、さらに厳しく）
         const variantIds = [...new Set(changeHistoryLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
-        const MAX_VARIANTS = 200; // タイムアウト対策：最大200件まで取得（500→200に削減）
+        const MAX_VARIANTS = 1500; // 商品名表示用：最大1500バリアントまで取得（制限撤廃に合わせて緩和）
         const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS);
         
         if (limitedVariantIds.length < variantIds.length) {
@@ -294,7 +341,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
         if (limitedVariantIds.length > 0 && session) {
           const CHUNK = 250;
-          const MAX_CHUNKS = 2; // タイムアウト対策：最大2チャンク（500件）まで処理（10→2に削減）
+          const MAX_CHUNKS = 6; // 最大6チャンク（1500件）まで処理（件数制限撤廃に合わせて緩和）
           const chunksToProcess = Math.min(Math.ceil(limitedVariantIds.length / CHUNK), MAX_CHUNKS);
           
           for (let i = 0; i < chunksToProcess * CHUNK && i < limitedVariantIds.length; i += CHUNK) {
@@ -387,6 +434,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       firstChangeHistoryDate,
       // 在庫変動履歴用のデータ
       changeHistoryLogs: changeHistoryLogs || [],
+      changeHistoryPagination,
       hasExplicitFilters, // フィルターが明示的に適用されているか（初回表示時のパフォーマンス改善用）
       changeHistoryFilters: {
         startDate,
@@ -428,6 +476,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
       snapshotDisplayUpdatedAt: null,
       firstChangeHistoryDate: null,
       changeHistoryLogs: [],
+      changeHistoryPagination: {
+        total: 0,
+        startIndex: 0,
+        pageSize: 5000,
+        currentPage: 1,
+        totalPages: 0,
+        hasNextPage: false,
+        hasPreviousPage: false,
+      },
       hasExplicitFilters: false,
       changeHistoryFilters: {
         startDate: new Date().toISOString().slice(0, 10),
@@ -445,9 +502,140 @@ export async function loader({ request }: LoaderFunctionArgs) {
 // 商品検索用のaction関数
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    const { admin, session } = await authenticate.admin(request);
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();
+
+    // 在庫変動履歴：検索結果の全件CSV出力
+    if (intent === "exportChangeHistoryCsv") {
+      const startDate = String(formData.get("startDate") || "").trim();
+      const endDate = String(formData.get("endDate") || "").trim();
+      if (!startDate || !endDate) {
+        return { ok: false, error: "期間（開始日・終了日）を指定してください。" };
+      }
+      const changeHistoryLocationIds = String(formData.get("changeHistoryLocationIds") || "")
+        .split(",")
+        .filter((id) => id.trim());
+      const inventoryItemIds = String(formData.get("inventoryItemIds") || "")
+        .split(",")
+        .filter((id) => id.trim());
+      const activityTypes = String(formData.get("activityTypes") || "")
+        .split(",")
+        .filter((t) => t.trim());
+      const sortOrder = (String(formData.get("sortOrder") || "desc").trim() === "asc" ? "asc" : "desc") as "asc" | "desc";
+
+      const whereClause: any = {
+        shop: session.shop,
+        date: { gte: startDate, lte: endDate },
+      };
+      if (changeHistoryLocationIds.length > 0) {
+        whereClause.locationId = { in: changeHistoryLocationIds };
+      }
+      if (inventoryItemIds.length > 0) {
+        whereClause.inventoryItemId = { in: inventoryItemIds };
+      }
+      if (activityTypes.length > 0) {
+        whereClause.activity = { in: activityTypes };
+      }
+
+      if (!db || typeof (db as any).inventoryChangeLog === "undefined") {
+        return { ok: false, error: "在庫変動履歴のデータを取得できません。" };
+      }
+
+      const MAX_EXPORT = 50000;
+      const count = await (db as any).inventoryChangeLog.count({ where: whereClause });
+      if (count > MAX_EXPORT) {
+        return {
+          ok: false,
+          error: `件数が多すぎます（${MAX_EXPORT.toLocaleString()}件まで）。期間や条件を絞ってください。（該当: ${count.toLocaleString()}件）`,
+        };
+      }
+
+      const allLogs = await (db as any).inventoryChangeLog.findMany({
+        where: whereClause,
+        orderBy: { timestamp: sortOrder },
+        take: MAX_EXPORT,
+      });
+
+      const variantIds = [...new Set(allLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
+      const MAX_VARIANTS_FOR_EXPORT = 5000;
+      const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS_FOR_EXPORT);
+      const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
+
+      if (limitedVariantIds.length > 0) {
+        const CHUNK = 250;
+        for (let i = 0; i < limitedVariantIds.length; i += CHUNK) {
+          const chunk = limitedVariantIds.slice(i, i + CHUNK);
+          try {
+            const resp = await admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
+            const data = await resp.json();
+            const nodes = (data?.data?.nodes ?? []).filter(Boolean);
+            for (const node of nodes) {
+              if (!node?.id) continue;
+              const opts = (node.selectedOptions as Array<{ name?: string; value?: string }>) ?? [];
+              variantInfoMap.set(node.id, {
+                productTitle: (node.product?.title ?? node.displayName ?? "") as string,
+                barcode: (node.barcode as string) ?? "",
+                option1: opts[0]?.value ?? "",
+                option2: opts[1]?.value ?? "",
+                option3: opts[2]?.value ?? "",
+              });
+            }
+          } catch (e) {
+            console.error("[inventory-info] Export CSV variant batch failed:", e);
+          }
+        }
+      }
+
+      const shopTzResp = await admin.graphql(
+        `#graphql query GetShopTimezone { shop { ianaTimezone } }`,
+        {}
+      );
+      const shopTzData = await shopTzResp.json();
+      const shopTimezone = shopTzData?.data?.shop?.ianaTimezone ?? "UTC";
+
+      const headers = [
+        "発生日時",
+        "商品名",
+        "SKU",
+        "JAN",
+        "オプション1",
+        "オプション2",
+        "オプション3",
+        "ロケーション",
+        "アクティビティ",
+        "変動数",
+        "変動後数量",
+        "参照ID",
+        "備考",
+      ];
+      const rows = allLogs.map((log: any) => {
+        const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
+        return [
+          formatDateTimeInShopTimezone(log.timestamp, shopTimezone),
+          info?.productTitle ?? log.sku ?? "",
+          log.sku || "",
+          info?.barcode ?? "",
+          info?.option1 ?? "",
+          info?.option2 ?? "",
+          info?.option3 ?? "",
+          log.locationName || "",
+          ACTIVITY_LABELS[log.activity] || log.activity || "",
+          log.delta !== null ? String(log.delta) : "",
+          log.quantityAfter !== null ? String(log.quantityAfter) : "",
+          log.sourceId || "",
+          log.note || "",
+        ];
+      });
+      const csvContent = [headers, ...rows]
+        .map((row) => row.map((cell: string) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+        .join("\n");
+      const filename =
+        startDate === endDate
+          ? `在庫変動履歴_${startDate}.csv`
+          : `在庫変動履歴_${startDate}_${endDate}.csv`;
+      return { ok: true, csvContent: "\uFEFF" + csvContent, filename };
+    }
 
     // 前日分スナップショットが無い場合に保存（共通モジュールで取得・保存）
     if (intent === "ensureYesterdaySnapshot") {
@@ -538,11 +726,12 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function InventoryInfoPage() {
-  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, todaySnapshotUpdatedAt, snapshotDisplayUpdatedAt, firstChangeHistoryDate, changeHistoryLogs, hasExplicitFilters, changeHistoryFilters } =
+  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, todaySnapshotUpdatedAt, snapshotDisplayUpdatedAt, firstChangeHistoryDate, changeHistoryLogs, changeHistoryPagination, hasExplicitFilters, changeHistoryFilters } =
     useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher<typeof action>();
   const ensuredYesterdayRef = useRef(false);
+  const exportCsvSubmittedRef = useRef(false);
 
   // タブ管理（URLパラメータから取得、デフォルトは在庫高）
   type InventoryTabId = "inventory-level" | "change-history";
@@ -639,6 +828,24 @@ export default function InventoryInfoPage() {
     setLocationFilters(new Set(selectedLocationIds));
   }, [selectedDate, selectedLocationIds]);
 
+  // 全件CSV出力のレスポンス処理：ダウンロードまたはエラー表示
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !exportCsvSubmittedRef.current || !fetcher.data || typeof fetcher.data !== "object") return;
+    const data = fetcher.data as { ok?: boolean; csvContent?: string; filename?: string; error?: string };
+    if (data.filename && data.csvContent) {
+      const blob = new Blob([data.csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } else if (data.ok === false && data.error) {
+      alert(data.error);
+    }
+    exportCsvSubmittedRef.current = false;
+  }, [fetcher.state, fetcher.data]);
+
   useEffect(() => {
     if (changeHistoryFilters) {
       setChangeHistoryStartDate(changeHistoryFilters.startDate);
@@ -662,6 +869,22 @@ export default function InventoryInfoPage() {
       setChangeHistorySortOrder((changeHistoryFilters.sortOrder as "asc" | "desc") || "desc");
     }
   }, [changeHistoryFilters]);
+
+  // 在庫変動履歴：表示範囲・ページ表示（入出庫履歴と同様のUI）
+  const chPagination = changeHistoryPagination ?? {
+    total: 0, startIndex: 0, pageSize: 5000, currentPage: 1, totalPages: 0, hasNextPage: false, hasPreviousPage: false,
+  };
+  const chEndIndex = chPagination.startIndex + (changeHistoryLogs?.length ?? 0) - 1;
+  const chRangeDisplay = (changeHistoryLogs?.length ?? 0) > 0
+    ? chPagination.startIndex === chEndIndex
+      ? `表示: ${chPagination.startIndex}件`
+      : `表示: ${chPagination.startIndex}-${chEndIndex}件`
+    : "表示: 0件";
+  const chTotalDisplay = chPagination.total > 0 ? `${chPagination.total}件` : "0件";
+  const chPageDisplay = (chPagination.hasNextPage || chPagination.hasPreviousPage) && chPagination.totalPages != null
+    ? `${chPagination.currentPage}/${chPagination.totalPages}`
+    : "";
+  const chHasPagination = chPagination.hasNextPage || chPagination.hasPreviousPage;
 
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
@@ -700,22 +923,20 @@ export default function InventoryInfoPage() {
   };
 
   // アクティビティ種別のラベルマッピング
-  const activityLabels: Record<string, string> = {
-    inbound_transfer: "入庫",
-    outbound_transfer: "出庫",
-    loss_entry: "ロス",
-    inventory_count: "棚卸",
-    purchase_entry: "仕入",
+  const activityLabels = ACTIVITY_LABELS;
+  const activityLabelsExtended: Record<string, string> = {
+    ...ACTIVITY_LABELS,
     purchase_cancel: "仕入",
     admin_webhook: "管理",
     order_sales: "売上",
     refund: "返品",
   };
 
-  // 在庫変動履歴のフィルター変更処理（開始日 > 終了日の場合は補正）
+  // 在庫変動履歴のフィルター変更処理（開始日 > 終了日の場合は補正）。フィルター適用時は1ページ目へ。
   const handleChangeHistoryFilterChange = () => {
     const params = new URLSearchParams(searchParams);
     params.set("tab", "change-history");
+    params.delete("changeHistoryPage"); // 1ページ目にリセット
     const start = changeHistoryStartDate > changeHistoryEndDate ? changeHistoryEndDate : changeHistoryStartDate;
     const end = changeHistoryStartDate > changeHistoryEndDate ? changeHistoryStartDate : changeHistoryEndDate;
     params.set("startDate", start);
@@ -1949,72 +2170,95 @@ export default function InventoryInfoPage() {
                           <>
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
                               <s-text tone="subdued" size="small">
-                                合計: {changeHistoryLogs.length}件
+                                {chRangeDisplay} / {chTotalDisplay}
                               </s-text>
-                              <button
-                                onClick={() => {
-                                  // CSV出力処理（商品名・オプションを含め他リストと同等の項目に）
-                                  const headers = [
-                                    "発生日時",
-                                    "商品名",
-                                    "SKU",
-                                    "JAN",
-                                    "オプション1",
-                                    "オプション2",
-                                    "オプション3",
-                                    "ロケーション",
-                                    "アクティビティ",
-                                    "変動数",
-                                    "変動後数量",
-                                    "参照ID",
-                                    "備考",
-                                  ];
-
-                                  const rows = changeHistoryLogs.map((log) => [
-                                    formatDateTimeInShopTimezone(log.timestamp, shopTimezone),
-                                    log.productTitle ?? log.sku ?? "",
-                                    log.sku || "",
-                                    log.barcode ?? "",
-                                    log.option1 ?? "",
-                                    log.option2 ?? "",
-                                    log.option3 ?? "",
-                                    log.locationName || "",
-                                    activityLabels[log.activity] || log.activity || "",
-                                    log.delta !== null ? String(log.delta) : "",
-                                    log.quantityAfter !== null ? String(log.quantityAfter) : "",
-                                    log.sourceId || "",
-                                    log.note || "",
-                                  ]);
-
-                                  const csvContent = [headers, ...rows]
-                                    .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
-                                    .join("\n");
-
-                                  // BOM付きUTF-8でダウンロード
-                                  const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
-                                  const url = URL.createObjectURL(blob);
-                                  const link = document.createElement("a");
-                                  link.href = url;
-                                  const dateRange = changeHistoryStartDate === changeHistoryEndDate 
-                                    ? changeHistoryStartDate 
-                                    : `${changeHistoryStartDate}_${changeHistoryEndDate}`;
-                                  link.download = `在庫変動履歴_${dateRange}.csv`;
-                                  link.click();
-                                  URL.revokeObjectURL(url);
-                                }}
-                                style={{
-                                  padding: "8px 16px",
-                                  backgroundColor: "#2563eb",
-                                  color: "#ffffff",
-                                  border: "none",
-                                  borderRadius: "6px",
-                                  fontSize: "14px",
-                                  fontWeight: 600,
-                                  cursor: "pointer",
-                                }}
-                              >
-                                CSV出力
-                              </button>
+                              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                                {chHasPagination && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (chPagination.hasPreviousPage && chPagination.currentPage > 1) {
+                                          const params = new URLSearchParams(searchParams);
+                                          params.set("changeHistoryPage", String(chPagination.currentPage - 1));
+                                          setSearchParams(params, { replace: true });
+                                        }
+                                      }}
+                                      disabled={!chPagination.hasPreviousPage}
+                                      style={{
+                                        padding: "6px 12px",
+                                        backgroundColor: chPagination.hasPreviousPage ? "#f6f6f7" : "#f3f4f6",
+                                        color: chPagination.hasPreviousPage ? "#202223" : "#9ca3af",
+                                        border: "1px solid #e1e3e5",
+                                        borderRadius: "6px",
+                                        fontSize: "14px",
+                                        cursor: chPagination.hasPreviousPage ? "pointer" : "not-allowed",
+                                      }}
+                                    >
+                                      前へ
+                                    </button>
+                                    <span style={{ fontSize: "14px", color: "#666", lineHeight: "1.5" }}>
+                                      {chPageDisplay}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (chPagination.hasNextPage) {
+                                          const params = new URLSearchParams(searchParams);
+                                          params.set("changeHistoryPage", String(chPagination.currentPage + 1));
+                                          setSearchParams(params, { replace: true });
+                                        }
+                                      }}
+                                      disabled={!chPagination.hasNextPage}
+                                      style={{
+                                        padding: "6px 12px",
+                                        backgroundColor: chPagination.hasNextPage ? "#f6f6f7" : "#f3f4f6",
+                                        color: chPagination.hasNextPage ? "#202223" : "#9ca3af",
+                                        border: "1px solid #e1e3e5",
+                                        borderRadius: "6px",
+                                        fontSize: "14px",
+                                        cursor: chPagination.hasNextPage ? "pointer" : "not-allowed",
+                                      }}
+                                    >
+                                      次へ
+                                    </button>
+                                  </>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={fetcher.state === "submitting"}
+                                  onClick={() => {
+                                    const fd = new FormData();
+                                    fd.set("intent", "exportChangeHistoryCsv");
+                                    fd.set("startDate", changeHistoryStartDate);
+                                    fd.set("endDate", changeHistoryEndDate);
+                                    if (changeHistoryLocationFilters.size > 0) {
+                                      fd.set("changeHistoryLocationIds", Array.from(changeHistoryLocationFilters).join(","));
+                                    }
+                                    if (changeHistorySelectedInventoryItemIds.size > 0) {
+                                      fd.set("inventoryItemIds", Array.from(changeHistorySelectedInventoryItemIds).join(","));
+                                    }
+                                    if (changeHistoryActivityTypes.size > 0) {
+                                      fd.set("activityTypes", Array.from(changeHistoryActivityTypes).join(","));
+                                    }
+                                    fd.set("sortOrder", changeHistorySortOrder);
+                                    exportCsvSubmittedRef.current = true;
+                                    fetcher.submit(fd, { method: "post" });
+                                  }}
+                                  style={{
+                                    padding: "8px 16px",
+                                    backgroundColor: fetcher.state === "submitting" ? "#9ca3af" : "#2563eb",
+                                    color: "#ffffff",
+                                    border: "none",
+                                    borderRadius: "6px",
+                                    fontSize: "14px",
+                                    fontWeight: 600,
+                                    cursor: fetcher.state === "submitting" ? "wait" : "pointer",
+                                  }}
+                                >
+                                  {fetcher.state === "submitting" ? "出力中..." : "CSV出力"}
+                                </button>
+                            </div>
                             </div>
                             <div style={{ maxHeight: "600px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px" }}>
                               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
@@ -2065,9 +2309,9 @@ export default function InventoryInfoPage() {
                             {/* 注釈情報 */}
                             <div style={{ marginTop: "12px", padding: "8px 12px", backgroundColor: "#f6f6f7", borderRadius: "6px", border: "1px solid #e1e3e5" }}>
                               <s-text tone="subdued" size="small" style={{ fontSize: "11px", lineHeight: "1.4" }}>
-                                管理画面からの在庫数量変更：
+                                管理画面からの在庫数量変更：対象SKUとロケーションの変動が初回の場合は変動数が「-」表記になります。
                                 <br />
-                                対象SKUとロケーションの変動が初回の場合は変動数が「-」表記になります。
+                                CSVダウンロード制限：一括処理最大50,000件となっています。超過する場合は検索条件にて件数のご調整をお願いします。
                               </s-text>
                             </div>
                           </>
