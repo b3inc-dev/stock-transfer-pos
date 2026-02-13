@@ -91,7 +91,15 @@
 
 ---
 
-## 7. 関連ファイル
+## 7. 反映漏れ洗い出し・Webhook 変動数（公式）・強固化
+
+- **管理画面 Webhook に変動数は含まれない**ことの公式根拠、および**反映漏れ・二重になりうる箇所の一覧と強固化**は、  
+  **`docs/INVENTORY_WEBHOOK_DELTA_OFFICIAL_AND_REFLECTION_HARDENING.md`** にまとめている。  
+  公開アプリ化前に一読し、チェックリストと合わせて確認するとよい。
+
+---
+
+## 8. 関連ファイル
 
 | ファイル | 役割 |
 |----------|------|
@@ -99,6 +107,7 @@
 | app/routes/api.log-inventory-change.tsx | POS API：admin_webhook 上書き、同一 activity 更新で二重防止 |
 | app/routes/webhooks.orders.updated.tsx | 注文 Webhook：order_sales 救済、OrderPendingLocation、order_cancel で既存 admin 更新 |
 | app/routes/webhooks.refunds.create.tsx | 返品 Webhook：既存 admin_webhook を refund に更新 |
+| docs/INVENTORY_WEBHOOK_DELTA_OFFICIAL_AND_REFLECTION_HARDENING.md | Webhook 変動数（公式）・反映漏れ洗い出し・強固化 |
 
 ---
 

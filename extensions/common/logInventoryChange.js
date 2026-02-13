@@ -2,6 +2,8 @@
  * 在庫変動をアプリの api/log-inventory-change に記録する共通関数
  * 出庫・入庫・ロス・棚卸・仕入の全フローでこの1つを使用し、処理を統一する。
  *
+ * 大量件数（例: 200SKU）でも漏れないよう、entries をチャンクに分けて複数リクエストで送信する。
+ *
  * @param {Object} opts
  * @param {string} opts.activity - アクティビティ種別（outbound_transfer, inbound_transfer, loss_entry, inventory_count, purchase_entry 等）
  * @param {string} opts.locationId - ロケーション ID（GID）
@@ -11,6 +13,10 @@
  * @param {Array<{inventoryItemId: string, variantId?: string, sku?: string}>} [opts.lineItems] - 出庫などで variantId/sku を補完するための行リスト（省略可）
  * @param {string|null} [opts.adjustmentGroupId] - ロス用の InventoryAdjustmentGroup ID（省略可）
  */
+
+/** 1リクエストあたりの最大件数。これ以上は複数リクエストに分割し、タイムアウトによる途中切れと「管理」のまま残る漏れを防ぐ。 */
+const LOG_INVENTORY_CHANGE_CHUNK_SIZE = 50;
+
 export async function logInventoryChangeToApi({
   activity,
   locationId,
@@ -21,37 +27,31 @@ export async function logInventoryChangeToApi({
   adjustmentGroupId = null,
 }) {
   const session = globalThis?.shopify?.session;
-  
-  // デバッグログ: 関数が呼ばれたことを記録
+
   console.log(`[logInventoryChangeToApi] Called: activity=${activity}, locationId=${locationId}, deltas.length=${deltas?.length || 0}`);
-  
+
   if (!session?.getSessionToken) {
     console.warn(`[logInventoryChangeToApi] No session or getSessionToken: session=${!!session}, getSessionToken=${!!session?.getSessionToken}`);
     return;
   }
-  
+
   if (!deltas?.length) {
     console.warn(`[logInventoryChangeToApi] No deltas: deltas.length=${deltas?.length || 0}`);
     return;
   }
-  
+
   try {
-    console.log(`[logInventoryChangeToApi] Getting session token: session=${!!session}, getSessionToken=${!!session?.getSessionToken}`);
     const token = await session.getSessionToken();
-    console.log(`[logInventoryChangeToApi] Session token obtained: token=${!!token}, tokenLength=${token?.length || 0}, tokenPreview=${token ? token.substring(0, 20) + "..." : "null"}`);
     if (!token) {
       console.warn(`[logInventoryChangeToApi] Failed to get session token`);
       return;
     }
-    
+
     const { getAppUrl } = await import("./appUrl.js");
     const appUrl = getAppUrl();
     const apiUrl = `${appUrl}/api/log-inventory-change`;
-    console.log(`[logInventoryChangeToApi] URL resolved: appUrl=${appUrl}, apiUrl=${apiUrl}`);
     const timestamp = new Date().toISOString();
     const locName = locationName || locationId;
-
-    console.log(`[logInventoryChangeToApi] Preparing request: apiUrl=${apiUrl}, activity=${activity}, locationId=${locationId}`);
 
     const entries = [];
     for (const d of deltas) {
@@ -72,46 +72,38 @@ export async function logInventoryChangeToApi({
       if (adjustmentGroupId != null) logData.adjustmentGroupId = adjustmentGroupId;
       entries.push(logData);
     }
-    
+
     if (entries.length === 0) {
       console.warn(`[logInventoryChangeToApi] No valid entries after filtering`);
       return;
     }
 
-    const body = entries.length === 1 ? entries[0] : { entries };
-    console.log(`[logInventoryChangeToApi] Sending request: apiUrl=${apiUrl}, entries.length=${entries.length}, activity=${activity}, body=${JSON.stringify(body).substring(0, 200)}`);
-    
-    let fetchError = null;
-    let res = null;
-    try {
-      res = await fetch(apiUrl, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      console.log(`[logInventoryChangeToApi] Fetch completed: status=${res.status}, statusText=${res.statusText}, activity=${activity}`);
-    } catch (fetchErr) {
-      fetchError = fetchErr;
-      console.error(`[logInventoryChangeToApi] Fetch exception: activity=${activity}, locationId=${locationId}, error=${fetchErr?.message || String(fetchErr)}`, fetchErr);
+    // 大量件数でタイムアウトによる途中切れを防ぐため、チャンクに分けて送信する
+    const chunkSize = LOG_INVENTORY_CHANGE_CHUNK_SIZE;
+    const chunks = [];
+    for (let i = 0; i < entries.length; i += chunkSize) {
+      chunks.push(entries.slice(i, i + chunkSize));
     }
-    
-    if (fetchError) {
-      // fetch自体が失敗した場合（ネットワークエラーなど）
-      console.error(`[logInventoryChangeToApi] Fetch failed: activity=${activity}, locationId=${locationId}, error=${fetchError?.message || String(fetchError)}`);
-      return;
+    if (chunks.length > 1) {
+      console.log(`[logInventoryChangeToApi] Sending in ${chunks.length} chunks (${chunkSize} entries each) to avoid timeout`);
     }
-    
-    if (!res) {
-      console.error(`[logInventoryChangeToApi] No response object: activity=${activity}, locationId=${locationId}`);
-      return;
-    }
-    
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      console.error(`[logInventoryChangeToApi] API call failed: status=${res.status}, statusText=${res.statusText}, activity=${activity}, locationId=${locationId}, error=${text.substring(0, 500)}`);
-    } else {
-      const responseData = await res.json().catch(() => null);
-      console.log(`[logInventoryChangeToApi] API call succeeded: activity=${activity}, locationId=${locationId}, response=${JSON.stringify(responseData)}`);
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const body = chunk.length === 1 ? chunk[0] : { entries: chunk };
+      try {
+        const res = await fetch(apiUrl, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          console.error(`[logInventoryChangeToApi] Chunk ${i + 1}/${chunks.length} failed: status=${res.status}, activity=${activity}, error=${text.substring(0, 300)}`);
+        }
+      } catch (fetchErr) {
+        console.error(`[logInventoryChangeToApi] Chunk ${i + 1}/${chunks.length} exception: activity=${activity}, error=${fetchErr?.message || String(fetchErr)}`);
+      }
     }
   } catch (e) {
     console.error(`[logInventoryChangeToApi] Exception: activity=${activity}, locationId=${locationId}, error=${e?.message || String(e)}`, e);

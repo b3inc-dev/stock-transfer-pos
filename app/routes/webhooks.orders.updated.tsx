@@ -486,69 +486,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         if (!orderLocationId) {
           // 受注直後は FulfillmentOrder.assignedLocation が null になりロケーションが取れない。OrderPendingLocation は上で登録済み。
-          console.log(`[orders/updated] No location found for order ${order.id}; OrderPendingLocation already recorded for inventory_levels/update match`);
-          // 救済: inventory_levels/update が先に届いてすでに admin_webhook で保存されている場合、
-          // 後から届いた orders/updated でその行を order_sales に上書きする（連続取引・到達順で判定漏れするため）
-          if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-            for (const lineItem of order.line_items) {
-              const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
-              if (!lineItem.variant_id || lineItemQty <= 0) continue;
-              try {
-                const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
-                const variantResp = await admin.request({
-                  data: `
-                    #graphql
-                    query GetVariant($id: ID!) {
-                      productVariant(id: $id) { id inventoryItem { id } }
-                    }
-                  `,
-                  variables: { id: variantId },
-                });
-                const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
-                const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
-                if (!inventoryItemId) continue;
-                const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
-                const itemIdCandidates = [
-                  inventoryItemId,
-                  rawItemId,
-                  `gid://shopify/InventoryItem/${rawItemId}`,
-                ].filter((id, i, arr) => arr.indexOf(id) === i);
-                const existingAdmin = await (db as any).inventoryChangeLog.findFirst({
-                  where: {
-                    shop,
-                    inventoryItemId: { in: itemIdCandidates },
-                    activity: "admin_webhook",
-                    timestamp: { gte: searchFrom, lte: searchTo },
-                  },
-                  orderBy: { timestamp: "desc" },
-                });
-                if (existingAdmin) {
-                  // 売上はオーダー数量を変動数に反映（-数量）。履歴に売上点数を表示するため
-                  const orderDelta = -lineItemQty;
-                  const orderIdRef = `order_${order.id}`;
-                  await (db as any).inventoryChangeLog.update({
-                    where: { id: existingAdmin.id },
-                    data: {
-                      activity: "order_sales",
-                      delta: orderDelta,
-                      sourceType: "order_sales",
-                      sourceId: orderIdRef,
-                      idempotencyKey: `${shop}_order_sales_${existingAdmin.inventoryItemId}_${existingAdmin.locationId}_${orderIdRef}_${orderCreatedAt.toISOString()}`,
-                      note: `注文: #${order.id}`,
-                    },
-                  });
-                  console.log(`[orders/updated] Remediated admin_webhook to order_sales (no location): id=${existingAdmin.id}, order.id=${order.id}`);
-                  if (typeof (db as any).orderPendingLocation !== "undefined") {
-                    await (db as any).orderPendingLocation.deleteMany({
-                      where: { shop, orderId: String(order.id), inventoryItemId: rawItemId },
-                    });
-                  }
-                }
-              } catch (e) {
-                console.error(`[orders/updated] Failed to remediate admin_webhook for line_item ${lineItem.id}:`, e);
-              }
-            }
-          }
+          // ロケーション不明のときは admin_webhook 救済をスキップする（item のみで検索すると他ロケーションの行を誤って order_sales に更新するリスクがあるため）。
+          // 後から届く inventory_levels/update が OrderPendingLocation とマッチして order_sales で記録する。
+          console.log(`[orders/updated] No location found for order ${order.id}; OrderPendingLocation recorded, remediation skipped to avoid wrong-location update`);
         } else {
           // 各line_itemについて、直近のadmin_webhookを検索してorder_salesに上書き
           for (const lineItem of order.line_items) {
