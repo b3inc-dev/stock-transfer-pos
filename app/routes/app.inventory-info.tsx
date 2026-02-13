@@ -63,6 +63,14 @@ const ACTIVITY_LABELS: Record<string, string> = {
   inventory_adjustment: "在庫調整",
 };
 
+/** DBのactivity値を表示用日本語ラベルに変換。大文字小文字・前後の空白に強くする */
+function getActivityDisplayLabel(activity: string | null | undefined): string {
+  if (activity == null) return "その他";
+  const key = String(activity).trim();
+  if (!key) return "その他";
+  return ACTIVITY_LABELS[key] ?? ACTIVITY_LABELS[key.toLowerCase()] ?? "その他";
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
     const { admin, session } = await authenticate.admin(request);
@@ -625,7 +633,7 @@ export async function action({ request }: ActionFunctionArgs) {
           info?.option2 ?? "",
           info?.option3 ?? "",
           log.locationName || "",
-          ACTIVITY_LABELS[log.activity] ?? "その他",
+          getActivityDisplayLabel(log.activity),
           log.delta !== null ? String(log.delta) : "",
           log.quantityAfter !== null ? String(log.quantityAfter) : "",
           log.sourceId || "",
@@ -926,9 +934,6 @@ export default function InventoryInfoPage() {
     params.delete("locationIds");
     setSearchParams(params);
   };
-
-  // アクティビティ種別のラベルマッピング（一覧表示・CSVで使用。ACTIVITY_LABELSをそのまま使用）
-  const activityLabels = ACTIVITY_LABELS;
 
   // 在庫変動履歴のフィルター変更処理（開始日 > 終了日の場合は補正）。フィルター適用時は1ページ目へ。
   const handleChangeHistoryFilterChange = () => {
@@ -2290,7 +2295,7 @@ export default function InventoryInfoPage() {
                                       <td style={{ padding: "12px 16px" }}>{log.option2 || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.option3 || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.locationName}</td>
-                                      <td style={{ padding: "12px 16px" }}>{activityLabels[log.activity] ?? "その他"}</td>
+                                      <td style={{ padding: "12px 16px" }}>{getActivityDisplayLabel(log.activity)}</td>
                                       <td style={{ padding: "12px 16px", textAlign: "right", color: log.delta != null && log.delta > 0 ? "#008060" : log.delta != null && log.delta < 0 ? "#d72c0d" : "#202223" }}>
                                         {log.delta !== null ? (log.delta > 0 ? `+${log.delta}` : String(log.delta)) : "-"}
                                       </td>
