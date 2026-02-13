@@ -94,6 +94,20 @@ function csvExportErrorResponse(message: string): Response {
   });
 }
 
+/** エラー時もCSV形式で返す（クライアントが text/csv でダウンロードできるようにする）。1行目にエラーメッセージを入れる */
+function csvExportErrorAsCsv(message: string): Response {
+  const headers = "発生日時,商品名,SKU,JAN,オプション1,オプション2,オプション3,ロケーション,アクティビティ,変動数,変動後在庫数,参照ID,備考";
+  const safeMsg = String(message).replace(/"/g, '""');
+  const csvContent = [headers, `"${safeMsg}","","","","","","","","","","","",""]`].join("\n");
+  return new Response("\uFEFF" + csvContent, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": "attachment; filename=\"inventory_change_history_error.csv\"",
+    },
+  });
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
     const { admin, session } = await authenticate.admin(request);
@@ -547,7 +561,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const startDate = String(formData.get("startDate") || "").trim();
       const endDate = String(formData.get("endDate") || "").trim();
       if (!startDate || !endDate) {
-        return csvExportErrorResponse("期間（開始日・終了日）を指定してください。");
+        return csvExportErrorAsCsv("期間（開始日・終了日）を指定してください。");
       }
       const changeHistoryLocationIds = String(formData.get("changeHistoryLocationIds") || "")
         .split(",")
@@ -707,7 +721,8 @@ export async function action({ request }: ActionFunctionArgs) {
         const message = e instanceof Error ? e.message : String(e);
         const stack = e instanceof Error ? e.stack : undefined;
         console.error("[inventory-info] Export CSV failed:", message, stack ?? "");
-        return csvExportErrorResponse(`CSVの作成に失敗しました。${message ? `（${message}）` : ""}`);
+        // エラー時もCSVで返すことでクライアントがダウンロードを実行し、1行目にエラー内容が入ったファイルが届く
+        return csvExportErrorAsCsv(`CSVの作成に失敗しました。${message ? `（${message}）` : ""}`);
       }
     }
 
