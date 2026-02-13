@@ -80,6 +80,8 @@
 
 ## 6. チェックリスト（公開アプリリリース前の確認）
 
+### 動作確認
+
 - [ ] 管理画面のみで在庫を変更したとき、履歴には「管理」が 1 行だけ出る（同一操作で 2 本 Webhook が来ても 1 行にまとまる）
 - [ ] POS で入庫確定後、履歴には「入庫」が 1 行だけ出る（「管理」が並ばない）
 - [ ] POS で出庫・ロス・棚卸・仕入をしたとき、それぞれ正しいアクティビティで 1 行だけ出る
@@ -87,7 +89,21 @@
 - [ ] 返品後、「返品」が 1 行だけ出る
 - [ ] 注文キャンセル後、「キャンセル戻り」が 1 行だけ出る（「管理」が並ばない）
 - [ ] 同一商品・同一ロケーションで短時間に 2 回変動した場合（例: 連続売上）、2 行とも正しいアクティビティで、片方が「管理」に化けない
-- [ ] Render ログで「Updated recent admin_webhook (same event)」「Updated admin_webhook to order_cancel」等が想定どおり出ているか確認
+
+### 運用・案内
+
+- [ ] **初回は必ず管理画面でアプリを開く**ことを、利用手順・オンボーディング・README に明記している（POS・Webhook の API が動くために必須）
+- [ ] 日次 Cron（在庫スナップショット）を設定している（推奨：トークンリフレッシュでセッション維持）
+
+### 監視・確認（定期実施）
+
+- [ ] Render ログで次のメッセージが想定どおり出ているか確認する：
+  - `Updated recent admin_webhook (same event)` … 同一変動の 2 本目で二重防止
+  - `Remediated admin_webhook to order_sales` … 売上の救済
+  - `Updated admin_webhook to order_cancel` … キャンセル戻りの二重防止
+  - `Before create: matched OrderPendingLocation` … レース対策での order_sales マッチ
+  - `Updated existing admin_webhook to order_sales (avoid duplicate row)` … 連続売上の二重防止
+- [ ] 変動履歴一覧で「想定どおり管理のみ・売上・返品・キャンセル戻りが 1 行ずつか」をスポット確認する
 
 ---
 

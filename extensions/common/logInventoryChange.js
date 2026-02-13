@@ -17,6 +17,52 @@
 /** 1リクエストあたりの最大件数。これ以上は複数リクエストに分割し、タイムアウトによる途中切れと「管理」のまま残る漏れを防ぐ。 */
 const LOG_INVENTORY_CHANGE_CHUNK_SIZE = 50;
 
+/** チャンク送信失敗時の最大リトライ回数。一時的なネットワーク障害で「管理」のまま残る漏れを防ぐ。 */
+const MAX_CHUNK_RETRIES = 2;
+
+/** リトライ間隔（ミリ秒） */
+const RETRY_DELAY_MS = 1000;
+
+/**
+ * チャンクをAPIに送信し、失敗時はリトライする
+ * @returns {Promise<boolean>} 成功したかどうか
+ */
+async function sendChunkWithRetry(apiUrl, token, body, activity, chunkIndex, totalChunks) {
+  for (let attempt = 1; attempt <= MAX_CHUNK_RETRIES; attempt++) {
+    try {
+      const res = await fetch(apiUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) return true;
+      if (attempt < MAX_CHUNK_RETRIES) {
+        console.warn(
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} failed (attempt ${attempt}), retrying in ${RETRY_DELAY_MS}ms... status=${res.status}`
+        );
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      } else {
+        const text = await res.text().catch(() => "");
+        console.error(
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} failed after ${MAX_CHUNK_RETRIES} attempts: status=${res.status}, activity=${activity}, error=${text.substring(0, 300)}`
+        );
+      }
+    } catch (fetchErr) {
+      if (attempt < MAX_CHUNK_RETRIES) {
+        console.warn(
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} exception (attempt ${attempt}), retrying: ${fetchErr?.message}`
+        );
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      } else {
+        console.error(
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} exception after ${MAX_CHUNK_RETRIES} attempts: activity=${activity}, error=${fetchErr?.message}`
+        );
+      }
+    }
+  }
+  return false;
+}
+
 export async function logInventoryChangeToApi({
   activity,
   locationId,
@@ -91,19 +137,7 @@ export async function logInventoryChangeToApi({
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
       const body = chunk.length === 1 ? chunk[0] : { entries: chunk };
-      try {
-        const res = await fetch(apiUrl, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          console.error(`[logInventoryChangeToApi] Chunk ${i + 1}/${chunks.length} failed: status=${res.status}, activity=${activity}, error=${text.substring(0, 300)}`);
-        }
-      } catch (fetchErr) {
-        console.error(`[logInventoryChangeToApi] Chunk ${i + 1}/${chunks.length} exception: activity=${activity}, error=${fetchErr?.message || String(fetchErr)}`);
-      }
+      await sendChunkWithRetry(apiUrl, token, body, activity, i + 1, chunks.length);
     }
   } catch (e) {
     console.error(`[logInventoryChangeToApi] Exception: activity=${activity}, locationId=${locationId}, error=${e?.message || String(e)}`, e);

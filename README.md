@@ -222,6 +222,14 @@ PRISMA_CLIENT_ENGINE_TYPE=binary
 
 This forces Prisma to use the binary engine mode, which runs the query engine as a separate process and can work via emulation on Windows ARM64.
 
+### Stock Transfer POS: 初回利用時の必須手順
+
+**インストール後（または初回利用前）に、必ず1回は「Shopify 管理画面でアプリを開く」** ことが必要です。
+
+- **理由**: POS や Webhook からの在庫変動記録（`api/log-inventory-change`）は、管理画面でアプリを開いたときに保存されるオフラインアクセストークンを使用します。一度も開いていないと 401 となり、変動が「管理」のまま残る可能性があります。
+- **対応**: 利用手順・オンボーディングで「初回は必ず1回、管理画面からアプリを開いてください」と案内してください。1回開いた後は、管理画面を開かなくとも問題なく動作します。
+- 詳細は `docs/RELEASE_REQUIREMENTS_PUBLIC_APP.md` セクション 5.2、`docs/INVENTORY_WEBHOOK_DELTA_OFFICIAL_AND_REFLECTION_HARDENING.md` を参照。
+
 ## Resources
 
 React Router:

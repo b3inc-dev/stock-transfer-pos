@@ -46,18 +46,19 @@ const VARIANTS_FOR_CHANGE_HISTORY_QUERY = `#graphql
   }
 `;
 
-// 在庫変動履歴のアクティビティ種別ラベル（一覧・CSV・アクションで共通）
+// 在庫変動履歴のアクティビティ種別ラベル（一覧・CSV・フィルターで共通）
+// 仕入キャンセル・キャンセル戻りは「仕入」「返品」に振り分けて表示
 const ACTIVITY_LABELS: Record<string, string> = {
   inbound_transfer: "入庫",
   outbound_transfer: "出庫",
   loss_entry: "ロス",
   inventory_count: "棚卸",
   purchase_entry: "仕入",
-  purchase_cancel: "仕入キャンセル",
+  purchase_cancel: "仕入",
   sale: "売上",
   order_sales: "売上",
   refund: "返品",
-  order_cancel: "キャンセル戻り",
+  order_cancel: "返品",
   admin_webhook: "管理",
   inventory_adjustment: "在庫調整",
 };
@@ -609,7 +610,7 @@ export async function action({ request }: ActionFunctionArgs) {
         "ロケーション",
         "アクティビティ",
         "変動数",
-        "変動後数量",
+        "変動後在庫数",
         "参照ID",
         "備考",
       ];
@@ -624,7 +625,7 @@ export async function action({ request }: ActionFunctionArgs) {
           info?.option2 ?? "",
           info?.option3 ?? "",
           log.locationName || "",
-          ACTIVITY_LABELS[log.activity] || log.activity || "",
+          ACTIVITY_LABELS[log.activity] ?? "その他",
           log.delta !== null ? String(log.delta) : "",
           log.quantityAfter !== null ? String(log.quantityAfter) : "",
           log.sourceId || "",
@@ -926,15 +927,8 @@ export default function InventoryInfoPage() {
     setSearchParams(params);
   };
 
-  // アクティビティ種別のラベルマッピング
+  // アクティビティ種別のラベルマッピング（一覧表示・CSVで使用。ACTIVITY_LABELSをそのまま使用）
   const activityLabels = ACTIVITY_LABELS;
-  const activityLabelsExtended: Record<string, string> = {
-    ...ACTIVITY_LABELS,
-    purchase_cancel: "仕入",
-    admin_webhook: "管理",
-    order_sales: "売上",
-    refund: "返品",
-  };
 
   // 在庫変動履歴のフィルター変更処理（開始日 > 終了日の場合は補正）。フィルター適用時は1ページ目へ。
   const handleChangeHistoryFilterChange = () => {
@@ -2079,7 +2073,7 @@ export default function InventoryInfoPage() {
                               { value: "purchase_cancel", label: "仕入" },
                               { value: "order_sales", label: "売上" },
                               { value: "refund", label: "返品" },
-                              { value: "order_cancel", label: "キャンセル戻り" },
+                              { value: "order_cancel", label: "返品" },
                               { value: "admin_webhook", label: "管理" },
                             ].map((activity) => {
                               const isSelected = changeHistoryActivityTypes.has(activity.value);
@@ -2279,7 +2273,7 @@ export default function InventoryInfoPage() {
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>ロケーション</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>アクティビティ</th>
                                     <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動数</th>
-                                    <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動後数量</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動後在庫数</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>参照ID</th>
                                   </tr>
                                 </thead>
@@ -2296,7 +2290,7 @@ export default function InventoryInfoPage() {
                                       <td style={{ padding: "12px 16px" }}>{log.option2 || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.option3 || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.locationName}</td>
-                                      <td style={{ padding: "12px 16px" }}>{activityLabels[log.activity] || log.activity}</td>
+                                      <td style={{ padding: "12px 16px" }}>{activityLabels[log.activity] ?? "その他"}</td>
                                       <td style={{ padding: "12px 16px", textAlign: "right", color: log.delta != null && log.delta > 0 ? "#008060" : log.delta != null && log.delta < 0 ? "#d72c0d" : "#202223" }}>
                                         {log.delta !== null ? (log.delta > 0 ? `+${log.delta}` : String(log.delta)) : "-"}
                                       </td>
