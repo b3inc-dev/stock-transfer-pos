@@ -71,6 +71,19 @@ function getActivityDisplayLabel(activity: string | null | undefined): string {
   return ACTIVITY_LABELS[key] ?? ACTIVITY_LABELS[key.toLowerCase()] ?? "その他";
 }
 
+/** ロケーションIDをGID・数値の両方に展開し、DBの locationId と一致するようにする（履歴は数値で保存されていることがある） */
+function normalizeLocationIdsForQuery(ids: string[]): string[] {
+  const set = new Set<string>();
+  for (const id of ids) {
+    if (!id?.trim()) continue;
+    set.add(id.trim());
+    const num = id.trim().replace(/^gid:\/\/shopify\/Location\//i, "");
+    if (num !== id.trim()) set.add(num);
+    else set.add(`gid://shopify/Location/${id.trim()}`);
+  }
+  return [...set];
+}
+
 /** 在庫変動履歴CSV出力でエラー時に、別タブ用のHTMLレスポンスを返す */
 function csvExportErrorResponse(message: string): Response {
   const escaped = message.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
@@ -304,7 +317,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         };
 
         if (changeHistoryLocationIds.length > 0) {
-          whereClause.locationId = { in: changeHistoryLocationIds };
+          whereClause.locationId = { in: normalizeLocationIdsForQuery(changeHistoryLocationIds) };
         }
 
         if (inventoryItemIds.length > 0) {
@@ -552,7 +565,7 @@ export async function action({ request }: ActionFunctionArgs) {
         date: { gte: startDate, lte: endDate },
       };
       if (changeHistoryLocationIds.length > 0) {
-        whereClause.locationId = { in: changeHistoryLocationIds };
+        whereClause.locationId = { in: normalizeLocationIdsForQuery(changeHistoryLocationIds) };
       }
       if (inventoryItemIds.length > 0) {
         whereClause.inventoryItemId = { in: inventoryItemIds };
@@ -597,7 +610,12 @@ export async function action({ request }: ActionFunctionArgs) {
             const chunk = limitedVariantIds.slice(i, i + CHUNK);
             try {
               const resp = await admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
-              const data = await resp.json();
+              if (!resp || typeof resp.json !== "function") continue;
+              const data = (await resp.json()) as { data?: { nodes?: Array<{ id?: string; product?: { title?: string }; displayName?: string; barcode?: string; selectedOptions?: Array<{ value?: string }> }> }; errors?: unknown[] };
+              if (data?.errors?.length) {
+                console.warn("[inventory-info] Export CSV variant batch GraphQL errors (skipping chunk):", data.errors.length);
+                continue;
+              }
               const nodes = (data?.data?.nodes ?? []).filter(Boolean);
               for (const node of nodes) {
                 if (!node?.id) continue;
@@ -611,7 +629,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 });
               }
             } catch (e) {
-              console.error("[inventory-info] Export CSV variant batch failed:", e);
+              console.warn("[inventory-info] Export CSV variant batch failed (skipping chunk):", e instanceof Error ? e.message : String(e));
             }
           }
         }
@@ -648,8 +666,14 @@ export async function action({ request }: ActionFunctionArgs) {
         ];
         const rows = allLogs.map((log: any) => {
           const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
+          let dateTimeStr = "";
+          try {
+            dateTimeStr = log.timestamp ? formatDateTimeInShopTimezone(log.timestamp, shopTimezone) : "";
+          } catch {
+            dateTimeStr = log.timestamp != null ? String(log.timestamp) : "";
+          }
           return [
-            formatDateTimeInShopTimezone(log.timestamp, shopTimezone),
+            dateTimeStr,
             info?.productTitle ?? log.sku ?? "",
             log.sku || "",
             info?.barcode ?? "",
@@ -680,8 +704,9 @@ export async function action({ request }: ActionFunctionArgs) {
           },
         });
       } catch (e) {
-        console.error("[inventory-info] Export CSV failed:", e);
         const message = e instanceof Error ? e.message : String(e);
+        const stack = e instanceof Error ? e.stack : undefined;
+        console.error("[inventory-info] Export CSV failed:", message, stack ?? "");
         return csvExportErrorResponse(`CSVの作成に失敗しました。${message ? `（${message}）` : ""}`);
       }
     }
@@ -1800,7 +1825,7 @@ export default function InventoryInfoPage() {
                                 value={changeHistoryStartDate}
                                 onChange={(e) => setChangeHistoryStartDate(e.target.value)}
                                 min={firstChangeHistoryDate || todayInShopTimezone}
-                                max={todayInShopTimezone}
+                                max={changeHistoryEndDate}
                                 style={{
                                   padding: "8px 12px",
                                   border: "1px solid #d1d5db",
@@ -1818,7 +1843,7 @@ export default function InventoryInfoPage() {
                                 type="date"
                                 value={changeHistoryEndDate}
                                 onChange={(e) => setChangeHistoryEndDate(e.target.value)}
-                                min={firstChangeHistoryDate || todayInShopTimezone}
+                                min={changeHistoryStartDate}
                                 max={todayInShopTimezone}
                                 style={{
                                   padding: "8px 12px",
