@@ -2250,7 +2250,8 @@ export default function InventoryInfoPage() {
                                   onClick={() => {
                                     const form = document.createElement("form");
                                     form.method = "post";
-                                    form.action = location.pathname;
+                                    // 同一タブのURL（pathname + search）を指定しないと、別タブでショップ情報が渡らずドメイン入力画面になる
+                                    form.action = location.pathname + (location.search || "");
                                     form.target = "_blank";
                                     const fields: [string, string][] = [
                                       ["intent", "exportChangeHistoryCsv"],

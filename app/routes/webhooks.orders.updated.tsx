@@ -410,42 +410,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           : new Date();
         const searchFrom = new Date(orderUpdatedAt.getTime() - 30 * 60 * 1000);
         const searchTo = new Date(orderUpdatedAt.getTime() + 5 * 60 * 1000);
-        
-        // 注文のデフォルトロケーションを取得
-        let orderLocationId: string | null = null;
-        try {
-          const orderResp = await admin.request({
-            data: `
-              #graphql
-              query GetOrder($id: ID!) {
-                order(id: $id) {
-                  id
-                  fulfillmentOrders(first: 1) {
-                    edges {
-                      node {
-                        assignedLocation {
-                          location {
-                            id
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            `,
-            variables: { id: `gid://shopify/Order/${order.id}` },
-          });
-          const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
-          const fulfillmentOrder = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
-          if (fulfillmentOrder?.assignedLocation?.location?.id) {
-            orderLocationId = fulfillmentOrder.assignedLocation.location.id;
-          }
-        } catch (error) {
-          console.error(`[orders/updated] Failed to get order location for order ${order.id}:`, error);
-        }
 
-        // 到着順に依存しないよう、受注時は常に OrderPendingLocation を登録する（後から届く inventory_levels/update がマッチできる）
+        // 先に OrderPendingLocation を登録する（inventory_levels/update が先に届いた場合でもマッチしやすくする）
+        // オンライン受注直後は FulfillmentOrder.assignedLocation が null でロケーションが取れないことが多く、
+        // その間にも inventory_levels/update が届くため、可能な限り早く DB に書いておく。
         if (db && typeof (db as any).orderPendingLocation !== "undefined") {
           for (const lineItem of order.line_items) {
             const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
@@ -482,6 +450,40 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${lineItem.id}:`, e);
             }
           }
+        }
+
+        // 注文のデフォルトロケーションを取得（OrderPendingLocation 登録の後に実行し、先にマッチ用データを用意する）
+        let orderLocationId: string | null = null;
+        try {
+          const orderResp = await admin.request({
+            data: `
+              #graphql
+              query GetOrder($id: ID!) {
+                order(id: $id) {
+                  id
+                  fulfillmentOrders(first: 1) {
+                    edges {
+                      node {
+                        assignedLocation {
+                          location {
+                            id
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `,
+            variables: { id: `gid://shopify/Order/${order.id}` },
+          });
+          const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
+          const fulfillmentOrder = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
+          if (fulfillmentOrder?.assignedLocation?.location?.id) {
+            orderLocationId = fulfillmentOrder.assignedLocation.location.id;
+          }
+        } catch (error) {
+          console.error(`[orders/updated] Failed to get order location for order ${order.id}:`, error);
         }
 
         if (!orderLocationId) {

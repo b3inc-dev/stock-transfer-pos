@@ -40,6 +40,7 @@
 |------|----------|------|
 | #1 既知アクティビティの見逃し | `webhooks.inventory_levels.update.tsx` L369-411 | `inventoryItemIdCandidates`, `locationIdCandidates` で GID/数値両形式検索 |
 | #3 OrderPendingLocation レース | 同ファイル L568-590 | 保存直前に OrderPendingLocation を再検索（18:29 型対策） |
+| #3 完全反映（到着順対策） | 同ファイル L597-623 | まだ「管理」で保存する場合、2.5秒待機＋最大2回再検索（inventory_levels/update が先に届いても orders/updated の登録を待って売上で記録） |
 | #4 連続売上で 2 件目が「管理」 | 同ファイル L592-631 | 既存 admin_webhook を order_sales に更新して二重防止（20:11/20:14 型） |
 | #5 直近 admin_webhook の 2 本目 | 同ファイル L496-533 | 2分前〜1分後の admin_webhook で quantityAfter 一致 or null なら更新して新規を作らない |
 | #6 idempotencyKey 重複 | 同ファイル L309-326 | 同一 timestamp で既存 admin_webhook があればスキップ |

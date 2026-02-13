@@ -9,6 +9,12 @@ import { getDateInShopTimezone } from "../utils/timezone";
 // APIバージョン（shopify.server.tsと同じ値を使用）
 const API_VERSION = "2025-10";
 
+/** オンライン受注で inventory_levels/update が orders/updated より先に届いた場合に、OrderPendingLocation の登録を待つための待機・再検索 */
+const PENDING_ORDER_WAIT_MS = 2500;
+const PENDING_ORDER_MAX_RETRIES = 2;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   // デバッグ: webhookが到達したかどうかを確認
   console.log(`[inventory_levels/update] Webhook endpoint called: method=${request.method}, url=${request.url}`);
@@ -586,6 +592,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         finalNote = `注文: #${pendingOrder.orderId}`;
         finalDelta = -pendingOrder.quantity;
         console.log(`[inventory_levels/update] Before create: matched OrderPendingLocation orderId=${pendingOrder.orderId}, quantity=${qty}, will save as order_sales`);
+      }
+    }
+
+    // まだ「管理」で保存しようとしている場合、orders/updated の登録を待って再検索する（完全反映のため）
+    // Shopify は inventory_levels/update を先に送ることがあり、その時点では OrderPendingLocation がまだ無いため待機＋最大2回再検索
+    if (!pendingOrder && finalActivity === "admin_webhook" && db && typeof (db as any).orderPendingLocation !== "undefined") {
+      const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
+      const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
+      for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
+        await sleep(PENDING_ORDER_WAIT_MS);
+        const pendingRetry = await (db as any).orderPendingLocation.findFirst({
+          where: {
+            shop,
+            inventoryItemId: inventoryItemIdRaw,
+            orderCreatedAt: { gte: pendingFrom, lte: pendingTo },
+          },
+          orderBy: { orderCreatedAt: "desc" },
+        });
+        if (pendingRetry) {
+          const qty = Math.max(1, Number(pendingRetry.quantity) || 1);
+          pendingOrder = { orderId: pendingRetry.orderId, quantity: qty };
+          finalActivity = "order_sales";
+          finalSourceId = `order_${pendingOrder.orderId}`;
+          finalNote = `注文: #${pendingOrder.orderId}`;
+          finalDelta = -pendingOrder.quantity;
+          console.log(`[inventory_levels/update] After wait (retry ${retry + 1}): matched OrderPendingLocation orderId=${pendingOrder.orderId}, quantity=${qty}, will save as order_sales`);
+          break;
+        }
       }
     }
 
