@@ -69,7 +69,7 @@
 
 | 対策 | 内容 | 実装 |
 |------|------|------|
-| **API 側で「見つからないときは短時間待って再検索」** | admin_webhook が検索で 0 件のとき、2.5 秒 sleep してから同じ条件で再検索し、ヒットすればその行を「入庫」等に更新する。Webhook の create 遅延によるレースを吸収する。 | ✅ `api.log-inventory-change.tsx`: `ADMIN_WEBHOOK_RETRY_WAIT_MS`（2.5秒）、`ADMIN_WEBHOOK_RETRY_TIMES`（1回）。セッションなし・ありの両パスで実施。 |
+| **API 側で「見つからないときは短時間待って再検索」** | admin_webhook が検索で 0 件のとき、2.5 秒 sleep してから同じ条件で再検索を最大 4 回繰り返し（最大 10 秒）。ヒットした時点でループを抜けるため、早く届けば短い応答で返る。 | ✅ `api.log-inventory-change.tsx`: `ADMIN_WEBHOOK_RETRY_WAIT_MS`（2.5秒）、`ADMIN_WEBHOOK_RETRY_TIMES`（4回）。セッションなし・ありの両パスで実施。 |
 | **時間窓の緩和** | クライアントの `timestamp` が未来寄りだと「管理」行が窓の外になるため、`recentFrom` を「いま − 1分」より過去にしないようにする。 | ✅ `recentFrom = min(ts - 30分, Date.now() - 60秒)` で直近 1 分は必ず検索対象に含める。 |
 | **上書き時に variantId/sku を反映** | 「管理」→「入庫」等に更新するとき、リクエストに variantId・sku があれば updateData に含め、CSV で商品名が空にならないようにする。 | ✅ admin_webhook を更新する 2 箇所で `updateData.variantId` / `updateData.sku` を設定。 |
 | **timestamp を送らないとサーバー基準** | リクエストで `timestamp` を省略すると API は `new Date()` を使うため、窓が「いま」中心になりヒットしやすい。 | 元からその仕様（変更なし）。 |

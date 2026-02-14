@@ -30,6 +30,7 @@
 | 18 | refunds item/location 候補 | ✅ 対応済み | 特になし |
 | **19** | **返品の売上同様処理（RefundPendingLocation）** | ✅ 対応済み | `webhooks.refunds.create.tsx`, `webhooks.inventory_levels.update.tsx`。Line item 検索失敗時の GraphQL Refund フォールバック、RefundPendingLocation 登録、inventory_levels/update での返品マッチ |
 | **新** | チャンク送信失敗時のリトライ | ✅ 対応済み | `logInventoryChange.js` に MAX_CHUNK_RETRIES=2 で実装 |
+| **20** | **Webhook の create が API の検索より遅いレース（ロス・入庫等）** | ✅ 対応済み | API で 2.5 秒×最大 4 回＝合計 10 秒待機＋再検索（`ADMIN_WEBHOOK_RETRY_TIMES = 4`）。見つかった時点で抜けるため、早く届けば短い応答で返る。要因は `docs/WEBHOOK_LINKING_ISSUES_CAUSE.md` の要因 A。 |
 
 ---
 
@@ -77,6 +78,28 @@
 | 要因 | 実装箇所 | 内容 |
 |------|----------|------|
 | チャンク送信失敗時のリトライ | `extensions/common/logInventoryChange.js` | 失敗時に最大 2 回リトライ（1秒待機）。一時的なネットワーク障害で「管理」のまま残る漏れを軽減 |
+
+### ⚠️ 要因 #20：Webhook の create が API より遅いレース（ロス・入庫等で「管理」が残る）
+
+**現象**: 同一のロス（または入庫等）操作で、履歴に「ロス」行と「管理」行の **2 行** が残る。ログでは API が「admin_webhook not found」→ 2.5 秒待機→再検索でも見つからず、その **後** に Webhook が「Saving log: activity=admin_webhook」している。
+
+**原因**:  
+- **Webhook** は「管理」で 1 行保存する **直前** に、OrderPendingLocation／RefundPendingLocation を待つため **2.5 秒×2 回＝約 5 秒** 待機する（`PENDING_ORDER_WAIT_MS` / `PENDING_ORDER_MAX_RETRIES`）。ロス・入庫など売上／返品でない場合でもこの待機が走る。  
+- **API** は admin_webhook が見つからないとき **2.5 秒 1 回だけ** 待って再検索（`ADMIN_WEBHOOK_RETRY_WAIT_MS` / `ADMIN_WEBHOOK_RETRY_TIMES = 1`）。  
+→ Webhook の create が API の「検索→待機→再検索」より **遅く** commit されるため、API は「該当なし」と判断して **新規でロス行を create** し、その後 Webhook が「管理」行を create して二重になる。
+
+**対策（実装済み）**: API 側で **2.5 秒×最大 4 回＝合計 10 秒** まで待機してから再検索（`ADMIN_WEBHOOK_RETRY_WAIT_MS = 2500`、`ADMIN_WEBHOOK_RETRY_TIMES = 4`）。**見つかった時点でループを抜ける**ため、admin_webhook が早く commit されていれば 2.5 秒後・5 秒後など、その時点で応答が返り、最大 10 秒まで待つのは「最後まで見つからなかった場合」のみ。
+
+**10秒（4回）の根拠**  
+- Webhook は「管理」保存前に約 5 秒の待機＋前処理で数秒かかるため、create が 6〜8 秒後になりうる。漏れを残さないよう **最大 10 秒**（2.5秒×4回）まで待機する。  
+- **早く届けば短い応答**：ループは「待機→再検索→見つかったら break」なので、1 回目で見つかれば待機なし、2 回目で見つかれば約 2.5 秒、3 回目で約 5 秒、4 回目で約 7.5 秒で返る。10 秒かかるのは **最後まで見つからなかった場合のみ**。
+
+**理想の待機時間の考え方**  
+- **下限**: Webhook の待機合計 5 秒以上。  
+- **現状**: 最大 10 秒（4 回）。見つかり次第抜けるため、多くのリクエストは 2.5〜5 秒程度で返る想定。  
+- **上限の目安**: 10 秒を超えると POS の体感待ち・タイムアウトのリスクが増える。
+
+**参照**: `docs/WEBHOOK_LINKING_ISSUES_CAUSE.md` 要因 A（レース）。
 
 ---
 

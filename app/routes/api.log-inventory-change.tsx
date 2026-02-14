@@ -10,9 +10,11 @@ import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session"
 
 const API_VERSION = "2025-10";
 
-/** admin_webhook 未検出時の再検索：Webhook の create 遅延（GraphQL・OrderPendingLocation 待機）を吸収し二重登録を防ぐ */
+/** admin_webhook 未検出時の再検索：Webhook の create 遅延を吸収し二重登録を防ぐ。
+ *  根拠：webhooks.inventory_levels.update は「管理」保存前に OrderPendingLocation 待機で 5秒＋前処理の遅れがあるため、
+ *  漏れを残さないよう最大 2.5秒×4回＝10秒まで待機。見つかった時点でループを抜けるため、早く届けばその分だけ短い応答で返る。 */
 const ADMIN_WEBHOOK_RETRY_WAIT_MS = 2500;
-const ADMIN_WEBHOOK_RETRY_TIMES = 1;
+const ADMIN_WEBHOOK_RETRY_TIMES = 4;
 /** recentFrom の下限：クライアントの timestamp が未来寄りでも直近の「管理」行を必ず検索対象にする（秒） */
 const RECENT_FROM_AT_LEAST_SEC = 60;
 
@@ -278,8 +280,8 @@ export async function action({ request }: ActionFunctionArgs) {
           },
           orderBy: { timestamp: "desc" },
         });
-        if (!recentAdminLog && ADMIN_WEBHOOK_RETRY_TIMES > 0) {
-          console.log(`[api.log-inventory-change] admin_webhook not found, waiting ${ADMIN_WEBHOOK_RETRY_WAIT_MS}ms and retrying (race with webhook create)...`);
+        for (let r = 0; !recentAdminLog && r < ADMIN_WEBHOOK_RETRY_TIMES; r++) {
+          console.log(`[api.log-inventory-change] admin_webhook not found, waiting ${ADMIN_WEBHOOK_RETRY_WAIT_MS}ms and retrying (${r + 1}/${ADMIN_WEBHOOK_RETRY_TIMES}, race with webhook create)...`);
           await sleep(ADMIN_WEBHOOK_RETRY_WAIT_MS);
           recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
             where: {
@@ -415,8 +417,8 @@ export async function action({ request }: ActionFunctionArgs) {
         },
         orderBy: { timestamp: "desc" },
       });
-      if (!recentAdminLog && ADMIN_WEBHOOK_RETRY_TIMES > 0) {
-        console.log(`[api.log-inventory-change] admin_webhook not found (session path), waiting ${ADMIN_WEBHOOK_RETRY_WAIT_MS}ms and retrying...`);
+      for (let r = 0; !recentAdminLog && r < ADMIN_WEBHOOK_RETRY_TIMES; r++) {
+        console.log(`[api.log-inventory-change] admin_webhook not found (session path), waiting ${ADMIN_WEBHOOK_RETRY_WAIT_MS}ms and retrying (${r + 1}/${ADMIN_WEBHOOK_RETRY_TIMES})...`);
         await sleep(ADMIN_WEBHOOK_RETRY_WAIT_MS);
         recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
           where: {
