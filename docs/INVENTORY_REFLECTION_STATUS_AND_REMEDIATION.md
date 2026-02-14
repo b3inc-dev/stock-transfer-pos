@@ -28,6 +28,7 @@
 | 16 | order_cancel | ✅ 対応済み | 特になし |
 | 17 | refunds/create 時間窓 | ✅ 対応済み | 特になし |
 | 18 | refunds item/location 候補 | ✅ 対応済み | 特になし |
+| **19** | **返品の売上同様処理（RefundPendingLocation）** | ✅ 対応済み | `webhooks.refunds.create.tsx`, `webhooks.inventory_levels.update.tsx`。Line item 検索失敗時の GraphQL Refund フォールバック、RefundPendingLocation 登録、inventory_levels/update での返品マッチ |
 | **新** | チャンク送信失敗時のリトライ | ✅ 対応済み | `logInventoryChange.js` に MAX_CHUNK_RETRIES=2 で実装 |
 
 ---
@@ -100,6 +101,7 @@
 |------|----------|------|
 | #17 時間窓 | `webhooks.refunds.create.tsx` L307-309 | `searchTo = max(refundCreatedAt+5分, now+2分)` |
 | #18 item/location 候補 | 同ファイル L295-305 | inventoryItemIdCandidates / locationIdCandidates で両形式検索 |
+| #19 売上同様の RefundPendingLocation | 同ファイル、`webhooks.inventory_levels.update.tsx` | ①line_item_id 検索失敗時に GraphQL Refund API で inventory_item_id 取得。②RefundPendingLocation を先に登録（inventory_levels/update が先に届いた場合のマッチ用）。③inventory_levels/update で delta>0 時に RefundPendingLocation マッチ→返品で記録。待機・再検索・既存 admin_webhook→refund 更新も実施。 |
 
 ---
 

@@ -9,6 +9,69 @@ import { logInventoryChange, getShopTimezoneAndDate, getLocationName, getInvento
 // APIバージョン（shopify.server.tsと同じ値を使用）
 const API_VERSION = "2025-10";
 
+/**
+ * line_item_id 検索失敗時のフォールバック: GraphQL Refund API で inventory_item_id を取得
+ */
+async function getInventoryItemFromRefundGraphQL(
+  admin: { request: (opts: { data: string; variables?: any }) => Promise<any> },
+  refundId: number,
+  refundLineItem: { line_item_id?: number; quantity?: number; location_id?: number; restock_type?: string }
+): Promise<{ variantId: string; inventoryItemId: string; sku: string } | null> {
+  try {
+    const refundResp = await admin.request({
+      data: `
+        #graphql
+        query GetRefund($id: ID!) {
+          refund(id: $id) {
+            id
+            refundLineItems(first: 50) {
+              edges {
+                node {
+                  lineItem {
+                    variant {
+                      id
+                      sku
+                      inventoryItem { id }
+                    }
+                  }
+                  quantity
+                  restockType
+                  location { id }
+                }
+              }
+            }
+          }
+        }
+      `,
+      variables: { id: `gid://shopify/Refund/${refundId}` },
+    });
+    const refundData = refundResp && typeof refundResp.json === "function" ? await refundResp.json() : refundResp;
+    const refundNode = refundData?.data?.refund;
+    const edges = refundNode?.refundLineItems?.edges || [];
+    const items = edges.map((e: any) => e?.node).filter(Boolean);
+    const qty = refundLineItem.quantity ?? 1;
+    const locId = refundLineItem.location_id ? `gid://shopify/Location/${refundLineItem.location_id}` : null;
+    const restock = (refundLineItem.restock_type || "").toLowerCase();
+    if (restock === "no_restock" || !locId) return null;
+    for (const it of items) {
+      if (it.restockType?.toLowerCase() === "no_restock") continue;
+      const qtyMatch = (it.quantity ?? 0) === qty;
+      const locMatch = it.location?.id === locId || it.location?.id === String(refundLineItem.location_id);
+      if (qtyMatch && locMatch && it.lineItem?.variant?.inventoryItem?.id) {
+        return {
+          variantId: it.lineItem.variant.id,
+          inventoryItemId: it.lineItem.variant.inventoryItem.id,
+          sku: it.lineItem.variant.sku ?? "",
+        };
+      }
+    }
+    return null;
+  } catch (e) {
+    console.error(`[refunds/create] GraphQL Refund fallback error:`, e);
+    return null;
+  }
+}
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {
     let payload, shop, topic, session;
@@ -156,27 +219,74 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           continue;
         }
 
-        // line_item_idに一致するline_itemを検索
-        const lineItemId = refundLineItem.line_item_id 
-          ? `gid://shopify/OrderLineItem/${refundLineItem.line_item_id}`
+        // line_item_idに一致するline_itemを検索（複数ID形式で試す：GID・数値のみ）
+        const lineItemIdCandidates = refundLineItem.line_item_id
+          ? [
+              `gid://shopify/OrderLineItem/${refundLineItem.line_item_id}`,
+              `gid://shopify/OrderLineItem/${String(refundLineItem.line_item_id)}`,
+            ]
+          : [];
+        const matchingLineItem = lineItemIdCandidates.length > 0
+          ? order.lineItems.edges.find((edge: any) =>
+              lineItemIdCandidates.includes(edge.node.id) ||
+              (edge.node.id && String(edge.node.id).endsWith(String(refundLineItem.line_item_id)))
+            )
           : null;
 
-        const matchingLineItem = lineItemId
-          ? order.lineItems.edges.find((edge: any) => edge.node.id === lineItemId)
-          : null;
+        let variantId: string;
+        let inventoryItemId: string;
+        let sku: string;
 
-        if (!matchingLineItem || !matchingLineItem.node.variant) {
-          console.warn(`Line item not found for refund line item: ${refundLineItem.line_item_id}`);
-          continue;
+        if (matchingLineItem?.node?.variant) {
+          variantId = matchingLineItem.node.variant.id;
+          inventoryItemId = matchingLineItem.node.variant.inventoryItem?.id;
+          sku = matchingLineItem.node.variant.sku || "";
+        } else {
+          // フォールバック: GraphQL Refund API で inventory_item_id を取得
+          const fallback = await getInventoryItemFromRefundGraphQL(admin, refund.id, refundLineItem);
+          if (!fallback) {
+            console.warn(`Line item not found for refund line item: ${refundLineItem.line_item_id}; GraphQL Refund fallback also failed`);
+            continue;
+          }
+          variantId = fallback.variantId;
+          inventoryItemId = fallback.inventoryItemId;
+          sku = fallback.sku || "";
         }
-
-        const variantId = matchingLineItem.node.variant.id;
-        const inventoryItemId = matchingLineItem.node.variant.inventoryItem?.id;
-        const sku = matchingLineItem.node.variant.sku || "";
 
         if (!inventoryItemId) {
           console.warn(`InventoryItem not found for variant ${variantId}`);
           continue;
+        }
+
+        const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+        const rawLocId = String(refundLineItem.location_id ?? "");
+
+        // 売上と同様: RefundPendingLocation を先に登録（inventory_levels/update が先に届いた場合のマッチ用）
+        if (db && typeof (db as any).refundPendingLocation !== "undefined") {
+          try {
+            await (db as any).refundPendingLocation.upsert({
+              where: {
+                shop_refundId_inventoryItemId_locationId: {
+                  shop,
+                  refundId: String(refund.id),
+                  inventoryItemId: rawItemId,
+                  locationId: rawLocId,
+                },
+              },
+              create: {
+                shop,
+                refundId: String(refund.id),
+                orderId: String(refund.order_id),
+                refundCreatedAt,
+                inventoryItemId: rawItemId,
+                locationId: rawLocId,
+                quantity,
+              },
+              update: { refundCreatedAt, quantity },
+            });
+          } catch (e) {
+            console.error(`[refunds/create] Failed to upsert RefundPendingLocation:`, e);
+          }
         }
 
         // ロケーション名を取得
@@ -338,6 +448,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               });
               console.log(`[refunds/create] Updated admin_webhook log to refund: id=${existingAdminLog.id}`);
               updatedExistingAdminLog = true;
+              if (typeof (db as any).refundPendingLocation !== "undefined") {
+                await (db as any).refundPendingLocation.deleteMany({
+                  where: { shop, refundId: String(refund.id), inventoryItemId: rawItemId, locationId: rawLocId },
+                });
+              }
             }
           }
         } catch (error) {
@@ -366,6 +481,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             idempotencyKey,
             note: `返品: 注文 #${refund.order_id}`,
           });
+          if (typeof (db as any).refundPendingLocation !== "undefined") {
+            await (db as any).refundPendingLocation.deleteMany({
+              where: { shop, refundId: String(refund.id), inventoryItemId: rawItemId, locationId: rawLocId },
+            });
+          }
         }
       } catch (error) {
         console.error(`Error logging inventory change for refund ${refund.id}, line item ${refundLineItem.line_item_id}:`, error);

@@ -545,7 +545,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // 受注直後は orders/updated でロケーションが取れず OrderPendingLocation に登録されている場合がある。
     // 同一商品・時刻が近い保留注文があれば、この変動は「売上」として記録する。
+    // 返品は refunds/create で RefundPendingLocation に登録。在庫増（delta>0）時にマッチすれば「返品」として記録。
     let pendingOrder: { orderId: string; quantity: number } | null = null;
+    let pendingRefund: { refundId: string; orderId: string; quantity: number } | null = null;
     if (db && typeof (db as any).orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
@@ -565,15 +567,36 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
-    let finalActivity = pendingOrder ? "order_sales" : activity;
-    let finalSourceId = pendingOrder ? `order_${pendingOrder.orderId}` : sourceId;
-    let finalNote = pendingOrder ? `注文: #${pendingOrder.orderId}` : null;
-    // 売上はオーダー数量を変動数に反映（-数量）。POS・オンライン共通で履歴に変動数を表示するため（pendingOrder.quantity は上で 1 以上に正規化済み）
-    let finalDelta: number | null = pendingOrder ? -pendingOrder.quantity : delta;
+    // 在庫増（delta>0）の場合、RefundPendingLocation を検索（返品として記録）
+    if ((delta === null || (delta !== null && delta > 0)) && !pendingOrder && db && typeof (db as any).refundPendingLocation !== "undefined") {
+      const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
+      const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
+      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`];
+      const pendingRef = await (db as any).refundPendingLocation.findFirst({
+        where: {
+          shop,
+          inventoryItemId: inventoryItemIdRaw,
+          locationId: { in: locCands.filter(Boolean) },
+          refundCreatedAt: { gte: refundFrom, lte: refundTo },
+        },
+        orderBy: { refundCreatedAt: "desc" },
+      });
+      if (pendingRef) {
+        const qty = Math.max(1, Number(pendingRef.quantity) || 1);
+        pendingRefund = { refundId: pendingRef.refundId, orderId: pendingRef.orderId, quantity: qty };
+        console.log(`[inventory_levels/update] Matched RefundPendingLocation: refundId=${pendingRef.refundId}, orderId=${pendingRef.orderId}, quantity=${qty}, will save as refund`);
+      }
+    }
 
-    // 保存直前に OrderPendingLocation を再チェック（レース対策）
-    // 処理開始時には無くても、その間に orders/updated が登録している場合がある（18:29・19:30 型の「管理」残りを防ぐ）
-    if (!pendingOrder && finalActivity === "admin_webhook" && db && typeof (db as any).orderPendingLocation !== "undefined") {
+    let finalActivity = pendingOrder ? "order_sales" : pendingRefund ? "refund" : activity;
+    let finalSourceId = pendingOrder ? `order_${pendingOrder.orderId}` : pendingRefund ? `order_${pendingRefund.orderId}` : sourceId;
+    let finalNote = pendingOrder ? `注文: #${pendingOrder.orderId}` : pendingRefund ? `返品: 注文 #${pendingRefund.orderId}` : null;
+    // 売上はオーダー数量を変動数に反映（-数量）。返品は+数量。POS・オンライン共通で履歴に変動数を表示するため
+    let finalDelta: number | null = pendingOrder ? -pendingOrder.quantity : pendingRefund ? pendingRefund.quantity : delta;
+
+    // 保存直前に OrderPendingLocation / RefundPendingLocation を再チェック（レース対策）
+    // 処理開始時には無くても、その間に orders/updated や refunds/create が登録している場合がある
+    if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && db && typeof (db as any).orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       const pendingAgain = await (db as any).orderPendingLocation.findFirst({
@@ -594,10 +617,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         console.log(`[inventory_levels/update] Before create: matched OrderPendingLocation orderId=${pendingOrder.orderId}, quantity=${qty}, will save as order_sales`);
       }
     }
+    if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && db && typeof (db as any).refundPendingLocation !== "undefined") {
+      const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
+      const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
+      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`];
+      const pendingRefAgain = await (db as any).refundPendingLocation.findFirst({
+        where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands.filter(Boolean) }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
+        orderBy: { refundCreatedAt: "desc" },
+      });
+      if (pendingRefAgain) {
+        const qty = Math.max(1, Number(pendingRefAgain.quantity) || 1);
+        pendingRefund = { refundId: pendingRefAgain.refundId, orderId: pendingRefAgain.orderId, quantity: qty };
+        finalActivity = "refund";
+        finalSourceId = `order_${pendingRefund.orderId}`;
+        finalNote = `返品: 注文 #${pendingRefund.orderId}`;
+        finalDelta = pendingRefund.quantity;
+        console.log(`[inventory_levels/update] Before create: matched RefundPendingLocation refundId=${pendingRefund.refundId}, will save as refund`);
+      }
+    }
 
-    // まだ「管理」で保存しようとしている場合、orders/updated の登録を待って再検索する（完全反映のため）
-    // Shopify は inventory_levels/update を先に送ることがあり、その時点では OrderPendingLocation がまだ無いため待機＋最大2回再検索
-    if (!pendingOrder && finalActivity === "admin_webhook" && db && typeof (db as any).orderPendingLocation !== "undefined") {
+    // まだ「管理」で保存しようとしている場合、orders/updated または refunds/create の登録を待って再検索する（完全反映のため）
+    // Shopify は inventory_levels/update を先に送ることがあり、その時点では OrderPendingLocation / RefundPendingLocation がまだ無いため待機＋最大2回再検索
+    if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && db) {
+      if (typeof (db as any).orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
@@ -619,6 +661,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           finalDelta = -pendingOrder.quantity;
           console.log(`[inventory_levels/update] After wait (retry ${retry + 1}): matched OrderPendingLocation orderId=${pendingOrder.orderId}, quantity=${qty}, will save as order_sales`);
           break;
+        }
+      }
+      }
+      if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && typeof (db as any).refundPendingLocation !== "undefined") {
+        for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
+          await sleep(PENDING_ORDER_WAIT_MS);
+          const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
+          const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
+          const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`];
+          const pendingRefRetry = await (db as any).refundPendingLocation.findFirst({
+            where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands.filter(Boolean) }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
+            orderBy: { refundCreatedAt: "desc" },
+          });
+          if (pendingRefRetry) {
+            const qty = Math.max(1, Number(pendingRefRetry.quantity) || 1);
+            pendingRefund = { refundId: pendingRefRetry.refundId, orderId: pendingRefRetry.orderId, quantity: qty };
+            finalActivity = "refund";
+            finalSourceId = `order_${pendingRefund.orderId}`;
+            finalNote = `返品: 注文 #${pendingRefund.orderId}`;
+            finalDelta = pendingRefund.quantity;
+            console.log(`[inventory_levels/update] After wait (retry ${retry + 1}): matched RefundPendingLocation refundId=${pendingRefund.refundId}, will save as refund`);
+            break;
+          }
         }
       }
     }
@@ -664,6 +729,50 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
+    // RefundPendingLocation にマッチした場合、既存の admin_webhook 行を refund に更新して新規行を作らない（売上と同様の二重防止）
+    if (pendingRefund && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+      const searchFrom = new Date(updatedAt.getTime() - 30 * 60 * 1000);
+      const searchTo = new Date(updatedAt.getTime() + 5 * 60 * 1000);
+      const expectedPrevQty = available - pendingRefund.quantity; // 返品前の在庫数
+      const inventoryItemIdCandidates = [inventoryItemIdRaw, `gid://shopify/InventoryItem/${inventoryItemIdRaw}`];
+      const locationIdCandidates = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`];
+      const existingAdminRefund = await (db as any).inventoryChangeLog.findFirst({
+        where: {
+          shop,
+          inventoryItemId: { in: inventoryItemIdCandidates },
+          locationId: { in: locationIdCandidates },
+          activity: "admin_webhook",
+          quantityAfter: expectedPrevQty,
+          timestamp: { gte: searchFrom, lte: searchTo },
+        },
+        orderBy: { timestamp: "desc" },
+      });
+      if (existingAdminRefund) {
+        const orderIdRef = `order_${pendingRefund.orderId}`;
+        const idempotencyKeyNew = `${shop}_refund_${inventoryItemIdRaw}_${locationIdRaw}_${orderIdRef}_${existingAdminRefund.timestamp.toISOString()}`;
+        await (db as any).inventoryChangeLog.update({
+          where: { id: existingAdminRefund.id },
+          data: {
+            activity: "refund",
+            sourceType: "refund",
+            sourceId: orderIdRef,
+            delta: pendingRefund.quantity,
+            quantityAfter: available,
+            note: `返品: 注文 #${pendingRefund.orderId}`,
+            idempotencyKey: idempotencyKeyNew,
+          },
+        });
+        if (typeof (db as any).refundPendingLocation !== "undefined") {
+          const rawLocForDel = locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, "") || locationIdRaw;
+          await (db as any).refundPendingLocation.deleteMany({
+            where: { shop, refundId: pendingRefund.refundId, inventoryItemId: inventoryItemIdRaw, locationId: rawLocForDel },
+          });
+        }
+        console.log(`[inventory_levels/update] Updated existing admin_webhook to refund (avoid duplicate row): id=${existingAdminRefund.id}, refundId=${pendingRefund.refundId}, quantityAfter ${existingAdminRefund.quantityAfter} -> ${available}`);
+        return new Response("OK", { status: 200 });
+      }
+    }
+
     // 在庫変動ログを保存（deltaがnullでも記録する）
     try {
       if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
@@ -690,7 +799,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             sourceType: finalActivity,
             sourceId: finalSourceId,
             adjustmentGroupId,
-            idempotencyKey: pendingOrder ? `${shop}_order_sales_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingOrder.orderId}_${updatedAt.toISOString()}` : idempotencyKey,
+            idempotencyKey: pendingOrder ? `${shop}_order_sales_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingOrder.orderId}_${updatedAt.toISOString()}` : pendingRefund ? `${shop}_refund_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingRefund.orderId}_${updatedAt.toISOString()}` : idempotencyKey,
             note: finalNote,
           },
         });
@@ -700,6 +809,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw },
           });
           console.log(`[inventory_levels/update] Removed OrderPendingLocation for order ${pendingOrder.orderId}, item ${inventoryItemIdRaw}`);
+        }
+        if (pendingRefund && typeof (db as any).refundPendingLocation !== "undefined") {
+          const rawLocForDel = locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, "") || locationIdRaw;
+          await (db as any).refundPendingLocation.deleteMany({
+            where: { shop, refundId: pendingRefund.refundId, inventoryItemId: inventoryItemIdRaw, locationId: rawLocForDel },
+          });
+          console.log(`[inventory_levels/update] Removed RefundPendingLocation for refund ${pendingRefund.refundId}, item ${inventoryItemIdRaw}`);
         }
         
         console.log(`[inventory_levels/update] Log saved successfully`);

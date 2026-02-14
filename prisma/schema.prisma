@@ -77,3 +77,20 @@ model OrderPendingLocation {
   @@unique([shop, orderId, inventoryItemId])
   @@index([shop, inventoryItemId, orderCreatedAt])
 }
+
+// 返品時に refunds/create で line_item 検索が失敗しても、inventory_levels/update で返品として記録できるよう
+// 「この返品のこの商品は返品候補」を一時保存。売上の OrderPendingLocation と同様の役割。
+model RefundPendingLocation {
+  id                String   @id @default(cuid())
+  shop              String
+  refundId          String   // 返品ID（数値、例: 12345678）
+  orderId           String   // 注文ID（数値）
+  refundCreatedAt   DateTime
+  inventoryItemId   String   // GID または数値
+  locationId        String   // GID または数値（返品先ロケーション）
+  quantity          Int      @default(1)
+  createdAt         DateTime @default(now())
+
+  @@unique([shop, refundId, inventoryItemId, locationId])
+  @@index([shop, inventoryItemId, locationId, refundCreatedAt])
+}
