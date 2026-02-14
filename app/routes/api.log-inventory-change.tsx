@@ -11,10 +11,10 @@ import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session"
 const API_VERSION = "2025-10";
 
 /** admin_webhook 未検出時の再検索：Webhook の create 遅延を吸収し二重登録を防ぐ。
- *  根拠：webhooks.inventory_levels.update は「管理」保存前に OrderPendingLocation 待機で 5秒＋前処理の遅れがあるため、
- *  漏れを残さないよう最大 2.5秒×4回＝10秒まで待機。見つかった時点でループを抜けるため、早く届けばその分だけ短い応答で返る。 */
+ *  根拠：同種の抱き合わせでは 15〜30 秒待機が一般的。漏れを残さないよう最大 2.5秒×12回＝30秒まで待機。
+ *  見つかった時点でループを抜けるため、早く届けばその分だけ短い応答で返る。 */
 const ADMIN_WEBHOOK_RETRY_WAIT_MS = 2500;
-const ADMIN_WEBHOOK_RETRY_TIMES = 4;
+const ADMIN_WEBHOOK_RETRY_TIMES = 12;
 /** recentFrom の下限：クライアントの timestamp が未来寄りでも直近の「管理」行を必ず検索対象にする（秒） */
 const RECENT_FROM_AT_LEAST_SEC = 60;
 
