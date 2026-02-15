@@ -5,6 +5,7 @@ import { authenticate } from "../shopify.server";
 import shopify from "../shopify.server";
 import db from "../db.server";
 import { logInventoryChange, getShopTimezoneAndDate, getLocationName } from "../utils/inventory-change-log";
+import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
 const API_VERSION = "2025-10";
@@ -198,16 +199,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             const cancelSearchTo = new Date(cancelledAt.getTime() + 5 * 60 * 1000);
             const itemIdCandidates = [inventoryItemId, rawItemId, `gid://shopify/InventoryItem/${rawItemId}`];
             const locIdCandidates = [orderLocationId, locationIdRaw, `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
-            const existingAdminForCancel = await (db as any).inventoryChangeLog.findFirst({
-              where: {
-                shop,
-                inventoryItemId: { in: itemIdCandidates },
-                locationId: { in: locIdCandidates },
-                activity: "admin_webhook",
-                timestamp: { gte: cancelSearchFrom, lte: cancelSearchTo },
-              },
-              orderBy: { timestamp: "desc" },
-            });
+            const existingAdminForCancel = await findWithAdminWebhookRetry(
+              () =>
+                (db as any).inventoryChangeLog.findFirst({
+                  where: {
+                    shop,
+                    inventoryItemId: { in: itemIdCandidates },
+                    locationId: { in: locIdCandidates },
+                    activity: "admin_webhook",
+                    timestamp: { gte: cancelSearchFrom, lte: cancelSearchTo },
+                  },
+                  orderBy: { timestamp: "desc" },
+                }),
+              "[orders/updated] order_cancel"
+            );
             if (existingAdminForCancel) {
               const orderIdRef = `order_${order.id}`;
               const delta = lineItemQty;
@@ -343,16 +348,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             if (existingOrderSales) continue;
 
             // 時間窓内で最も古い admin_webhook を1件だけ order_sales に更新（販売可能・手持ちの2回更新のうち1件だけ救済）
-            const adminWebhookToUpdate = await (db as any).inventoryChangeLog.findFirst({
-              where: {
-                shop,
-                inventoryItemId: { in: itemIdCandidates },
-                locationId: { in: locationIdCandidates },
-                activity: "admin_webhook",
-                timestamp: { gte: searchFrom, lte: searchTo },
-              },
-              orderBy: { timestamp: "asc" },
-            });
+            const adminWebhookToUpdate = await findWithAdminWebhookRetry(
+              () =>
+                (db as any).inventoryChangeLog.findFirst({
+                  where: {
+                    shop,
+                    inventoryItemId: { in: itemIdCandidates },
+                    locationId: { in: locationIdCandidates },
+                    activity: "admin_webhook",
+                    timestamp: { gte: searchFrom, lte: searchTo },
+                  },
+                  orderBy: { timestamp: "asc" },
+                }),
+              "[orders/updated] fulfillments"
+            );
 
             if (adminWebhookToUpdate) {
               const orderDelta = -lineItemQty;
@@ -538,17 +547,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               ].filter((id, index, arr) => arr.indexOf(id) === index);
               
               if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-                const existingAdminLog = await (db as any).inventoryChangeLog.findFirst({
-                  where: {
-                    shop,
-                    inventoryItemId: { in: inventoryItemIdCandidates },
-                    locationId: { in: locationIdCandidates },
-                    activity: "admin_webhook",
-                    timestamp: { gte: searchFrom, lte: searchTo },
-                  },
-                  orderBy: { timestamp: "desc" },
-                });
-                
+                const existingAdminLog = await findWithAdminWebhookRetry(
+                  () =>
+                    (db as any).inventoryChangeLog.findFirst({
+                      where: {
+                        shop,
+                        inventoryItemId: { in: inventoryItemIdCandidates },
+                        locationId: { in: locationIdCandidates },
+                        activity: "admin_webhook",
+                        timestamp: { gte: searchFrom, lte: searchTo },
+                      },
+                      orderBy: { timestamp: "desc" },
+                    }),
+                  "[orders/updated] no fulfillments"
+                );
+
                 if (existingAdminLog) {
                   console.log(`[orders/updated] Found admin_webhook log to update (no fulfillments): id=${existingAdminLog.id}, order.id=${order.id}`);
                   const orderId = `order_${order.id}`;

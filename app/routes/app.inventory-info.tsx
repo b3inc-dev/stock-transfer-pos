@@ -71,6 +71,19 @@ function getActivityDisplayLabel(activity: string | null | undefined): string {
   return ACTIVITY_LABELS[key] ?? ACTIVITY_LABELS[key.toLowerCase()] ?? "その他";
 }
 
+/** 仕入フィルター用：UIでは1つの「仕入」に統一し、クエリでは purchase_entry と purchase_cancel の両方を対象にする */
+const PURCHASE_ACTIVITY_KEY = "purchase";
+const PURCHASE_ACTIVITY_TYPES = ["purchase_entry", "purchase_cancel"] as const;
+
+function expandActivityTypesForQuery(types: Set<string>): string[] {
+  return Array.from(types).flatMap((t) => (t === PURCHASE_ACTIVITY_KEY ? [...PURCHASE_ACTIVITY_TYPES] : [t]));
+}
+
+function normalizeActivityTypesFromUrl(types: string[]): string[] {
+  const normalized = types.map((t) => ((t === "purchase_entry" || t === "purchase_cancel") ? PURCHASE_ACTIVITY_KEY : t));
+  return [...new Set(normalized)];
+}
+
 /** ロケーションIDをGID・数値の両方に展開し、DBの locationId と一致するようにする（履歴は数値で保存されていることがある） */
 function normalizeLocationIdsForQuery(ids: string[]): string[] {
   const set = new Set<string>();
@@ -675,7 +688,7 @@ export default function InventoryInfoPage() {
     new Set(changeHistoryFilters?.locationIds || [])
   );
   const [changeHistoryActivityTypes, setChangeHistoryActivityTypes] = useState<Set<string>>(
-    new Set(changeHistoryFilters?.activityTypes || [])
+    () => new Set(normalizeActivityTypesFromUrl(changeHistoryFilters?.activityTypes || []))
   );
   const [changeHistorySortOrder, setChangeHistorySortOrder] = useState<"asc" | "desc">(
     (changeHistoryFilters?.sortOrder as "asc" | "desc") || "desc"
@@ -747,7 +760,7 @@ export default function InventoryInfoPage() {
       }
       // URLパラメータが変更されていない場合は、現在の選択状態を保持（商品検索中など）
       
-      setChangeHistoryActivityTypes(new Set(changeHistoryFilters.activityTypes));
+      setChangeHistoryActivityTypes(new Set(normalizeActivityTypesFromUrl(changeHistoryFilters.activityTypes || [])));
       setChangeHistorySortOrder((changeHistoryFilters.sortOrder as "asc" | "desc") || "desc");
     }
   }, [changeHistoryFilters]);
@@ -825,7 +838,7 @@ export default function InventoryInfoPage() {
       params.delete("inventoryItemIds");
     }
     if (changeHistoryActivityTypes.size > 0) {
-      params.set("activityTypes", Array.from(changeHistoryActivityTypes).join(","));
+      params.set("activityTypes", expandActivityTypesForQuery(changeHistoryActivityTypes).join(","));
     } else {
       params.delete("activityTypes");
     }
@@ -1943,8 +1956,7 @@ export default function InventoryInfoPage() {
                               { value: "outbound_transfer", label: "出庫" },
                               { value: "loss_entry", label: "ロス" },
                               { value: "inventory_count", label: "棚卸" },
-                              { value: "purchase_entry", label: "仕入" },
-                              { value: "purchase_cancel", label: "仕入" },
+                              { value: PURCHASE_ACTIVITY_KEY, label: "仕入" },
                               { value: "order_sales", label: "売上" },
                               { value: "refund", label: "返品" },
                               { value: "order_cancel", label: "返品" },
@@ -2115,7 +2127,7 @@ export default function InventoryInfoPage() {
                                       formData.set("inventoryItemIds", Array.from(changeHistorySelectedInventoryItemIds).join(","));
                                     }
                                     if (changeHistoryActivityTypes.size > 0) {
-                                      formData.set("activityTypes", Array.from(changeHistoryActivityTypes).join(","));
+                                      formData.set("activityTypes", expandActivityTypesForQuery(changeHistoryActivityTypes).join(","));
                                     }
                                     try {
                                       // リソースルートへPOSTすると Remix がHTMLで包まずCSVをそのまま返す（同一ページPOSTはHTMLが返りダウンロードできないため）

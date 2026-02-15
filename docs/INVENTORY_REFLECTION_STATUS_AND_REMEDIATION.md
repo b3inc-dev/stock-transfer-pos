@@ -30,7 +30,7 @@
 | 18 | refunds item/location 候補 | ✅ 対応済み | 特になし |
 | **19** | **返品の売上同様処理（RefundPendingLocation）** | ✅ 対応済み | `webhooks.refunds.create.tsx`, `webhooks.inventory_levels.update.tsx`。Line item 検索失敗時の GraphQL Refund フォールバック、RefundPendingLocation 登録、inventory_levels/update での返品マッチ |
 | **新** | チャンク送信失敗時のリトライ | ✅ 対応済み | `logInventoryChange.js` に MAX_CHUNK_RETRIES=2 で実装 |
-| **20** | **Webhook の create が API の検索より遅いレース（ロス・入庫等）** | ✅ 対応済み | API で 2.5 秒×最大 12 回＝合計 30 秒待機＋再検索（`ADMIN_WEBHOOK_RETRY_TIMES = 12`）。見つかった時点で抜けるため、早く届けば短い応答で返る。要因は `docs/WEBHOOK_LINKING_ISSUES_CAUSE.md` の要因 A。 |
+| **20** | **Webhook の create が API の検索より遅いレース（ロス・入庫・売上・返品等）** | ✅ 対応済み | 共通モジュール `admin-webhook-retry.ts` で 2.5 秒×最大 12 回＝合計 30 秒待機＋再検索。api/log-inventory-change・orders/updated・refunds/create の全経路で適用。見つかった時点で抜けるため早く届けば短い応答で返る。要因は `docs/WEBHOOK_LINKING_ISSUES_CAUSE.md` の要因 A。 |
 
 ---
 
@@ -88,7 +88,11 @@
 - **API** は admin_webhook が見つからないとき **2.5 秒 1 回だけ** 待って再検索（`ADMIN_WEBHOOK_RETRY_WAIT_MS` / `ADMIN_WEBHOOK_RETRY_TIMES = 1`）。  
 → Webhook の create が API の「検索→待機→再検索」より **遅く** commit されるため、API は「該当なし」と判断して **新規でロス行を create** し、その後 Webhook が「管理」行を create して二重になる。
 
-**対策（実装済み）**: API 側で **2.5 秒×最大 12 回＝合計 30 秒** まで待機してから再検索（`ADMIN_WEBHOOK_RETRY_WAIT_MS = 2500`、`ADMIN_WEBHOOK_RETRY_TIMES = 12`）。**見つかった時点でループを抜ける**ため、admin_webhook が早く commit されていれば 2.5 秒後・5 秒後など、その時点で応答が返り、最大 30 秒まで待つのは「最後まで見つからなかった場合」のみ。
+**対策（実装済み）**: 共通モジュール `app/utils/admin-webhook-retry.ts` で **2.5 秒×最大 12 回＝合計 30 秒** まで待機してから再検索。以下に適用：
+- **api/log-inventory-change**（入庫・出庫・ロス・棚卸・仕入）
+- **webhooks.orders.updated**（売上・order_cancel、3箇所）
+- **webhooks.refunds.create**（返品）
+**見つかった時点で抜ける**ため、admin_webhook が早く commit されていれば短い応答で返り、最大 30 秒待つのは「最後まで見つからなかった場合」のみ。
 
 **30秒（12回）の根拠**  
 - 同種の Webhook 抱き合わせでは 15〜30 秒待機が一般的。漏れを残さないよう **最大 30 秒**（2.5秒×12回）まで待機する。  

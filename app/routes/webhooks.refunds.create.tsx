@@ -5,6 +5,7 @@ import { authenticate } from "../shopify.server";
 import shopify from "../shopify.server";
 import db from "../db.server";
 import { logInventoryChange, getShopTimezoneAndDate, getLocationName, getInventoryItemInfo } from "../utils/inventory-change-log";
+import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
 const API_VERSION = "2025-10";
@@ -418,16 +419,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             const searchFrom = new Date(refundCreatedAt.getTime() - 30 * 60 * 1000); // 30分前
             const searchTo = new Date(Math.max(refundCreatedAt.getTime() + 5 * 60 * 1000, Date.now() + 2 * 60 * 1000)); // 5分後 または 現在+2分
 
-            const existingAdminLog = await (db as any).inventoryChangeLog.findFirst({
-              where: {
-                shop,
-                inventoryItemId: { in: inventoryItemIdCandidates },
-                locationId: { in: locationIdCandidates },
-                activity: "admin_webhook",
-                timestamp: { gte: searchFrom, lte: searchTo },
-              },
-              orderBy: { timestamp: "desc" },
-            });
+            const existingAdminLog = await findWithAdminWebhookRetry(
+              () =>
+                (db as any).inventoryChangeLog.findFirst({
+                  where: {
+                    shop,
+                    inventoryItemId: { in: inventoryItemIdCandidates },
+                    locationId: { in: locationIdCandidates },
+                    activity: "admin_webhook",
+                    timestamp: { gte: searchFrom, lte: searchTo },
+                  },
+                  orderBy: { timestamp: "desc" },
+                }),
+              "[refunds/create]"
+            );
 
             if (existingAdminLog) {
               console.log(

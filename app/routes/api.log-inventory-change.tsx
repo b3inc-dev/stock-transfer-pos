@@ -7,18 +7,12 @@ import { authenticate, sessionStorage } from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
+import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
 const API_VERSION = "2025-10";
 
-/** admin_webhook 未検出時の再検索：Webhook の create 遅延を吸収し二重登録を防ぐ。
- *  根拠：同種の抱き合わせでは 15〜30 秒待機が一般的。漏れを残さないよう最大 2.5秒×12回＝30秒まで待機。
- *  見つかった時点でループを抜けるため、早く届けばその分だけ短い応答で返る。 */
-const ADMIN_WEBHOOK_RETRY_WAIT_MS = 2500;
-const ADMIN_WEBHOOK_RETRY_TIMES = 12;
 /** recentFrom の下限：クライアントの timestamp が未来寄りでも直近の「管理」行を必ず検索対象にする（秒） */
 const RECENT_FROM_AT_LEAST_SEC = 60;
-
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // dest が "https://xxx.myshopify.com" のときホスト名だけにする（findSessionsByShop は "xxx.myshopify.com" で保存されている）
 function shopFromDest(dest: string): string {
@@ -270,31 +264,20 @@ export async function action({ request }: ActionFunctionArgs) {
           rawLocId,
           `gid://shopify/Location/${rawLocId}`,
         ];
-        let recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
-          where: {
-            shop,
-            inventoryItemId: { in: inventoryItemIdCandidates },
-            locationId: { in: locationIdCandidates },
-            activity: "admin_webhook",
-            timestamp: { gte: recentFrom, lte: recentTo },
-          },
-          orderBy: { timestamp: "desc" },
-        });
-        for (let r = 0; !recentAdminLog && r < ADMIN_WEBHOOK_RETRY_TIMES; r++) {
-          console.log(`[api.log-inventory-change] admin_webhook not found, waiting ${ADMIN_WEBHOOK_RETRY_WAIT_MS}ms and retrying (${r + 1}/${ADMIN_WEBHOOK_RETRY_TIMES}, race with webhook create)...`);
-          await sleep(ADMIN_WEBHOOK_RETRY_WAIT_MS);
-          recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
-            where: {
-              shop,
-              inventoryItemId: { in: inventoryItemIdCandidates },
-              locationId: { in: locationIdCandidates },
-              activity: "admin_webhook",
-              timestamp: { gte: recentFrom, lte: recentTo },
-            },
-            orderBy: { timestamp: "desc" },
-          });
-          if (recentAdminLog) console.log(`[api.log-inventory-change] Found admin_webhook on retry: id=${recentAdminLog.id}`);
-        }
+        let recentAdminLog = await findWithAdminWebhookRetry<{ id: number }>(
+          () =>
+            (db as any).inventoryChangeLog.findFirst({
+              where: {
+                shop,
+                inventoryItemId: { in: inventoryItemIdCandidates },
+                locationId: { in: locationIdCandidates },
+                activity: "admin_webhook",
+                timestamp: { gte: recentFrom, lte: recentTo },
+              },
+              orderBy: { timestamp: "desc" },
+            }),
+          "[api.log-inventory-change]"
+        );
         if (recentAdminLog) {
           console.log(
             `[api.log-inventory-change] Found admin_webhook log to update: id=${recentAdminLog.id}, activity=${activity}, delta=${delta}, quantityAfter=${quantityAfter}`
@@ -407,31 +390,20 @@ export async function action({ request }: ActionFunctionArgs) {
         rawLocId,
         `gid://shopify/Location/${rawLocId}`,
       ];
-      let recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
-        where: {
-          shop: shopId,
-          inventoryItemId: { in: inventoryItemIdCandidates },
-          locationId: { in: locationIdCandidates },
-          activity: "admin_webhook",
-          timestamp: { gte: recentFrom, lte: recentTo },
-        },
-        orderBy: { timestamp: "desc" },
-      });
-      for (let r = 0; !recentAdminLog && r < ADMIN_WEBHOOK_RETRY_TIMES; r++) {
-        console.log(`[api.log-inventory-change] admin_webhook not found (session path), waiting ${ADMIN_WEBHOOK_RETRY_WAIT_MS}ms and retrying (${r + 1}/${ADMIN_WEBHOOK_RETRY_TIMES})...`);
-        await sleep(ADMIN_WEBHOOK_RETRY_WAIT_MS);
-        recentAdminLog = await (db as any).inventoryChangeLog.findFirst({
-          where: {
-            shop: shopId,
-            inventoryItemId: { in: inventoryItemIdCandidates },
-            locationId: { in: locationIdCandidates },
-            activity: "admin_webhook",
-            timestamp: { gte: recentFrom, lte: recentTo },
-          },
-          orderBy: { timestamp: "desc" },
-        });
-        if (recentAdminLog) console.log(`[api.log-inventory-change] Found admin_webhook on retry: id=${recentAdminLog.id}`);
-      }
+      let recentAdminLog = await findWithAdminWebhookRetry<{ id: number }>(
+        () =>
+          (db as any).inventoryChangeLog.findFirst({
+            where: {
+              shop: shopId,
+              inventoryItemId: { in: inventoryItemIdCandidates },
+              locationId: { in: locationIdCandidates },
+              activity: "admin_webhook",
+              timestamp: { gte: recentFrom, lte: recentTo },
+            },
+            orderBy: { timestamp: "desc" },
+          }),
+        "[api.log-inventory-change] session"
+      );
       if (recentAdminLog) {
         console.log(
           `[api.log-inventory-change] Found admin_webhook log to update: id=${recentAdminLog.id}, activity=${activity}, delta=${delta}, quantityAfter=${quantityAfter}`
