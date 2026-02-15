@@ -5406,6 +5406,17 @@ function OutboundList({
       ? outbound.settings
       : { version: 1, destinationGroups: [], carriers: [] };
 
+  const arrivalQuickDays = useMemo(() => {
+    const raw = settings?.outbound?.arrivalQuickDays ?? settings?.arrivalQuickDays;
+    const base = Array.isArray(raw) ? raw : [1, 2];
+    const nums = base
+      .map((v) => Number(v))
+      .filter((n) => Number.isFinite(n) && n > 0 && n <= 365);
+    const uniq = Array.from(new Set(nums));
+    uniq.sort((a, b) => a - b);
+    return uniq;
+  }, [settings]);
+
   const carrierOptions = useMemo(() => {
     const cs = Array.isArray(settings?.carriers) ? settings.carriers : [];
     return cs
