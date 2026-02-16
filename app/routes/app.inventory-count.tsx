@@ -1226,18 +1226,29 @@ export async function action({ request }: ActionFunctionArgs) {
     const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
 
     // 商品グループ名とinventoryItemIdsを取得（全グループ分を取得してPOSのまとめて表示で読めるようにする）
+    // ✅ 制限: リクエストタイムアウト（例: Render 30秒）を避けるため、一定時間を超えたら残りはスキップして保存する
+    const INVENTORY_IDS_FETCH_MS = 22_000; //  platform の 30 秒タイムアウトより手前に収める
+    const fetchStart = Date.now();
     const groupNames: string[] = [];
     const inventoryItemIdsByGroup: Record<string, string[]> = {};
     for (const groupId of targetProductGroupIds) {
+      if (Date.now() - fetchStart > INVENTORY_IDS_FETCH_MS) {
+        console.warn("[inventory-count] inventoryItemIds fetch time budget exceeded, saving count with partial groups");
+        break;
+      }
       const group = productGroups.find((g) => g.id === groupId);
       if (!group) {
         return { ok: false, error: `商品グループが見つかりません: ${groupId}` as const };
       }
       groupNames.push(group.name);
-      // ✅ 全グループ分のinventoryItemIdsを取得（既存がなければコレクション/SKUから取得）
-      const ids = await getInventoryItemIdsForGroup(admin, group);
-      if (ids.length > 0) {
-        inventoryItemIdsByGroup[groupId] = ids;
+      try {
+        const ids = await getInventoryItemIdsForGroup(admin, group);
+        if (ids.length > 0) {
+          inventoryItemIdsByGroup[groupId] = ids;
+        }
+      } catch (e) {
+        console.error(`[inventory-count] getInventoryItemIdsForGroup failed for group ${groupId}:`, e);
+        // 1グループ失敗しても他は続行し、取得できた分だけ保存する
       }
     }
 
