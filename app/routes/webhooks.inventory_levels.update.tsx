@@ -558,11 +558,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // 同一注文で2ロケーション出荷に対応するため、locationId でフィルタする（空文字は従来データ用）。
     // 返品は refunds/create で RefundPendingLocation に登録。在庫増（delta>0）時にマッチすれば「返品」として記録。
     let pendingOrder: { orderId: string; quantity: number; locationId: string } | null = null;
-    let pendingRefund: { refundId: string; orderId: string; quantity: number } | null = null;
+    let pendingRefund: { refundId: string; orderId: string; quantity: number; locationId: string } | null = null;
     if (db && typeof (db as any).orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      const orderLocCands = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""].filter(Boolean);
+      // 空文字 "" は .filter(Boolean) で除かれるため使わない。ロケーション不明で登録された OrderPendingLocation（locationId=""）をマッチさせるため "" を必ず含める
+      const orderLocCands = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""];
       const allPendings = await (db as any).orderPendingLocation.findMany({
         where: {
           shop,
@@ -591,10 +592,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // 在庫増（delta>0）の場合、RefundPendingLocation を検索（返品として記録）。短時間複数返品時は「変動前在庫 === available - 返品数」で正しい返品にマッチする。
+    // 空文字 "" を検索に含める（refunds/create で location_id が空になるエッジケースに備え、OrderPendingLocation と同様に .filter(Boolean) は使わない）
     if ((delta === null || (delta !== null && delta > 0)) && !pendingOrder && db && typeof (db as any).refundPendingLocation !== "undefined") {
       const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
+      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`, ""];
       const allRefundPendings = await (db as any).refundPendingLocation.findMany({
         where: {
           shop,
@@ -615,8 +617,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const pendingRef = matchedRefund ?? allRefundPendings[0] ?? null;
       if (pendingRef) {
         const qty = Math.max(1, Number(pendingRef.quantity) || 1);
-        pendingRefund = { refundId: pendingRef.refundId, orderId: pendingRef.orderId, quantity: qty };
-        console.log(`[inventory_levels/update] Matched RefundPendingLocation: refundId=${pendingRef.refundId}, orderId=${pendingRef.orderId}, quantity=${qty}, prevAvailable=${prevForRefund ?? "n/a"}, will save as refund`);
+        pendingRefund = { refundId: pendingRef.refundId, orderId: pendingRef.orderId, quantity: qty, locationId: pendingRef.locationId ?? "" };
+        console.log(`[inventory_levels/update] Matched RefundPendingLocation: refundId=${pendingRef.refundId}, orderId=${pendingRef.orderId}, quantity=${qty}, locationId=${pendingRef.locationId ?? ""}, prevAvailable=${prevForRefund ?? "n/a"}, will save as refund`);
       }
     }
 
@@ -631,7 +633,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && db && typeof (db as any).orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      const orderLocCandsAgain = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""].filter(Boolean);
+      const orderLocCandsAgain = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""];
       const allAgain = await (db as any).orderPendingLocation.findMany({
         where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsAgain }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
         orderBy: { orderCreatedAt: "desc" },
@@ -655,7 +657,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && db && typeof (db as any).refundPendingLocation !== "undefined") {
       const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
+      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`, ""];
       const allRefAgain = await (db as any).refundPendingLocation.findMany({
         where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
         orderBy: { refundCreatedAt: "desc" },
@@ -668,7 +670,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const pendingRefAgain = matchedRefAgain ?? allRefAgain[0] ?? null;
       if (pendingRefAgain) {
         const qty = Math.max(1, Number(pendingRefAgain.quantity) || 1);
-        pendingRefund = { refundId: pendingRefAgain.refundId, orderId: pendingRefAgain.orderId, quantity: qty };
+        pendingRefund = { refundId: pendingRefAgain.refundId, orderId: pendingRefAgain.orderId, quantity: qty, locationId: pendingRefAgain.locationId ?? "" };
         finalActivity = "refund";
         finalSourceId = `order_${pendingRefund.orderId}`;
         finalNote = `返品: 注文 #${pendingRefund.orderId}`;
@@ -685,7 +687,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
         await sleep(PENDING_ORDER_WAIT_MS);
-        const orderLocCandsRetry = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""].filter(Boolean);
+        const orderLocCandsRetry = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""];
         const allRetry = await (db as any).orderPendingLocation.findMany({
           where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsRetry }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
           orderBy: { orderCreatedAt: "desc" },
@@ -713,7 +715,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           await sleep(PENDING_ORDER_WAIT_MS);
           const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
           const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-          const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
+          const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`, ""];
           const allRefRetry = await (db as any).refundPendingLocation.findMany({
             where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
             orderBy: { refundCreatedAt: "desc" },
@@ -726,7 +728,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const pendingRefRetry = matchedRefRetry ?? allRefRetry[0] ?? null;
           if (pendingRefRetry) {
             const qty = Math.max(1, Number(pendingRefRetry.quantity) || 1);
-            pendingRefund = { refundId: pendingRefRetry.refundId, orderId: pendingRefRetry.orderId, quantity: qty };
+            pendingRefund = { refundId: pendingRefRetry.refundId, orderId: pendingRefRetry.orderId, quantity: qty, locationId: pendingRefRetry.locationId ?? "" };
             finalActivity = "refund";
             finalSourceId = `order_${pendingRefund.orderId}`;
             finalNote = `返品: 注文 #${pendingRefund.orderId}`;
@@ -845,9 +847,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           },
         });
         if (typeof (db as any).refundPendingLocation !== "undefined") {
-          const rawLocForDel = locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, "") || locationIdRaw;
           await (db as any).refundPendingLocation.deleteMany({
-            where: { shop, refundId: pendingRefund.refundId, inventoryItemId: inventoryItemIdRaw, locationId: rawLocForDel },
+            where: { shop, refundId: pendingRefund.refundId, inventoryItemId: inventoryItemIdRaw, locationId: pendingRefund.locationId },
           });
         }
         console.log(`[inventory_levels/update] Updated existing admin_webhook to refund (avoid duplicate row): id=${existingAdminRefund.id}, refundId=${pendingRefund.refundId}, quantityAfter ${existingAdminRefund.quantityAfter} -> ${available}`);
@@ -896,11 +897,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           console.log(`[inventory_levels/update] Removed OrderPendingLocation for order ${pendingOrder.orderId}, item ${inventoryItemIdRaw}, locationId=${pendingOrder.locationId}`);
         }
         if (pendingRefund && typeof (db as any).refundPendingLocation !== "undefined") {
-          const rawLocForDel = locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, "") || locationIdRaw;
           await (db as any).refundPendingLocation.deleteMany({
-            where: { shop, refundId: pendingRefund.refundId, inventoryItemId: inventoryItemIdRaw, locationId: rawLocForDel },
+            where: { shop, refundId: pendingRefund.refundId, inventoryItemId: inventoryItemIdRaw, locationId: pendingRefund.locationId },
           });
-          console.log(`[inventory_levels/update] Removed RefundPendingLocation for refund ${pendingRefund.refundId}, item ${inventoryItemIdRaw}`);
+          console.log(`[inventory_levels/update] Removed RefundPendingLocation for refund ${pendingRefund.refundId}, item ${inventoryItemIdRaw}, locationId=${pendingRefund.locationId}`);
         }
         
         console.log(`[inventory_levels/update] Log saved successfully`);

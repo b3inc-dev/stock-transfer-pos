@@ -35,6 +35,8 @@
 | **22** | **並列 Webhook による create の P2002** | ✅ 対応済み（2026-02-16） | inventory_levels/update の create で P2002（idempotencyKey 重複）をキャッチし、ログ出力の上で 200 を返す。もう1リクエストが先に保存済みのため二重送信防止として成功扱い。 |
 | **23** | **同一商品で「管理」と「売上」が2行になる** | ✅ 対応済み（2026-02-16） | OrderPendingLocation マッチ時に、`quantityAfter = expectedPrevQty` に加え **quantityAfter === available** の admin_webhook も検索し、あればその行を order_sales/refund に更新。先に届いた Webhook が「売上後」の値で管理保存している場合の二重行を防止。 |
 | **24** | **OrderPendingLocation 登録が遅くマッチしない** | ✅ 軽減済み（2026-02-16） | 待機・再検索を 2 回→**3 回**に増加（最大約 7.5 秒）。orders/updated が遅れてもマッチしやすくする。 |
+| **25** | **ロケーション不明時 OrderPendingLocation（locationId=""）が検索にヒットしない** | ✅ 対応済み（2026-02-17） | OrderPendingLocation 検索で `locationId` 候補に `""` を含めていたが `.filter(Boolean)` で空文字が除かれていた。`.filter(Boolean)` をやめ、`locationId=""` で登録された行もマッチするように修正。要因: `docs/INVENTORY_ACTIVITY_MANAGEMENT_CAUSE_20260217.md`。 |
+| **26** | **RefundPendingLocation の locationId="" と deleteMany の整合** | ✅ 防御的対応（2026-02-17） | 返品は現状 `location_id` なしで RefundPendingLocation を登録しないが、検索の `locCands` に `""` を追加。マッチ時に `locationId` を保持し、deleteMany でマッチした行の locationId を使うよう統一。残存リスク一覧: `docs/INVENTORY_REFLECTION_REMAINING_RISKS.md`。 |
 
 ---
 
