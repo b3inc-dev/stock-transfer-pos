@@ -292,19 +292,40 @@ export async function fetchProductsByGroup(productGroupId, locationId) {
   return fetchProductsByGroups([productGroupId], locationId);
 }
 
+// IDの正規化：GIDと数値IDの両方で照合できるようにする（管理画面とPOSで形式が異なる場合の対策）
+function normalizeIdForMatch(id) {
+  const s = String(id ?? "").trim();
+  const lastSegment = s.split("/").pop() || s;
+  return lastSegment;
+}
+function findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, groupId) {
+  if (!inventoryItemIdsByGroup || typeof inventoryItemIdsByGroup !== "object") return undefined;
+  if (inventoryItemIdsByGroup[groupId]) return inventoryItemIdsByGroup[groupId];
+  const normalized = normalizeIdForMatch(groupId);
+  const key = Object.keys(inventoryItemIdsByGroup).find(
+    (k) => k === groupId || normalizeIdForMatch(k) === normalized
+  );
+  return key ? inventoryItemIdsByGroup[key] : undefined;
+}
+
 // 複数商品グループに含まれる商品を取得（コレクションから）
 // locationIdが指定されている場合、在庫レベルがある商品のみを返す（初期表示用）
 // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用して商品をフィルタリング（生成時の状態を保持）
 export async function fetchProductsByGroups(productGroupIds, locationId, opts = {}) {
   const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null } = opts;
   const groups = await readProductGroups();
-  const targetGroups = groups.filter((g) => Array.isArray(productGroupIds) && productGroupIds.includes(g.id));
+  // ✅ まとめて表示で2つ目以降のグループが取れない対策：IDの正規化で照合（GIDと数値の差を吸収）
+  const normalizedIds = new Set((productGroupIds || []).map(normalizeIdForMatch));
+  const targetGroups = groups.filter(
+    (g) => Array.isArray(productGroupIds) && (productGroupIds.includes(g.id) || normalizedIds.has(normalizeIdForMatch(g.id)))
+  );
   if (targetGroups.length === 0) return [];
 
   const allVariants = [];
   for (const group of targetGroups) {
     // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用（生成時の状態を保持）
-    const savedInventoryItemIds = inventoryItemIdsByGroup?.[group.id];
+    // ✅ キー照合を正規化して行い、管理画面とPOSでID形式が違っても取得できるようにする
+    const savedInventoryItemIds = findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, group.id);
     if (savedInventoryItemIds && Array.isArray(savedInventoryItemIds) && savedInventoryItemIds.length > 0) {
       // ✅ 保存されたinventoryItemIdsを使用して商品を取得（GraphQLで直接取得）
       // ✅ 保存されたinventoryItemIdsを使用して商品を取得

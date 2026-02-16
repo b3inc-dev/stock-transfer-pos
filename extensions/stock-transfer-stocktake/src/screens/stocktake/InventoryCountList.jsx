@@ -635,13 +635,14 @@ export function InventoryCountList({
           let groupItemsForGroup = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
           if (groupItemsForGroup.length === 0 && countItemsLegacy.length > 0) {
             // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
-            // 商品グループの商品リストを取得してフィルタリング
+            // 商品グループの商品リストを取得してフィルタリング（inventoryItemIdsByGroupも渡してまとめて表示で全グループ取得できるようにする）
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
               const products = await fetchProductsByGroups([groupId], count.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
                 includeImages: false,
+                inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
               });
               const productInventoryItemIds = new Set(
                 products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
@@ -2758,8 +2759,13 @@ export function InventoryCountList({
                     const completedCurrentQty = hasGroupItems
                       ? groupItemsFromMap.reduce((sum, it) => sum + Number(it?.currentQuantity ?? 0), 0)
                       : (hasReadOnlyLines ? groupLines.reduce((sum, l) => sum + Number(l?.currentQuantity ?? 0), 0) : 0);
-                    const completedCount = groupLines.filter((l) => l.isReadOnly === true).length;
-                    const totalCount = groupLines.length;
+                    // ✅ 完了済み時は件数は groupItemsFromMap を優先（まとめて表示で1グループ目のみlinesに乗る場合の 0/0 を防ぐ）
+                    const completedCount = isGroupCompleted && groupItemsFromMap.length > 0 && groupLines.length === 0
+                      ? groupItemsFromMap.length
+                      : groupLines.filter((l) => l.isReadOnly === true).length;
+                    const totalCount = isGroupCompleted && groupItemsFromMap.length > 0 && groupLines.length === 0
+                      ? groupItemsFromMap.length
+                      : groupLines.length;
                     
                     // ✅ 未完了グループで商品リストが空の場合でも、グループタイトルを表示する
                     // ✅ loadingがfalseで、かつ商品リストが空の場合のみ「商品がありません」を表示
@@ -2796,7 +2802,9 @@ export function InventoryCountList({
                                 {isGroupCompleted ? "完了済み" : "未完了"}
                               </s-badge>
                               <s-text tone="subdued" size="small">
-                                {isGroupCompleted ? `${completedCount}/${totalCount} 実数${completedTotalQty}${completedCurrentQty > 0 ? `/${completedCurrentQty}` : ""}` : `${totalCount}件`}
+                                {isGroupCompleted
+                                  ? (totalCount > 0 ? `${completedCount}/${totalCount} ` : "") + `実数${completedTotalQty}${completedCurrentQty > 0 ? `/${completedCurrentQty}` : ""}`
+                                  : `${totalCount}件`}
                               </s-text>
                             </s-stack>
                           </s-stack>
