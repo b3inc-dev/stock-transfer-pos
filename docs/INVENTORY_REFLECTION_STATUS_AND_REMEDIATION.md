@@ -31,6 +31,10 @@
 | **19** | **返品の売上同様処理（RefundPendingLocation）** | ✅ 対応済み | `webhooks.refunds.create.tsx`, `webhooks.inventory_levels.update.tsx`。Line item 検索失敗時の GraphQL Refund フォールバック、RefundPendingLocation 登録、inventory_levels/update での返品マッチ |
 | **新** | チャンク送信失敗時のリトライ | ✅ 対応済み | `logInventoryChange.js` に MAX_CHUNK_RETRIES=2 で実装 |
 | **20** | **Webhook の create が API の検索より遅いレース（ロス・入庫・売上・返品等）** | ✅ 対応済み | 共通モジュール `admin-webhook-retry.ts` で 2.5 秒×最大 12 回＝合計 30 秒待機＋再検索。api/log-inventory-change・orders/updated・refunds/create の全経路で適用。見つかった時点で抜けるため早く届けば短い応答で返る。要因は `docs/WEBHOOK_LINKING_ISSUES_CAUSE.md` の要因 A。 |
+| **21** | **救済時の idempotencyKey 更新による P2002** | ✅ 対応済み（2026-02-16） | 救済（admin_webhook → order_sales/refund/order_cancel）の **update で idempotencyKey を変更しない**。他経路で同じキーが既に使われていると Unique constraint で更新失敗するため。orders/updated・refunds/create・inventory_levels/update の救済処理で idempotencyKey を update に含めない。 |
+| **22** | **並列 Webhook による create の P2002** | ✅ 対応済み（2026-02-16） | inventory_levels/update の create で P2002（idempotencyKey 重複）をキャッチし、ログ出力の上で 200 を返す。もう1リクエストが先に保存済みのため二重送信防止として成功扱い。 |
+| **23** | **同一商品で「管理」と「売上」が2行になる** | ✅ 対応済み（2026-02-16） | OrderPendingLocation マッチ時に、`quantityAfter = expectedPrevQty` に加え **quantityAfter === available** の admin_webhook も検索し、あればその行を order_sales/refund に更新。先に届いた Webhook が「売上後」の値で管理保存している場合の二重行を防止。 |
+| **24** | **OrderPendingLocation 登録が遅くマッチしない** | ✅ 軽減済み（2026-02-16） | 待機・再検索を 2 回→**3 回**に増加（最大約 7.5 秒）。orders/updated が遅れてもマッチしやすくする。 |
 
 ---
 
@@ -42,7 +46,7 @@
 |------|----------|------|
 | #1 既知アクティビティの見逃し | `webhooks.inventory_levels.update.tsx` L369-411 | `inventoryItemIdCandidates`, `locationIdCandidates` で GID/数値両形式検索 |
 | #3 OrderPendingLocation レース | 同ファイル L568-590 | 保存直前に OrderPendingLocation を再検索（18:29 型対策） |
-| #3 完全反映（到着順対策） | 同ファイル L597-623 | まだ「管理」で保存する場合、2.5秒待機＋最大2回再検索（inventory_levels/update が先に届いても orders/updated の登録を待って売上で記録） |
+| #3 完全反映（到着順対策） | 同ファイル L597-623 | まだ「管理」で保存する場合、2.5秒待機＋最大**3回**再検索（計最大約7.5秒）。inventory_levels/update が先に届いても orders/updated の登録を待って売上で記録 |
 | #4 連続売上で 2 件目が「管理」 | 同ファイル L592-631 | 既存 admin_webhook を order_sales に更新して二重防止（20:11/20:14 型） |
 | #5 直近 admin_webhook の 2 本目 | 同ファイル L496-533 | 2分前〜1分後の admin_webhook で quantityAfter 一致 or null なら更新して新規を作らない |
 | #6 idempotencyKey 重複 | 同ファイル L309-326 | 同一 timestamp で既存 admin_webhook があればスキップ |
@@ -84,9 +88,9 @@
 **現象**: 同一のロス（または入庫等）操作で、履歴に「ロス」行と「管理」行の **2 行** が残る。ログでは API が「admin_webhook not found」→ 2.5 秒待機→再検索でも見つからず、その **後** に Webhook が「Saving log: activity=admin_webhook」している。
 
 **原因**:  
-- **Webhook** は「管理」で 1 行保存する **直前** に、OrderPendingLocation／RefundPendingLocation を待つため **2.5 秒×2 回＝約 5 秒** 待機する（`PENDING_ORDER_WAIT_MS` / `PENDING_ORDER_MAX_RETRIES`）。ロス・入庫など売上／返品でない場合でもこの待機が走る。  
-- **API** は admin_webhook が見つからないとき **2.5 秒 1 回だけ** 待って再検索（`ADMIN_WEBHOOK_RETRY_WAIT_MS` / `ADMIN_WEBHOOK_RETRY_TIMES = 1`）。  
-→ Webhook の create が API の「検索→待機→再検索」より **遅く** commit されるため、API は「該当なし」と判断して **新規でロス行を create** し、その後 Webhook が「管理」行を create して二重になる。
+- **Webhook**（inventory_levels/update）は「管理」で 1 行保存する **直前** に、OrderPendingLocation／RefundPendingLocation を待つため **2.5 秒×3 回＝約 7.5 秒** 待機する（`PENDING_ORDER_WAIT_MS` / `PENDING_ORDER_MAX_RETRIES`）。ロス・入庫など売上／返品でない場合でもこの待機が走る。  
+- **API**（api/log-inventory-change）や **orders/updated / refunds/create** は、既存 admin_webhook を探すときに **共通モジュール `admin-webhook-retry.ts`** で **2.5 秒×12 回＝最大 30 秒** まで待機して再検索する（下記「待機・リトライ一覧」参照）。  
+→ 以前は API 側の待機が短く、Webhook の create が遅いと二重になった。**30 秒リトライ**を全経路に適用済み。
 
 **対策（実装済み）**: 共通モジュール `app/utils/admin-webhook-retry.ts` で **2.5 秒×最大 12 回＝合計 30 秒** まで待機してから再検索。以下に適用：
 - **api/log-inventory-change**（入庫・出庫・ロス・棚卸・仕入）
@@ -104,6 +108,17 @@
 - **上限の目安**: 30 秒を超えると POS の体感待ち・タイムアウトのリスクが増える。
 
 **参照**: `docs/WEBHOOK_LINKING_ISSUES_CAUSE.md` 要因 A（レース）。
+
+---
+
+### 待機・リトライの一覧（30秒と OrderPendingLocation の違い）
+
+| 用途 | どこで使うか | 定数・値 | 最大待機 | 履歴・根拠 |
+|------|--------------|----------|----------|------------|
+| **admin_webhook を探して更新する**（救済・二重防止） | api/log-inventory-change、orders/updated（売上・order_cancel）、refunds/create | `admin-webhook-retry.ts`: 2.5秒×**12回** | **約30秒** | 2026-02-15 に「admin_webhook 未検出時リトライ 30 秒を全経路に適用」。REQUIREMENTS_FINAL・本ドキュメント #20 に記載。見つかり次第抜けるため、多くの場合は 2.5〜5 秒で返る。 |
+| **OrderPendingLocation / RefundPendingLocation の登録を待つ** | inventory_levels/update（売上・返品として記録する直前） | `PENDING_ORDER_WAIT_MS` 2500、`PENDING_ORDER_MAX_RETRIES` **3** | **約7.5秒** | 2026-02-14 に 2.5秒×2回で導入、2026-02-16 に 3 回に増加。Webhook の応答を長くしすぎないよう 30 秒にはしていない（Shopify の再送・タイムアウトの観点）。 |
+
+→ **30秒に変更した記憶**は、**admin_webhook を探す側**（admin-webhook-retry.ts）の話で、REQUIREMENTS_FINAL の 2026-02-15 および本ドキュメント #20 に履歴が残っている。**OrderPendingLocation を待つ側**（inventory_levels/update）は別処理で、最大 7.5 秒のまま。
 
 ---
 
@@ -196,12 +211,66 @@
 
 - [x] **チャンク送信のリトライ**（`logInventoryChange.js`）  
   → 失敗時に最大 2 回リトライを実装済み
+- [x] **救済時に idempotencyKey を更新しない**（2026-02-16）  
+  → `webhooks.orders.updated.tsx`（order_sales / order_cancel）、`webhooks.refunds.create.tsx`、`webhooks.inventory_levels.update.tsx`（既存行を order_sales/refund に更新する箇所）で update の data から idempotencyKey を除外。P2002 による救済失敗を防止。
+- [x] **create 時の P2002 を成功扱い**（2026-02-16）  
+  → `webhooks.inventory_levels.update.tsx` の create で、idempotencyKey 重複（P2002）をキャッチして 200 を返す。並列 Webhook で二重送信防止。
+- [x] **quantityAfter === available の既存行も order_sales/refund に更新**（2026-02-16）  
+  → OrderPendingLocation / RefundPendingLocation マッチ時、expectedPrevQty で見つからなければ **quantityAfter === available** の admin_webhook を検索し、あればその行を更新。同一商品で「管理」と「売上」が2行になる残りケースを防止。
+- [x] **待機・再検索回数の増加**（2026-02-16）  
+  → `PENDING_ORDER_MAX_RETRIES` を 2 → 3 に変更（最大約 7.5 秒待機）。orders/updated が遅い場合のマッチ率向上。
 
 ### 運用で補うもの（ドキュメントに追記済み）
 
 - [x] 初回は管理画面でアプリを開く … README.md に追記済み
 - [x] 監視ログのスポット確認 … INVENTORY_ACTIVITY_REFLECTION_GUARANTEE.md のチェックリストに追記済み
 - [x] 変動履歴一覧で想定どおり 1 行ずつ記録されているか確認 … 同上
+
+---
+
+## 完全に履歴が意図通り処理される方法（設計・運用）
+
+在庫変動履歴を「意図どおり」にするには、**コード側の対策**と**運用前提**の両方が必要です。
+
+### 1. コードで担保していること（2026-02-16 時点）
+
+| 項目 | 内容 |
+|------|------|
+| 売上・返品の種別 | orders/updated で OrderPendingLocation を**先に**登録 → inventory_levels/update が先に届いても保存直前に再検索＋待機（2.5秒×最大3回＝約7.5秒）でマッチ → order_sales/refund で記録。救済時は idempotencyKey を変更しないため P2002 で失敗しない。 |
+| 二重行の防止 | 既存 admin_webhook を order_sales/refund に**更新**して新規行を作らない（同一商品で「管理」と「売上」が2行並ばない）。 |
+| 救済の成功 | 救済時の update に idempotencyKey を含めない（本修正）。他経路で同じキーが既に使われていても update が成功する。 |
+| 並列 create | 同じ Webhook が並列で届いた場合の create の P2002 をキャッチし、200 を返して成功扱い（1本は既に保存済み）。 |
+| 変動数（delta） | 直前ログから算出。初回のみ履歴がない場合は delta=null（UI では「-」）を注釈で許容。 |
+
+### 2. 運用で守ること
+
+| 項目 | 内容 |
+|------|------|
+| 初回オープン | インストール後（または初回利用前）に**1回は管理画面でアプリを開く**。オフラインセッションが保存され、POS・Webhook から API が通る。 |
+| 永続 DB | 本番では PostgreSQL 等の永続 DB を用意し、デプロイで履歴が消えないようにする。 |
+| 監視 | たまに変動履歴一覧で「売上であるべき行が管理のまま」「同一商品で管理と売上が2行」がないか確認する。 |
+
+### 3. 意図とずれうる残り要因（許容範囲・追加修正不要）
+
+| 要因 | 現象 | 対応 |
+|------|------|------|
+| 管理画面からの初回変更 | 変動数が「-」 | Webhook に変動量が含まれない仕様のため、当該 SKU/ロケーションの初回は delta を計算できない。注釈で案内済み。**コードでは遡り delta 算出済み。初回のみ「-」は許容。** |
+| 極端な API 遅延 | まれに「管理」のまま | 時間窓（30分前〜5分後）を広げると二重リスクが増えるため、窓は現状のまま。待機は 3 回（約 7.5 秒）に増加済み。 |
+| ロケーション不明時の救済スキップ | オンライン受注直後のみ「管理」のまま残りうる | 他ロケーションの行を誤更新しないため意図的にスキップ。OrderPendingLocation ＋ inventory_levels/update のマッチで多くの場合は order_sales になる。 |
+
+### 4. 完全化のために対応済みの修正一覧（2026-02-16）
+
+「履歴を意図通りに扱う方法」を完全にするために実施したコード修正は以下で揃っている。
+
+| # | 修正内容 | ファイル |
+|---|----------|----------|
+| 1 | 救済時の update で idempotencyKey を変更しない | webhooks.orders.updated.tsx, webhooks.refunds.create.tsx, webhooks.inventory_levels.update.tsx |
+| 2 | create 時の P2002 をキャッチして 200 を返す | webhooks.inventory_levels.update.tsx |
+| 3 | OrderPendingLocation マッチ時、quantityAfter === available の既存 admin_webhook も order_sales に更新 | webhooks.inventory_levels.update.tsx |
+| 4 | RefundPendingLocation マッチ時、quantityAfter === available の既存 admin_webhook も refund に更新 | webhooks.inventory_levels.update.tsx |
+| 5 | 待機・再検索を 2 回→3 回に増加 | webhooks.inventory_levels.update.tsx（PENDING_ORDER_MAX_RETRIES） |
+
+上記に加え、**運用**（初回管理画面オープン・永続 DB・たまの履歴確認）を守れば、履歴は意図通りに扱える状態になっている。
 
 ---
 

@@ -438,7 +438,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               console.log(
                 `[refunds/create] Found existing admin_webhook log to update: id=${existingAdminLog.id}, timestamp=${existingAdminLog.timestamp}, quantityAfter=${existingAdminLog.quantityAfter} -> ${quantityAfter}`
               );
-              // 既存のadmin_webhookログをrefundに更新
+              // 既存のadmin_webhookログをrefundに更新（救済時は idempotencyKey を変更しない＝P2002 防止）
               await (db as any).inventoryChangeLog.update({
                 where: { id: existingAdminLog.id },
                 data: {
@@ -447,7 +447,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   quantityAfter: quantityAfter !== null ? quantityAfter : existingAdminLog.quantityAfter,
                   sourceType: "refund",
                   sourceId: `order_${refund.order_id}`,
-                  idempotencyKey,
                   note: `返品: 注文 #${refund.order_id}`,
                 },
               });

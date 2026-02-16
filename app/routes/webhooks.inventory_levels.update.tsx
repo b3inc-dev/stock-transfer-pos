@@ -11,7 +11,7 @@ const API_VERSION = "2025-10";
 
 /** オンライン受注で inventory_levels/update が orders/updated より先に届いた場合に、OrderPendingLocation の登録を待つための待機・再検索 */
 const PENDING_ORDER_WAIT_MS = 2500;
-const PENDING_ORDER_MAX_RETRIES = 2;
+const PENDING_ORDER_MAX_RETRIES = 3; // 2.5秒×3回＝最大約7.5秒待機（履歴を意図通りにするため1回増）
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -693,7 +693,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const searchFrom = new Date(updatedAt.getTime() - 30 * 60 * 1000);
       const searchTo = new Date(updatedAt.getTime() + 5 * 60 * 1000);
       const expectedPrevQty = available + pendingOrder.quantity;
-      const existingAdmin = await (db as any).inventoryChangeLog.findFirst({
+      let existingAdmin = await (db as any).inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: inventoryItemIdRaw,
@@ -704,9 +704,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
         orderBy: { timestamp: "desc" },
       });
+      // 先に届いた Webhook が「売上後」の値で admin_webhook 保存している場合（quantityAfter=available）。その行を order_sales に更新して二重行を防ぐ
+      if (!existingAdmin && available !== expectedPrevQty) {
+        existingAdmin = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop,
+            inventoryItemId: inventoryItemIdRaw,
+            locationId: locationIdRaw,
+            activity: "admin_webhook",
+            quantityAfter: available,
+            timestamp: { gte: searchFrom, lte: searchTo },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (existingAdmin) {
+          console.log(`[inventory_levels/update] Found admin_webhook with quantityAfter=${available} (post-sale value), will update to order_sales to avoid duplicate row`);
+        }
+      }
       if (existingAdmin) {
         const orderIdRef = `order_${pendingOrder.orderId}`;
-        const idempotencyKeyNew = `${shop}_order_sales_${inventoryItemIdRaw}_${locationIdRaw}_${orderIdRef}_${existingAdmin.timestamp.toISOString()}`;
+        // 救済時は idempotencyKey を変更しない（orders/updated 等とキーが被ると P2002 になるため）
         await (db as any).inventoryChangeLog.update({
           where: { id: existingAdmin.id },
           data: {
@@ -716,7 +733,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             delta: -pendingOrder.quantity,
             quantityAfter: available,
             note: `注文: #${pendingOrder.orderId}`,
-            idempotencyKey: idempotencyKeyNew,
           },
         });
         if (typeof (db as any).orderPendingLocation !== "undefined") {
@@ -736,7 +752,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const expectedPrevQty = available - pendingRefund.quantity; // 返品前の在庫数
       const inventoryItemIdCandidates = [inventoryItemIdRaw, `gid://shopify/InventoryItem/${inventoryItemIdRaw}`];
       const locationIdCandidates = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`];
-      const existingAdminRefund = await (db as any).inventoryChangeLog.findFirst({
+      let existingAdminRefund = await (db as any).inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: { in: inventoryItemIdCandidates },
@@ -747,9 +763,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
         orderBy: { timestamp: "desc" },
       });
+      // 先に届いた Webhook が「返品後」の値で admin_webhook 保存している場合（quantityAfter=available）。その行を refund に更新して二重行を防ぐ
+      if (!existingAdminRefund && available !== expectedPrevQty) {
+        existingAdminRefund = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            activity: "admin_webhook",
+            quantityAfter: available,
+            timestamp: { gte: searchFrom, lte: searchTo },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (existingAdminRefund) {
+          console.log(`[inventory_levels/update] Found admin_webhook with quantityAfter=${available} (post-refund value), will update to refund to avoid duplicate row`);
+        }
+      }
       if (existingAdminRefund) {
         const orderIdRef = `order_${pendingRefund.orderId}`;
-        const idempotencyKeyNew = `${shop}_refund_${inventoryItemIdRaw}_${locationIdRaw}_${orderIdRef}_${existingAdminRefund.timestamp.toISOString()}`;
+        // 救済時は idempotencyKey を変更しない（refunds/create 等とキーが被ると P2002 になるため）
         await (db as any).inventoryChangeLog.update({
           where: { id: existingAdminRefund.id },
           data: {
@@ -759,7 +792,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             delta: pendingRefund.quantity,
             quantityAfter: available,
             note: `返品: 注文 #${pendingRefund.orderId}`,
-            idempotencyKey: idempotencyKeyNew,
           },
         });
         if (typeof (db as any).refundPendingLocation !== "undefined") {
@@ -822,9 +854,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } else {
         console.warn(`[inventory_levels/update] InventoryChangeLog model not found in Prisma client. Please restart the dev server.`);
       }
-    } catch (error) {
-      console.error("[inventory_levels/update] Error saving inventory change log:", error);
-      // エラーが発生してもWebhookは成功として返す
+    } catch (error: unknown) {
+      // 並列で同じ Webhook が届いた場合など、idempotencyKey 重複で create が失敗することがある。1本は既に保存されているので成功扱いにする
+      const prismaError = error as { code?: string; meta?: { target?: string[] } };
+      if (prismaError?.code === "P2002" && Array.isArray(prismaError?.meta?.target) && prismaError.meta.target.includes("idempotencyKey")) {
+        console.log(`[inventory_levels/update] Duplicate idempotencyKey (concurrent create), treating as success: item=${inventoryItemIdRaw}, location=${locationIdRaw}`);
+      } else {
+        console.error("[inventory_levels/update] Error saving inventory change log:", error);
+      }
+      // エラーが発生してもWebhookは成功として返す（リトライで二重送信を防ぐ）
     }
 
     return new Response("OK", { status: 200 });

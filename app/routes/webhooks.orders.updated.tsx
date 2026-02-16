@@ -217,6 +217,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               const orderIdRef = `order_${order.id}`;
               const delta = lineItemQty;
               // quantityAfter は inventory_levels/update で既に「戻り後」が入っているのでそのまま
+              // 救済時は idempotencyKey を変更しない（P2002 防止）
               await (db as any).inventoryChangeLog.update({
                 where: { id: existingAdminForCancel.id },
                 data: {
@@ -224,7 +225,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   sourceType: "order_cancel",
                   sourceId: orderIdRef,
                   delta,
-                  idempotencyKey,
                   note: `注文キャンセル: #${order.id}`,
                 },
               });
@@ -365,7 +365,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
             if (adminWebhookToUpdate) {
               const orderDelta = -lineItemQty;
-              const idempotencyKey = `${shop}_order_sales_${rawItemId}_${locationIdRaw}_${orderIdRef}_${orderCreatedAt.toISOString()}`;
+              // 救済時は idempotencyKey を変更しない（他経路で同じキーが既に使われていると P2002 になるため）
               await (db as any).inventoryChangeLog.update({
                 where: { id: adminWebhookToUpdate.id },
                 data: {
@@ -373,7 +373,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   delta: orderDelta,
                   sourceType: "order_sales",
                   sourceId: orderIdRef,
-                  idempotencyKey,
                   note: `注文: #${order.id}`,
                 },
               });
@@ -565,11 +564,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 if (existingAdminLog) {
                   console.log(`[orders/updated] Found admin_webhook log to update (no fulfillments): id=${existingAdminLog.id}, order.id=${order.id}`);
                   const orderId = `order_${order.id}`;
-                  const idempotencyKey = `${shop}_order_sales_${inventoryItemId}_${orderLocationId}_${orderId}_${orderCreatedAt.toISOString()}`;
                   // 売上はオーダー数量を変動数に反映（-数量）。履歴に売上点数を表示するため
                   const orderDelta = -lineItemQty;
                   const rawItemIdForPending = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
-
+                  // 救済時は idempotencyKey を変更しない（他経路で同じキーが既に使われていると P2002 になるため）
                   await (db as any).inventoryChangeLog.update({
                     where: { id: existingAdminLog.id },
                     data: {
@@ -577,7 +575,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                       delta: orderDelta,
                       sourceType: "order_sales",
                       sourceId: orderId,
-                      idempotencyKey,
                       note: `注文: ${order.name || orderId}`,
                     },
                   });
