@@ -1,0 +1,66 @@
+# 棚卸「まとめて表示」で2つ目以降の商品リストが読み込まれない要因
+
+**日付**: 2026-02-16
+
+## 事象
+
+- 本番で棚卸の「まとめて表示」を使うと、1つ目の商品グループのみ商品リストが表示され、2つ目以降は「商品がありません」のままになる。
+- 「商品グループごとに選択」で該当グループを開くと、そのグループの商品リストは表示される。
+
+## 要因
+
+### 1. 棚卸作成時に `inventoryItemIdsByGroup` が全グループ分入っていない
+
+**流れ:**
+
+- POS の「まとめて表示」では、`count.inventoryItemIdsByGroup` を参照して、**グループごとの inventoryItemId 一覧**で商品を取得している（`fetchProductsByGroups` → `savedInventoryItemIds`）。
+- `inventoryItemIdsByGroup` は**管理画面で棚卸IDを発行したとき**に、その時点の「商品グループ」の `inventoryItemIds` をコピーして保存している。
+- 管理画面のロジックでは、**「グループに既に `inventoryItemIds` が入っているときだけ」** そのグループを `inventoryItemIdsByGroup` に載せていた。
+
+```ts
+// 旧ロジック（要因）
+if (group.inventoryItemIds && group.inventoryItemIds.length > 0) {
+  inventoryItemIdsByGroup[groupId] = [...group.inventoryItemIds];
+}
+```
+
+- 商品グループの `inventoryItemIds` は、
+  - そのグループを**編集して保存**したとき（コレクションやSKUから商品を取得したとき）、または
+  - CSVでSKUを登録したとき  
+  にだけセットされる。
+- そのため、
+  - 1つ目のグループは過去に編集保存されていて `inventoryItemIds` がある → 棚卸作成時に `inventoryItemIdsByGroup` に含まれる → POS で商品リストが読める。
+  - 2つ目以降のグループは「名前＋コレクション選択だけ」で、一度も「保存」で商品取得していない → `inventoryItemIds` が空 → 棚卸作成時に `inventoryItemIdsByGroup` に**含まれない** → POS では `inventoryItemIdsByGroup` にキーが無いため、コレクション取得にフォールバックするが、POS 側の `readProductGroups()` のグループに `collectionIds` が無い／別要因で 0 件になる → 「商品がありません」になる。
+
+まとめると、
+
+- **「棚卸作成時点で、そのグループに `inventoryItemIds` が入っていないと、`inventoryItemIdsByGroup` にそのグループが載らない」**
+- その結果、POS のまとめて表示では 2つ目以降のグループ用の商品リストが取得できず、商品が表示されない。
+
+### 2. 既存の棚卸IDについて
+
+- すでに発行済みの棚卸IDは、**発行時に上記の旧ロジックで保存されている**ため、`inventoryItemIdsByGroup` に 2つ目以降が入っていない可能性が高い。
+- そのため、
+  - **新規に発行する棚卸ID**は、今回の管理画面側の修正により、全グループ分の商品IDが入るようになる。
+  - **既存の棚卸ID**は、現状のままだと 2つ目以降が空のままなので、「まとめて表示」では 2つ目以降が「商品がありません」のままになる。
+
+## 対応内容（コード側）
+
+1. **管理画面（棚卸ID発行時）**
+   - 発行時に「選択した全商品グループ」について、その時点で `inventoryItemIds` が空でも、
+     - コレクションがあればコレクションから、
+     - なければ SKU から  
+     商品を取得して `inventoryItemIds` を組み立て、**全グループ分**を `inventoryItemIdsByGroup` に保存するように変更した（`getInventoryItemIdsForGroup` を追加し、発行処理で利用）。
+   - これにより、**新規発行する棚卸ID**では、まとめて表示で全グループの商品リストが読まれるようになる。
+
+2. **既存の棚卸ID**
+   - コードでは「既存の count を書き換える」処理は入れていない。
+   - 既存の棚卸で 2つ目以降も表示したい場合は、
+     - その棚卸を**使わず、あらためて棚卸IDを発行し直す**か、
+     - 必要であれば「既存棚卸の `inventoryItemIdsByGroup` を補完する」機能を別途検討する必要がある。
+
+## 確認方法
+
+- 管理画面で**新しく棚卸IDを発行**し、複数商品グループを選択して発行する。
+- POS でその棚卸IDを開き、「まとめて表示」を選ぶ。
+- 全グループで商品リストが表示されることを確認する。

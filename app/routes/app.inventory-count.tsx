@@ -414,6 +414,73 @@ async function resolveSkusToInventoryItemIds(
   return inventoryItemIds;
 }
 
+/**
+ * 商品グループの inventoryItemIds を取得する。
+ * 既に保存されていればそれを返し、なければコレクションまたはSKUから取得する。
+ * 棚卸作成時に全グループ分の商品リストを count に保存するために使用。
+ */
+async function getInventoryItemIdsForGroup(
+  admin: { graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  group: ProductGroup
+): Promise<string[]> {
+  if (group.inventoryItemIds && group.inventoryItemIds.length > 0) {
+    return [...group.inventoryItemIds];
+  }
+  const ids: string[] = [];
+  if (group.collectionIds?.length) {
+    const collectionConfigs = group.collectionConfigs ?? [];
+    for (const collectionId of group.collectionIds) {
+      const config = collectionConfigs.find((c) => c.collectionId === collectionId);
+      const selectedVariantIds = config?.selectedVariantIds ?? [];
+      try {
+        const productsResp = await admin.graphql(
+          `#graphql
+            query CollectionProducts($id: ID!, $first: Int!) {
+              collection(id: $id) {
+                id
+                products(first: $first) {
+                  nodes {
+                    id
+                    variants(first: 250) {
+                      nodes {
+                        id
+                        inventoryItem { id }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          `,
+          { variables: { id: collectionId, first: 250 } }
+        );
+        const productsData = await productsResp.json();
+        const collection = productsData?.data?.collection;
+        if (collection) {
+          for (const product of collection.products?.nodes ?? []) {
+            for (const variant of product.variants?.nodes ?? []) {
+              if (variant.inventoryItem?.id) {
+                if (selectedVariantIds.length === 0 || selectedVariantIds.includes(variant.id)) {
+                  if (!ids.includes(variant.inventoryItem.id)) {
+                    ids.push(variant.inventoryItem.id);
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`Failed to get inventoryItemIds from collection ${collectionId}:`, e);
+      }
+    }
+  }
+  if (ids.length > 0) return ids;
+  if (group.skus?.length) {
+    return resolveSkusToInventoryItemIds(admin, group.skus);
+  }
+  return [];
+}
+
 export async function action({ request }: ActionFunctionArgs) {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
@@ -1158,7 +1225,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const locData = await locResp.json();
     const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
 
-    // 商品グループ名とinventoryItemIdsを取得
+    // 商品グループ名とinventoryItemIdsを取得（全グループ分を取得してPOSのまとめて表示で読めるようにする）
     const groupNames: string[] = [];
     const inventoryItemIdsByGroup: Record<string, string[]> = {};
     for (const groupId of targetProductGroupIds) {
@@ -1167,9 +1234,10 @@ export async function action({ request }: ActionFunctionArgs) {
         return { ok: false, error: `商品グループが見つかりません: ${groupId}` as const };
       }
       groupNames.push(group.name);
-      // ✅ 生成時の商品グループのinventoryItemIdsを保存（商品グループを編集しても影響を受けないように）
-      if (group.inventoryItemIds && group.inventoryItemIds.length > 0) {
-        inventoryItemIdsByGroup[groupId] = [...group.inventoryItemIds];
+      // ✅ 全グループ分のinventoryItemIdsを取得（既存がなければコレクション/SKUから取得）
+      const ids = await getInventoryItemIdsForGroup(admin, group);
+      if (ids.length > 0) {
+        inventoryItemIdsByGroup[groupId] = ids;
       }
     }
 
