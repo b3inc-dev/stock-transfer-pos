@@ -65,6 +65,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         location_id?: number;
         line_items?: Array<{
           id?: number;
+          variant_id?: number;
           quantity?: number;
         }>;
       }>;
@@ -293,140 +294,159 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       if (!alreadyRecordedAtOrder) {
-        // fulfillments あり：救済のみ行う（注文の line_items で admin_webhook を order_sales に更新）
-        const fulfillmentLocationId = order.fulfillments[0]?.location_id != null
-          ? String(order.fulfillments[0].location_id)
-          : null;
-        const locationIdRaw = fulfillmentLocationId;
-        const locationIdGid = fulfillmentLocationId?.startsWith("gid://")
-          ? fulfillmentLocationId
-          : fulfillmentLocationId
-            ? `gid://shopify/Location/${fulfillmentLocationId}`
-            : null;
+        // 複数履行・複数ロケーション対応：履行ごとの location_id と line_items を収集し、(item, location) 単位で救済または OrderPendingLocation 登録
+        type PendingItem = { locationIdRaw: string; locationIdGid: string | null; variant_id: number; quantity: number };
+        const pendingItems: PendingItem[] = [];
+        for (const f of order.fulfillments || []) {
+          const locId = f.location_id != null ? String(f.location_id) : null;
+          if (!locId) continue;
+          const locationIdGid = locId.startsWith("gid://") ? locId : `gid://shopify/Location/${locId}`;
+          for (const fli of f.line_items || []) {
+            const variantId = fli.variant_id;
+            const qty = Math.max(0, Number(fli.quantity) || 0);
+            if (!variantId || qty <= 0) continue;
+            pendingItems.push({ locationIdRaw: locId, locationIdGid, variant_id: variantId, quantity: qty });
+          }
+        }
 
-        if (locationIdRaw && order.line_items && order.line_items.length > 0 && db && typeof (db as any).inventoryChangeLog !== "undefined") {
-          for (const lineItem of order.line_items) {
-            const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
-            if (!lineItem.variant_id || lineItemQty <= 0) continue;
+        if (pendingItems.length > 0 && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+          const variantIds = [...new Set(pendingItems.map((p) => p.variant_id))];
+          const variantToInventoryItem = new Map<number, { inventoryItemId: string; rawItemId: string }>();
+          for (const vid of variantIds) {
             try {
-            const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
-            const variantResp = await admin.request({
-              data: `
-                #graphql
-                query GetVariant($id: ID!) {
-                  productVariant(id: $id) { id inventoryItem { id } }
-                }
-              `,
-              variables: { id: variantId },
+              const variantIdGid = `gid://shopify/ProductVariant/${vid}`;
+              const variantResp = await admin.request({
+                data: `
+                  #graphql
+                  query GetVariant($id: ID!) {
+                    productVariant(id: $id) { id inventoryItem { id } }
+                  }
+                `,
+                variables: { id: variantIdGid },
+              });
+              const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+              const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
+              if (inventoryItemId) {
+                const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+                variantToInventoryItem.set(vid, { inventoryItemId, rawItemId });
+              }
+            } catch (e) {
+              console.warn(`[orders/updated] Failed to get inventoryItem for variant ${vid}:`, e);
+            }
+          }
+
+          const key = (raw: string, loc: string) => `${raw}\t${loc}`;
+          const grouped = new Map<string, { rawItemId: string; inventoryItemId: string; locationIdRaw: string; locationIdGid: string | null; quantity: number }>();
+          for (const p of pendingItems) {
+            const info = variantToInventoryItem.get(p.variant_id);
+            if (!info) continue;
+            const k = key(info.rawItemId, p.locationIdRaw);
+            const existing = grouped.get(k);
+            if (existing) existing.quantity += p.quantity;
+            else grouped.set(k, { rawItemId: info.rawItemId, inventoryItemId: info.inventoryItemId, locationIdRaw: p.locationIdRaw, locationIdGid: p.locationIdGid, quantity: p.quantity });
+          }
+
+          if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+            await (db as any).orderPendingLocation.deleteMany({
+              where: { shop, orderId: String(order.id) },
             });
-            const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
-            const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
-            if (!inventoryItemId) continue;
-            const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
-            const itemIdCandidates = [
-              inventoryItemId,
-              rawItemId,
-              `gid://shopify/InventoryItem/${rawItemId}`,
-            ].filter((id, i, arr) => arr.indexOf(id) === i);
-            const locationIdCandidates = [
-              locationIdRaw,
-              locationIdGid,
-              locationIdRaw?.startsWith("gid://") ? locationIdRaw : null,
-            ].filter(Boolean) as string[];
+          }
 
-            // 既にこの order で order_sales が記録されていればスキップ（二重救済防止）
-            const existingOrderSales = await (db as any).inventoryChangeLog.findFirst({
-              where: {
-                shop,
-                inventoryItemId: { in: itemIdCandidates },
-                locationId: { in: locationIdCandidates },
-                activity: "order_sales",
-                sourceId: orderIdRef,
-                timestamp: { gte: searchFrom, lte: searchTo },
-              },
-            });
-            if (existingOrderSales) continue;
+          for (const [, g] of grouped) {
+            try {
+              const itemIdCandidates = [g.inventoryItemId, g.rawItemId, `gid://shopify/InventoryItem/${g.rawItemId}`].filter((id, i, arr) => arr.indexOf(id) === i);
+              const locationIdCandidates = [g.locationIdRaw, g.locationIdGid, g.locationIdRaw?.startsWith("gid://") ? g.locationIdRaw : null].filter(Boolean) as string[];
 
-            // 時間窓内で最も古い admin_webhook を1件だけ order_sales に更新（販売可能・手持ちの2回更新のうち1件だけ救済）
-            const adminWebhookToUpdate = await findWithAdminWebhookRetry(
-              () =>
-                (db as any).inventoryChangeLog.findFirst({
-                  where: {
-                    shop,
-                    inventoryItemId: { in: itemIdCandidates },
-                    locationId: { in: locationIdCandidates },
-                    activity: "admin_webhook",
-                    timestamp: { gte: searchFrom, lte: searchTo },
-                  },
-                  orderBy: { timestamp: "asc" },
-                }),
-              "[orders/updated] fulfillments"
-            );
+              const existingOrderSales = await (db as any).inventoryChangeLog.findFirst({
+                where: {
+                  shop,
+                  inventoryItemId: { in: itemIdCandidates },
+                  locationId: { in: locationIdCandidates },
+                  activity: "order_sales",
+                  sourceId: orderIdRef,
+                  timestamp: { gte: searchFrom, lte: searchTo },
+                },
+              });
+              if (existingOrderSales) continue;
 
-            if (adminWebhookToUpdate) {
-              const orderDelta = -lineItemQty;
-              let quantityAfterRemediation: number | null = null;
-              try {
-                const levelResp = await admin.request({
-                  data: `
-                    #graphql
-                    query GetInventoryLevel($itemId: ID!) {
-                      inventoryItem(id: $itemId) {
-                        inventoryLevels(first: 250) {
-                          edges {
-                            node {
-                              location { id }
-                              quantities(names: ["available"]) { quantity }
+              const adminWebhookToUpdate = await findWithAdminWebhookRetry(
+                () =>
+                  (db as any).inventoryChangeLog.findFirst({
+                    where: {
+                      shop,
+                      inventoryItemId: { in: itemIdCandidates },
+                      locationId: { in: locationIdCandidates },
+                      activity: "admin_webhook",
+                      timestamp: { gte: searchFrom, lte: searchTo },
+                    },
+                    orderBy: { timestamp: "asc" },
+                  }),
+                "[orders/updated] fulfillments"
+              );
+
+              if (adminWebhookToUpdate) {
+                const orderDelta = -g.quantity;
+                let quantityAfterRemediation: number | null = null;
+                try {
+                  const levelResp = await admin.request({
+                    data: `
+                      #graphql
+                      query GetInventoryLevel($itemId: ID!) {
+                        inventoryItem(id: $itemId) {
+                          inventoryLevels(first: 250) {
+                            edges {
+                              node {
+                                location { id }
+                                quantities(names: ["available"]) { quantity }
+                              }
                             }
                           }
                         }
                       }
-                    }
-                  `,
-                  variables: { itemId: inventoryItemId },
+                    `,
+                    variables: { itemId: g.inventoryItemId },
+                  });
+                  const levelData = levelResp && typeof levelResp.json === "function" ? await levelResp.json() : levelResp;
+                  const levels = levelData?.data?.inventoryItem?.inventoryLevels?.edges || [];
+                  const locIdForMatch = g.locationIdGid ?? (g.locationIdRaw?.startsWith("gid://") ? g.locationIdRaw : `gid://shopify/Location/${g.locationIdRaw}`);
+                  const match = levels.find((e: any) => e?.node?.location?.id === locIdForMatch || e?.node?.location?.id === g.locationIdRaw);
+                  if (match?.node?.quantities?.[0]?.quantity != null) quantityAfterRemediation = match.node.quantities[0].quantity;
+                } catch (e) {
+                  console.warn(`[orders/updated] Could not fetch quantityAfter for remediation:`, e);
+                }
+                const updateData: { activity: string; delta: number; sourceType: string; sourceId: string; note: string; quantityAfter?: number } = {
+                  activity: "order_sales",
+                  delta: orderDelta,
+                  sourceType: "order_sales",
+                  sourceId: orderIdRef,
+                  note: `注文: #${order.id}`,
+                };
+                if (quantityAfterRemediation !== null) updateData.quantityAfter = quantityAfterRemediation;
+                await (db as any).inventoryChangeLog.update({
+                  where: { id: adminWebhookToUpdate.id },
+                  data: updateData,
                 });
-                const levelData = levelResp && typeof levelResp.json === "function" ? await levelResp.json() : levelResp;
-                const levels = levelData?.data?.inventoryItem?.inventoryLevels?.edges || [];
-                const locIdForMatch = locationIdGid ?? (locationIdRaw?.startsWith("gid://") ? locationIdRaw : `gid://shopify/Location/${locationIdRaw}`);
-                const match = levels.find((e: any) => e?.node?.location?.id === locIdForMatch || e?.node?.location?.id === locationIdRaw);
-                if (match?.node?.quantities?.[0]?.quantity != null) quantityAfterRemediation = match.node.quantities[0].quantity;
-              } catch (e) {
-                console.warn(`[orders/updated] Could not fetch quantityAfter for remediation:`, e);
+                console.log(`[orders/updated] Remediated admin_webhook to order_sales (fulfillments): id=${adminWebhookToUpdate.id}, order.id=${order.id}, item=${g.rawItemId}, locationId=${g.locationIdRaw}, delta=${orderDelta}`);
+              } else if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+                const locIdForPending = g.locationIdRaw ?? "";
+                await (db as any).orderPendingLocation.upsert({
+                  where: {
+                    shop_orderId_inventoryItemId_locationId: { shop, orderId: String(order.id), inventoryItemId: g.rawItemId, locationId: locIdForPending },
+                  },
+                  create: {
+                    shop,
+                    orderId: String(order.id),
+                    orderCreatedAt: orderCreatedAt,
+                    inventoryItemId: g.rawItemId,
+                    locationId: locIdForPending,
+                    quantity: g.quantity,
+                  },
+                  update: { orderCreatedAt: orderCreatedAt, quantity: g.quantity },
+                });
+                console.log(`[orders/updated] OrderPendingLocation upserted: orderId=${order.id}, inventoryItemId=${g.rawItemId}, locationId=${locIdForPending}, quantity=${g.quantity}`);
               }
-              const updateData: { activity: string; delta: number; sourceType: string; sourceId: string; note: string; quantityAfter?: number } = {
-                activity: "order_sales",
-                delta: orderDelta,
-                sourceType: "order_sales",
-                sourceId: orderIdRef,
-                note: `注文: #${order.id}`,
-              };
-              if (quantityAfterRemediation !== null) updateData.quantityAfter = quantityAfterRemediation;
-              await (db as any).inventoryChangeLog.update({
-                where: { id: adminWebhookToUpdate.id },
-                data: updateData,
-              });
-              console.log(`[orders/updated] Remediated admin_webhook to order_sales (fulfillments exist): id=${adminWebhookToUpdate.id}, order.id=${order.id}, delta=${orderDelta}${quantityAfterRemediation !== null ? `, quantityAfter=${quantityAfterRemediation}` : ""}`);
-            } else if (db && typeof (db as any).orderPendingLocation !== "undefined") {
-              // POS等で orders/updated が inventory_levels/update より先に届いた場合：admin_webhook がまだ無いので OrderPendingLocation に登録し、後から届く inventory_levels/update で order_sales にマッチさせる
-              const locIdForPending = locationIdRaw ?? "";
-              await (db as any).orderPendingLocation.upsert({
-                where: {
-                  shop_orderId_inventoryItemId_locationId: { shop, orderId: String(order.id), inventoryItemId: rawItemId, locationId: locIdForPending },
-                },
-                create: {
-                  shop,
-                  orderId: String(order.id),
-                  orderCreatedAt: orderCreatedAt,
-                  inventoryItemId: rawItemId,
-                  locationId: locIdForPending,
-                  quantity: lineItemQty,
-                },
-                update: { orderCreatedAt: orderCreatedAt, quantity: lineItemQty },
-              });
-              console.log(`[orders/updated] OrderPendingLocation upserted: orderId=${order.id}, inventoryItemId=${rawItemId}, locationId=${locIdForPending}, quantity=${lineItemQty}`);
-            }
             } catch (err) {
-              console.error(`[orders/updated] Error remediating line_item for order ${order.id}:`, err);
+              console.error(`[orders/updated] Error remediating (item, location) for order ${order.id}:`, err);
             }
           }
         }
