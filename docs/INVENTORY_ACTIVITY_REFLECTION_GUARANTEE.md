@@ -63,6 +63,7 @@
 - **inventory_levels/update** はペイロードを**数値 ID**のまま保存している
 - **orders/updated / refunds/create** は **GID 形式**で保存していることがある
 - そのため「既知アクティビティ」「admin_webhook」の検索では、**inventoryItemId / locationId の両方の形式**を候補にして検索する（inventoryItemIdCandidates, locationIdCandidates）
+- **delta 算出用の「直前ログ」**（prevLog / prevLogWithQty）も、数値のみだと order_sales/refund（GID 保存）を拾えず誤った直前値から delta が計算されるため、**両形式を候補**にして検索する（prevItemCandidates, prevLocCandidates）
 
 ---
 
@@ -115,7 +116,38 @@
 
 ---
 
-## 8. 関連ファイル
+## 8. アクティビティ・変動数・変動後在庫が意図とずれうる残りのリスク
+
+以下は、既存の救済・二重防止を入れたうえで、**まだ意図した処理にならない可能性がある箇所**の整理です。
+
+| リスク | どの値がずれるか | 条件・経路 | 対策・備考 |
+|--------|------------------|------------|------------|
+| **短時間の複数注文で 2 件目が「管理」** | アクティビティ | 同一商品で別注文が続き、1 件目の Webhook で OrderPendingLocation がマッチして削除される。2 件目の Webhook では別 orderId のため Pending が無く「管理」で記録される。 | **対応済み**: inventory_levels/update で「変動前在庫（prevAvailable）=== available + 売上数」となる Pending だけを採用する数量一致マッチに変更。複数 Pending があっても正しい注文に紐づく。 |
+| **api/log-inventory-change が別注文の行を更新** | 変動数・変動後在庫 | 同一商品・ロケーションで短時間に複数注文があり、API が「直近の order_sales」を 1 件だけ更新する。直近が 2 件目の注文の行だと、1 件目のロス等を送ったときに 2 件目の行の delta/quantityAfter が上書きされる。 | **対応済み**: order_sales/refund の既存行を更新するのは、API が activity として **order_sales または refund を送ったときだけ**に限定。ロス・入庫等では order_sales 行を更新しない。 |
+| **refunds.create で quantityAfter が取れない** | 変動後在庫 | GraphQL で在庫レベルを取得できない場合、既存 admin_webhook 更新時に quantityAfter が null のまま。 | **対応済み**: ロケーション ID の GID/数値両形式で一致を試すフォールバックを追加。取得できない場合は従来どおり既存値を維持。 |
+| **orders.updated の救済で quantityAfter を更新していない** | 変動後在庫 | 救済時は activity, delta, sourceType, sourceId, note のみ更新。quantityAfter は既存のまま。 | **対応済み**: 救済時に GraphQL で現在の在庫レベル（available）を取得し、quantityAfter をセットしてから更新。取得失敗時は既存のまま。 |
+| **delta が null のまま残る** | 変動数 | 直前ログが無い・InventoryAdjustmentGroup からも取れない、かつ API で補完されない場合。 | **対応済み**: 保存時に note に「変動数は直前ログが存在しなかったため記録されていません」を付与。一覧に「備考」列を追加し、理由を表示。prevLog を GID 候補で検索する修正で、order_sales/refund 直後の誤計算は防止済み。 |
+| **重複チェック（5秒窓）で別イベントの行を上書き** | 変動後在庫・二重防止 | 5秒窓内の既存 admin_webhook を「重複」とみなして quantityAfter を更新し return していたため、別イベント（例: 売上→返品）の行を誤って上書きする可能性があった。 | **対応済み**: 「同一イベント」のみ重複扱いするよう変更。既存行の quantityAfter が今回の available と**一致する**か **null** のときだけ更新して return。一致しない場合は別イベントとして新規行を作成。 |
+
+上記のうちリスク 1〜4 および delta null・重複チェックはコードで対策済み。delta が null になるケースは初回変動などで残るが、note と備考列で理由が分かる。
+
+**再確認で追加対応した残りリスク（同上・対策済み）**
+
+| リスク | 対策 |
+|--------|------|
+| **短時間に複数返品で 2 件目が誤った返品にマッチ** | RefundPendingLocation を「変動前在庫 === available - 返品数」で数量一致マッチに変更（OrderPendingLocation と同様）。初回・保存直前・待機後の 3 箇所で適用。 |
+| **refunds.create の prevLog が Webhook 保存行を拾えない** | prevLog 検索で inventoryItemId / locationId を GID と数値の両形式で候補にし、delta 計算の直前値が取れるようにした。 |
+
+**残りの軽微なエッジケース（発生頻度低・仕様上許容）**
+
+- **同一注文で同一商品が2ロケーションから出荷**: **対応済み**。OrderPendingLocation に locationId を追加し、upsert・findMany・deleteMany で locationId を扱うように変更。同一注文で2ロケーション出荷時も各 Webhook が正しいロケーションの Pending にマッチする。
+- **異なる変動が同じ変動後在庫で 2 分以内に発生**: 例）10→8 と 12→8。2本目の Webhook で「直近 admin_webhook（quantityAfter=8）」を同一イベントとみなし更新して return するため、2つの変動が1行にまとまる。レアなケース。
+
+新たな Webhook 順序や Shopify 側の挙動変更が出た場合は、上記と同様に「経路・条件・どの値がずれるか」を追記して対策するとよいです。
+
+---
+
+## 9. 関連ファイル
 
 | ファイル | 役割 |
 |----------|------|

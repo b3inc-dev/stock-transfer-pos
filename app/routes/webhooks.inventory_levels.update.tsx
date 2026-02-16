@@ -190,11 +190,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     try {
       if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+        // 直前ログ検索は「数値IDのみ」だと order_sales/refund（GID形式で保存）を拾えず delta が誤計算になるため、両形式を候補にする
+        const prevItemCandidates = [inventoryItemIdRaw, `gid://shopify/InventoryItem/${inventoryItemIdRaw}`];
+        const prevLocCandidates = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`];
         const prevLog = await (db as any).inventoryChangeLog.findFirst({
           where: {
             shop,
-            inventoryItemId: inventoryItemIdRaw, // 元の形式を使用
-            locationId: locationIdRaw, // 元の形式を使用
+            inventoryItemId: { in: prevItemCandidates },
+            locationId: { in: prevLocCandidates },
           },
           orderBy: {
             timestamp: "desc",
@@ -209,8 +212,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const prevLogWithQty = await (db as any).inventoryChangeLog.findFirst({
             where: {
               shop,
-              inventoryItemId: inventoryItemIdRaw,
-              locationId: locationIdRaw,
+              inventoryItemId: { in: prevItemCandidates },
+              locationId: { in: prevLocCandidates },
               quantityAfter: { not: null },
             },
             orderBy: { timestamp: "desc" },
@@ -312,8 +315,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return new Response("OK", { status: 200 });
     }
 
-    // 重複チェック：同じタイムスタンプで既にadmin_webhookログが存在する場合はスキップ
-    // （inventory_levels/updateが複数回呼ばれる場合の二重登録を防ぐ）
+    // 重複チェック：同一イベントの重複送信のみスキップする（別イベントの行を上書きしない）
+    // 既存行の quantityAfter が今回の available と一致する、または null（未確定）のときだけ「同一イベント」とみなし、
+    // その行の quantityAfter を更新して return。一致しない場合は別イベントなので既存行は触らず新規作成へ進む。
     if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
       const duplicateCheckThreshold = new Date(updatedAt.getTime() - 5 * 1000); // 5秒前
       const duplicateCheckTo = new Date(updatedAt.getTime() + 5 * 1000); // 5秒後
@@ -327,18 +331,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       });
       if (duplicateAdminLog) {
-        console.log(
-          `[inventory_levels/update] Skipping duplicate admin_webhook log: existing id=${duplicateAdminLog.id}, timestamp=${duplicateAdminLog.timestamp}, quantityAfter=${duplicateAdminLog.quantityAfter}`
-        );
-        // 既存ログのquantityAfterを更新（最新の値に更新）
-        if (duplicateAdminLog.quantityAfter !== available) {
-          await (db as any).inventoryChangeLog.update({
-            where: { id: duplicateAdminLog.id },
-            data: { quantityAfter: available },
-          });
-          console.log(`[inventory_levels/update] Updated existing admin_webhook log quantityAfter: ${duplicateAdminLog.quantityAfter} -> ${available}`);
+        const existingQty = duplicateAdminLog.quantityAfter ?? null;
+        const isSameEvent = existingQty === available || existingQty === null;
+        if (isSameEvent) {
+          console.log(
+            `[inventory_levels/update] Skipping duplicate admin_webhook log (same event): existing id=${duplicateAdminLog.id}, quantityAfter=${duplicateAdminLog.quantityAfter}`
+          );
+          if (duplicateAdminLog.quantityAfter !== available) {
+            await (db as any).inventoryChangeLog.update({
+              where: { id: duplicateAdminLog.id },
+              data: { quantityAfter: available },
+            });
+            console.log(`[inventory_levels/update] Updated existing admin_webhook log quantityAfter: ${duplicateAdminLog.quantityAfter} -> ${available}`);
+          }
+          return new Response("OK", { status: 200 });
         }
-        return new Response("OK", { status: 200 });
+        console.log(
+          `[inventory_levels/update] Existing admin_webhook in window but different event (quantityAfter ${existingQty} !== available ${available}), will create new row`
+        );
       }
     }
 
@@ -544,47 +554,69 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // 受注直後は orders/updated でロケーションが取れず OrderPendingLocation に登録されている場合がある。
-    // 同一商品・時刻が近い保留注文があれば、この変動は「売上」として記録する。
+    // 同一商品・時刻が近い保留注文があれば、この変動は「売上」として記録する。短時間複数注文時は「変動前在庫 === available + 売上数」で正しい注文にマッチする。
+    // 同一注文で2ロケーション出荷に対応するため、locationId でフィルタする（空文字は従来データ用）。
     // 返品は refunds/create で RefundPendingLocation に登録。在庫増（delta>0）時にマッチすれば「返品」として記録。
-    let pendingOrder: { orderId: string; quantity: number } | null = null;
+    let pendingOrder: { orderId: string; quantity: number; locationId: string } | null = null;
     let pendingRefund: { refundId: string; orderId: string; quantity: number } | null = null;
     if (db && typeof (db as any).orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      const pending = await (db as any).orderPendingLocation.findFirst({
+      const orderLocCands = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""].filter(Boolean);
+      const allPendings = await (db as any).orderPendingLocation.findMany({
         where: {
           shop,
           inventoryItemId: inventoryItemIdRaw,
+          locationId: { in: orderLocCands },
           orderCreatedAt: { gte: pendingFrom, lte: pendingTo },
         },
         orderBy: { orderCreatedAt: "desc" },
       });
+      const prevForMatch = prevAvailable ?? null;
+      const matched =
+        prevForMatch != null
+          ? allPendings.find((p: { quantity: number }) => {
+              const qty = Math.max(1, Number(p.quantity) || 1);
+              return available + qty === prevForMatch;
+            })
+          : allPendings[0] ?? null;
+      const pending = matched ?? allPendings[0] ?? null;
       if (pending) {
-        // ペイロードに quantity が含まれず OrderPendingLocation が 0 や未設定で保存されている場合に備え、1 以上に正規化
         const qty = Math.max(1, Number(pending.quantity) || 1);
-        pendingOrder = { orderId: pending.orderId, quantity: qty };
-        console.log(`[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, quantity=${qty} (raw=${pending.quantity}), will save as order_sales`);
+        pendingOrder = { orderId: pending.orderId, quantity: qty, locationId: pending.locationId ?? "" };
+        console.log(
+          `[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, quantity=${qty}, locationId=${pending.locationId ?? ""}, prevAvailable=${prevForMatch ?? "n/a"}, will save as order_sales`
+        );
       }
     }
 
-    // 在庫増（delta>0）の場合、RefundPendingLocation を検索（返品として記録）
+    // 在庫増（delta>0）の場合、RefundPendingLocation を検索（返品として記録）。短時間複数返品時は「変動前在庫 === available - 返品数」で正しい返品にマッチする。
     if ((delta === null || (delta !== null && delta > 0)) && !pendingOrder && db && typeof (db as any).refundPendingLocation !== "undefined") {
       const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`];
-      const pendingRef = await (db as any).refundPendingLocation.findFirst({
+      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
+      const allRefundPendings = await (db as any).refundPendingLocation.findMany({
         where: {
           shop,
           inventoryItemId: inventoryItemIdRaw,
-          locationId: { in: locCands.filter(Boolean) },
+          locationId: { in: locCands },
           refundCreatedAt: { gte: refundFrom, lte: refundTo },
         },
         orderBy: { refundCreatedAt: "desc" },
       });
+      const prevForRefund = prevAvailable ?? null;
+      const matchedRefund =
+        prevForRefund != null
+          ? allRefundPendings.find((p: { quantity: number }) => {
+              const qty = Math.max(1, Number(p.quantity) || 1);
+              return prevForRefund === available - qty;
+            })
+          : allRefundPendings[0] ?? null;
+      const pendingRef = matchedRefund ?? allRefundPendings[0] ?? null;
       if (pendingRef) {
         const qty = Math.max(1, Number(pendingRef.quantity) || 1);
         pendingRefund = { refundId: pendingRef.refundId, orderId: pendingRef.orderId, quantity: qty };
-        console.log(`[inventory_levels/update] Matched RefundPendingLocation: refundId=${pendingRef.refundId}, orderId=${pendingRef.orderId}, quantity=${qty}, will save as refund`);
+        console.log(`[inventory_levels/update] Matched RefundPendingLocation: refundId=${pendingRef.refundId}, orderId=${pendingRef.orderId}, quantity=${qty}, prevAvailable=${prevForRefund ?? "n/a"}, will save as refund`);
       }
     }
 
@@ -599,17 +631,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && db && typeof (db as any).orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      const pendingAgain = await (db as any).orderPendingLocation.findFirst({
-        where: {
-          shop,
-          inventoryItemId: inventoryItemIdRaw,
-          orderCreatedAt: { gte: pendingFrom, lte: pendingTo },
-        },
+      const orderLocCandsAgain = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""].filter(Boolean);
+      const allAgain = await (db as any).orderPendingLocation.findMany({
+        where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsAgain }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
         orderBy: { orderCreatedAt: "desc" },
       });
+      const prevForAgain = prevAvailable ?? null;
+      const matchedAgain =
+        prevForAgain != null
+          ? allAgain.find((p: { quantity: number }) => available + Math.max(1, Number(p.quantity) || 1) === prevForAgain)
+          : allAgain[0] ?? null;
+      const pendingAgain = matchedAgain ?? allAgain[0] ?? null;
       if (pendingAgain) {
         const qty = Math.max(1, Number(pendingAgain.quantity) || 1);
-        pendingOrder = { orderId: pendingAgain.orderId, quantity: qty };
+        pendingOrder = { orderId: pendingAgain.orderId, quantity: qty, locationId: pendingAgain.locationId ?? "" };
         finalActivity = "order_sales";
         finalSourceId = `order_${pendingOrder.orderId}`;
         finalNote = `注文: #${pendingOrder.orderId}`;
@@ -620,11 +655,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && db && typeof (db as any).refundPendingLocation !== "undefined") {
       const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`];
-      const pendingRefAgain = await (db as any).refundPendingLocation.findFirst({
-        where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands.filter(Boolean) }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
+      const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
+      const allRefAgain = await (db as any).refundPendingLocation.findMany({
+        where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
         orderBy: { refundCreatedAt: "desc" },
       });
+      const prevForRefAgain = prevAvailable ?? null;
+      const matchedRefAgain =
+        prevForRefAgain != null
+          ? allRefAgain.find((p: { quantity: number }) => prevForRefAgain === available - Math.max(1, Number(p.quantity) || 1))
+          : allRefAgain[0] ?? null;
+      const pendingRefAgain = matchedRefAgain ?? allRefAgain[0] ?? null;
       if (pendingRefAgain) {
         const qty = Math.max(1, Number(pendingRefAgain.quantity) || 1);
         pendingRefund = { refundId: pendingRefAgain.refundId, orderId: pendingRefAgain.orderId, quantity: qty };
@@ -644,17 +685,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
         await sleep(PENDING_ORDER_WAIT_MS);
-        const pendingRetry = await (db as any).orderPendingLocation.findFirst({
-          where: {
-            shop,
-            inventoryItemId: inventoryItemIdRaw,
-            orderCreatedAt: { gte: pendingFrom, lte: pendingTo },
-          },
+        const orderLocCandsRetry = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""].filter(Boolean);
+        const allRetry = await (db as any).orderPendingLocation.findMany({
+          where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsRetry }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
           orderBy: { orderCreatedAt: "desc" },
         });
+        const prevForRetry = prevAvailable ?? null;
+        const matchedRetry =
+          prevForRetry != null
+            ? allRetry.find((p: { quantity: number }) => available + Math.max(1, Number(p.quantity) || 1) === prevForRetry)
+            : allRetry[0] ?? null;
+        const pendingRetry = matchedRetry ?? allRetry[0] ?? null;
         if (pendingRetry) {
           const qty = Math.max(1, Number(pendingRetry.quantity) || 1);
-          pendingOrder = { orderId: pendingRetry.orderId, quantity: qty };
+          pendingOrder = { orderId: pendingRetry.orderId, quantity: qty, locationId: pendingRetry.locationId ?? "" };
           finalActivity = "order_sales";
           finalSourceId = `order_${pendingOrder.orderId}`;
           finalNote = `注文: #${pendingOrder.orderId}`;
@@ -669,11 +713,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           await sleep(PENDING_ORDER_WAIT_MS);
           const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
           const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-          const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`];
-          const pendingRefRetry = await (db as any).refundPendingLocation.findFirst({
-            where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands.filter(Boolean) }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
+          const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
+          const allRefRetry = await (db as any).refundPendingLocation.findMany({
+            where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
             orderBy: { refundCreatedAt: "desc" },
           });
+          const prevForRefRetry = prevAvailable ?? null;
+          const matchedRefRetry =
+            prevForRefRetry != null
+              ? allRefRetry.find((p: { quantity: number }) => prevForRefRetry === available - Math.max(1, Number(p.quantity) || 1))
+              : allRefRetry[0] ?? null;
+          const pendingRefRetry = matchedRefRetry ?? allRefRetry[0] ?? null;
           if (pendingRefRetry) {
             const qty = Math.max(1, Number(pendingRefRetry.quantity) || 1);
             pendingRefund = { refundId: pendingRefRetry.refundId, orderId: pendingRefRetry.orderId, quantity: qty };
@@ -737,7 +787,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         });
         if (typeof (db as any).orderPendingLocation !== "undefined") {
           await (db as any).orderPendingLocation.deleteMany({
-            where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw },
+            where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw, locationId: pendingOrder.locationId },
           });
         }
         console.log(`[inventory_levels/update] Updated existing admin_webhook to order_sales (avoid duplicate row): id=${existingAdmin.id}, orderId=${pendingOrder.orderId}, quantityAfter ${existingAdmin.quantityAfter} -> ${available}`);
@@ -810,11 +860,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
         console.log(`[inventory_levels/update] Saving log: shop=${shop}, item=${inventoryItemIdRaw}, location=${locationIdRaw}, locationName=${locationName}, delta=${finalDelta}, quantityAfter=${available}, date=${date}, activity=${finalActivity}`);
         
-        // deltaがnullの場合でも記録する（管理画面からの操作の場合、直前の値が取れないことがある）
+        // deltaがnullの場合でも記録する。理由を note に残し、一覧で「-」の意味が分かるようにする。
+        const noteForCreate =
+          finalNote ??
+          (finalDelta === null ? "変動数は直前ログが存在しなかったため記録されていません" : null);
         if (finalDelta === null) {
-          console.log(`[inventory_levels/update] Warning: delta is null, but saving log anyway`);
+          console.log(`[inventory_levels/update] Saving log with delta=null (first event or no prev log), note will explain`);
         }
-        
+
         await (db as any).inventoryChangeLog.create({
           data: {
             shop,
@@ -832,15 +885,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             sourceId: finalSourceId,
             adjustmentGroupId,
             idempotencyKey: pendingOrder ? `${shop}_order_sales_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingOrder.orderId}_${updatedAt.toISOString()}` : pendingRefund ? `${shop}_refund_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingRefund.orderId}_${updatedAt.toISOString()}` : idempotencyKey,
-            note: finalNote,
+            note: noteForCreate,
           },
         });
         
         if (pendingOrder && typeof (db as any).orderPendingLocation !== "undefined") {
           await (db as any).orderPendingLocation.deleteMany({
-            where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw },
+            where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw, locationId: pendingOrder.locationId },
           });
-          console.log(`[inventory_levels/update] Removed OrderPendingLocation for order ${pendingOrder.orderId}, item ${inventoryItemIdRaw}`);
+          console.log(`[inventory_levels/update] Removed OrderPendingLocation for order ${pendingOrder.orderId}, item ${inventoryItemIdRaw}, locationId=${pendingOrder.locationId}`);
         }
         if (pendingRefund && typeof (db as any).refundPendingLocation !== "undefined") {
           const rawLocForDel = locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, "") || locationIdRaw;

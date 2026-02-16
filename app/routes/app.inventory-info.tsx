@@ -2191,6 +2191,7 @@ export default function InventoryInfoPage() {
                                     <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動数</th>
                                     <th style={{ padding: "12px 16px", textAlign: "right", fontWeight: 600, fontSize: "12px", color: "#202223" }}>変動後在庫数</th>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>参照ID</th>
+                                    <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>備考</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -2216,6 +2217,9 @@ export default function InventoryInfoPage() {
                                       <td style={{ padding: "12px 16px", fontSize: "12px", color: "#666" }}>
                                         {log.sourceId ? (log.sourceId.length > 30 ? `${log.sourceId.substring(0, 30)}...` : log.sourceId) : "-"}
                                       </td>
+                                      <td style={{ padding: "12px 16px", fontSize: "11px", color: "#666", maxWidth: "200px" }}>
+                                        {log.note ? (log.note.length > 50 ? `${log.note.substring(0, 50)}...` : log.note) : "-"}
+                                      </td>
                                     </tr>
                                   ))}
                                 </tbody>
@@ -2224,7 +2228,7 @@ export default function InventoryInfoPage() {
                             {/* 注釈情報 */}
                             <div style={{ marginTop: "12px", padding: "8px 12px", backgroundColor: "#f6f6f7", borderRadius: "6px", border: "1px solid #e1e3e5" }}>
                               <s-text tone="subdued" size="small" style={{ fontSize: "11px", lineHeight: "1.4" }}>
-                                管理画面からの在庫数量変更：対象SKUとロケーションの変動が初回の場合は変動数が「-」表記になります。
+                                変動数が「-」の場合は備考列に理由（例：直前ログが存在しなかったため）を表示しています。
                                 <br />
                                 CSVダウンロード制限：一括処理最大50,000件となっています。超過する場合は検索条件にて件数のご調整をお願いします。
                               </s-text>

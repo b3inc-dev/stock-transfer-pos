@@ -320,10 +320,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variables: { itemId: inventoryItemId },
           });
           const levelData = levelResp && typeof levelResp.json === "function" ? await levelResp.json() : levelResp;
-          // 特定のロケーションに一致するInventoryLevelを検索
           const levels = levelData?.data?.inventoryItem?.inventoryLevels?.edges || [];
+          const locIdAlt = locationId.startsWith("gid://") ? locationId.replace(/^gid:\/\/shopify\/Location\//, "") : `gid://shopify/Location/${locationId}`;
           const matchingLevel = levels.find(
-            (edge: any) => edge?.node?.location?.id === locationId
+            (edge: any) => {
+              const id = edge?.node?.location?.id;
+              return id === locationId || id === locIdAlt;
+            }
           );
           if (matchingLevel?.node?.quantities?.[0]) {
             quantityAfter = matchingLevel.node.quantities[0].quantity;
@@ -332,15 +335,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           console.error("Failed to get inventory level:", error);
         }
 
-        // 直前の在庫値を取得（delta計算用）
+        // 直前の在庫値を取得（delta計算用）。inventory_levels/update は数値IDで保存するため、GID/数値両形式を候補にする。
         let delta: number | null = null;
         try {
           if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+            const prevItemCandidates = [inventoryItemId, rawItemId, `gid://shopify/InventoryItem/${rawItemId}`].filter((id, i, arr) => arr.indexOf(id) === i);
+            const prevLocCandidates = [locationId, rawLocId, rawLocId ? `gid://shopify/Location/${rawLocId}` : null].filter(Boolean);
             const prevLog = await (db as any).inventoryChangeLog.findFirst({
               where: {
                 shop,
-                inventoryItemId: inventoryItemId,
-                locationId: locationId,
+                inventoryItemId: { in: prevItemCandidates },
+                locationId: { in: prevLocCandidates },
               },
               orderBy: {
                 timestamp: "desc",

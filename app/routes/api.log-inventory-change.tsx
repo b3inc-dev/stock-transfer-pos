@@ -303,25 +303,28 @@ export async function action({ request }: ActionFunctionArgs) {
           );
         }
         // orders/updated が先に admin_webhook を order_sales に更新している場合、同じ変動で新規作成すると二重になる。既存の order_sales/refund を更新する。
-        const sameActivity = activity === "refund" ? "refund" : "order_sales";
-        const recentSameLog = await (db as any).inventoryChangeLog.findFirst({
-          where: {
-            shop,
-            inventoryItemId: { in: inventoryItemIdCandidates },
-            locationId: { in: locationIdCandidates },
-            activity: sameActivity,
-            timestamp: { gte: recentFrom, lte: recentTo },
-          },
-          orderBy: { timestamp: "desc" },
-        });
-        if (recentSameLog) {
-          const updateData: Record<string, unknown> = { locationName: resolvedLocationName };
-          if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
-          if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
-          await (db as any).inventoryChangeLog.update({ where: { id: recentSameLog.id }, data: updateData });
-          console.log(`[api.log-inventory-change] Updated existing ${sameActivity} log (avoid duplicate): id=${recentSameLog.id}`);
-          results.push({ ok: true, updated: true, id: recentSameLog.id });
-          continue;
+        // ただし API が order_sales/refund を送ったときだけ実行（ロス・入庫等で別注文の order_sales 行を上書きしない）
+        if (activity === "order_sales" || activity === "refund") {
+          const sameActivity = activity;
+          const recentSameLog = await (db as any).inventoryChangeLog.findFirst({
+            where: {
+              shop,
+              inventoryItemId: { in: inventoryItemIdCandidates },
+              locationId: { in: locationIdCandidates },
+              activity: sameActivity,
+              timestamp: { gte: recentFrom, lte: recentTo },
+            },
+            orderBy: { timestamp: "desc" },
+          });
+          if (recentSameLog) {
+            const updateData: Record<string, unknown> = { locationName: resolvedLocationName };
+            if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
+            if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
+            await (db as any).inventoryChangeLog.update({ where: { id: recentSameLog.id }, data: updateData });
+            console.log(`[api.log-inventory-change] Updated existing ${sameActivity} log (avoid duplicate): id=${recentSameLog.id}`);
+            results.push({ ok: true, updated: true, id: recentSameLog.id });
+            continue;
+          }
         }
         // 入庫・出庫・ロス・棚卸・仕入の重複送信: 同一 item/location/activity の既存行があれば更新して新規作成しない
         const posActivities = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "purchase_entry", "purchase_cancel"];
@@ -428,26 +431,28 @@ export async function action({ request }: ActionFunctionArgs) {
           `[api.log-inventory-change] No admin_webhook log found to update. Search criteria: shop=${shopId}, inventoryItemIds=[${inventoryItemIdCandidates.join(", ")}], locationIds=[${locationIdCandidates.join(", ")}], timestamp between ${recentFrom.toISOString()} and ${recentTo.toISOString()}`
         );
       }
-      // orders/updated が先に admin_webhook を order_sales に更新している場合、同じ変動で新規作成すると二重になる。既存の order_sales/refund を更新する。
-      const sameActivitySession = activity === "refund" ? "refund" : "order_sales";
-      const recentSameLogSession = await (db as any).inventoryChangeLog.findFirst({
-        where: {
-          shop: shopId,
-          inventoryItemId: { in: inventoryItemIdCandidates },
-          locationId: { in: locationIdCandidates },
-          activity: sameActivitySession,
-          timestamp: { gte: recentFrom, lte: recentTo },
-        },
-        orderBy: { timestamp: "desc" },
-      });
-      if (recentSameLogSession) {
-        const updateDataSession: Record<string, unknown> = { locationName: resolvedLocationName };
-        if (delta !== undefined && delta !== null) updateDataSession.delta = Number(delta);
-        if (quantityAfter !== undefined && quantityAfter !== null) updateDataSession.quantityAfter = Number(quantityAfter);
-        await (db as any).inventoryChangeLog.update({ where: { id: recentSameLogSession.id }, data: updateDataSession });
-        console.log(`[api.log-inventory-change] Updated existing ${sameActivitySession} log (avoid duplicate): id=${recentSameLogSession.id}`);
-        results.push({ ok: true, updated: true, id: recentSameLogSession.id });
-        continue;
+      // orders/updated が先に admin_webhook を order_sales に更新している場合、同じ変動で新規作成すると二重になる。既存の order_sales/refund を更新する（同種のみ）。
+      if (activity === "order_sales" || activity === "refund") {
+        const sameActivitySession = activity;
+        const recentSameLogSession = await (db as any).inventoryChangeLog.findFirst({
+          where: {
+            shop: shopId,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            activity: sameActivitySession,
+            timestamp: { gte: recentFrom, lte: recentTo },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (recentSameLogSession) {
+          const updateDataSession: Record<string, unknown> = { locationName: resolvedLocationName };
+          if (delta !== undefined && delta !== null) updateDataSession.delta = Number(delta);
+          if (quantityAfter !== undefined && quantityAfter !== null) updateDataSession.quantityAfter = Number(quantityAfter);
+          await (db as any).inventoryChangeLog.update({ where: { id: recentSameLogSession.id }, data: updateDataSession });
+          console.log(`[api.log-inventory-change] Updated existing ${sameActivitySession} log (avoid duplicate): id=${recentSameLogSession.id}`);
+          results.push({ ok: true, updated: true, id: recentSameLogSession.id });
+          continue;
+        }
       }
       // 入庫・出庫・ロス・棚卸・仕入の重複送信: 同一 item/location/activity の既存行があれば更新して新規作成しない（セッションあり）
       const posActivitiesSession = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "purchase_entry", "purchase_cancel"];
