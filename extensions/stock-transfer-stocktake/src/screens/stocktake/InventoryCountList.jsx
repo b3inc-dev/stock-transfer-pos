@@ -8,6 +8,7 @@ import {
   writeInventoryCounts,
   getLocationName,
   getProductGroupName,
+  readProductGroups,
   resolveVariantByCode,
 } from "./stocktakeApi.js";
 import { fetchSettings } from "./stocktakeApi.js";
@@ -625,6 +626,17 @@ export function InventoryCountList({
         const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
         // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
         const countItemsLegacy = Array.isArray(count?.items) ? count.items : [];
+        // ✅ まとめて表示で全グループが同じスナップショットを参照するよう、先に1回だけ取得して渡す（初回の readProductGroups 失敗・遅延で一部グループが0件になるのを防ぐ）
+        let cachedProductGroups = [];
+        try {
+          cachedProductGroups = await readProductGroups();
+        } catch (e) {
+          console.error("[InventoryCountList] readProductGroups failed (will retry per group):", e);
+        }
+        const fetchOptsBase = {
+          inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
+          ...(cachedProductGroups.length > 0 ? { cachedProductGroups } : {}),
+        };
         
         // 各商品グループごとに処理
         for (const groupId of targetProductGroupIds) {
@@ -642,7 +654,7 @@ export function InventoryCountList({
                 productFirst,
                 filterByInventoryLevel: false,
                 includeImages: false,
-                inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
+                ...fetchOptsBase,
               });
               const productInventoryItemIds = new Set(
                 products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
@@ -666,7 +678,7 @@ export function InventoryCountList({
                 productFirst,
                 filterByInventoryLevel: false,
                 includeImages: showImages && !liteMode,
-                inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
+                ...fetchOptsBase,
               });
               const productMap = new Map();
               products.forEach((p) => {
@@ -755,16 +767,23 @@ export function InventoryCountList({
               // ✅ 問題1の修正: filterByInventoryLevel: falseに変更（在庫レベルが0でも商品を表示）
               // ✅ 単一グループモードと同じロジックに統一（商品グループごとに選択した場合も表示されるため）
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-              const products = await fetchProductsByGroups([groupId], count.locationId, {
+              let products = await fetchProductsByGroups([groupId], count.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
                 includeImages: showImages && !liteMode,
-                inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
+                ...fetchOptsBase,
               });
-              
+              // ✅ 一時的な readProductGroups 失敗で0件になることがあるため、1回だけリトライ（約1秒待機後に再取得）
               if (products.length === 0) {
-                // ✅ 商品が0件でも、グループを表示するために空の配列を追加（表示ロジックで「読み込み中...」が表示される）
-                // ただし、allLinesには何も追加しない（表示ロジックで「商品がありません」が表示される）
+                await new Promise((r) => setTimeout(r, 1000));
+                products = await fetchProductsByGroups([groupId], count.locationId, {
+                  productFirst,
+                  filterByInventoryLevel: false,
+                  includeImages: showImages && !liteMode,
+                  ...fetchOptsBase,
+                });
+              }
+              if (products.length === 0) {
                 continue; // 次のグループへ
               }
               

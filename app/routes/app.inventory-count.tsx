@@ -1479,6 +1479,80 @@ export async function action({ request }: ActionFunctionArgs) {
         return { ok: true, groupId, products: allResults };
       }
 
+      // パターン1b: skus のみ（CSV等で inventoryItemIds が未保存のグループ）→ SKU から ID 解決してから商品・在庫取得
+      if ((!productGroup.collectionIds?.length) && (!productGroup.inventoryItemIds?.length) && productGroup.skus?.length) {
+        const ids = await resolveSkusToInventoryItemIds(admin, productGroup.skus);
+        if (ids.length > 0) {
+          const BATCH_SIZE = 10;
+          const allResults: Array<{
+            variantId: string;
+            inventoryItemId: string;
+            productTitle: string;
+            variantTitle: string;
+            sku: string;
+            barcode?: string;
+            title: string;
+            currentQuantity: number;
+            actualQuantity: number;
+            delta: number;
+          }> = [];
+          for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+            const batch = ids.slice(i, i + BATCH_SIZE);
+            const results = await Promise.all(
+              batch.map(async (inventoryItemId) => {
+                try {
+                  const resp = await admin.graphql(
+                    `#graphql
+                      query ItemAndLevel($id: ID!, $loc: ID!) {
+                        inventoryItem(id: $id) {
+                          id
+                          variant {
+                            id
+                            title
+                            sku
+                            barcode
+                            product { title }
+                          }
+                          inventoryLevel(locationId: $loc) {
+                            quantities(names: ["available"]) { name quantity }
+                          }
+                        }
+                      }
+                    `,
+                    { variables: { id: inventoryItemId, loc: locationId } }
+                  );
+                  const json = await resp.json();
+                  const item = json?.data?.inventoryItem;
+                  if (!item?.variant) return null;
+                  const productTitle = item.variant.product?.title ?? "";
+                  const variantTitle = item.variant.title ?? "";
+                  const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${productTitle}/${variantTitle}` : productTitle;
+                  const qty = item.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
+                  const currentQuantity = qty !== null && qty !== undefined ? Number(qty) : 0;
+                  return {
+                    variantId: item.variant.id,
+                    inventoryItemId: item.id,
+                    productTitle,
+                    variantTitle,
+                    sku: item.variant.sku ?? "",
+                    barcode: item.variant.barcode,
+                    title: fullTitle,
+                    currentQuantity,
+                    actualQuantity: 0,
+                    delta: 0,
+                  };
+                } catch {
+                  return null;
+                }
+              })
+            );
+            const valid = results.filter((r): r is NonNullable<typeof r> => r != null);
+            allResults.push(...valid);
+          }
+          return { ok: true, groupId, products: allResults };
+        }
+      }
+
       // パターン2: コレクションから商品を取得
       if (!productGroup.collectionIds?.length) {
         return { ok: true, products: [] };

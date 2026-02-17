@@ -311,9 +311,12 @@ function findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, groupId) {
 // 複数商品グループに含まれる商品を取得（コレクションから）
 // locationIdが指定されている場合、在庫レベルがある商品のみを返す（初期表示用）
 // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用して商品をフィルタリング（生成時の状態を保持）
+// ✅ cachedProductGroups を渡すと readProductGroups() をスキップし、まとめて表示で全グループが同じスナップショットを参照して安定表示
 export async function fetchProductsByGroups(productGroupIds, locationId, opts = {}) {
-  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null } = opts;
-  const groups = await readProductGroups();
+  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null } = opts;
+  const groups = (Array.isArray(cachedProductGroups) && cachedProductGroups.length > 0)
+    ? cachedProductGroups
+    : await readProductGroups();
   // ✅ まとめて表示で2つ目以降のグループが取れない対策：IDの正規化で照合（GIDと数値の差を吸収）
   const normalizedIds = new Set((productGroupIds || []).map(normalizeIdForMatch));
   const targetGroups = groups.filter(
