@@ -4591,9 +4591,9 @@ export default function InventoryCountPage() {
                             （実数: {totalActualQty} / 在庫数: {totalCurrentQty > 0 ? totalCurrentQty : "-"}）
                           </span>
                         ) : null}
-                        {hasMultipleGroups && itemsByGroup.size > 0 && (
+                        {hasMultipleGroups && allGroupIds.length > 0 && (
                           <div style={{ marginTop: "4px", fontSize: "12px" }}>
-                            商品グループごとの進捗: {itemsByGroup.size}/{allGroupIds.length}グループ完了
+                            商品グループごとの進捗: {Array.from(completedGroupsMap.values()).filter(Boolean).length}/{allGroupIds.length}グループ完了
                           </div>
                         )}
                       </div>
