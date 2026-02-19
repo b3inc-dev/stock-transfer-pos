@@ -11,8 +11,8 @@ import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
 const API_VERSION = "2025-10";
 
-/** recentFrom の下限：クライアントの timestamp が未来寄りでも直近の「管理」行を必ず検索対象にする（秒） */
-const RECENT_FROM_AT_LEAST_SEC = 60;
+/** admin_webhook 検索の recentFrom: API が Webhook より数分遅れて届いても確実に拾うため、「現在」から最大でこの秒数まで遡る（名古屋パルコ型の「管理」のまま残る防止） */
+const RECENT_FROM_NOW_MAX_SEC = 15 * 60; // 15分
 
 // dest が "https://xxx.myshopify.com" のときホスト名だけにする（findSessionsByShop は "xxx.myshopify.com" で保存されている）
 function shopFromDest(dest: string): string {
@@ -251,9 +251,9 @@ export async function action({ request }: ActionFunctionArgs) {
           results.push({ ok: true, message: "Log already exists", id: existingLog.id });
           continue;
         }
-        // 検索範囲: 30分前〜「リクエスト時刻+5分」と「現在+2分」の遅い方（POS/Webhookの到達順で admin_webhook が後から保存されるケースを拾う）
-        // recentFrom は「いま」から RECENT_FROM_AT_LEAST_SEC 秒前より過去にしない（クライアント timestamp が未来寄りでも直近の管理行を拾う）
-        const recentFrom = new Date(Math.min(ts.getTime() - 30 * 60 * 1000, Date.now() - RECENT_FROM_AT_LEAST_SEC * 1000));
+        // 検索範囲: admin_webhook を確実に拾うため「イベント30分前」と「現在から最大15分前」の遅い方〜「イベント+5分」と「現在+2分」の遅い方
+        // Webhook が先に保存され API が数分遅れて届いても、15分は遡るので「管理」のまま残らない
+        const recentFrom = new Date(Math.max(ts.getTime() - 30 * 60 * 1000, Date.now() - RECENT_FROM_NOW_MAX_SEC * 1000));
         const recentTo = new Date(Math.max(ts.getTime() + 5 * 60 * 1000, Date.now() + 2 * 60 * 1000));
         // inventory_levels/update Webhookは数値ID形式で保存しているが、念のため両方の形式を候補として検索
         const inventoryItemIdCandidates = [
@@ -288,6 +288,8 @@ export async function action({ request }: ActionFunctionArgs) {
             sourceId: sourceId || null,
             adjustmentGroupId: adjustmentGroupId || null,
             locationName: resolvedLocationName,
+            // Webhook が delta=null で保存した際の備考「変動数は直前ログが…」を、種別上書き時にクリアする
+            note: null,
           };
           if (variantId != null && variantId !== "") updateData.variantId = variantId;
           if (sku != null && sku !== "") updateData.sku = String(sku);
@@ -317,7 +319,7 @@ export async function action({ request }: ActionFunctionArgs) {
             orderBy: { timestamp: "desc" },
           });
           if (recentSameLog) {
-            const updateData: Record<string, unknown> = { locationName: resolvedLocationName };
+            const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
             if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
             if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
             await (db as any).inventoryChangeLog.update({ where: { id: recentSameLog.id }, data: updateData });
@@ -340,7 +342,7 @@ export async function action({ request }: ActionFunctionArgs) {
             orderBy: { timestamp: "desc" },
           });
           if (recentSameActivityLog) {
-            const updateDataPos: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null };
+            const updateDataPos: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null, note: null };
             if (delta !== undefined && delta !== null) updateDataPos.delta = Number(delta);
             if (quantityAfter !== undefined && quantityAfter !== null) updateDataPos.quantityAfter = Number(quantityAfter);
             await (db as any).inventoryChangeLog.update({ where: { id: recentSameActivityLog.id }, data: updateDataPos });
@@ -381,8 +383,8 @@ export async function action({ request }: ActionFunctionArgs) {
         results.push({ ok: true, message: "Log already exists", id: existingLog.id });
         continue;
       }
-      // 検索範囲: 30分前〜「リクエスト時刻+5分」と「現在+2分」の遅い方（POS/Webhookの到達順で admin_webhook が後から保存されるケースを拾う）
-      const recentFrom = new Date(Math.min(ts.getTime() - 30 * 60 * 1000, Date.now() - RECENT_FROM_AT_LEAST_SEC * 1000));
+      // 検索範囲: 上記と同じ（API が遅れて届いても admin_webhook を確実に拾う）
+      const recentFrom = new Date(Math.max(ts.getTime() - 30 * 60 * 1000, Date.now() - RECENT_FROM_NOW_MAX_SEC * 1000));
       const recentTo = new Date(Math.max(ts.getTime() + 5 * 60 * 1000, Date.now() + 2 * 60 * 1000));
       // inventory_levels/update Webhookは数値ID形式で保存しているが、念のため両方の形式を候補として検索
       const inventoryItemIdCandidates = [
@@ -417,6 +419,8 @@ export async function action({ request }: ActionFunctionArgs) {
           sourceId: sourceId || null,
           adjustmentGroupId: adjustmentGroupId || null,
           locationName: resolvedLocationName,
+          // Webhook が delta=null で保存した際の備考「変動数は直前ログが…」を、種別上書き時にクリアする
+          note: null,
         };
         if (variantId != null && variantId !== "") updateData.variantId = variantId;
         if (sku != null && sku !== "") updateData.sku = String(sku);
@@ -445,7 +449,7 @@ export async function action({ request }: ActionFunctionArgs) {
           orderBy: { timestamp: "desc" },
         });
         if (recentSameLogSession) {
-          const updateDataSession: Record<string, unknown> = { locationName: resolvedLocationName };
+          const updateDataSession: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
           if (delta !== undefined && delta !== null) updateDataSession.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateDataSession.quantityAfter = Number(quantityAfter);
           await (db as any).inventoryChangeLog.update({ where: { id: recentSameLogSession.id }, data: updateDataSession });
@@ -468,7 +472,7 @@ export async function action({ request }: ActionFunctionArgs) {
           orderBy: { timestamp: "desc" },
         });
         if (recentSameActivityLogSession) {
-          const updateDataPosSession: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null };
+          const updateDataPosSession: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null, note: null };
           if (delta !== undefined && delta !== null) updateDataPosSession.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateDataPosSession.quantityAfter = Number(quantityAfter);
           await (db as any).inventoryChangeLog.update({ where: { id: recentSameActivityLogSession.id }, data: updateDataPosSession });
