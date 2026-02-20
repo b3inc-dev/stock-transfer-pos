@@ -464,6 +464,10 @@ function Extension() {
         appState={appState}
         setAppState={setAppState}
         onBack={goBack}
+        onConfirmSuccess={() => {
+          clearBars();
+          nav.reset(SCREENS.OUTBOUND_COND);
+        }}
         onAddShipmentSuccess={({ transferId, transferName }) => {
           setStateSlice(setAppState, "outbound", (prev) => ({
             ...(prev || {}),
@@ -5362,6 +5366,7 @@ function OutboundList({
   appState,
   setAppState,
   onBack,
+  onConfirmSuccess,
   onAddShipmentSuccess,
   dialog,
   setHeader,
@@ -6521,6 +6526,9 @@ function OutboundList({
           if (SHOPIFY?.storage?.delete) {
             await SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY);
           }
+          if (SHOPIFY?.storage?.set) {
+            await SHOPIFY.storage.set(OUTBOUND_CONDITIONS_DRAFT_KEY, {});
+          }
         } catch (_) {}
         try { setLines([]); } catch (_) {}
         try { setCandidateQtyMap?.({}); } catch (_) {}
@@ -6555,6 +6563,9 @@ function OutboundList({
           if (SHOPIFY?.storage?.delete) {
             await SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY);
           }
+          if (SHOPIFY?.storage?.set) {
+            await SHOPIFY.storage.set(OUTBOUND_CONDITIONS_DRAFT_KEY, {});
+          }
         } catch (_) {}
         try { setLines([]); } catch (_) {}
         try { setCandidateQtyMap?.({}); } catch (_) {}
@@ -6564,7 +6575,7 @@ function OutboundList({
           editingTransferId: "",
         }));
 
-        onBack?.();
+        (onConfirmSuccess ?? onBack)?.();
         return { transfer, shipment: null };
       }
 
@@ -6834,6 +6845,9 @@ function OutboundList({
         if (SHOPIFY?.storage?.delete) {
           await SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY);
         }
+        if (SHOPIFY?.storage?.set) {
+          await SHOPIFY.storage.set(OUTBOUND_CONDITIONS_DRAFT_KEY, {});
+        }
       } catch (_) {}
       try { setLines([]); } catch (_) {}
       try { setCandidateQtyMap?.({}); } catch (_) {}
@@ -6843,8 +6857,8 @@ function OutboundList({
         editingTransferId: "",
       }));
 
-      // v50寄せ：成功したら戻る（不要ならここだけ消してOK）
-      onBack?.();
+      // 確定後はコンディション画面へ強制遷移（pop だと画面が切り替わらない場合があるため reset を使用）
+      (onConfirmSuccess ?? onBack)?.();
 
       return { transfer, shipment };
     } catch (e) {
@@ -7087,6 +7101,9 @@ function OutboundList({
         try {
           if (SHOPIFY?.storage?.delete) {
             await SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY);
+          }
+          if (SHOPIFY?.storage?.set) {
+            await SHOPIFY.storage.set(OUTBOUND_CONDITIONS_DRAFT_KEY, {});
           }
         } catch (_) {}
         try { setLines([]); } catch (_) {}
