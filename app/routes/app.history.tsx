@@ -34,12 +34,11 @@ function extractExtrasQuantityFromNote(note: string): number {
   // 各行をパース（"  - "で始まる行のみ）
   const lines = extrasLines.split(/\n/).filter(line => line.trim().startsWith("-"));
   lines.forEach((line) => {
-    // 形式: "  - 商品名, オプション: オプション値, SKU: xxx, JAN: xxx, 予定外/数量: X"
-    const lineMatch = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?(?:,\s*予定外\/数量:\s*(\d+))?$/);
-    if (lineMatch) {
-      const qty = parseInt(lineMatch[5] || "0", 10);
-      totalQty += qty;
-    }
+    // 形式A（タイル）: ..., 予定外/数量: X  形式B（入庫拡張）: ..., 数量: X
+    const lineMatchA = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?(?:,\s*予定外\/数量:\s*(\d+))?$/);
+    const lineMatchB = line.match(/  - (.+?)(?:,\s*SKU:\s*(.+?))?(?:,\s*数量:\s*(\d+))?$/);
+    if (lineMatchA && lineMatchA[5]) totalQty += parseInt(lineMatchA[5], 10);
+    else if (lineMatchB && lineMatchB[3]) totalQty += parseInt(lineMatchB[3], 10);
   });
   
   return totalQty;
@@ -540,15 +539,19 @@ export async function action({ request }: ActionFunctionArgs) {
         // 各行をパース（"  - "で始まる行のみ）
         const lines = extrasLines.split(/\n/).filter(line => line.trim().startsWith("-"));
         lines.forEach((line, idx) => {
-          // 形式: "  - 商品名, オプション: オプション値, SKU: xxx, JAN: xxx, 予定外/数量: X"
-          // より柔軟なパターンでマッチング
-          const lineMatch = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?(?:,\s*予定外\/数量:\s*(\d+))?$/);
+          // 形式A（タイル拡張）: "  - 商品名, オプション: オプション値, SKU: xxx, JAN: xxx, 予定外/数量: X"
+          // 形式B（入庫拡張）: "  - 商品名, SKU: xxx, 数量: X"
+          const lineMatchA = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?(?:,\s*予定外\/数量:\s*(\d+))?$/);
+          const lineMatchB = line.match(/  - (.+?)(?:,\s*SKU:\s*(.+?))?(?:,\s*数量:\s*(\d+))?$/);
+          const lineMatch = lineMatchA || lineMatchB;
           if (lineMatch) {
             const title = lineMatch[1]?.trim() || "";
-            const options = lineMatch[2]?.trim() || "";
-            const sku = lineMatch[3]?.trim() || "";
-            const barcode = lineMatch[4]?.trim() || "";
-            const qty = parseInt(lineMatch[5] || "0", 10);
+            const options = lineMatchA ? (lineMatchA[2]?.trim() || "") : "";
+            const sku = (lineMatchA ? lineMatchA[3] : lineMatchB?.[2])?.trim() || "";
+            const barcode = lineMatchA ? (lineMatchA[4]?.trim() || "") : "";
+            const qtyA = lineMatchA ? parseInt(lineMatchA[5] || "0", 10) : 0;
+            const qtyB = lineMatchB ? parseInt(lineMatchB[3] || "0", 10) : 0;
+            const qty = qtyA > 0 ? qtyA : qtyB;
             
             if (qty > 0) {
               // オプションを分割（例: "Special Selling 1 / Free" → option1: "Special Selling 1", option2: "Free"）

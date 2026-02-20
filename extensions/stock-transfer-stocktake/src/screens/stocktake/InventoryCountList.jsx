@@ -1107,6 +1107,11 @@ export function InventoryCountList({
       }
       const normalizedId = normalizeInventoryItemIdForExtra(inventoryItemId);
       const isExtra = !initialInventoryItemIdsRef.current.has(normalizedId);
+      // ✅ 予定外棚卸許可が不許可の場合は予定外商品の追加をブロック（入庫の予定外入庫許可と同様）
+      if (isExtra && (settings?.inventoryCount?.allowExtraCount === false)) {
+        toast("予定外棚卸は許可されていません。設定で「予定外棚卸許可」を許可に変更してください。");
+        return;
+      }
       const assignedGroupId = isMultipleMode ? (targetProductGroupIds[0] || null) : (productGroupId || targetProductGroupIds[0] || null);
       const newLine = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1125,7 +1130,7 @@ export function InventoryCountList({
       setLines((prev) => [newLine, ...prev]);
       // ✅ 入庫と同様：追加後も検索はクリアしない
     },
-    [count, denyEdit, isMultipleMode, targetProductGroupIds, productGroupId]
+    [count, denyEdit, isMultipleMode, targetProductGroupIds, productGroupId, settings]
   );
 
   // スキャンキュー処理

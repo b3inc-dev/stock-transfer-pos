@@ -27,6 +27,8 @@ export type OrderRequestItem = {
   quantity: number;
   cost?: number; // 原価（商品情報から取得）
   price?: number; // 販売価格（商品情報から取得）
+  /** 予定外仕入（未処理から入庫確定時に POS が付与。管理画面で予定外ブロック表示用） */
+  isExtra?: boolean;
 };
 
 export type OrderRequestEntry = {

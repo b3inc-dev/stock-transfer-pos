@@ -105,6 +105,7 @@ export type SettingsV1 = {
     csvExportColumns?: string[]; // 入出庫履歴CSV出力項目（出庫は入庫と連動。並び順を含む）
   };
   inventoryCount?: {
+    allowExtraCount?: boolean; // 予定外棚卸許可（デフォルト: true）
     csvExportColumns?: string[]; // 棚卸履歴CSV出力項目（並び順を含む、明細モード用）
   };
   productList?: {
@@ -186,11 +187,11 @@ const DEFAULT_HISTORY_CSV_COLUMNS_IDS = [...HISTORY_CSV_COLUMN_IDS];
 // 仕入履歴CSV列（app.purchase のヘッダーと一致）
 const PURCHASE_CSV_COLUMN_IDS = [
   "purchaseId", "name", "date", "location", "supplier", "carrier", "trackingNumber", "status",
-  "productTitle", "sku", "barcode", "option1", "option2", "option3", "quantity",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "quantity", "kind",
 ] as const;
 const DEFAULT_PURCHASE_CSV_LABELS = [
   "仕入ID", "名称", "日付", "入庫先ロケーション", "仕入先", "配送業者", "配送番号", "ステータス",
-  "商品名", "SKU", "JAN", "オプション1", "オプション2", "オプション3", "数量",
+  "商品名", "SKU", "JAN", "オプション1", "オプション2", "オプション3", "数量", "種別",
 ];
 const PURCHASE_CSV_ID_TO_LABEL: Record<string, string> = Object.fromEntries(
   PURCHASE_CSV_COLUMN_IDS.map((id, i) => [id, DEFAULT_PURCHASE_CSV_LABELS[i] ?? id])
@@ -646,7 +647,7 @@ function sanitizeSettings(input: any): SettingsV1 {
     };
   }
 
-  // 棚卸設定（CSV出力項目）
+  // 棚卸設定（予定外棚卸許可・CSV出力項目）
   if (input?.inventoryCount && typeof input.inventoryCount === "object") {
     const stocktakeCols = Array.isArray(input.inventoryCount.csvExportColumns)
       ? (input.inventoryCount.csvExportColumns as string[]).filter((id) =>
@@ -654,6 +655,10 @@ function sanitizeSettings(input: any): SettingsV1 {
         )
       : [];
     s.inventoryCount = {
+      allowExtraCount:
+        typeof input.inventoryCount.allowExtraCount === "boolean"
+          ? input.inventoryCount.allowExtraCount
+          : true,
       csvExportColumns:
         stocktakeCols.length > 0 ? stocktakeCols : DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS,
     };
@@ -4163,7 +4168,68 @@ export default function SettingsPage() {
 
             {/* ⑦ 棚卸設定タブ */}
             {activeTab === "stocktake" && (
-              <s-box padding="base">
+              <>
+                {/* 予定外棚卸許可：左（タイトル＋説明） / 右（白カード） */}
+                <s-box padding="base">
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "24px",
+                      alignItems: "flex-start",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <div style={{ flex: "1 1 260px", minWidth: 0 }}>
+                      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>予定外棚卸許可</div>
+                      <s-text tone="subdued" size="small">
+                        予定にない商品の棚卸を許可するかどうかを設定します。
+                      </s-text>
+                    </div>
+                    <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+                      <div
+                        style={{
+                          background: "#ffffff",
+                          borderRadius: 12,
+                          boxShadow: "0 0 0 1px #e1e3e5",
+                          padding: 16,
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                            <input
+                              type="radio"
+                              name="allowExtraCount"
+                              checked={(settings.inventoryCount?.allowExtraCount ?? true) === true}
+                              onChange={() =>
+                                setSettings((s) => ({
+                                  ...s,
+                                  inventoryCount: { ...(s.inventoryCount ?? {}), allowExtraCount: true },
+                                }))
+                              }
+                            />
+                            <span>許可</span>
+                          </label>
+                          <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                            <input
+                              type="radio"
+                              name="allowExtraCount"
+                              checked={(settings.inventoryCount?.allowExtraCount ?? true) === false}
+                              onChange={() =>
+                                setSettings((s) => ({
+                                  ...s,
+                                  inventoryCount: { ...(s.inventoryCount ?? {}), allowExtraCount: false },
+                                }))
+                              }
+                            />
+                            <span>不許可</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </s-box>
+
+                <s-box padding="base">
                 <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>棚卸履歴CSV出力項目設定</div>
@@ -4226,6 +4292,7 @@ export default function SettingsPage() {
                   </div>
                 </div>
               </s-box>
+              </>
             )}
           </s-stack>
 

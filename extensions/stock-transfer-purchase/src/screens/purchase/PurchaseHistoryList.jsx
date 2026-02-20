@@ -900,6 +900,7 @@ export function PurchaseHistoryList({
           option1: "",
           option2: "",
           option3: "",
+          isExtra: false,
         })),
           ...(Array.isArray(extras) ? extras : []).map((l) => ({
             inventoryItemId: l.inventoryItemId,
@@ -914,6 +915,7 @@ export function PurchaseHistoryList({
             option1: "",
             option2: "",
             option3: "",
+            isExtra: true,
           })),
         ],
         status: "received",

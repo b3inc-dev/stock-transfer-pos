@@ -15,12 +15,12 @@ const PURCHASE_KEY = "purchase_entries_v1";
 // 仕入履歴CSV列（設定の「仕入履歴CSV出力項目設定」と一致）
 const PURCHASE_CSV_COLUMN_IDS = [
   "purchaseId", "name", "date", "location", "supplier", "carrier", "trackingNumber", "status",
-  "productTitle", "sku", "barcode", "option1", "option2", "option3", "quantity",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "quantity", "kind",
 ] as const;
 const PURCHASE_CSV_LABELS: Record<string, string> = {
   purchaseId: "仕入ID", name: "名称", date: "日付", location: "入庫先ロケーション", supplier: "仕入先",
   carrier: "配送業者", trackingNumber: "配送番号", status: "ステータス", productTitle: "商品名", sku: "SKU",
-  barcode: "JAN", option1: "オプション1", option2: "オプション2", option3: "オプション3", quantity: "数量",
+  barcode: "JAN", option1: "オプション1", option2: "オプション2", option3: "オプション3", quantity: "数量", kind: "種別",
 };
 const DEFAULT_PURCHASE_CSV_COLUMNS = [...PURCHASE_CSV_COLUMN_IDS];
 
@@ -1152,9 +1152,10 @@ export default function PurchasePage() {
             option2: "",
             option3: "",
             quantity: "",
+            kind: "",
           }));
         } else {
-          e.items.forEach((item) => {
+          e.items.forEach((item: OrderRequestItem) => {
             rows.push(toRow({
               purchaseId: e.id,
               name: e.purchaseName || e.id,
@@ -1171,6 +1172,7 @@ export default function PurchasePage() {
               option2: item.option2 || "",
               option3: item.option3 || "",
               quantity: item.quantity || 0,
+              kind: item.isExtra ? "予定外" : "通常",
             }));
           });
         }
@@ -1408,6 +1410,7 @@ export default function PurchasePage() {
         option2: item.option2 || "",
         option3: item.option3 || "",
         quantity: item.quantity || 0,
+        kind: item.isExtra ? "予定外" : "通常",
       }));
     });
 
@@ -2802,6 +2805,12 @@ export default function PurchasePage() {
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
                                     <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
                                       <span style={getStatusBadgeStyle(entry.status)}>{STATUS_LABEL[entry.status] || entry.status}</span>
+                                      {entry.status === "received" && (() => {
+                                        const extrasCount = (entry.items || []).filter((it: OrderRequestItem) => it.isExtra).length;
+                                        return extrasCount > 0 ? (
+                                          <span style={{ color: "#d32f2f", fontSize: "12px" }}>（予定外: {extrasCount}件）</span>
+                                        ) : null;
+                                      })()}
                                       {entry.cancelledAt && (
                                         <span style={{ marginLeft: "8px" }}>
                                           （キャンセル: {new Date(entry.cancelledAt).toISOString().split("T")[0]}）
@@ -2930,7 +2939,15 @@ export default function PurchasePage() {
                     {formatDateTimeInShopTimezone(modalEntry.cancelledAt, shopTimezone)}
                   </div>
                 )}
-                <div style={{ fontSize: "14px" }}><strong>数量合計:</strong> {modalItems.reduce((s, it) => s + (it.quantity || 0), 0)}</div>
+                <div style={{ fontSize: "14px" }}>
+                  <strong>数量合計:</strong> {modalItems.reduce((s, it) => s + (it.quantity || 0), 0)}
+                  {(() => {
+                    const extraCount = modalItems.filter((it) => it.isExtra).length;
+                    return extraCount > 0 ? (
+                      <span style={{ marginLeft: "12px", color: "#d32f2f", fontSize: "13px" }}>（予定外: {extraCount}件）</span>
+                    ) : null;
+                  })()}
+                </div>
               </div>
             )}
 
@@ -2938,35 +2955,57 @@ export default function PurchasePage() {
               <div style={{ padding: "24px", textAlign: "center" }}>商品リストを取得中...</div>
             ) : modalItems.length > 0 ? (
               <div>
-                <div style={{ marginBottom: "12px", fontSize: "14px", color: "#666" }}>合計: {modalItems.length}件</div>
-                <div style={{ maxHeight: "400px", overflowY: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
-                    <thead>
-                      <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
-                        <th style={{ padding: "8px", textAlign: "right" }}>数量</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {modalItems.map((item, idx) => (
-                        <tr key={item.id || idx} style={{ borderBottom: "1px solid #eee" }}>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.title || "（商品名なし）"}</td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.sku || "（SKUなし）"}</td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.barcode || "（JANなし）"}</td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.option1 || "-"}</td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.option2 || "-"}</td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.option3 || "-"}</td>
-                          <td style={{ padding: "8px", textAlign: "right" }}>{item.quantity || "-"}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                {(() => {
+                  const normalItems = modalItems.filter((it) => !it.isExtra);
+                  const extraItems = modalItems.filter((it) => it.isExtra);
+                  const tableRow = (item: OrderRequestItem, idx: number) => (
+                    <tr key={item.id ?? idx} style={{ borderBottom: "1px solid #eee" }}>
+                      <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.title || "（商品名なし）"}</td>
+                      <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.sku || "（SKUなし）"}</td>
+                      <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.barcode || "（JANなし）"}</td>
+                      <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.option1 || "-"}</td>
+                      <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.option2 || "-"}</td>
+                      <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>{item.option3 || "-"}</td>
+                      <td style={{ padding: "8px", textAlign: "right" }}>{item.quantity || "-"}</td>
+                    </tr>
+                  );
+                  const tableHeader = (
+                    <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
+                      <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
+                      <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
+                      <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
+                      <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
+                      <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
+                      <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
+                      <th style={{ padding: "8px", textAlign: "right" }}>数量</th>
+                    </tr>
+                  );
+                  return (
+                    <>
+                      <div style={{ marginBottom: "12px", fontSize: "14px", color: "#666" }}>合計: {modalItems.length}件</div>
+                      <div style={{ maxHeight: "400px", overflowY: "auto" }}>
+                        {normalItems.length > 0 && (
+                          <div style={{ marginBottom: extraItems.length > 0 ? "24px" : 0 }}>
+                            <div style={{ marginBottom: "8px", fontWeight: 600, fontSize: "14px" }}>通常</div>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
+                              <thead>{tableHeader}</thead>
+                              <tbody>{normalItems.map((item, idx) => tableRow(item, idx))}</tbody>
+                            </table>
+                          </div>
+                        )}
+                        {extraItems.length > 0 && (
+                          <div style={{ padding: "12px", backgroundColor: "#fff5f5", borderRadius: "4px", border: "1px solid #ffe6e6" }}>
+                            <div style={{ marginBottom: "8px", fontWeight: 600, fontSize: "14px", color: "#c62828" }}>予定外（{extraItems.length}件）</div>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
+                              <thead>{tableHeader}</thead>
+                              <tbody>{extraItems.map((item, idx) => tableRow(item, idx))}</tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             ) : (
               <div style={{ padding: "24px", textAlign: "center", color: "#666" }}>商品リストがありません</div>
