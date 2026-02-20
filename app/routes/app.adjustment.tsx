@@ -13,12 +13,16 @@ const SETTINGS_KEY = "settings_v1";
 
 const ADJUSTMENT_CSV_COLUMN_IDS = [
   "historyId", "name", "date", "location", "memo", "staff", "status",
-  "productTitle", "sku", "barcode", "option1", "option2", "option3", "currentQuantity", "quantity",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "currentQuantity", "quantity", "delta",
 ] as const;
 const ADJUSTMENT_CSV_LABELS: Record<string, string> = {
   historyId: "履歴ID", name: "名称", date: "日付", location: "ロケーション", memo: "メモ", staff: "担当者", status: "ステータス",
-  productTitle: "商品名", sku: "SKU", barcode: "JAN", option1: "オプション1", option2: "オプション2", option3: "オプション3", currentQuantity: "在庫数", quantity: "実数",
+  productTitle: "商品名", sku: "SKU", barcode: "JAN", option1: "オプション1", option2: "オプション2", option3: "オプション3", currentQuantity: "在庫数", quantity: "実数", delta: "差分",
 };
+// 商品リストモーダルで表示する明細列（CSV設定の並びで表示するため、このIDのみフィルターする）
+const ADJUSTMENT_DETAIL_COLUMN_IDS = [
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "currentQuantity", "quantity", "delta",
+] as const;
 const DEFAULT_ADJUSTMENT_CSV_COLUMNS = [...ADJUSTMENT_CSV_COLUMN_IDS];
 
 export type LocationNode = { id: string; name: string };
@@ -440,9 +444,13 @@ export default function AdjustmentPage() {
             option3: "",
             currentQuantity: "",
             quantity: "",
+            delta: "",
           }));
         } else {
           e.items.forEach((item) => {
+            const curr = item.currentQuantity ?? 0;
+            const qty = item.quantity ?? 0;
+            const deltaVal = qty - curr;
             rows.push(toRow({
               historyId: e.id,
               name: adjustmentName,
@@ -457,8 +465,9 @@ export default function AdjustmentPage() {
               option1: item.option1 || "",
               option2: item.option2 || "",
               option3: item.option3 || "",
-              currentQuantity: item.currentQuantity ?? "",
-              quantity: item.quantity || 0,
+              currentQuantity: curr,
+              quantity: qty,
+              delta: deltaVal,
             }));
           });
         }
@@ -562,6 +571,9 @@ export default function AdjustmentPage() {
       modalEntry.adjustmentName || formatAdjustmentName(modalEntry, entries, entries.findIndex((e) => e.id === modalEntry.id));
 
     modalItems.forEach((item) => {
+      const curr = item.currentQuantity ?? 0;
+      const qty = item.quantity ?? 0;
+      const deltaVal = qty - curr;
       rows.push(toRow({
         historyId: modalEntry.id,
         name: adjustmentName,
@@ -576,8 +588,9 @@ export default function AdjustmentPage() {
         option1: item.option1 || "",
         option2: item.option2 || "",
         option3: item.option3 || "",
-        currentQuantity: item.currentQuantity ?? "",
-        quantity: item.quantity || 0,
+        currentQuantity: curr,
+        quantity: qty,
+        delta: deltaVal,
       }));
     });
 
@@ -889,7 +902,7 @@ export default function AdjustmentPage() {
                               display: "block",
                             }}
                           >
-                            理由: {entry.reason || "-"}
+                            メモ: {entry.memo || "-"}
                           </s-text>
                         </div>
                         <div
@@ -1064,7 +1077,7 @@ export default function AdjustmentPage() {
                     modalEntry.locationId}
                 </div>
                 <div style={{ fontSize: "14px", marginBottom: "4px" }}>
-                  <strong>理由:</strong> {modalEntry.memo || "-"}
+                  <strong>メモ:</strong> {modalEntry.memo || "-"}
                 </div>
                 <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                   <strong>担当者:</strong>{" "}
@@ -1100,39 +1113,57 @@ export default function AdjustmentPage() {
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
                     <thead>
                       <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>SKU</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>JAN</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
-                        <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
-                        <th style={{ padding: "8px", textAlign: "right" }}>数量</th>
+                        {csvColumns
+                          .filter((id) => ADJUSTMENT_DETAIL_COLUMN_IDS.includes(id as (typeof ADJUSTMENT_DETAIL_COLUMN_IDS)[number]))
+                          .map((id) => (
+                            <th
+                              key={id}
+                              style={{
+                                padding: "8px",
+                                textAlign: id === "currentQuantity" || id === "quantity" || id === "delta" ? "right" : "left",
+                                borderRight: "1px solid #ddd",
+                              }}
+                            >
+                              {ADJUSTMENT_CSV_LABELS[id] ?? id}
+                            </th>
+                          ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {modalItems.map((item, idx) => (
-                        <tr key={item.id || idx} style={{ borderBottom: "1px solid #eee" }}>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.title || "（商品名なし）"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.sku || "（SKUなし）"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.barcode || "（JANなし）"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.option1 || "-"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.option2 || "-"}
-                          </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
-                            {item.option3 || "-"}
-                          </td>
-                          <td style={{ padding: "8px", textAlign: "right" }}>{item.quantity || "-"}</td>
-                        </tr>
-                      ))}
+                      {modalItems.map((item, idx) => {
+                        const curr = item.currentQuantity ?? 0;
+                        const qty = item.quantity ?? 0;
+                        const deltaVal = qty - curr;
+                        const row: Record<string, string | number> = {
+                          productTitle: item.title || "（商品名なし）",
+                          sku: item.sku || "（SKUなし）",
+                          barcode: item.barcode || "（JANなし）",
+                          option1: item.option1 || "-",
+                          option2: item.option2 || "-",
+                          option3: item.option3 || "-",
+                          currentQuantity: curr,
+                          quantity: qty,
+                          delta: deltaVal,
+                        };
+                        return (
+                          <tr key={item.id || idx} style={{ borderBottom: "1px solid #eee" }}>
+                            {csvColumns
+                              .filter((id) => ADJUSTMENT_DETAIL_COLUMN_IDS.includes(id as (typeof ADJUSTMENT_DETAIL_COLUMN_IDS)[number]))
+                              .map((id) => (
+                                <td
+                                  key={id}
+                                  style={{
+                                    padding: "8px",
+                                    textAlign: id === "currentQuantity" || id === "quantity" || id === "delta" ? "right" : "left",
+                                    borderRight: "1px solid #eee",
+                                  }}
+                                >
+                                  {String(row[id] ?? "-")}
+                                </td>
+                              ))}
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

@@ -234,11 +234,11 @@ const DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS = [...STOCKTAKE_CSV_COLUMN_IDS];
 // 調整履歴CSV列（app.adjustment のヘッダーと一致。商品グループなし）
 const ADJUSTMENT_CSV_COLUMN_IDS = [
   "historyId", "name", "date", "location", "memo", "staff", "status",
-  "productTitle", "sku", "barcode", "option1", "option2", "option3", "currentQuantity", "quantity",
+  "productTitle", "sku", "barcode", "option1", "option2", "option3", "currentQuantity", "quantity", "delta",
 ] as const;
 const DEFAULT_ADJUSTMENT_CSV_LABELS = [
   "履歴ID", "名称", "日付", "ロケーション", "メモ", "担当者", "ステータス",
-  "商品名", "SKU", "JAN", "オプション1", "オプション2", "オプション3", "在庫数", "実数",
+  "商品名", "SKU", "JAN", "オプション1", "オプション2", "オプション3", "在庫数", "実数", "差分",
 ];
 const ADJUSTMENT_CSV_ID_TO_LABEL: Record<string, string> = Object.fromEntries(
   ADJUSTMENT_CSV_COLUMN_IDS.map((id, i) => [id, DEFAULT_ADJUSTMENT_CSV_LABELS[i] ?? id])
