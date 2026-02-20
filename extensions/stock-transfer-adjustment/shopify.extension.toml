@@ -1,7 +1,7 @@
 api_version = "2026-01"
 
 [[extensions]]
-uid = "c130fca1-ced8-a1d8-5f88-a909273dd6779df5a0ae"
+uid = "e8f9a0b1-c2d3-4e5f-6a7b-8c9d0e1f2a3b4c5d6e7"
 type = "ui_extension"
 name = "調整 / 在庫調整"
 handle = "stock-transfer-adjustment"

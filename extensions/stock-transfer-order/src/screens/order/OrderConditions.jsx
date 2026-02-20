@@ -85,7 +85,7 @@ export function OrderConditions({
   const allLocations = useMemo(() => (Array.isArray(locationsProp) ? locationsProp : []), [locationsProp]);
 
   // 設定から希望納品日フラグ・プリセット日数を計算
-  const useDesiredDeliveryDateFromSettings = !!settings?.order?.useDesiredDeliveryDate ?? true;
+  const useDesiredDeliveryDateFromSettings = !!(settings?.order?.useDesiredDeliveryDate ?? true);
   const desiredDeliveryQuickDays = useMemo(() => {
     const raw = settings?.order?.desiredDeliveryQuickDays;
     const base = Array.isArray(raw) ? raw : [1, 2, 3, 7, 30];
