@@ -50,6 +50,7 @@ export default function App() {
         <s-link href="/app/history">入出庫</s-link>
         <s-link href="/app/purchase">仕入</s-link>
         <s-link href="/app/loss">ロス</s-link>
+        <s-link href="/app/adjustment">調整</s-link>
         <s-link href="/app/order">発注</s-link>
         <s-link href="/app/inventory-count">棚卸</s-link>
       {/* @ts-expect-error s-app-nav 閉じタグ */}

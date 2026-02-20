@@ -329,7 +329,7 @@ export async function action({ request }: ActionFunctionArgs) {
           }
         }
         // 入庫・出庫・ロス・棚卸・仕入の重複送信: 同一 item/location/activity の既存行があれば更新して新規作成しない
-        const posActivities = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "purchase_entry", "purchase_cancel"];
+        const posActivities = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "adjustment", "purchase_entry", "purchase_cancel"];
         if (posActivities.includes(activity)) {
           const recentSameActivityLog = await (db as any).inventoryChangeLog.findFirst({
             where: {
@@ -459,7 +459,7 @@ export async function action({ request }: ActionFunctionArgs) {
         }
       }
       // 入庫・出庫・ロス・棚卸・仕入の重複送信: 同一 item/location/activity の既存行があれば更新して新規作成しない（セッションあり）
-      const posActivitiesSession = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "purchase_entry", "purchase_cancel"];
+      const posActivitiesSession = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "adjustment", "purchase_entry", "purchase_cancel"];
       if (posActivitiesSession.includes(activity)) {
         const recentSameActivityLogSession = await (db as any).inventoryChangeLog.findFirst({
           where: {
