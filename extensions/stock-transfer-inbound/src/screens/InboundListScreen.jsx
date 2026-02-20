@@ -1054,17 +1054,10 @@ export function InboundListScreen({
     const hasSomething = noteText.length > 0 || (Array.isArray(overForLog) && overForLog.length > 0) || (Array.isArray(extrasForLog) && extrasForLog.length > 0);
 
     try {
-      if (transferId && hasSomething) {
-        const noteLine = buildInboundNoteLine_({ shipmentId: shipment.id, locationId: locationGid, finalize, note: noteText, over: overForLog, extras: extrasForLog });
-        if (String(noteLine || "").trim()) {
-          const addProcessLog = () => {}; // REFERENCE 5.2 #6: デバッグ用（空関数でログ記録なし）
-          const ok = await appendInventoryTransferNote_({ transferId, line: noteLine, processLogCallback: addProcessLog });
-          if (!ok) toast("管理画面メモへの追記に失敗しました（確定処理は続行します）");
-        }
-      }
-
+      // メモは確定処理の最後に「予定外＋予定超過＋メモ＋在庫調整履歴」を1回で追記する（2回目追記の失敗で在庫調整履歴が残らない事象を防ぐ）
       let extraDeltasMerged;
       let rejectedDeltas = [];
+      let adjustments = []; // メモ追記は確定処理の最後に1回だけ行う（予定外＋在庫調整履歴をまとめて追記し、2回目追記の失敗を防ぐ）
       const extraDeltas = (extras || []).map((x) => ({
         inventoryItemId: String(x?.inventoryItemId || "").trim(),
         delta: Math.max(0, Math.floor(Number(x?.receiveQty || 0))),
@@ -1439,38 +1432,41 @@ export function InboundListScreen({
       }
 
       if (transferId && (rejectedDeltas.length > 0 || (extraDeltasMerged && extraDeltasMerged.length > 0))) {
-        try {
-          const adjustments = [];
-          const originLocationId = String(transferForShipment?.originLocationId || transferForShipment?.origin?.location?.id || inbound?.selectedOriginLocationId || "").trim() || null;
-          const originLocationName = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim() || "出庫元";
-          const destinationLocationName = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim() || "入庫先";
-          if (rejectedDeltas.length > 0) {
-            rejectedDeltas.forEach((d) => {
-              adjustments.push({ locationName: originLocationName, locationId: originLocationId, inventoryItemId: d.inventoryItemId, sku: d.sku, title: d.title, delta: d.delta });
-            });
-          }
-          if (extraDeltasMerged && extraDeltasMerged.length > 0) {
-            const extrasMapForAdj = new Map();
-            (extras || []).forEach((x) => {
-              const id = String(x?.inventoryItemId || "").trim();
-              if (id) extrasMapForAdj.set(id, { title: String(x?.title || x?.sku || "(unknown)").trim(), sku: String(x?.sku || "").trim() });
-            });
+        const originLocationId = String(transferForShipment?.originLocationId || transferForShipment?.origin?.location?.id || inbound?.selectedOriginLocationId || "").trim() || null;
+        const originLocationName = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim() || "出庫元";
+        const destinationLocationName = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim() || "入庫先";
+        if (rejectedDeltas.length > 0) {
+          rejectedDeltas.forEach((d) => {
+            adjustments.push({ locationName: originLocationName, locationId: originLocationId, inventoryItemId: d.inventoryItemId, sku: d.sku, title: d.title, delta: d.delta });
+          });
+        }
+        if (extraDeltasMerged && extraDeltasMerged.length > 0) {
+          const extrasMapForAdj = new Map();
+          (extras || []).forEach((x) => {
+            const id = String(x?.inventoryItemId || "").trim();
+            if (id) extrasMapForAdj.set(id, { title: String(x?.title || x?.sku || "(unknown)").trim(), sku: String(x?.sku || "").trim() });
+          });
+          extraDeltasMerged.forEach((d) => {
+            const meta = extrasMapForAdj.get(d.inventoryItemId) || {};
+            adjustments.push({ locationName: destinationLocationName, locationId: locationGid, inventoryItemId: d.inventoryItemId, sku: meta.sku || "", title: meta.title || d.inventoryItemId || "不明", delta: Math.max(0, Math.floor(Number(d.delta || 0))) });
+          });
+          if (originLocationId) {
             extraDeltasMerged.forEach((d) => {
               const meta = extrasMapForAdj.get(d.inventoryItemId) || {};
-              adjustments.push({ locationName: destinationLocationName, locationId: locationGid, inventoryItemId: d.inventoryItemId, sku: meta.sku || "", title: meta.title || d.inventoryItemId || "不明", delta: Math.max(0, Math.floor(Number(d.delta || 0))) });
+              adjustments.push({ locationName: originLocationName, locationId: originLocationId, inventoryItemId: d.inventoryItemId, sku: meta.sku || "", title: meta.title || d.inventoryItemId || "不明", delta: -Math.max(0, Math.floor(Number(d.delta || 0))) });
             });
-            if (originLocationId) {
-              extraDeltasMerged.forEach((d) => {
-                const meta = extrasMapForAdj.get(d.inventoryItemId) || {};
-                adjustments.push({ locationName: originLocationName, locationId: originLocationId, inventoryItemId: d.inventoryItemId, sku: meta.sku || "", title: meta.title || d.inventoryItemId || "不明", delta: -Math.max(0, Math.floor(Number(d.delta || 0))) });
-              });
-            }
           }
-          if (adjustments.length > 0) {
-            const adjustmentNote = buildInboundNoteLine_({ shipmentId: shipment.id, locationId: locationGid, finalize, note: "", over: [], extras: [], inventoryAdjustments: adjustments });
-            await appendInventoryTransferNote_({ transferId, line: adjustmentNote });
-          }
-        } catch (_) {}
+        }
+      }
+
+      // メモを1回だけ追記（予定外＋予定超過＋メモ＋在庫調整履歴。2回目追記の失敗で在庫調整履歴が残らない事象を防ぐ）
+      if (transferId && (hasSomething || adjustments.length > 0)) {
+        const fullNote = buildInboundNoteLine_({ shipmentId: shipment.id, locationId: locationGid, finalize, note: noteText, over: overForLog, extras: extrasForLog, inventoryAdjustments: adjustments });
+        if (String(fullNote || "").trim()) {
+          const addProcessLog = () => {};
+          const ok = await appendInventoryTransferNote_({ transferId, line: fullNote, processLogCallback: addProcessLog });
+          if (!ok) toast("管理画面メモへの追記に失敗しました（確定処理は続行します）");
+        }
       }
 
       toast(finalize ? "入庫を完了しました" : "一部入庫を確定しました");

@@ -1,7 +1,7 @@
 # 管理画面・ロス登録・棚卸 実装要件書
 
-**最終更新日**: 2026年2月20日（上記に加え、**POS出庫：確定後のコンディション画面遷移・下書きリセット修正（2026-02-20）** まで反映済み。2月19日分は在庫変動履歴：備考クリア・API検索窓15分拡張・救済API・要因ドキュメント 等）
-**コード確認日**: 2026年2月（上記に加え、4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・発注機能実装・仕入POS拡張・在庫高・在庫変動履歴・api/log-inventory-change 種別上書き・ロケーション名取得・公開/自社用 appUrl・リリース時必須対策・希望納品日/到着予定日ボタン設定・入出庫/仕入/ロス/棚卸CSV出力項目設定・在庫高Cronトークンリフレッシュ・在庫変動履歴の二重記録防止・UI改善・在庫高の本日集計自動保存・保存時間表示・在庫変動履歴のエラーハンドリング改善・二重記録防止の改善・OrderPendingLocation・売上/返品の変動数反映・POS二重防止・**受注時優先・配送完了時スキップ・Webhook到着順非依存・販売可能/手持ちは分けない方針**・**保存直前OrderPendingLocation再検索・在庫高日付枠のスマホはみ出し防止**・**既存admin_webhookをorder_salesに更新して二重管理防止・注文編集救済の時間窓updated_at・本日集計全ロケーション表示・変動一覧注釈文言**・**変動数「-」対策（遡りdelta算出・既知アクティビティ行のdelta補完）・直近admin_webhook同一イベント更新・purchase_cancel/order_cancel・キャンセル時の在庫戻り記録・order_cancel二重防止・api同一activity二重防止・INVENTORY_ACTIVITY_REFLECTION_GUARANTEE**・**反映漏れ洗い出し・orders/updated ロケーション不明時救済スキップ・大量処理50件チャンク送信・公開/自社デプロイ手順（DEPLOY_PUBLIC_AND_INHOUSE.md・set-app-mode.js・deploy:public/deploy:inhouse）**・**出庫確定で常に処理中・Webhook既知アクティビティ行更新の時間窓60秒・在庫高文言・仕入ラベル統一・ロス理由右寄せ**・**在庫変動履歴CSV出力form.actionにsearchを含める・orders/updatedでOrderPendingLocationを先に登録・inventory_levels/updateで待機＋再検索で売上完全反映**・**admin_webhook 未検出時リトライ 30 秒を売上・返品・入庫・出庫・ロス・棚卸・仕入の全経路に適用（admin-webhook-retry.ts）**・**2026-02-16 救済時idempotencyKey変更しない・P2002キャッチ・quantityAfter===available・待機3回**・**OrderPendingLocation locationId・fulfillments ループで履行ごと登録**・**2026-02-19 在庫変動履歴：備考クリア（admin_webhook上書き時note=null）・recentFrom15分拡張・救済API（api.reclassify-change-history）・要因ドキュメント（INVENTORY_HISTORY_ISSUES_20260219.md）**・**2026-02-20 POS出庫確定後コンディション遷移・下書きリセット修正** 反映済み）
+**最終更新日**: 2026年2月20日（上記に加え、**入出庫・仕入・棚卸の予定外対応と予定外表示修正（2026-02-20）** まで反映済み。POS出庫確定後コンディション遷移・下書きリセット修正、2月19日分は在庫変動履歴：備考クリア・API検索窓15分拡張・救済API・要因ドキュメント 等）
+**コード確認日**: 2026年2月（上記に加え、4分割・出庫マルチシップメント・履歴一覧UI・仮想行・配送情報・入庫 REFERENCE 整合・入出庫/棚卸モーダルUI統一・POS棚卸読み込み最適化・ロケーションインライン化・履歴モーダル配送情報・本番前console整理・POS表記統一・発注機能実装・仕入POS拡張・在庫高・在庫変動履歴・api/log-inventory-change 種別上書き・ロケーション名取得・公開/自社用 appUrl・リリース時必須対策・希望納品日/到着予定日ボタン設定・入出庫/仕入/ロス/棚卸CSV出力項目設定・在庫高Cronトークンリフレッシュ・在庫変動履歴の二重記録防止・UI改善・在庫高の本日集計自動保存・保存時間表示・在庫変動履歴のエラーハンドリング改善・二重記録防止の改善・OrderPendingLocation・売上/返品の変動数反映・POS二重防止・**受注時優先・配送完了時スキップ・Webhook到着順非依存・販売可能/手持ちは分けない方針**・**保存直前OrderPendingLocation再検索・在庫高日付枠のスマホはみ出し防止**・**既存admin_webhookをorder_salesに更新して二重管理防止・注文編集救済の時間窓updated_at・本日集計全ロケーション表示・変動一覧注釈文言**・**変動数「-」対策（遡りdelta算出・既知アクティビティ行のdelta補完）・直近admin_webhook同一イベント更新・purchase_cancel/order_cancel・キャンセル時の在庫戻り記録・order_cancel二重防止・api同一activity二重防止・INVENTORY_ACTIVITY_REFLECTION_GUARANTEE**・**反映漏れ洗い出し・orders/updated ロケーション不明時救済スキップ・大量処理50件チャンク送信・公開/自社デプロイ手順（DEPLOY_PUBLIC_AND_INHOUSE.md・set-app-mode.js・deploy:public/deploy:inhouse）**・**出庫確定で常に処理中・Webhook既知アクティビティ行更新の時間窓60秒・在庫高文言・仕入ラベル統一・ロス理由右寄せ**・**在庫変動履歴CSV出力form.actionにsearchを含める・orders/updatedでOrderPendingLocationを先に登録・inventory_levels/updateで待機＋再検索で売上完全反映**・**admin_webhook 未検出時リトライ 30 秒を売上・返品・入庫・出庫・ロス・棚卸・仕入の全経路に適用（admin-webhook-retry.ts）**・**2026-02-16 救済時idempotencyKey変更しない・P2002キャッチ・quantityAfter===available・待機3回**・**OrderPendingLocation locationId・fulfillments ループで履行ごと登録**・**2026-02-19 在庫変動履歴：備考クリア（admin_webhook上書き時note=null）・recentFrom15分拡張・救済API（api.reclassify-change-history）・要因ドキュメント（INVENTORY_HISTORY_ISSUES_20260219.md）**・**2026-02-20 POS出庫確定後コンディション遷移・下書きリセット修正**・**2026-02-20 入出庫予定外リスト（入庫拡張メモ形式対応・形式B正規表現・JAN/オプション）・仕入予定外反映（isExtra・ブロック表示・CSV種別）・棚卸予定外棚卸許可設定・予定外表示のタイトル混入修正** 反映済み）
 
 ---
 
@@ -24,6 +24,9 @@
 | 棚卸履歴IDモーダル：商品グループごとの進捗カウント | ✅ 完了（2026-02-18。「X/Yグループ完了」のXに itemsByGroup.size を使っていたため常にY/Y表示になっていた不具合を修正。completedGroupsMap から完了グループ数を算出するよう変更。実装: app.inventory-count.tsx） |
 | 棚卸単一グループ時のブロック背景 | ✅ 完了（複数と同じ背景色・角丸で統一） |
 | 棚卸の予定外を別ブロック表示 | ✅ 完了（入出庫の「予定外入庫」ブロックと同様） |
+| 入出庫履歴の予定外リスト（入庫拡張メモ形式対応） | ✅ 完了（形式Bパース・末尾「, 数量: N」必須でタイトル混入防止。入庫拡張メモにオプション・JAN出力。管理画面でJAN・オプション表示） |
+| 仕入履歴の予定外反映（未処理から入庫確定時） | ✅ 完了（POSで isExtra 保存、管理画面で予定外ブロック・一覧（予定外: N件）・CSV種別列。予定外で option1〜3 保存） |
+| 棚卸：予定外棚卸許可設定 | ✅ 完了（棚卸設定タブに「予定外棚卸許可」をCSV設定の上に配置。不許可時はアプリで予定外追加をブロック） |
 | 管理画面のステータスをバッジ表示 | ✅ 完了（入出庫・ロス・棚卸の一覧・モーダル） |
 | 出庫ロケーション選択のインライン展開 | ✅ 完了（モーダル→ボタン押下で同一画面内展開、変更/閉じるトグル） |
 | 出庫到着時刻ラベル「時間指定」化 | ✅ 完了 |
@@ -198,6 +201,7 @@
 | **微調整済み** | 棚卸ページ：上部メニュー下の余白を狭く（タブ＋区切り線を1ブロックにまとめて余白削減）。設定ページ：「破棄」「保存」ボタンを右寄せし、上下余白を抑えて浮き感を軽減 |
 
 **直近の主な更新（2026-02）**:
+- **入出庫・仕入・棚卸の予定外対応と予定外表示修正（2026-02-20）**：①**入出庫履歴の予定外リスト**：入庫拡張のメモ形式（「数量: X」）でもパースして表示するよう対応。形式Bの正規表現で末尾「, 数量: N」を必須にし、商品名に「, SKU: xxx, 数量: 2」が混入しないよう修正。入庫拡張（inboundApi.js）のメモにオプション・JANを出力するよう変更し、管理画面でJAN・オプションを表示可能に。②**仕入履歴の予定外反映**：未処理からの入庫確定時に、POSで予定（lines）・予定外（extras）に isExtra を付与して保存。管理画面で一覧に「（予定外: N件）」、モーダルで「通常」「予定外（N件）」ブロック分け表示、CSVに種別列を追加。予定外保存時に option1〜option3 を通すよう変更。③**棚卸：予定外棚卸許可設定**：設定の棚卸設定タブに「予定外棚卸許可」（左：タイトル＋説明、右：許可/不許可ラジオ）を棚卸履歴CSV出力項目設定の上に追加。不許可時は棚卸アプリで予定外商品の追加をブロックしトーストで案内。④**予定外表示の不具合修正**：入出庫の形式Bでタイトルに数量が入る問題を正規表現修正で解消。実装: app.history.tsx、inboundApi.js、PurchaseHistoryList.jsx、app.settings.tsx、InventoryCountList.jsx、app.purchase.tsx、app.order.tsx。
 - **POS出庫：確定後のコンディション画面遷移・下書きリセット修正（2026-02-20）**：アプリタイルで出庫確定後に「商品リストから戻らず、モーダルを閉じて開き直すと自動保存内容が復元される」事象を修正。①**遷移**：確定後は `onBack()`（nav.pop）に頼らず、`onConfirmSuccess` で `nav.reset(SCREENS.OUTBOUND_COND)` を実行しコンディション画面へ強制遷移。②**下書きクリア**：コンディション下書き（OUTBOUND_CONDITIONS_DRAFT_KEY）は `storage.delete` に加え `storage.set(KEY, {})` で空オブジェクトを上書きし、delete 失敗時や反映遅延時も復元されないようにした。新規確定・編集（同ID）確定・配送追加確定の全後処理で適用。実装: `extensions/stock-transfer-tile/src/ModalOutbound.jsx`。
 - **在庫変動履歴：備考クリア・API検索窓15分拡張・救済API・要因ドキュメント（2026-02-19）**：①入庫なのに備考「変動数は直前ログが…」が残る問題：api/log-inventory-change で admin_webhook を既知アクティビティに上書きする際に note を null にクリアするよう修正。②特定店舗の入庫がすべて「管理」になる問題：admin_webhook 検索の recentFrom を「現在から最大15分前」まで遡るよう拡張（API が数分遅れても既存行を拾って入庫に上書き）。③既存データ救済：POST /api/reclassify-change-history で「管理」→入庫等の一括振り直し・備考クリアが可能。要因・恒久対策・救済手順は docs/INVENTORY_HISTORY_ISSUES_20260219.md。実装: api.log-inventory-change.tsx、api.reclassify-change-history.tsx（新規）。
 - **棚卸：履歴IDモーダルの商品グループ進捗カウント修正（2026-02-18）**：「商品グループごとの進捗: X/Yグループ完了」のXが常にY表示になっていた不具合を修正。itemsByGroup.size ではなく completedGroupsMap から完了グループ数を算出するよう変更。実装: app.inventory-count.tsx。
@@ -454,6 +458,7 @@
 - ✅ **出庫：強制キャンセル処理許可設定**: 実装済み（`outbound.allowForceCancel`）
 - ✅ **入庫：過剰入庫許可設定**: 実装済み（`inbound.allowOverReceive`）
 - ✅ **入庫：予定外入庫許可設定**: 実装済み（`inbound.allowExtraReceive`）
+- ✅ **棚卸：予定外棚卸許可設定**: 実装済み（`inventoryCount.allowExtraCount`。棚卸設定タブでCSV設定の上に配置。不許可時はアプリで予定外追加をブロック）
 - ✅ **表示件数設定**: 実装済み
   - ✅ **履歴一覧リスト**: 出庫履歴・入庫履歴・ロス履歴に適用（`outbound.historyInitialLimit`、`inbound.listInitialLimit`）
   - ✅ **商品リスト**: 出庫・入庫・ロス登録に適用（`productList.initialLimit`）
@@ -470,6 +475,7 @@
 | ③ 入庫設定 | 入庫設定（過剰入庫・予定外入庫の許可など） |
 | ④ 仕入設定 | 仕入設定 |
 | ⑤ ロス設定 | ロス区分設定（ロス理由の登録・「その他（理由入力）」表示制御） |
+| ⑥ 棚卸設定 | 予定外棚卸許可（許可/不許可） / 棚卸履歴CSV出力項目設定 |
 
 - **レイアウト共通ルール（PC）**: 各タブ内の設定セクションは、**左カラムにタイトル＋説明テキスト（グレー背景） / 右カラムに設定フォームを収めた白いカード**の2カラム構成に統一。
 - **SPレイアウト**: 画面幅が狭い場合は `flexWrap` により、右カラム（白カード）が左カラム（タイトル＋説明）の**下**に縦積みされる。
@@ -547,7 +553,22 @@
 - **影響範囲**: 入庫処理時の予定外商品チェック
 - **実装ファイル**: `/app/routes/app.settings.tsx`
 
-##### ⑥ 表示件数設定 ✅ 実装済み
+##### ⑥ 棚卸：予定外棚卸許可設定 ✅ 実装済み
+- **目的**: 予定にない商品の棚卸を許可するかどうかを設定する
+- **データ構造**:
+  ```typescript
+  {
+    inventoryCount: {
+      allowExtraCount?: boolean; // デフォルト: true（許可）
+    }
+  }
+  ```
+- **UI**: 棚卸設定タブ内で、棚卸履歴CSV出力項目設定の**上**に配置。左：タイトル「予定外棚卸許可」＋説明「予定にない商品の棚卸を許可するかどうかを設定します。」、右：白カード内でラジオボタン（許可/不許可）
+- **デフォルト**: `true`（許可）
+- **影響範囲**: 棚卸アプリ（stock-transfer-stocktake）で、予定外商品を検索・スキャンから追加しようとした際に不許可ならブロックしトーストで案内
+- **実装ファイル**: `/app/routes/app.settings.tsx`、`extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
+
+##### ⑦ 表示件数設定 ✅ 実装済み
 - **目的**: 各画面の初回読み込み時の表示件数を設定
 - **データ構造**:
   ```typescript

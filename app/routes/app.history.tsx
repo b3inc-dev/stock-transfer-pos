@@ -546,14 +546,21 @@ export async function action({ request }: ActionFunctionArgs) {
           const lineMatchB = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?,\s*数量:\s*(\d+)$/);
           const lineMatch = lineMatchA || lineMatchB;
           if (lineMatch) {
-            const title = lineMatch[1]?.trim() || "";
-            const options = lineMatchA ? (lineMatchA[2]?.trim() || "") : (lineMatchB?.[2]?.trim() || "");
+            let title = lineMatch[1]?.trim() || "";
+            let options = lineMatchA ? (lineMatchA[2]?.trim() || "") : (lineMatchB?.[2]?.trim() || "");
             const sku = (lineMatchA ? lineMatchA[3] : lineMatchB?.[3])?.trim() || "";
             const barcode = lineMatchA ? (lineMatchA[4]?.trim() || "") : (lineMatchB?.[4]?.trim() || "");
             const qtyA = lineMatchA ? parseInt(lineMatchA[5] || "0", 10) : 0;
             const qtyB = lineMatchB ? parseInt(lineMatchB[5] || "0", 10) : 0;
             const qty = qtyA > 0 ? qtyA : qtyB;
-            
+            // 形式B（旧）: 行に「オプション:」が無く、タイトルに「 / 」が含まれる場合（例: "商品名 / Silver / iPhone15Pro"）は、オプションをタイトルから分離する
+            if (qty > 0 && !options && title.includes(" / ")) {
+              const parts = title.split("/").map((s) => s.trim()).filter(Boolean);
+              if (parts.length >= 2) {
+                title = parts[0] || title;
+                options = parts.slice(1).join(" / ");
+              }
+            }
             if (qty > 0) {
               // オプションを分割（例: "Special Selling 1 / Free" → option1: "Special Selling 1", option2: "Free"）
               const optionParts = options.split(" / ").filter(Boolean);
