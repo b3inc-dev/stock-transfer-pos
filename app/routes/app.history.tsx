@@ -541,15 +541,15 @@ export async function action({ request }: ActionFunctionArgs) {
         lines.forEach((line, idx) => {
           // 形式A（タイル拡張）: "  - 商品名, オプション: オプション値, SKU: xxx, JAN: xxx, 予定外/数量: X"
           // 形式B（入庫拡張）: "  - 商品名, SKU: xxx, 数量: X" または "  - 商品名, オプション: xxx, SKU: xxx, JAN: xxx, 数量: X"
-          // 末尾の「, 数量: N」を必須にし、タイトルに「, 数量: 2」などが混入しないようにする
+          // 形式Aは末尾がすべて任意のため、形式Bの行（末尾が「, 数量: N」）でも形式Aが先にマッチし group1 に全体が入り SKU に「xxx, 数量: N」が入る不具合があるため、末尾に「, 数量: N」がある行は形式Bを優先する
           const lineMatchA = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?(?:,\s*予定外\/数量:\s*(\d+))?$/);
-          const lineMatchB = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?,\s*数量:\s*(\d+)$/);
-          const lineMatch = lineMatchA || lineMatchB;
+          const lineMatchB = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*([^,]+?))?(?:,\s*JAN:\s*([^,]*?))?,\s*数量:\s*(\d+)$/);
+          const lineMatch = (lineMatchB && lineMatchB[5]) ? lineMatchB : lineMatchA;
           if (lineMatch) {
             let title = lineMatch[1]?.trim() || "";
-            let options = lineMatchA ? (lineMatchA[2]?.trim() || "") : (lineMatchB?.[2]?.trim() || "");
-            const sku = (lineMatchA ? lineMatchA[3] : lineMatchB?.[3])?.trim() || "";
-            const barcode = lineMatchA ? (lineMatchA[4]?.trim() || "") : (lineMatchB?.[4]?.trim() || "");
+            let options = (lineMatch[2]?.trim() || "") as string;
+            const sku = (lineMatch[3]?.trim() || "") as string;
+            const barcode = (lineMatch[4]?.trim() || "") as string;
             const qtyA = lineMatchA ? parseInt(lineMatchA[5] || "0", 10) : 0;
             const qtyB = lineMatchB ? parseInt(lineMatchB[5] || "0", 10) : 0;
             const qty = qtyA > 0 ? qtyA : qtyB;
