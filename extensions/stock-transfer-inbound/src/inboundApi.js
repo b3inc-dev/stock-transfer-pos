@@ -565,7 +565,21 @@ export function buildInboundNoteLine_({ shipmentId, locationId, finalize, note, 
   }
   if (Array.isArray(extras) && extras.length > 0) {
     lines.push("予定外入庫: " + extras.length + "件");
-    extras.forEach((e) => { const titleRaw = String(e?.title || e?.inventoryItemId || "不明").trim(); const sku = String(e?.sku || "").trim(); const qty = Number(e?.qty || 0); lines.push(`  - ${titleRaw}${sku ? ", SKU: " + sku : ""}, 数量: ${qty}`); });
+    extras.forEach((e) => {
+      const titleRaw = String(e?.title || e?.inventoryItemId || "不明").trim();
+      const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
+      const productName = parts[0] || titleRaw;
+      const option = parts.length >= 2 ? parts.slice(1).join(" / ") : "";
+      const sku = String(e?.sku ?? "").trim();
+      const barcode = String(e?.barcode ?? "").trim();
+      const qty = Number(e?.qty || 0);
+      const info = [productName];
+      if (option) info.push("オプション: " + option);
+      if (sku) info.push("SKU: " + sku);
+      if (barcode) info.push("JAN: " + barcode);
+      info.push("数量: " + qty);
+      lines.push("  - " + info.join(", "));
+    });
   }
   if (Array.isArray(inventoryAdjustments) && inventoryAdjustments.length > 0) {
     lines.push("在庫調整履歴:");

@@ -34,9 +34,9 @@ function extractExtrasQuantityFromNote(note: string): number {
   // 各行をパース（"  - "で始まる行のみ）
   const lines = extrasLines.split(/\n/).filter(line => line.trim().startsWith("-"));
   lines.forEach((line) => {
-    // 形式A（タイル）: ..., 予定外/数量: X  形式B（入庫拡張）: ..., 数量: X
+    // 形式A（タイル）: ..., 予定外/数量: X  形式B（入庫拡張）: ..., 数量: X（末尾を必須にしてタイトルに数量が混入しないようにする）
     const lineMatchA = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?(?:,\s*予定外\/数量:\s*(\d+))?$/);
-    const lineMatchB = line.match(/  - (.+?)(?:,\s*SKU:\s*(.+?))?(?:,\s*数量:\s*(\d+))?$/);
+    const lineMatchB = line.match(/  - (.+?)(?:,\s*SKU:\s*(.+?))?,\s*数量:\s*(\d+)$/);
     if (lineMatchA && lineMatchA[5]) totalQty += parseInt(lineMatchA[5], 10);
     else if (lineMatchB && lineMatchB[3]) totalQty += parseInt(lineMatchB[3], 10);
   });
@@ -540,17 +540,18 @@ export async function action({ request }: ActionFunctionArgs) {
         const lines = extrasLines.split(/\n/).filter(line => line.trim().startsWith("-"));
         lines.forEach((line, idx) => {
           // 形式A（タイル拡張）: "  - 商品名, オプション: オプション値, SKU: xxx, JAN: xxx, 予定外/数量: X"
-          // 形式B（入庫拡張）: "  - 商品名, SKU: xxx, 数量: X"
+          // 形式B（入庫拡張）: "  - 商品名, SKU: xxx, 数量: X" または "  - 商品名, オプション: xxx, SKU: xxx, JAN: xxx, 数量: X"
+          // 末尾の「, 数量: N」を必須にし、タイトルに「, 数量: 2」などが混入しないようにする
           const lineMatchA = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?(?:,\s*予定外\/数量:\s*(\d+))?$/);
-          const lineMatchB = line.match(/  - (.+?)(?:,\s*SKU:\s*(.+?))?(?:,\s*数量:\s*(\d+))?$/);
+          const lineMatchB = line.match(/  - (.+?)(?:,\s*オプション:\s*(.+?))?(?:,\s*SKU:\s*(.+?))?(?:,\s*JAN:\s*(.+?))?,\s*数量:\s*(\d+)$/);
           const lineMatch = lineMatchA || lineMatchB;
           if (lineMatch) {
             const title = lineMatch[1]?.trim() || "";
-            const options = lineMatchA ? (lineMatchA[2]?.trim() || "") : "";
-            const sku = (lineMatchA ? lineMatchA[3] : lineMatchB?.[2])?.trim() || "";
-            const barcode = lineMatchA ? (lineMatchA[4]?.trim() || "") : "";
+            const options = lineMatchA ? (lineMatchA[2]?.trim() || "") : (lineMatchB?.[2]?.trim() || "");
+            const sku = (lineMatchA ? lineMatchA[3] : lineMatchB?.[3])?.trim() || "";
+            const barcode = lineMatchA ? (lineMatchA[4]?.trim() || "") : (lineMatchB?.[4]?.trim() || "");
             const qtyA = lineMatchA ? parseInt(lineMatchA[5] || "0", 10) : 0;
-            const qtyB = lineMatchB ? parseInt(lineMatchB[3] || "0", 10) : 0;
+            const qtyB = lineMatchB ? parseInt(lineMatchB[5] || "0", 10) : 0;
             const qty = qtyA > 0 ? qtyA : qtyB;
             
             if (qty > 0) {
