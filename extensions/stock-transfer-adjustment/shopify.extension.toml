@@ -5,7 +5,7 @@ uid = "e8f9a0b1-c2d3-4e5f-6a7b-8c9d0e1f2a3b4c5d6e7"
 type = "ui_extension"
 name = "調整 / 在庫調整"
 handle = "stock-transfer-adjustment"
-description = "調整 / 在庫調整（簡易棚卸）"
+description = "調整 / 在庫調整"
 
 [[extensions.targeting]]
 target = "pos.home.tile.render"

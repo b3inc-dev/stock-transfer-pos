@@ -2248,7 +2248,7 @@ export function InventoryCountList({
     const summaryCenter = (
       <s-stack gap="extra-tight" alignItems="center">
         <s-text size="small" tone="subdued">
-          在庫 {currentTotal} / 実数 {actualTotal}
+          明細 {lines.length} / 在庫 {currentTotal} / 実数 {actualTotal}
         </s-text>
         <s-text size="small" tone={overTotal > 0 || shortageTotal > 0 ? "critical" : "subdued"}>
           超過 {overTotal} / 不足 {shortageTotal}
@@ -2260,7 +2260,7 @@ export function InventoryCountList({
         ) : null}
       </s-stack>
     );
-    
+
     setFooter?.(
       <FixedFooterNavBar
         summaryLeft=""

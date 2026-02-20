@@ -680,6 +680,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           l.id === hit.id ? { ...l, qty: Math.max(0, (l.qty ?? l.currentQuantity ?? 0) + incBy), available, stockLoading } : l
         );
       }
+      // スキャン・検索追加時は実数=1で追加し、数量ボタンでカウントできるようにする（在庫=実数だとカウントできないため）
       return [
         {
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -691,7 +692,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           barcode: resolved.barcode ?? "",
           imageUrl: resolved.imageUrl ?? "",
           currentQuantity: cur,
-          qty: Math.max(0, cur + incBy - 1),
+          qty: 1,
           available,
           stockLoading,
         },
@@ -1029,7 +1030,7 @@ await SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY);
       <FixedFooterNavBar
         summaryLeft=""
         summaryCenter={
-        <s-stack gap="none">
+        <s-stack gap="none" alignItems="center">
           <s-text size="small" tone="subdued">明細 {totalLines} / 在庫 {currentTotal} / 実数 {actualTotal}</s-text>
           <s-text size="small" tone={overTotal + shortTotal > 0 ? "critical" : "subdued"}>超過 {overTotal} / 不足 {shortTotal}</s-text>
         </s-stack>

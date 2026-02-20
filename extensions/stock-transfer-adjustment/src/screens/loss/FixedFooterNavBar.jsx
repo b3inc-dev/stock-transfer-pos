@@ -50,7 +50,9 @@ export function FixedFooterNavBar({
                 {summaryCenter}
               </s-text>
             ) : (
-              summaryCenter
+              <s-box style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center" }}>
+                {summaryCenter}
+              </s-box>
             )
           ) : hasMiddle ? (
             <s-button tone={middleTone} disabled={middleDisabled} onClick={onMiddle}>
