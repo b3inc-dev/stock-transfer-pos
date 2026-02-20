@@ -41,7 +41,7 @@ export default function App() {
           読み込み中…
         </div>
       )}
-      {/* App Bridge ナビゲーション（在庫情報・入出庫・仕入・ロス・発注・棚卸） */}
+      {/* App Bridge ナビゲーション（在庫情報・入出庫・仕入・ロス・発注・棚卸・調整） */}
       {/* @ts-expect-error s-app-nav は App Bridge の Web コンポーネント */}
       <s-app-nav>
         {/* @ts-expect-error s-link は App Bridge の Web コンポーネント */}
@@ -50,9 +50,9 @@ export default function App() {
         <s-link href="/app/history">入出庫</s-link>
         <s-link href="/app/purchase">仕入</s-link>
         <s-link href="/app/loss">ロス</s-link>
-        <s-link href="/app/adjustment">調整</s-link>
         <s-link href="/app/order">発注</s-link>
         <s-link href="/app/inventory-count">棚卸</s-link>
+        <s-link href="/app/adjustment">調整</s-link>
       {/* @ts-expect-error s-app-nav 閉じタグ */}
       </s-app-nav>
       <Outlet />
