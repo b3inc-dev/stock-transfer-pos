@@ -6807,7 +6807,7 @@ function OutboundList({
 
       toast("出庫を作成しました（進行中）");
 
-      // 在庫変動履歴に「出庫」で記録する（Webhook の「管理」を上書き）
+      // 在庫変動履歴に「出庫」で記録する（Webhook の「管理」を上書き）。失敗しても後処理は必ず実行する
       const transferIdStr = String(movementId || "").trim();
       const transferIdMatch = transferIdStr.match(/(\d+)$/);
       const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
@@ -6823,23 +6823,22 @@ function OutboundList({
           sku: line?.sku ?? "",
         };
       }).filter((d) => d.inventoryItemId && d.delta !== 0);
-      console.log(`[ModalOutbound] outboundDeltas.length=${outboundDeltas.length}, will call logInventoryChangeToApi=${outboundDeltas.length > 0}`);
       if (outboundDeltas.length > 0) {
-        console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer: locationId=${originLocationGid}, deltas.length=${outboundDeltas.length}, sourceId=${transferIdForUri}`);
-        await logInventoryChangeToApi({
-          activity: "outbound_transfer",
-          locationId: originLocationGid,
-          locationName: originLocationName,
-          deltas: outboundDeltas,
-          sourceId: transferIdForUri,
-          lineItems: lines,
-        });
-        console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer`);
-      } else {
-        console.warn(`[ModalOutbound] outboundDeltas.length is 0, skipping logInventoryChangeToApi call`);
+        try {
+          await logInventoryChangeToApi({
+            activity: "outbound_transfer",
+            locationId: originLocationGid,
+            locationName: originLocationName,
+            deltas: outboundDeltas,
+            sourceId: transferIdForUri,
+            lineItems: lines,
+          });
+        } catch (apiErr) {
+          console.warn("[ModalOutbound] logInventoryChangeToApi failed (outbound still created):", apiErr?.message || apiErr);
+        }
       }
 
-      // 後処理（商品リストとコンディションの両方の下書きをクリア）
+      // 確定後は必ず実行：下書き削除・コンディション画面へ遷移（API失敗時も画面は戻す）
       try { await clearOutboundDraft?.(); } catch (_) {}
       try {
         if (SHOPIFY?.storage?.delete) {
@@ -6857,9 +6856,7 @@ function OutboundList({
         editingTransferId: "",
       }));
 
-      // 確定後はコンディション画面へ強制遷移（pop だと画面が切り替わらない場合があるため reset を使用）
-      (onConfirmSuccess ?? onBack)?.();
-
+      // コンディション画面への遷移は呼び出し側（確定ボタン）でモーダルを閉じたあとに実行
       return { transfer, shipment };
     } catch (e) {
       const msg = String(e?.message || e || "unknown error");
@@ -8139,6 +8136,7 @@ function OutboundList({
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
+                (onConfirmSuccess ?? onBack)?.();
               }
             } catch (e) {
               toast(`確定前処理エラー: ${toUserMessage(e)}`);
@@ -8221,6 +8219,7 @@ function OutboundList({
                 confirmTransferModalRef?.current?.hideOverlay?.();
                 confirmTransferModalRef?.current?.hide?.();
                 setStateSlice(setAppState, "outbound", { confirmModalOpen: false });
+                (onConfirmSuccess ?? onBack)?.();
               }
             } catch (e) {
               toast(`確定前処理エラー: ${toUserMessage(e)}`);

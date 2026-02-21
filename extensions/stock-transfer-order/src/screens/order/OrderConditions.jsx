@@ -465,9 +465,9 @@ export function OrderConditions({
             onChange={(e) => setDate(readValue(e))}
           />
 
-          {/* 希望納品日（任意） */}
+          {/* 希望納品日（任意）・出庫の到着予定日と同様の間隔・右寄せ */}
           {useDesiredDeliveryDateFromSettings && (
-            <s-stack gap="extraTight">
+            <s-stack gap="small">
               <s-text-field
                 type="date"
                 label="希望納品日（任意）"
@@ -477,7 +477,7 @@ export function OrderConditions({
                 helpText="YYYY-MM-DD形式で入力してください"
               />
               {desiredDeliveryQuickDays.length > 0 && (
-                <s-stack direction="inline" gap="small" inlineAlignment="end">
+                <s-stack direction="inline" gap="small" inlineAlignment="end" justifyContent="end" wrap>
                   {desiredDeliveryQuickDays.map((d) => {
                     const label =
                       settings?.order?.desiredDeliveryQuickDayLabels?.[String(d)]?.trim() ||
