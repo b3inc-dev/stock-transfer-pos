@@ -76,12 +76,24 @@ function getActivityDisplayLabel(activity: string | null | undefined): string {
 const PURCHASE_ACTIVITY_KEY = "purchase";
 const PURCHASE_ACTIVITY_TYPES = ["purchase_entry", "purchase_cancel"] as const;
 
+/** 返品フィルター用：UIでは1つの「返品」に統一し、クエリでは refund と order_cancel の両方を対象にする */
+const REFUND_ACTIVITY_KEY = "refund";
+const REFUND_ACTIVITY_TYPES = ["refund", "order_cancel"] as const;
+
 function expandActivityTypesForQuery(types: Set<string>): string[] {
-  return Array.from(types).flatMap((t) => (t === PURCHASE_ACTIVITY_KEY ? [...PURCHASE_ACTIVITY_TYPES] : [t]));
+  return Array.from(types).flatMap((t) => {
+    if (t === PURCHASE_ACTIVITY_KEY) return [...PURCHASE_ACTIVITY_TYPES];
+    if (t === REFUND_ACTIVITY_KEY) return [...REFUND_ACTIVITY_TYPES];
+    return [t];
+  });
 }
 
 function normalizeActivityTypesFromUrl(types: string[]): string[] {
-  const normalized = types.map((t) => ((t === "purchase_entry" || t === "purchase_cancel") ? PURCHASE_ACTIVITY_KEY : t));
+  const normalized = types.map((t) => {
+    if (t === "purchase_entry" || t === "purchase_cancel") return PURCHASE_ACTIVITY_KEY;
+    if (t === "refund" || t === "order_cancel") return REFUND_ACTIVITY_KEY;
+    return t;
+  });
   return [...new Set(normalized)];
 }
 
@@ -1960,8 +1972,7 @@ export default function InventoryInfoPage() {
                               { value: "adjustment", label: "調整" },
                               { value: PURCHASE_ACTIVITY_KEY, label: "仕入" },
                               { value: "order_sales", label: "売上" },
-                              { value: "refund", label: "返品" },
-                              { value: "order_cancel", label: "返品" },
+                              { value: REFUND_ACTIVITY_KEY, label: "返品" },
                               { value: "admin_webhook", label: "管理" },
                             ].map((activity) => {
                               const isSelected = changeHistoryActivityTypes.has(activity.value);
