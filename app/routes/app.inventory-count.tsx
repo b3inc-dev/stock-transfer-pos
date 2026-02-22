@@ -1792,6 +1792,8 @@ export default function InventoryCountPage() {
   const [collectionModalPage, setCollectionModalPage] = useState(1);
   const collectionProductsFetcher = useFetcher<typeof action>();
   const MODAL_ITEMS_PER_PAGE = 1000;
+  /** モーダルを開いて商品リストを初めて受け取った1回だけ「全選択」初期化するためのフラグ（全解除ボタン押下で effect が再実行されないようにする） */
+  const collectionModalInitialSelectionDoneRef = useRef(false);
 
   const filteredModalProducts = useMemo(() => {
     const list = collectionModalProducts;
@@ -2027,6 +2029,7 @@ export default function InventoryCountPage() {
     setCollectionModalSearchQuery("");
     setShowOnlySelectedInModal(false);
     setCollectionModalPage(1);
+    collectionModalInitialSelectionDoneRef.current = false; // 商品取得後の「初回だけ全選択」を有効にする
 
     // 既存の設定があれば復元（商品リスト取得前に設定）
     // 右側から開いた場合は、その商品グループの設定を読み込む
@@ -2053,21 +2056,25 @@ export default function InventoryCountPage() {
     collectionProductsFetcher.submit(formData, { method: "post" });
   };
 
-  // 商品リスト取得完了時の処理
+  // 商品リスト取得完了時の処理（初回のみ「既存設定がなければ全選択」を行い、全選択/全解除ボタンの上書きを防ぐ）
   useEffect(() => {
     if (collectionProductsFetcher.data?.ok && collectionProductsFetcher.data.products) {
-      setCollectionModalProducts(collectionProductsFetcher.data.products);
-      // 既存の設定がなければ全選択
-      if (collectionModalSelectedVariantIds.size === 0) {
-        const allVariantIds = new Set(collectionProductsFetcher.data.products.map((p) => p.variantId));
-        setCollectionModalSelectedVariantIds(allVariantIds);
+      const products = collectionProductsFetcher.data.products;
+      setCollectionModalProducts(products);
+      // このモーダル表示中に初めて商品を受け取ったときだけ、既存設定がなければ全選択する
+      if (!collectionModalInitialSelectionDoneRef.current) {
+        collectionModalInitialSelectionDoneRef.current = true;
+        if (collectionModalSelectedVariantIds.size === 0) {
+          const allVariantIds = new Set(products.map((p) => p.variantId));
+          setCollectionModalSelectedVariantIds(allVariantIds);
+        }
       }
       setCollectionModalLoading(false);
     } else if (collectionProductsFetcher.data?.error) {
       alert(collectionProductsFetcher.data.error);
       setCollectionModalLoading(false);
     }
-  }, [collectionProductsFetcher.data, collectionModalSelectedVariantIds.size]);
+  }, [collectionProductsFetcher.data]);
 
   // モーダルで選択商品を確定
   const handleConfirmCollectionSelection = () => {
