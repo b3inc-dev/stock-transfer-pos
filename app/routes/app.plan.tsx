@@ -1,8 +1,10 @@
 // app/routes/app.plan.tsx - 料金プランページ（プラン選択＋プラン別機能の紹介）
-import type { LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
+import { redirect } from "react-router";
 import { authenticate } from "../shopify.server";
 import { getShopPlan } from "./app";
+import { createAppSubscription } from "../utils/billing";
 
 const APP_HANDLE = process.env.SHOPIFY_APP_HANDLE || "app";
 
@@ -16,9 +18,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
   return { shopPlan, pricingPlansUrl };
 }
 
+/** プラン選択ボタン押下: サブスク作成 → Shopify の承認 URL へリダイレクト */
+export async function action({ request }: ActionFunctionArgs) {
+  if (request.method !== "POST") return null;
+  const formData = await request.formData();
+  const plan = formData.get("plan");
+  if (plan !== "lite" && plan !== "pro") return null;
+
+  const { admin } = await authenticate.admin(request);
+  const shopPlan = await getShopPlan(admin);
+  if (shopPlan.distribution === "inhouse") return null;
+
+  const url = new URL(request.url);
+  const returnUrl = `${url.origin}${url.pathname}`;
+  const { confirmationUrl, userErrors } = await createAppSubscription(admin, plan, returnUrl);
+  if (userErrors.length > 0 || !confirmationUrl) {
+    return redirect(`${url.pathname}?billingError=1`);
+  }
+  return redirect(confirmationUrl);
+}
+
 export default function PlanPage() {
   const { shopPlan, pricingPlansUrl } = useLoaderData<typeof loader>();
-  const { plan, locationsCount, distribution } = shopPlan;
+  const { plan, locationsCount, distribution, isDevelopmentStore } = shopPlan;
   const isInhouse = distribution === "inhouse";
 
   if (isInhouse) {
@@ -52,28 +74,50 @@ export default function PlanPage() {
     // @ts-expect-error s-page は App Bridge の Web コンポーネント
     <s-page heading="料金プラン">
       <div style={{ padding: "16px", maxWidth: "900px" }}>
+        {isDevelopmentStore && (
+          <div
+            style={{
+              marginBottom: "16px",
+              padding: "12px 16px",
+              background: "#e3f1df",
+              borderRadius: "8px",
+              borderLeft: "4px solid #008060",
+            }}
+          >
+            {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
+            <s-text emphasis="bold">開発ストアのため課金は発生しません</s-text>
+            <div style={{ marginTop: "4px" }}>
+              {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
+              <s-text tone="subdued" size="small">
+                全機能をご利用いただけます。本番ストアでは下記の料金が適用されます。
+              </s-text>
+            </div>
+          </div>
+        )}
+
         {/* プラン選択セクション */}
         <div style={{ marginBottom: "32px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "8px" }}>
-            {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-            <s-text emphasis="bold" size="large">
-              料金プラン
-            </s-text>
+            <span style={{ fontSize: "18px", fontWeight: 700, color: "#202223" }}>料金プラン</span>
             <span style={{ fontSize: "14px", color: "#6d7175" }}>ロケーション数: {locationsCount}</span>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "16px" }}>
             <PlanCard
+              planKey="lite"
               name="Lite"
-              price="$19/月〜"
+              priceSummary="$20/月〜"
+              priceDetail="3ロケーション: $20 / 10ロケーション: $40 / 10以上: 1ロケーションあたり$4"
               trial="7日間無料"
               summary="入出庫（POS・管理画面）、入出庫履歴・CSV"
               isCurrent={plan === "lite"}
               pricingPlansUrl={pricingPlansUrl}
             />
             <PlanCard
+              planKey="pro"
               name="Pro"
-              price="$59/月〜"
+              priceSummary="$60/月〜"
+              priceDetail="3ロケーション: $60 / 10ロケーション: $100 / 10以上: 1ロケーションあたり$10"
               trial="14日間無料"
               summary="在庫情報・入出庫・仕入・ロス・発注・棚卸・調整（全機能）"
               isCurrent={plan === "pro"}
@@ -84,10 +128,9 @@ export default function PlanPage() {
 
         {/* プラン別機能の紹介 */}
         <div style={{ marginBottom: "24px" }}>
-          {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-          <s-text emphasis="bold" size="large">
+          <div style={{ marginBottom: "12px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
             全てのプランで利用可能な機能
-          </s-text>
+          </div>
           <div style={{ marginTop: "12px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: "12px" }}>
             <FeatureCard title="出庫" description="POS で出庫登録。管理画面で履歴・CSV。" />
             <FeatureCard title="入庫" description="POS で入庫受領。管理画面で履歴・CSV。" />
@@ -97,10 +140,7 @@ export default function PlanPage() {
 
         <div style={{ marginBottom: "24px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" }}>
-            {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-            <s-text emphasis="bold" size="large">
-              Pro プランで利用可能な機能
-            </s-text>
+            <span style={{ fontSize: "18px", fontWeight: 700, color: "#202223" }}>Pro プランで利用可能な機能</span>
             <span
               style={{
                 fontSize: "12px",
@@ -140,15 +180,19 @@ export default function PlanPage() {
 }
 
 function PlanCard({
+  planKey,
   name,
-  price,
+  priceSummary,
+  priceDetail,
   trial,
   summary,
   isCurrent,
   pricingPlansUrl,
 }: {
+  planKey: "lite" | "pro";
   name: string;
-  price: string;
+  priceSummary: string;
+  priceDetail: string;
   trial: string;
   summary: string;
   isCurrent: boolean;
@@ -164,29 +208,25 @@ function PlanCard({
         border: isCurrent ? "2px solid #2c6ecb" : "1px solid #e1e3e5",
       }}
     >
-      <div style={{ marginBottom: "8px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text emphasis="bold" size="large">
-          {name}
-        </s-text>
+      {/* カードタイトル（プラン名） */}
+      <div style={{ marginBottom: "12px", fontSize: "20px", fontWeight: 700 }}>
+        {name}
       </div>
-      <div style={{ marginBottom: "4px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text tone="subdued" size="small">
-          {price}
-        </s-text>
+      {/* メイン料金 */}
+      <div style={{ marginBottom: "6px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
+        {priceSummary}
       </div>
-      <div style={{ marginBottom: "12px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text tone="subdued" size="small">
-          {trial}
-        </s-text>
+      {/* 料金の内訳 */}
+      <div style={{ marginBottom: "6px", fontSize: "12px", color: "#6d7175", lineHeight: 1.4 }}>
+        {priceDetail}
       </div>
-      <div style={{ marginBottom: "16px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text tone="subdued" size="small">
-          {summary}
-        </s-text>
+      {/* トライアル */}
+      <div style={{ marginBottom: "12px", fontSize: "13px", color: "#6d7175" }}>
+        {trial}
+      </div>
+      {/* 機能の要約 */}
+      <div style={{ marginBottom: "16px", fontSize: "14px", color: "#6d7175", lineHeight: 1.4 }}>
+        {summary}
       </div>
       {isCurrent ? (
         <div
@@ -203,23 +243,24 @@ function PlanCard({
           このプランを利用中
         </div>
       ) : (
-        <a
-          href={pricingPlansUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            display: "inline-block",
-            padding: "8px 16px",
-            background: "#2c6ecb",
-            color: "#fff",
-            borderRadius: "6px",
-            fontSize: "14px",
-            textDecoration: "none",
-            fontWeight: 500,
-          }}
-        >
-          このプランを選択する
-        </a>
+        <form method="post" style={{ display: "inline-block" }}>
+          <input type="hidden" name="plan" value={planKey} />
+          <button
+            type="submit"
+            style={{
+              padding: "8px 16px",
+              background: "#2c6ecb",
+              color: "#fff",
+              border: "none",
+              borderRadius: "6px",
+              fontSize: "14px",
+              fontWeight: 500,
+              cursor: "pointer",
+            }}
+          >
+            このプランを選択する
+          </button>
+        </form>
       )}
     </div>
   );
@@ -244,9 +285,9 @@ function FeatureCard({
         border: "1px solid #e1e3e5",
       }}
     >
-      <div style={{ marginBottom: "4px", display: "flex", alignItems: "center", gap: "6px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text emphasis="bold">{title}</s-text>
+      {/* カードタイトル */}
+      <div style={{ marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" }}>
+        <span style={{ fontSize: "15px", fontWeight: 700, color: "#202223" }}>{title}</span>
         {pro && (
           <span
             style={{
@@ -261,11 +302,8 @@ function FeatureCard({
           </span>
         )}
       </div>
-      <div>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text tone="subdued" size="small">
-          {description}
-        </s-text>
+      <div style={{ fontSize: "13px", color: "#6d7175", lineHeight: 1.4 }}>
+        {description}
       </div>
     </div>
   );
