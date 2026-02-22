@@ -1,5 +1,5 @@
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, useLoaderData, useNavigation, useRouteError } from "react-router";
+import { Outlet, redirect, useLoaderData, useNavigation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
@@ -9,6 +9,7 @@ import { authenticate } from "../shopify.server";
 import type { ActiveSubscription } from "../utils/billing";
 import {
   getPlanFromActiveSubscriptions,
+  getMaxLocationsFromSubscriptionName,
   getUsageLineItemId,
   calculateUsageAmount,
   reportUsageRecord,
@@ -31,6 +32,10 @@ export type ShopPlan = {
   locationsCount: number;
   /** 開発ストア（partnerDevelopment）のとき true。開発ストアには請求しない方針で全機能を利用可能にする */
   isDevelopmentStore: boolean;
+  /** ロケーション数が契約プラン（3 or 10）を超えている場合 true。プラン変更案内を表示し機能を制限する */
+  locationPlanMismatch?: boolean;
+  /** 現在のプランが対象とする最大ロケーション数（3 or 10）。locationPlanMismatch 時のみ意味を持つ */
+  maxLocationsForPlan?: 3 | 10;
   /** 要因特定用。ENABLE_PLAN_DEBUG=1 のときのみ付与。本番では設定しないこと */
   planDebug?: {
     shop: string | undefined;
@@ -149,6 +154,24 @@ export async function getShopPlan(
     }
   }
 
+  // ロケーション数とプラン（3/10）の一致チェック。公開アプリ・Lite/Pro のときのみ
+  let locationPlanMismatch = false;
+  let maxLocationsForPlan: 3 | 10 | undefined;
+  if (distribution === "public" && !forceInhouse && (plan === "lite" || plan === "pro")) {
+    const active = activeSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
+    let maxFromPlans: 3 | 10 | null = null;
+    for (const s of active) {
+      const m = getMaxLocationsFromSubscriptionName(String(s?.name || ""));
+      if (m !== null) {
+        if (maxFromPlans === null || m > maxFromPlans) maxFromPlans = m;
+      }
+    }
+    if (maxFromPlans !== null && locationsCount > maxFromPlans) {
+      locationPlanMismatch = true;
+      maxLocationsForPlan = maxFromPlans;
+    }
+  }
+
   const planDebug =
     process.env.ENABLE_PLAN_DEBUG === "1"
       ? {
@@ -160,7 +183,15 @@ export async function getShopPlan(
         }
       : undefined;
 
-  return { distribution, plan, features, locationsCount, isDevelopmentStore, planDebug };
+  return {
+    distribution,
+    plan,
+    features,
+    locationsCount,
+    isDevelopmentStore,
+    ...(locationPlanMismatch ? { locationPlanMismatch: true, maxLocationsForPlan } : {}),
+    planDebug,
+  };
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -168,6 +199,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shopPlan = await getShopPlan(admin, session?.shop);
   const storeHandle =
     session?.shop?.replace(/\.myshopify\.com$/i, "") ?? "";
+
+  // ロケーション数とプランが一致していない場合は、ホームと料金プラン以外へはアクセスさせずプラン変更を促す
+  if (shopPlan.locationPlanMismatch) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    if (path !== "/app" && path !== "/app/plan" && !path.startsWith("/app/plan?")) {
+      return redirect("/app/plan?mismatch=1");
+    }
+  }
 
   // eslint-disable-next-line no-undef
   return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle };
@@ -217,6 +257,25 @@ export default function App() {
         {distribution === "public" && <s-link href="/app/plan">料金プラン</s-link>}
       {/* @ts-expect-error s-app-nav 閉じタグ */}
       </s-app-nav>
+      {shopPlan.locationPlanMismatch && (
+        <div
+          style={{
+            margin: "8px 16px",
+            padding: "12px 16px",
+            background: "#fff4e5",
+            border: "1px solid #e0b252",
+            borderRadius: "8px",
+            fontSize: "14px",
+            color: "#202223",
+          }}
+        >
+          <strong>ロケーション数がプランと一致していません。</strong>
+          <span style={{ marginLeft: "4px" }}>
+            現在のプランは{shopPlan.maxLocationsForPlan}ロケーションまでです。ストアのロケーション数（{shopPlan.locationsCount}）に合ったプランに変更するまで、設定・在庫・入出庫などの機能をご利用いただけません。
+            <a href="/app/plan" style={{ marginLeft: "8px", color: "#2c6ecb", fontWeight: 600 }}>料金プランで変更する</a>
+          </span>
+        </div>
+      )}
       {shopPlan.planDebug && (
         <div
           style={{

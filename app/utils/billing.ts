@@ -36,6 +36,23 @@ export function getPlanFromActiveSubscriptions(subscriptions: ActiveSubscription
   return null;
 }
 
+/**
+ * サブスクリプション名から「3ロケーション用」か「10ロケーション用」かを判定する。
+ * パートナーで lite-3 / lite-10 / pro-3 / pro-10 のように設定している場合、名前に "10" または "3" が含まれる想定。
+ * 判定できない場合は null（制限しない）。
+ */
+export function getMaxLocationsFromSubscriptionName(name: string): 3 | 10 | null {
+  const n = String(name || "").trim();
+  if (!n) return null;
+  // 先に 10 を判定（lite-10, "10 locations", "10ロケーション" など）
+  if (/-10\b|10ロケーション|10\s*locations?/i.test(n)) return 10;
+  if (/\b10\b/.test(n)) return 10;
+  // 3 を判定（lite-3, "3 locations", "3ロケーション" など）
+  if (/-3\b|3ロケーション|3\s*locations?/i.test(n)) return 3;
+  if (/\b3\b/.test(n)) return 3;
+  return null;
+}
+
 /** 10 loc 超の従量単価（USD） */
 export const USAGE_PRICE_PER_LOCATION = {
   lite: 4,

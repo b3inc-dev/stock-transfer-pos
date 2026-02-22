@@ -40,7 +40,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function PlanPage() {
   const { shopPlan, pricingPlansUrl } = useLoaderData<typeof loader>();
-  const { plan, locationsCount, distribution, isDevelopmentStore } = shopPlan;
+  const { plan, locationsCount, distribution, isDevelopmentStore, locationPlanMismatch, maxLocationsForPlan } = shopPlan;
   const isInhouse = distribution === "inhouse";
 
   if (isInhouse) {
@@ -74,6 +74,45 @@ export default function PlanPage() {
     // @ts-expect-error s-page は App Bridge の Web コンポーネント
     <s-page heading="料金プラン">
       <div style={{ padding: "16px", maxWidth: "900px" }}>
+        {locationPlanMismatch && maxLocationsForPlan != null && (
+          <div
+            style={{
+              marginBottom: "16px",
+              padding: "16px",
+              background: "#fff4e5",
+              border: "1px solid #e0b252",
+              borderRadius: "8px",
+            }}
+          >
+            <div style={{ fontSize: "16px", fontWeight: 700, color: "#202223", marginBottom: "8px" }}>
+              ロケーション数がプランと一致していません
+            </div>
+            <div style={{ fontSize: "14px", color: "#202223", marginBottom: "12px", lineHeight: 1.5 }}>
+              現在のプランは<strong>{maxLocationsForPlan}ロケーション</strong>までです。ストアのロケーション数は<strong>{locationsCount}</strong>のため、プラン変更が必要です。変更が反映されるまで設定・在庫・入出庫などの機能はご利用いただけません。
+            </div>
+            <a
+              href={pricingPlansUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: "inline-block",
+                padding: "10px 20px",
+                background: "#2c6ecb",
+                color: "#fff",
+                borderRadius: "6px",
+                fontSize: "14px",
+                fontWeight: 600,
+                textDecoration: "none",
+              }}
+            >
+              Shopify でプランを変更する
+            </a>
+            <div style={{ marginTop: "8px", fontSize: "13px", color: "#6d7175" }}>
+              プラン変更後、このページを再読み込みしてください。
+            </div>
+          </div>
+        )}
+
         {isDevelopmentStore && (
           <div
             style={{
