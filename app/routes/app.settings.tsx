@@ -1877,42 +1877,21 @@ export default function SettingsPage() {
     fetcher.submit(fd, { method: "post" });
   };
 
+  // フッター左側に表示するステータス文言
+  const footerStatusText = saveOk
+    ? "保存しました"
+    : saveErr
+      ? `保存エラー: ${saveErr}`
+      : saving
+        ? "保存中..."
+        : isDirty
+          ? "未保存の変更があります"
+          : "";
+
   return (
     <s-page heading="設定">
       <s-scroll-box padding="base">
         <s-stack gap="base">
-          {/* 保存・破棄ボタン（最上部・右寄せ・上下余白を抑えて浮き感を軽減） */}
-          <div style={{ width: "100%", display: "flex", justifyContent: "flex-end", padding: "8px 16px" }}>
-            <s-stack direction="inline" gap="base" inlineAlignment="end">
-              <s-button
-                tone="critical"
-                onClick={() => setSettings(initial)}
-                disabled={saving || !isDirty}
-              >
-                破棄
-              </s-button>
-              <s-button
-                tone="success"
-                onClick={save}
-                disabled={saving || !isDirty || hasDisplayCountError}
-              >
-                {saving ? "保存中..." : "保存"}
-              </s-button>
-            </s-stack>
-          </div>
-
-          {/* 成功・エラーメッセージ */}
-          {saveOk ? (
-            <s-box padding="base" background="subdued">
-              <s-text tone="success" emphasis="bold">保存しました</s-text>
-            </s-box>
-          ) : null}
-          {saveErr ? (
-            <s-box padding="base" background="subdued">
-              <s-text tone="critical" emphasis="bold">保存エラー: {saveErr}</s-text>
-            </s-box>
-          ) : null}
-
           {/* 上部タブナビゲーション（アプリ設定 / 出庫設定 / 入庫設定 / 仕入設定 / ロス設定） */}
           <s-box padding="none">
             <div
@@ -4456,8 +4435,50 @@ export default function SettingsPage() {
           </s-stack>
 
           <s-divider />
+          {/* 下部固定フッターの高さ分の余白（スクロール時も最後の内容が隠れないように） */}
+          <div style={{ minHeight: "72px" }} aria-hidden />
         </s-stack>
       </s-scroll-box>
+
+      {/* 固定フッター: 左にステータス、右に破棄・保存ボタン（見逃し防止） */}
+      <div
+        style={{
+          position: "fixed",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "16px",
+          padding: "12px 16px",
+          background: "#fff",
+          borderTop: "1px solid #e1e3e5",
+          boxShadow: "0 -2px 8px rgba(0,0,0,0.06)",
+          flexWrap: "wrap",
+          zIndex: 100,
+        }}
+      >
+        <div style={{ fontSize: "14px", color: saveErr ? "#d72c0d" : saveOk ? "#008060" : "#6d7175", fontWeight: 500, minHeight: "20px" }}>
+          {footerStatusText}
+        </div>
+        <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+          <s-button
+            tone="critical"
+            onClick={() => setSettings(initial)}
+            disabled={saving || !isDirty}
+          >
+            破棄
+          </s-button>
+          <s-button
+            tone="success"
+            onClick={save}
+            disabled={saving || !isDirty || hasDisplayCountError}
+          >
+            {saving ? "保存中..." : "保存"}
+          </s-button>
+        </div>
+      </div>
     </s-page>
   );
 }
