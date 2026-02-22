@@ -33,8 +33,24 @@ export type ShopPlan = {
   isDevelopmentStore: boolean;
 };
 
-export async function getShopPlan(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<ShopPlan> {
-  const distribution = (process.env.APP_DISTRIBUTION === "inhouse" ? "inhouse" : "public") as "inhouse" | "public";
+/**
+ * カスタムアプリとして扱うストアのショップドメイン一覧（カンマ区切り）。
+ * 例: CUSTOM_APP_STORE_IDS=my-store.myshopify.com,other.myshopify.com
+ * ここに含まれるストアでは常に全機能を解放する（APP_DISTRIBUTION が public でも inhouse 扱い）。
+ */
+function getCustomAppStoreIds(): string[] {
+  const raw = process.env.CUSTOM_APP_STORE_IDS ?? "";
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+export async function getShopPlan(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  currentShop?: string
+): Promise<ShopPlan> {
+  // カスタムアプリ: APP_DISTRIBUTION=inhouse または 現在のストアが CUSTOM_APP_STORE_IDS に含まれる場合は全機能解放
+  const customStoreIds = getCustomAppStoreIds();
+  const forceInhouse = Boolean(currentShop && customStoreIds.includes(currentShop));
+  const distribution = (process.env.APP_DISTRIBUTION === "inhouse" || forceInhouse ? "inhouse" : "public") as "inhouse" | "public";
 
   let locationsCount = 0;
   let isDevelopmentStore = false;
@@ -79,19 +95,20 @@ export async function getShopPlan(admin: { graphql: (q: string, opts?: { variabl
     // ignore
   }
 
-  // プラン: inhouse は常に全機能、開発ストアは請求しないで全機能、public 本番は Billing から取得
+  // プラン: カスタムアプリ（inhouse）では全ての機能を解放。開発ストアは請求しないで全機能。public 本番は Billing から取得
   let plan: "lite" | "pro" | null = null;
   if (distribution === "inhouse") {
-    plan = "pro"; // カスタムは常に全機能
+    plan = "pro"; // カスタムアプリは常に全機能利用可能
   } else if (isDevelopmentStore) {
     plan = "pro"; // 開発ストアには請求しない。全機能を利用可能にする
   } else {
     plan = planFromBilling; // 公開アプリ本番: activeSubscriptions から判定。未課金なら null（Lite 相当）
   }
 
+  // カスタムアプリ（inhouse）のときは全ての機能を true。公開アプリは plan に応じて制御
   const features: ShopPlanFeatures = {
     inventoryInfo: distribution === "inhouse" || plan === "pro",
-    history: true,
+    history: true, // 全配布で利用可能
     purchase: distribution === "inhouse" || plan === "pro",
     loss: distribution === "inhouse" || plan === "pro",
     order: distribution === "inhouse" || plan === "pro",
@@ -126,8 +143,8 @@ export async function getShopPlan(admin: { graphql: (q: string, opts?: { variabl
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
-  const shopPlan = await getShopPlan(admin);
+  const { admin, session } = await authenticate.admin(request);
+  const shopPlan = await getShopPlan(admin, session?.shop);
 
   // eslint-disable-next-line no-undef
   return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan };

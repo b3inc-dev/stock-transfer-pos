@@ -82,3 +82,18 @@
 | **CLI（手動）** | appUrl.js で public に変更 → `shopify app config use public` → `shopify app deploy` | appUrl.js で inhouse に変更 → `shopify app config use shopify.app.toml` → `shopify app deploy` |
 
 **どちらのアプリにデプロイするか**と、**appUrl.js の APP_MODE** が一致していれば、パートナーダッシュボードからでも CLI からでも問題ありません。
+
+---
+
+## 5. カスタムアプリのストアで全機能を解放する（CUSTOM_APP_STORE_IDS）
+
+**同じデプロイ（公開用 URL）**で、特定のストアだけ「カスタムアプリ同様に全機能解放」したい場合は、バックエンドの環境変数 **`CUSTOM_APP_STORE_IDS`** を設定します。
+
+| 項目 | 内容 |
+|------|------|
+| **設定例** | `CUSTOM_APP_STORE_IDS=my-store.myshopify.com,other.myshopify.com` |
+| **形式** | ショップのドメインをカンマ区切りで列挙（スペースはトリムされる） |
+| **動作** | ここに含まれるストアでアプリを開いたとき、`APP_DISTRIBUTION` が public でも **inhouse 扱い**になり、在庫情報・仕入・発注・ロス・棚卸・調整がすべて利用可能になる |
+
+**使いどころ**: 公開アプリ用の 1 本のデプロイしか運用していないが、自社ストア（カスタムアプリとしてインストールしたストア）だけ全機能を使いたい場合に、Render 等の環境変数で上記を設定してください。  
+カスタムアプリ専用のデプロイで **`APP_DISTRIBUTION=inhouse`** を設定している場合は、`CUSTOM_APP_STORE_IDS` は不要です。

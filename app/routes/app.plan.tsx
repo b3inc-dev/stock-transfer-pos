@@ -10,7 +10,7 @@ const APP_HANDLE = process.env.SHOPIFY_APP_HANDLE || "app";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin, session } = await authenticate.admin(request);
-  const shopPlan = await getShopPlan(admin);
+  const shopPlan = await getShopPlan(admin, session?.shop);
 
   const storeHandle = session.shop.replace(".myshopify.com", "");
   const pricingPlansUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${APP_HANDLE}/pricing_plans`;
@@ -25,8 +25,8 @@ export async function action({ request }: ActionFunctionArgs) {
   const plan = formData.get("plan");
   if (plan !== "lite" && plan !== "pro") return null;
 
-  const { admin } = await authenticate.admin(request);
-  const shopPlan = await getShopPlan(admin);
+  const { admin, session } = await authenticate.admin(request);
+  const shopPlan = await getShopPlan(admin, session?.shop);
   if (shopPlan.distribution === "inhouse") return null;
 
   const url = new URL(request.url);

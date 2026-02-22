@@ -131,12 +131,11 @@ export default function HomePage() {
           ))}
         </div>
 
-        {/* 右カラム: サマリー */}
+        {/* 右カラム: サマリー（料金プラン画面と同様のフォントメリハリ） */}
         <div style={{ flex: "0 1 320px", minWidth: "260px" }}>
           <SummaryCard title="現在の料金プラン" style={{ marginBottom: "16px" }}>
-            <div style={{ marginBottom: "8px" }}>
-              {/* @ts-expect-error s-text */}
-              <s-text emphasis="bold">{planLabel}</s-text>
+            <div style={{ marginBottom: "8px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
+              {planLabel}
             </div>
             {!isInhouse && !plan && (
               <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
@@ -149,23 +148,20 @@ export default function HomePage() {
               </Link>
             )}
             {isInhouse && (
-              // @ts-expect-error s-text
-              <s-text tone="subdued" size="small">
+              <span style={{ fontSize: "14px", color: "#6d7175" }}>
                 全機能をご利用いただけます
-              </s-text>
+              </span>
             )}
             {showBillingNote && (
-              // @ts-expect-error s-text
-              <s-text tone="subdued" size="small">
+              <span style={{ fontSize: "14px", color: "#6d7175" }}>
                 開発ストアのため課金は発生しません
-              </s-text>
+              </span>
             )}
           </SummaryCard>
 
           <SummaryCard title="ロケーション数">
-            {/* @ts-expect-error s-text */}
-            <s-text emphasis="bold">{locationsCount}</s-text>
-            <span style={{ marginLeft: "4px" }}>ロケーション</span>
+            <span style={{ fontSize: "18px", fontWeight: 700, color: "#202223" }}>{locationsCount}</span>
+            <span style={{ marginLeft: "4px", fontSize: "14px", color: "#6d7175" }}>ロケーション</span>
           </SummaryCard>
         </div>
       </div>
@@ -197,15 +193,11 @@ function StepCard({
         borderLeft: highlight ? "4px solid #2c6ecb" : undefined,
       }}
     >
-      <div style={{ marginBottom: "8px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text emphasis="bold">{title}</s-text>
+      <div style={{ marginBottom: "8px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
+        {title}
       </div>
-      <div style={{ marginBottom: "12px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text tone="subdued" size="small">
-          {description}
-        </s-text>
+      <div style={{ marginBottom: "12px", fontSize: "14px", color: "#6d7175", lineHeight: 1.4 }}>
+        {description}
       </div>
       <Link
         to={to}
@@ -245,9 +237,8 @@ function SummaryCard({
         ...style,
       }}
     >
-      <div style={{ marginBottom: "8px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント。カードタイトルは太字 */}
-        <s-text emphasis="bold">{title}</s-text>
+      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
+        {title}
       </div>
       {children}
     </div>
