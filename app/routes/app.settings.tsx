@@ -1,6 +1,6 @@
 // app/routes/app.settings.tsx
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useSearchParams } from "react-router";
 import { useEffect, useMemo, useState } from "react";
 import { authenticate } from "../shopify.server";
 
@@ -878,9 +878,22 @@ export default function SettingsPage() {
   const [orderQuickDayInput, setOrderQuickDayInput] = useState("");
   const [outboundQuickDayInput, setOutboundQuickDayInput] = useState("");
 
-  // 設定タブ（棚卸と同様のタブ構成）
+  // 設定タブ（棚卸と同様のタブ構成）。URL ?tab= で開いたタブを初期表示
   type SettingsTabId = "app" | "outbound" | "inbound" | "purchase" | "order" | "loss" | "stocktake" | "adjustment";
-  const [activeTab, setActiveTab] = useState<SettingsTabId>("app");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabFromUrl = searchParams.get("tab");
+  const validTabIds: SettingsTabId[] = ["app", "outbound", "inbound", "purchase", "order", "loss", "stocktake", "adjustment"];
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(() =>
+    tabFromUrl && validTabIds.includes(tabFromUrl as SettingsTabId) ? (tabFromUrl as SettingsTabId) : "app"
+  );
+
+  // ホームなどから /app/settings?tab=xxx で遷移したときにタブを反映
+  useEffect(() => {
+    const t = searchParams.get("tab");
+    if (t && validTabIds.includes(t as SettingsTabId)) {
+      setActiveTab(t as SettingsTabId);
+    }
+  }, [searchParams]);
 
   // アプリ表示件数の入力検証エラー（半角数字以外など）
   const [displayCountErrors, setDisplayCountErrors] = useState<{
@@ -1926,7 +1939,10 @@ export default function SettingsPage() {
                   <button
                     key={tab.id}
                     type="button"
-                    onClick={() => setActiveTab(tab.id)}
+                    onClick={() => {
+                      setActiveTab(tab.id);
+                      setSearchParams({ tab: tab.id });
+                    }}
                     style={{
                       border: "none",
                       backgroundColor: selected ? "#e5e7eb" : "transparent",

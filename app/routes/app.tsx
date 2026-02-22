@@ -170,8 +170,8 @@ export default function App() {
         {features.inventoryInfo && <s-link href="/app/inventory-info">在庫情報</s-link>}
         <s-link href="/app/history">入出庫</s-link>
         {features.purchase && <s-link href="/app/purchase">仕入</s-link>}
-        {features.loss && <s-link href="/app/loss">ロス</s-link>}
         {features.order && <s-link href="/app/order">発注</s-link>}
+        {features.loss && <s-link href="/app/loss">ロス</s-link>}
         {features.stocktake && <s-link href="/app/inventory-count">棚卸</s-link>}
         {features.adjustment && <s-link href="/app/adjustment">調整</s-link>}
         {distribution === "public" && <s-link href="/app/plan">料金プラン</s-link>}

@@ -12,10 +12,11 @@ type OutletContext = { shopPlan: ShopPlan };
 
 export default function HomePage() {
   const { shopPlan } = useOutletContext<OutletContext>();
-  const { distribution, plan, features, locationsCount } = shopPlan;
+  const { distribution, plan, features, locationsCount, isDevelopmentStore } = shopPlan;
   const isInhouse = distribution === "inhouse";
-  const showPlanStep = !isInhouse; // カスタムのときは料金プランステップを非表示
-  const showStep4 = isInhouse || plan === "pro";
+  const showPlanStep = !isInhouse;
+  const showBillingNote = !isInhouse && isDevelopmentStore;
+  const isPro = isInhouse || plan === "pro";
 
   const planLabel =
     plan === "pro"
@@ -24,50 +25,110 @@ export default function HomePage() {
         ? "Lite（7日間トライアル中）"
         : "プランが選択されていません";
 
+  // 導入ステップ: 1.料金 2.アプリ設定 3.出庫 4.入庫 [Lite: 10.POS] [Pro: 5〜9 仕入・発注・ロス・棚卸・調整] 10.POS
+  const steps: Array<{ num: number; title: string; description: string; to: string; buttonLabel: string; highlight?: boolean }> = [];
+  let num = 0;
+  if (showPlanStep) {
+    num++;
+    steps.push({
+      num,
+      title: "料金プランを選択する",
+      description: "Lite または Pro を選択し、利用を開始しましょう。",
+      to: "/app/plan",
+      buttonLabel: "料金プランを選択する",
+      highlight: !plan,
+    });
+  }
+  num++;
+  steps.push({
+    num,
+    title: "アプリ設定",
+    description: "設定できる項目：表示ロケーションの選択、履歴一覧の表示件数、商品リスト・検索リストの表示件数。",
+    to: "/app/settings",
+    buttonLabel: "設定を開く",
+  });
+  num++;
+  steps.push({
+    num,
+    title: "出庫設定",
+    description: "設定できる項目：出庫履歴の初回件数、配送情報の必須/任意、配送業者プリセット、到着予定日ボタン（日数・ラベル）、「その他（配送会社入力）」の表示、強制キャンセル許可。",
+    to: "/app/settings?tab=outbound",
+    buttonLabel: "出庫設定を開く",
+  });
+  num++;
+  steps.push({
+    num,
+    title: "入庫設定",
+    description: "設定できる項目：入出庫履歴のCSV出力項目（並び・ON/OFF）、過剰入庫許可、予定外入庫許可、入庫リストの初回件数。",
+    to: "/app/settings?tab=inbound",
+    buttonLabel: "入庫設定を開く",
+  });
+  if (isPro) {
+    num++;
+    steps.push({
+      num,
+      title: "仕入設定",
+      description: "設定できる項目：仕入先マスタ（名称・コード・並び順）、「その他（仕入先入力）」の表示、仕入履歴のCSV出力項目。",
+      to: "/app/settings?tab=purchase",
+      buttonLabel: "仕入設定を開く",
+    });
+    num++;
+    steps.push({
+      num,
+      title: "発注設定",
+      description: "設定できる項目：発注先マスタ（名称・コード・並び順）、希望納品日の表示ON/OFF、希望納品日ボタンの日数・ラベル、発注履歴のCSV出力項目。",
+      to: "/app/settings?tab=order",
+      buttonLabel: "発注設定を開く",
+    });
+    num++;
+    steps.push({
+      num,
+      title: "ロス設定",
+      description: "設定できる項目：ロス区分（破損・紛失など）の登録・並び順、「その他（理由入力）」の表示、ロス履歴のCSV出力項目。",
+      to: "/app/settings?tab=loss",
+      buttonLabel: "ロス設定を開く",
+    });
+    num++;
+    steps.push({
+      num,
+      title: "棚卸設定",
+      description: "設定できる項目：棚卸履歴のCSV出力項目（並び・ON/OFF）、予定外棚卸の許可/不許可。",
+      to: "/app/settings?tab=stocktake",
+      buttonLabel: "棚卸設定を開く",
+    });
+    num++;
+    steps.push({
+      num,
+      title: "調整設定",
+      description: "設定できる項目：調整（簡易棚卸）履歴のCSV出力項目（並び・ON/OFF、差分列など）。",
+      to: "/app/settings?tab=adjustment",
+      buttonLabel: "調整設定を開く",
+    });
+  }
+  num++;
+  steps.push({
+    num,
+    title: "POSアプリタイル追加",
+    description: "POSで出庫・入庫・ロス・棚卸などのタイルを使うには、Shopify管理画面のPOSチャネルでアプリを追加してください。設定画面の「アプリ設定」からも案内を確認できます。",
+    to: "/app/settings",
+    buttonLabel: "設定を開く",
+  });
+
   return (
     <s-page heading="ホーム">
       <div style={{ padding: "16px", display: "flex", gap: "24px", flexWrap: "wrap", maxWidth: "1200px" }}>
-        {/* 左カラム: はじめての設定 */}
+        {/* 左カラム: 導入ステップ */}
         <div style={{ flex: "1 1 60%", minWidth: "280px" }}>
-          <div style={{ marginBottom: "16px" }}>
-            {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-            <s-text emphasis="bold" size="large">
-              はじめての設定
-            </s-text>
-          </div>
-
-          {showPlanStep && (
+          {steps.map((step) => (
             <StepCard
-              title="1. 料金プランを選択する"
-              description="Lite または Pro を選択し、利用を開始しましょう。"
-              buttonLabel="料金プランを選択する"
-              to="/app/plan"
-              highlight={!plan}
+              key={step.num}
+              title={`${step.num}. ${step.title}`}
+              description={step.description}
+              buttonLabel={step.buttonLabel}
+              to={step.to}
+              highlight={step.highlight}
             />
-          )}
-
-          <StepCard
-            title={showPlanStep ? "2. 設定でロケーション等を確認する" : "1. 設定でロケーション等を確認する"}
-            description="出庫元・入庫先に使うロケーションや、出庫・入庫の初期設定を行います。"
-            buttonLabel="設定を開く"
-            to="/app/settings"
-          />
-
-          <StepCard
-            title={showPlanStep ? "3. 入出庫の使い方を確認する" : "2. 入出庫の使い方を確認する"}
-            description="POS で出庫・入庫を使う前に、管理画面で入出庫履歴の見方を確認しましょう。"
-            buttonLabel="入出庫を開く"
-            to="/app/history"
-          />
-
-          {showStep4 && (
-            <StepCard
-              title={showPlanStep ? "4. 仕入・ロス・棚卸・発注を使う" : "3. 仕入・ロス・棚卸・発注を使う"}
-              description="仕入・ロス・棚卸・発注は Pro プランで利用できます。各メニューから設定や履歴を確認できます。"
-              buttonLabel="仕入を開く"
-              to="/app/purchase"
-            />
-          )}
+          ))}
         </div>
 
         {/* 右カラム: サマリー */}
@@ -91,6 +152,12 @@ export default function HomePage() {
               // @ts-expect-error s-text
               <s-text tone="subdued" size="small">
                 全機能をご利用いただけます
+              </s-text>
+            )}
+            {showBillingNote && (
+              // @ts-expect-error s-text
+              <s-text tone="subdued" size="small">
+                開発ストアのため課金は発生しません
               </s-text>
             )}
           </SummaryCard>
@@ -179,10 +246,8 @@ function SummaryCard({
       }}
     >
       <div style={{ marginBottom: "8px" }}>
-        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-        <s-text tone="subdued" size="small">
-          {title}
-        </s-text>
+        {/* @ts-expect-error s-text は App Bridge の Web コンポーネント。カードタイトルは太字 */}
+        <s-text emphasis="bold">{title}</s-text>
       </div>
       {children}
     </div>
