@@ -28,6 +28,12 @@ api_version = "2026-01"
   topics = [ "inventory_levels/update" ]
   uri = "/webhooks/inventory_levels/update"
 
+  # 必須コンプライアンス Webhook（App Store 審査で必須）
+  # https://shopify.dev/docs/apps/build/compliance/privacy-law-compliance
+  [[webhooks.subscriptions]]
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+  uri = "/webhooks/compliance"
+
   # 保護された顧客データを含む Webhook。未承認アプリではデプロイ時にエラーになるためコメントアウト。
   # 承認後はコメントを外して deploy する。https://shopify.dev/docs/apps/launch/protected-customer-data
   # [[webhooks.subscriptions]]

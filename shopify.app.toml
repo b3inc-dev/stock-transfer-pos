@@ -23,6 +23,11 @@ api_version = "2026-01"
   topics = [ "inventory_levels/update" ]
   uri = "/webhooks/inventory_levels/update"
 
+  # 必須コンプライアンス Webhook（App Store 審査で必須）
+  [[webhooks.subscriptions]]
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+  uri = "/webhooks/compliance"
+
   [[webhooks.subscriptions]]
   topics = [ "orders/updated" ]
   uri = "/webhooks/orders/updated"
