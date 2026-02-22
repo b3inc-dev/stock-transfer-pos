@@ -193,7 +193,7 @@ function StepCard({
         borderLeft: highlight ? "4px solid #2c6ecb" : undefined,
       }}
     >
-      <div style={{ marginBottom: "8px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
+      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
         {title}
       </div>
       <div style={{ marginBottom: "12px", fontSize: "14px", color: "#6d7175", lineHeight: 1.4 }}>
