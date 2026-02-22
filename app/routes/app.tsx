@@ -166,13 +166,15 @@ export async function getShopPlan(
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, session } = await authenticate.admin(request);
   const shopPlan = await getShopPlan(admin, session?.shop);
+  const storeHandle =
+    session?.shop?.replace(/\.myshopify\.com$/i, "") ?? "";
 
   // eslint-disable-next-line no-undef
-  return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan };
+  return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle };
 };
 
 export default function App() {
-  const { apiKey, shopPlan } = useLoaderData<typeof loader>();
+  const { apiKey, shopPlan, storeHandle } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isLoading = navigation.state === "loading";
   const { features, distribution } = shopPlan;
@@ -243,7 +245,7 @@ export default function App() {
           </div>
         </div>
       )}
-      <Outlet context={{ shopPlan }} />
+      <Outlet context={{ shopPlan, storeHandle }} />
     </AppProvider>
   );
 }

@@ -8,10 +8,17 @@ export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
 
-type OutletContext = { shopPlan: ShopPlan };
+type OutletContext = { shopPlan: ShopPlan; storeHandle?: string };
+
+/** 販売チャネルPOSの設定画面（POSアプリの追加はここ）。ストアによっては販売チャネル一覧に誘導される場合あり */
+const getPosChannelUrl = (storeHandle: string) =>
+  `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/apps/point-of-sale-channel`;
+/** 販売チャネル一覧（POSがまだない場合はここから「Point of Sale」を追加） */
+const getChannelsUrl = (storeHandle: string) =>
+  `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/settings/channels`;
 
 export default function HomePage() {
-  const { shopPlan } = useOutletContext<OutletContext>();
+  const { shopPlan, storeHandle } = useOutletContext<OutletContext>();
   const { distribution, plan, features, locationsCount, isDevelopmentStore } = shopPlan;
   const isInhouse = distribution === "inhouse";
   const showPlanStep = !isInhouse;
@@ -26,7 +33,7 @@ export default function HomePage() {
         : "プランが選択されていません";
 
   // 導入ステップ: 1.料金 2.アプリ設定 3.出庫 4.入庫 [Lite: 10.POS] [Pro: 5〜9 仕入・発注・ロス・棚卸・調整] 10.POS
-  const steps: Array<{ num: number; title: string; description: string; to: string; buttonLabel: string; highlight?: boolean }> = [];
+  const steps: Array<{ num: number; title: string; description: string; to: string; buttonLabel: string; highlight?: boolean; stepId?: "pos" }> = [];
   let num = 0;
   if (showPlanStep) {
     num++;
@@ -109,61 +116,95 @@ export default function HomePage() {
   steps.push({
     num,
     title: "POSアプリタイル追加",
-    description: "POSで出庫・入庫・ロス・棚卸などのタイルを使うには、Shopify管理画面のPOSチャネルでアプリを追加してください。設定画面の「アプリ設定」からも案内を確認できます。",
+    description: "POSで出庫・入庫・ロス・棚卸などのタイルを使うには、Shopify管理画面の「販売チャネル」の「Point of Sale」でアプリを追加してください。POSチャネルがまだない場合は販売チャネル一覧から追加できます。",
     to: "/app/settings",
-    buttonLabel: "設定を開く",
+    buttonLabel: "POSの設定を開く",
+    stepId: "pos",
   });
+
+  const summaryBlock = (
+    <div className="HomePage-summary">
+      <SummaryCard title="現在の料金プラン" style={{ marginBottom: "16px" }}>
+        <div style={{ marginBottom: "8px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
+          {planLabel}
+        </div>
+        {!isInhouse && !plan && (
+          <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
+            料金プランを選択する
+          </Link>
+        )}
+        {!isInhouse && plan === "lite" && (
+          <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
+            アップグレードして全機能を使いましょう
+          </Link>
+        )}
+        {isInhouse && (
+          <span style={{ fontSize: "14px", color: "#6d7175" }}>
+            全機能をご利用いただけます
+          </span>
+        )}
+        {showBillingNote && (
+          <span style={{ fontSize: "14px", color: "#6d7175" }}>
+            開発ストアのため課金は発生しません
+          </span>
+        )}
+      </SummaryCard>
+
+      <SummaryCard title="ロケーション数">
+        <span style={{ fontSize: "18px", fontWeight: 700, color: "#202223" }}>{locationsCount}</span>
+        <span style={{ marginLeft: "4px", fontSize: "14px", color: "#6d7175" }}>ロケーション</span>
+      </SummaryCard>
+    </div>
+  );
+
+  const stepsBlock = (
+    <div className="HomePage-steps">
+      {steps.map((step) =>
+        step.stepId === "pos" && storeHandle ? (
+          <StepCardPos
+            key={step.num}
+            step={step}
+            storeHandle={storeHandle}
+          />
+        ) : (
+          <StepCard
+            key={step.num}
+            title={`${step.num}. ${step.title}`}
+            description={step.description}
+            buttonLabel={step.buttonLabel}
+            to={step.to}
+            highlight={step.highlight}
+          />
+        )
+      )}
+    </div>
+  );
 
   return (
     <s-page heading="ホーム">
-      <div style={{ padding: "16px", display: "flex", gap: "24px", flexWrap: "wrap", maxWidth: "1200px" }}>
-        {/* 左カラム: 導入ステップ */}
-        <div style={{ flex: "1 1 60%", minWidth: "280px" }}>
-          {steps.map((step) => (
-            <StepCard
-              key={step.num}
-              title={`${step.num}. ${step.title}`}
-              description={step.description}
-              buttonLabel={step.buttonLabel}
-              to={step.to}
-              highlight={step.highlight}
-            />
-          ))}
-        </div>
-
-        {/* 右カラム: サマリー（料金プラン画面と同様のフォントメリハリ） */}
-        <div style={{ flex: "0 1 320px", minWidth: "260px" }}>
-          <SummaryCard title="現在の料金プラン" style={{ marginBottom: "16px" }}>
-            <div style={{ marginBottom: "8px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
-              {planLabel}
-            </div>
-            {!isInhouse && !plan && (
-              <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
-                料金プランを選択する
-              </Link>
-            )}
-            {!isInhouse && plan === "lite" && (
-              <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
-                アップグレードして全機能を使いましょう
-              </Link>
-            )}
-            {isInhouse && (
-              <span style={{ fontSize: "14px", color: "#6d7175" }}>
-                全機能をご利用いただけます
-              </span>
-            )}
-            {showBillingNote && (
-              <span style={{ fontSize: "14px", color: "#6d7175" }}>
-                開発ストアのため課金は発生しません
-              </span>
-            )}
-          </SummaryCard>
-
-          <SummaryCard title="ロケーション数">
-            <span style={{ fontSize: "18px", fontWeight: 700, color: "#202223" }}>{locationsCount}</span>
-            <span style={{ marginLeft: "4px", fontSize: "14px", color: "#6d7175" }}>ロケーション</span>
-          </SummaryCard>
-        </div>
+      <style>{`
+        .HomePage-layout {
+          padding: 16px;
+          display: flex;
+          gap: 24px;
+          flex-wrap: wrap;
+          max-width: 1200px;
+        }
+        .HomePage-summary { flex: 0 1 320px; min-width: 260px; }
+        .HomePage-steps { flex: 1 1 60%; min-width: 280px; }
+        @media (max-width: 767px) {
+          .HomePage-layout { flex-direction: column; }
+          .HomePage-summary { order: 1; flex: 1 1 100%; min-width: 0; width: 100%; }
+          .HomePage-steps { order: 2; flex: 1 1 100%; min-width: 0; width: 100%; }
+        }
+        @media (min-width: 768px) {
+          .HomePage-steps { order: 1; }
+          .HomePage-summary { order: 2; }
+        }
+      `}</style>
+      <div className="HomePage-layout">
+        {summaryBlock}
+        {stepsBlock}
       </div>
     </s-page>
   );
@@ -214,6 +255,53 @@ function StepCard({
       >
         {buttonLabel}
       </Link>
+    </div>
+  );
+}
+
+/** POSアプリタイル追加用：販売チャネルPOSの設定／販売チャネル一覧を管理画面で開く */
+function StepCardPos({
+  step,
+  storeHandle,
+}: {
+  step: { num: number; title: string; description: string };
+  storeHandle: string;
+}) {
+  const posUrl = getPosChannelUrl(storeHandle);
+  const channelsUrl = getChannelsUrl(storeHandle);
+  const linkStyle = {
+    display: "inline-block",
+    padding: "8px 16px",
+    background: "#2c6ecb",
+    color: "#fff",
+    borderRadius: "6px",
+    fontSize: "14px",
+    textDecoration: "none" as const,
+    fontWeight: 500,
+  };
+  const secondaryStyle = { fontSize: "14px", color: "#2c6ecb", marginLeft: "12px" };
+  return (
+    <div
+      style={{
+        marginBottom: "16px",
+        padding: "16px",
+        background: "#fff",
+        borderRadius: "8px",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+      }}
+    >
+      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
+        {step.num}. {step.title}
+      </div>
+      <div style={{ marginBottom: "12px", fontSize: "14px", color: "#6d7175", lineHeight: 1.4 }}>
+        {step.description}
+      </div>
+      <a href={posUrl} target="_blank" rel="noopener noreferrer" style={linkStyle}>
+        POSの設定を開く
+      </a>
+      <a href={channelsUrl} target="_blank" rel="noopener noreferrer" style={secondaryStyle}>
+        販売チャネル一覧を開く
+      </a>
     </div>
   );
 }
