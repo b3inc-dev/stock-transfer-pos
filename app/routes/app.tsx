@@ -31,6 +31,14 @@ export type ShopPlan = {
   locationsCount: number;
   /** 開発ストア（partnerDevelopment）のとき true。開発ストアには請求しない方針で全機能を利用可能にする */
   isDevelopmentStore: boolean;
+  /** 要因特定用。ENABLE_PLAN_DEBUG=1 のときのみ付与。本番では設定しないこと */
+  planDebug?: {
+    shop: string | undefined;
+    appDistributionValue: string;
+    distributionResult: "inhouse" | "public";
+    shopInCustomList: boolean;
+    customStoreIdsCount: number;
+  };
 };
 
 /**
@@ -49,8 +57,10 @@ export async function getShopPlan(
 ): Promise<ShopPlan> {
   // カスタムアプリ: APP_DISTRIBUTION=inhouse または 現在のストアが CUSTOM_APP_STORE_IDS に含まれる場合は全機能解放
   const customStoreIds = getCustomAppStoreIds();
-  const forceInhouse = Boolean(currentShop && customStoreIds.includes(currentShop));
-  const distribution = (process.env.APP_DISTRIBUTION === "inhouse" || forceInhouse ? "inhouse" : "public") as "inhouse" | "public";
+  const shopNormalized = currentShop?.trim().toLowerCase();
+  const forceInhouse = Boolean(shopNormalized && customStoreIds.some((id) => id.trim().toLowerCase() === shopNormalized));
+  const distEnv = (process.env.APP_DISTRIBUTION ?? "").trim().toLowerCase();
+  const distribution = (distEnv === "inhouse" || forceInhouse ? "inhouse" : "public") as "inhouse" | "public";
 
   let locationsCount = 0;
   let isDevelopmentStore = false;
@@ -139,7 +149,18 @@ export async function getShopPlan(
     }
   }
 
-  return { distribution, plan, features, locationsCount, isDevelopmentStore };
+  const planDebug =
+    process.env.ENABLE_PLAN_DEBUG === "1"
+      ? {
+          shop: currentShop,
+          appDistributionValue: process.env.APP_DISTRIBUTION ?? "(未設定)",
+          distributionResult: distribution,
+          shopInCustomList: forceInhouse,
+          customStoreIdsCount: customStoreIds.length,
+        }
+      : undefined;
+
+  return { distribution, plan, features, locationsCount, isDevelopmentStore, planDebug };
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -194,6 +215,34 @@ export default function App() {
         {distribution === "public" && <s-link href="/app/plan">料金プラン</s-link>}
       {/* @ts-expect-error s-app-nav 閉じタグ */}
       </s-app-nav>
+      {shopPlan.planDebug && (
+        <div
+          style={{
+            margin: "8px 16px",
+            padding: "12px 16px",
+            background: "#f6f6f7",
+            border: "1px solid #c9cccf",
+            borderRadius: "8px",
+            fontSize: "13px",
+            fontFamily: "monospace",
+            color: "#202223",
+          }}
+        >
+          <div style={{ fontWeight: 700, marginBottom: "8px" }}>プラン判定の診断（ENABLE_PLAN_DEBUG=1）</div>
+          <table style={{ borderCollapse: "collapse" }}>
+            <tbody>
+              <tr><td style={{ padding: "2px 12px 2px 0", verticalAlign: "top" }}>shop</td><td>{shopPlan.planDebug.shop ?? "(なし)"}</td></tr>
+              <tr><td style={{ padding: "2px 12px 2px 0", verticalAlign: "top" }}>APP_DISTRIBUTION</td><td>{shopPlan.planDebug.appDistributionValue}</td></tr>
+              <tr><td style={{ padding: "2px 12px 2px 0", verticalAlign: "top" }}>distribution（結果）</td><td><strong>{shopPlan.planDebug.distributionResult}</strong></td></tr>
+              <tr><td style={{ padding: "2px 12px 2px 0", verticalAlign: "top" }}>CUSTOM_APP_STORE_IDS 件数</td><td>{shopPlan.planDebug.customStoreIdsCount}</td></tr>
+              <tr><td style={{ padding: "2px 12px 2px 0", verticalAlign: "top" }}>このストアがリストに含まれる</td><td>{shopPlan.planDebug.shopInCustomList ? "はい" : "いいえ"}</td></tr>
+            </tbody>
+          </table>
+          <div style={{ marginTop: "8px", fontSize: "12px", color: "#6d7175" }}>
+            distribution が public のままなら、APP_DISTRIBUTION=inhouse をこのサーバーの環境変数に設定するか、CUSTOM_APP_STORE_IDS に上記 shop を追加してください。確認後は ENABLE_PLAN_DEBUG を外してください。
+          </div>
+        </div>
+      )}
       <Outlet context={{ shopPlan }} />
     </AppProvider>
   );
