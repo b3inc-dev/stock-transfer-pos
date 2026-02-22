@@ -156,7 +156,7 @@ export default function PlanPage() {
               planKey="pro"
               name="Pro"
               priceSummary="$60/月〜"
-              priceDetail="3ロケーション: $60 / 10ロケーション: $100 / 10以上: 1ロケーションあたり$10"
+              priceDetail="3ロケーション: $60 / 10ロケーション: $120 / 10以上: 1ロケーションあたり$12"
               trial="14日間無料"
               summary="在庫情報・入出庫・仕入・ロス・発注・棚卸・調整（全機能）"
               isCurrent={plan === "pro"}

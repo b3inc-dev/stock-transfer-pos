@@ -29,16 +29,16 @@
 | プラン | 3ロケーション | 10ロケーション | 10ロケーション以上 |
 |--------|----------------|-----------------|----------------------|
 | **Lite** | $20 | $40 | **1ロケーションあたり $4** |
-| **Pro** | $60 | $100 | **1ロケーションあたり $10** |
+| **Pro** | $60 | $120 | **1ロケーションあたり $12** |
 
 **実装の考え方**
 
 - **開発ストアには請求しない**：Shopify の `shop.plan.partnerDevelopment` が `true` のストアは開発ストアとする。開発ストアでは課金（Recurring charge）を作成・請求せず、アプリ内では全機能を利用可能（Pro 相当）として扱う。管理画面のホーム・料金プランページで「開発ストアのため課金は発生しません」と案内する。
-- **3ロケーション・10ロケーション**：Managed pricing で固定プラン（例: Lite 3 loc $20、Lite 10 loc $40、Pro 3 loc $60、Pro 10 loc $100）を複数用意する。最大4プランの制約があるため、Lite 2種＋Pro 2種などで組み合わせる。
+- **3ロケーション・10ロケーション**：Managed pricing で固定プラン（例: Lite 3 loc $20、Lite 10 loc $40、Pro 3 loc $60、Pro 10 loc $120）を複数用意する。最大4プランの制約があるため、Lite 2種＋Pro 2種などで組み合わせる。
 - **10ロケーション以上（1ロケーションあたりの課金）**：**要件確定**。**Usage-based billing**（使用量に応じた請求）で **「基本料金＋(ロケーション数−10)×単価」** により課金する。
-  - **基本料金**：Lite は 10ロケーションまで $40/月、Pro は 10ロケーションまで $100/月（上記の 10 loc プランと同額）。
-  - **単価**：Lite は 11 loc 目以降 $4/ロケーション、Pro は 11 loc 目以降 $10/ロケーション。
-  - **計算式**：Lite は `$40 + max(0, locationsCount - 10) × $4`、Pro は `$100 + max(0, locationsCount - 10) × $10`。実装時は Shopify の Usage-based billing API の仕様に合わせて、基本料（Recurring）＋従量分（Usage charge）の形で請求を作成する。
+  - **基本料金**：Lite は 10ロケーションまで $40/月、Pro は 10ロケーションまで $120/月（上記の 10 loc プランと同額）。
+  - **単価**：Lite は 11 loc 目以降 $4/ロケーション、Pro は 11 loc 目以降 $12/ロケーション。
+  - **計算式**：Lite は `$40 + max(0, locationsCount - 10) × $4`、Pro は `$120 + max(0, locationsCount - 10) × $12`。実装時は Shopify の Usage-based billing API の仕様に合わせて、基本料（Recurring）＋従量分（Usage charge）の形で請求を作成する。
 
 ---
 
@@ -69,7 +69,7 @@
 - **本番ストア**：**Shopify Billing API** で、そのショップの「現在の Recurring Application Charge」を取得する。
 - パートナーで作成するプラン名（例: `Lite - up to 3 locations`, `Pro - up to 10 locations`）と、アプリ内の **Lite / Pro** を対応させる。
 - 取得したプラン名から **`lite` または `pro`** を判定し、機能の ON/OFF に使う。
-- **10ロケーション以上**：本番ストアでロケーション数が 10 を超える場合は、**Usage-based billing** で「基本料金＋(ロケーション数−10)×単価」（Lite: 基本 $40＋$4/ loc、Pro: 基本 $100＋$10/ loc）により請求する。実装時は Recurring Application Charge（基本料）と Usage charge（従量分）を組み合わせる。
+- **10ロケーション以上**：本番ストアでロケーション数が 10 を超える場合は、**Usage-based billing** で「基本料金＋(ロケーション数−10)×単価」（Lite: 基本 $40＋$4/ loc、Pro: 基本 $120＋$12/ loc）により請求する。実装時は Recurring Application Charge（基本料）と Usage charge（従量分）を組み合わせる。
 
 **補足**
 
@@ -250,5 +250,5 @@ TOP の「はじめての設定」に載せる文言のたたき台です。必�
 ## 8. 課金まわり実装メモ（2026-02 反映）
 
 - **プラン取得**: `getShopPlan`（`app/routes/app.tsx`）で `currentAppInstallation.activeSubscriptions` を取得し、サブスク名から `lite` / `pro` を判定。開発ストアは課金せず `plan = "pro"`。
-- **サブスク作成**: `app/utils/billing.ts` の `createAppSubscription(admin, plan, returnUrl)` で `appSubscriptionCreate` を実行。基本料（Recurring $40/$100）＋10 loc 超用の従量（Usage、キャップ $200/$500）の 2 本立て。料金プランページ（`app.plan.tsx`）の「このプランを選択する」は POST で action を呼び、承認用 `confirmationUrl` へリダイレクト。
+- **サブスク作成**: `app/utils/billing.ts` の `createAppSubscription(admin, plan, returnUrl)` で `appSubscriptionCreate` を実行。基本料（Recurring $40/$120）＋10 loc 超用の従量（Usage、キャップ $200/$500）の 2 本立て。料金プランページ（`app.plan.tsx`）の「このプランを選択する」は POST で action を呼び、承認用 `confirmationUrl` へリダイレクト。
 - **10ロケーション超の従量課金**: `getShopPlan` 内で、公開・本番・Lite/Pro・`locationsCount > 10` のとき `reportUsageRecord` を呼ぶ。同一請求期間の重複防止に `idempotencyKey = usage-{subscriptionId}-{currentPeriodEnd}` を使用。応答をブロックしないよう fire-and-forget。

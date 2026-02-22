@@ -56,13 +56,13 @@ export function getMaxLocationsFromSubscriptionName(name: string): 3 | 10 | null
 /** 10 loc 超の従量単価（USD） */
 export const USAGE_PRICE_PER_LOCATION = {
   lite: 4,
-  pro: 10,
+  pro: 12,
 } as const;
 
 /** 基本料金（10ロケーションまで・USD/30日） */
 export const BASE_PRICE_UP_TO_10 = {
   lite: 40,
-  pro: 100,
+  pro: 120,
 } as const;
 
 /**
@@ -170,7 +170,7 @@ export async function createAppSubscription(
   const basePrice = BASE_PRICE_UP_TO_10[plan];
   const trialDays = TRIAL_DAYS[plan];
   const usageCap = USAGE_CAP_USD[plan];
-  const terms = plan === "pro" ? "$10 per location for 11+ locations" : "$4 per location for 11+ locations";
+  const terms = plan === "pro" ? "$12 per location for 11+ locations" : "$4 per location for 11+ locations";
 
   const mutation = `#graphql
     mutation AppSubscriptionCreate(
