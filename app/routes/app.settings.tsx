@@ -1,7 +1,7 @@
 // app/routes/app.settings.tsx
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useSearchParams } from "react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useFetcher, useLoaderData, useRevalidator, useSearchParams } from "react-router";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { authenticate } from "../shopify.server";
 
 export type LocationNode = { id: string; name: string };
@@ -856,6 +856,7 @@ export async function action({ request }: ActionFunctionArgs) {
 export default function SettingsPage() {
   const loaderData = useLoaderData<typeof loader>();
   const fetcher = useFetcher<typeof action>();
+  const revalidator = useRevalidator();
 
   // loaderDataが存在しない場合（認証エラーなど）のエラーハンドリング
   if (!loaderData) {
@@ -929,11 +930,6 @@ export default function SettingsPage() {
     return { value: clamped, displayValue: String(clamped), error: hasRangeError ? DISPLAY_COUNT_ERROR_MSG : null, shouldUpdate: true };
   };
 
-  useEffect(() => {
-    setSettings(initial);
-    setDisplayCountErrors({});
-  }, [initial]);
-
   const saving = fetcher.state !== "idle";
   const saveOk = fetcher.data && (fetcher.data as any).ok === true;
   const saveErr =
@@ -949,11 +945,28 @@ export default function SettingsPage() {
     [displayCountErrors],
   );
 
-  // 保存成功したらサニタイズ後のsettingsでstateを更新
+  // 保存成功したらサニタイズ後の settings で state を更新（同じ fetcher.data で二重適用しない）
+  const lastAppliedFetcherDataRef = useRef<unknown>(null);
   useEffect(() => {
-    if ((fetcher.data as any)?.ok && (fetcher.data as any)?.settings) {
-      setSettings((fetcher.data as any).settings);
-    }
+    const data = fetcher.data as any;
+    if (!data?.ok || !data?.settings) return;
+    if (lastAppliedFetcherDataRef.current === data) return;
+    lastAppliedFetcherDataRef.current = data;
+    setSettings(data.settings);
+    setDisplayCountErrors({});
+    revalidator.revalidate();
+  }, [fetcher.data, revalidator]);
+
+  // 保存完了メッセージを約3秒表示（同じレスポンスで1回だけ・Location Stock と同様）
+  const [showSavedFeedback, setShowSavedFeedback] = useState(false);
+  const lastShowSavedFeedbackRef = useRef<unknown>(null);
+  useEffect(() => {
+    const data = fetcher.data as any;
+    if (!data?.ok || lastShowSavedFeedbackRef.current === data) return;
+    lastShowSavedFeedbackRef.current = data;
+    setShowSavedFeedback(true);
+    const t = setTimeout(() => setShowSavedFeedback(false), 3000);
+    return () => clearTimeout(t);
   }, [fetcher.data]);
 
   const addCarrier = () => {
@@ -1877,16 +1890,14 @@ export default function SettingsPage() {
     fetcher.submit(fd, { method: "post" });
   };
 
-  // フッター左側に表示するステータス文言
-  const footerStatusText = saveOk
-    ? "保存しました"
-    : saveErr
-      ? `保存エラー: ${saveErr}`
-      : saving
-        ? "保存中..."
-        : isDirty
-          ? "未保存の変更があります"
-          : "";
+  // 「保存しました」は showSavedFeedback のときだけ表示。ここでは送信中・未保存・エラーのみ
+  const footerStatusText = saveErr
+    ? `保存エラー: ${saveErr}`
+    : saving
+      ? "保存中..."
+      : isDirty
+        ? "未保存の変更があります"
+        : "";
 
   return (
     <s-page heading="設定">
@@ -4435,50 +4446,70 @@ export default function SettingsPage() {
           </s-stack>
 
           <s-divider />
-          {/* 下部固定フッターの高さ分の余白（スクロール時も最後の内容が隠れないように） */}
-          <div style={{ minHeight: "72px" }} aria-hidden />
+          {/* 変更時または保存直後に固定フッターを表示するため、表示時のみ余白を確保 */}
+          {(isDirty || showSavedFeedback) && <div style={{ minHeight: "72px" }} aria-hidden />}
         </s-stack>
       </s-scroll-box>
 
-      {/* 固定フッター: 左にステータス、右に破棄・保存ボタン（見逃し防止） */}
-      <div
-        style={{
-          position: "fixed",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "16px",
-          padding: "12px 16px",
-          background: "#fff",
-          borderTop: "1px solid #e1e3e5",
-          boxShadow: "0 -2px 8px rgba(0,0,0,0.06)",
-          flexWrap: "wrap",
-          zIndex: 100,
-        }}
-      >
-        <div style={{ fontSize: "14px", color: saveErr ? "#d72c0d" : saveOk ? "#008060" : "#6d7175", fontWeight: 500, minHeight: "20px" }}>
-          {footerStatusText}
+      {/* 固定フッター: 変更時または保存直後（「保存しました」を約3秒表示・Location Stock と統一） */}
+      {(isDirty || showSavedFeedback) && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            background: "#fff",
+            borderTop: "1px solid #e1e3e5",
+            padding: "12px 24px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            boxShadow: "0 -2px 6px rgba(0,0,0,0.06)",
+            zIndex: 100,
+          }}
+        >
+          <span style={{ fontSize: 14, color: "#6d7175" }}>
+            {showSavedFeedback && !isDirty ? "保存しました" : footerStatusText}
+          </span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => setSettings(initial)}
+              disabled={saving || (showSavedFeedback && !isDirty)}
+              style={{
+                padding: "8px 16px",
+                borderRadius: 6,
+                border: "1px solid #c9cccf",
+                background: "#fff",
+                fontSize: 14,
+                fontWeight: 600,
+                cursor: saving || (showSavedFeedback && !isDirty) ? "not-allowed" : "pointer",
+                color: "#202223",
+              }}
+            >
+              破棄
+            </button>
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving || hasDisplayCountError || (showSavedFeedback && !isDirty)}
+              style={{
+                padding: "8px 16px",
+                borderRadius: 6,
+                border: "none",
+                background: "#2c6ecb",
+                color: "#fff",
+                fontSize: 14,
+                fontWeight: 600,
+                cursor: saving || hasDisplayCountError || (showSavedFeedback && !isDirty) ? "not-allowed" : "pointer",
+              }}
+            >
+              {saving ? "保存中..." : "保存"}
+            </button>
+          </div>
         </div>
-        <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-          <s-button
-            tone="critical"
-            onClick={() => setSettings(initial)}
-            disabled={saving || !isDirty}
-          >
-            破棄
-          </s-button>
-          <s-button
-            tone="success"
-            onClick={save}
-            disabled={saving || !isDirty || hasDisplayCountError}
-          >
-            {saving ? "保存中..." : "保存"}
-          </s-button>
-        </div>
-      </div>
+      )}
     </s-page>
   );
 }
