@@ -288,7 +288,8 @@ export async function fetchProductsByGroup(productGroupId, locationId) {
 }
 
 // IDの正規化：GIDと数値IDの両方で照合できるようにする（管理画面とPOSで形式が異なる場合の対策）
-function normalizeIdForMatch(id) {
+// 商品グループ名の Map キー統一用に export（InventoryCountList 等で利用）
+export function normalizeIdForMatch(id) {
   const s = String(id ?? "").trim();
   const lastSegment = s.split("/").pop() || s;
   return lastSegment;

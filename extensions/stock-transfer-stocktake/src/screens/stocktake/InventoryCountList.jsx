@@ -10,6 +10,7 @@ import {
   getProductGroupName,
   readProductGroups,
   resolveVariantByCode,
+  normalizeIdForMatch,
 } from "./stocktakeApi.js";
 import { fetchSettings } from "./stocktakeApi.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
@@ -314,11 +315,12 @@ export function InventoryCountList({
     if (productGroupId && count?.productGroupName) {
       setProductGroupName(count.productGroupName);
     }
+    // ✅ 商品グループ名 Map のキーは正規化キーで統一（GID と数値の混在でずれないようにする）
     if (isMultipleMode && Array.isArray(count?.productGroupNames) && Array.isArray(count?.productGroupIds)) {
       const initialMap = new Map();
       count.productGroupIds.forEach((id, i) => {
         const n = count.productGroupNames[i];
-        if (n) initialMap.set(id, n);
+        if (n) initialMap.set(normalizeIdForMatch(id), n);
       });
       if (initialMap.size > 0) setProductGroupNames(initialMap);
     }
@@ -334,11 +336,12 @@ export function InventoryCountList({
       if (isMultipleMode && targetProductGroupIds.length > 0) {
         const groupMap = new Map();
         for (const id of targetProductGroupIds) {
+          const normalizedId = normalizeIdForMatch(id);
           const fromCount = Array.isArray(count?.productGroupNames) && count?.productGroupIds
-            ? count.productGroupNames[count.productGroupIds.indexOf(id)]
+            ? count.productGroupNames[count.productGroupIds.findIndex((pid) => normalizeIdForMatch(pid) === normalizedId)]
             : null;
           const name = fromCount || (await getProductGroupName(id));
-          if (name) groupMap.set(id, name);
+          if (name) groupMap.set(normalizedId, name);
         }
         setProductGroupNames(groupMap);
       }
@@ -643,7 +646,7 @@ export function InventoryCountList({
         
         // 各商品グループごとに処理
         for (const groupId of targetProductGroupIds) {
-          const groupName = productGroupNames.get(groupId) || groupId;
+          const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
           // ✅ 完了判定：groupItemsMap[groupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
           // ✅ 確実に判定するため、groupIdとgroupItemsMapの両方をチェック
           // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング（InventoryCountProductGroupSelectionと同じロジック）
@@ -1382,7 +1385,7 @@ export function InventoryCountList({
             // 各商品グループごとにgroupItemsに保存
             // ✅ 確定操作したグループは全て groupItems に保存する（全て0・差分なしでも「完了」扱いにする）
             for (const [groupId, groupLines] of linesByGroup.entries()) {
-              const groupName = productGroupNames.get(groupId) || groupId;
+              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
               const hasCountedItems = groupLines.some((l) => {
                 const actualQty = Number(l.actualQuantity ?? 0);
                 const currentQty = Number(l.currentQuantity ?? 0);
@@ -1424,7 +1427,7 @@ export function InventoryCountList({
             // ✅ 確定済みグループの確認
             const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
             for (const groupId of targetProductGroupIds) {
-              const groupName = productGroupNames.get(groupId) || groupId;
+              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
               // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
               if (!linesByGroup.has(groupId)) {
                 const groupItemsForGroup = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
@@ -1542,7 +1545,7 @@ export function InventoryCountList({
           // ✅ 確定操作したグループは全て groupItems に保存する（全て0・差分なしでも「完了」扱いにする・在庫調整ありパスも同様）
           const groupStatusMessagesForAdjust = [];
           for (const [groupId, groupLines] of linesByGroup.entries()) {
-            const groupName = productGroupNames.get(groupId) || groupId;
+            const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
             const groupLinesSnapshot = linesSnapshot.filter((l) => l.productGroupId === groupId);
             
             const hasCountedItems = groupLinesSnapshot.some((l) => {
@@ -1573,7 +1576,7 @@ export function InventoryCountList({
           // ✅ 確定済みグループの確認
           const groupItemsMapForAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
           for (const groupId of targetProductGroupIds) {
-            const groupName = productGroupNames.get(groupId) || groupId;
+            const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
             // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
             if (!linesByGroup.has(groupId)) {
               const groupItemsForGroup = groupId && groupItemsMapForAdjust[groupId] && Array.isArray(groupItemsMapForAdjust[groupId]) ? groupItemsMapForAdjust[groupId] : [];
@@ -1684,7 +1687,7 @@ export function InventoryCountList({
             // ✅ カウントした商品があるグループのみ確定（actualQuantity > 0 または currentQuantity !== actualQuantity の商品がある場合のみ）
             const groupStatusMessagesForNoAdjust = [];
             for (const [groupId, groupLines] of linesByGroup.entries()) {
-              const groupName = productGroupNames.get(groupId) || groupId;
+              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
               // ✅ グループ内にカウントした商品があるかチェック
               // ✅ actualQuantity > 0 の場合：実数が0より大きい（カウントした）
               // ✅ actualQuantity !== 0 && currentQuantity !== actualQuantity の場合：実数が0でなく、在庫数と実数が異なる（カウントした）
@@ -1721,7 +1724,7 @@ export function InventoryCountList({
             // ✅ 確定済みグループの確認
             const groupItemsMapForNoAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
             for (const groupId of targetProductGroupIds) {
-              const groupName = productGroupNames.get(groupId) || groupId;
+              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
               // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
               if (!linesByGroup.has(groupId)) {
                 const groupItemsForGroup = groupId && groupItemsMapForNoAdjust[groupId] && Array.isArray(groupItemsMapForNoAdjust[groupId]) ? groupItemsMapForNoAdjust[groupId] : [];
@@ -1928,7 +1931,7 @@ export function InventoryCountList({
             // ✅ カウントした商品があるグループのみ確定（actualQuantity > 0 または currentQuantity !== actualQuantity の商品がある場合のみ）
             const groupStatusMessagesForSingleAdjust = [];
             for (const [groupId, groupLines] of linesByGroup.entries()) {
-              const groupName = productGroupNames.get(groupId) || groupId;
+              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
               // ✅ グループ内にカウントした商品があるかチェック
               // ✅ actualQuantity > 0 の場合：実数が0より大きい（カウントした）
               // ✅ actualQuantity !== 0 && currentQuantity !== actualQuantity の場合：実数が0でなく、在庫数と実数が異なる（カウントした）
@@ -1966,7 +1969,7 @@ export function InventoryCountList({
             // ✅ 確定済みグループの確認
             const groupItemsMapForSingleAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
             for (const groupId of targetProductGroupIds) {
-              const groupName = productGroupNames.get(groupId) || groupId;
+              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
               // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
               if (!linesByGroup.has(groupId)) {
                 const groupItemsForGroup = groupId && groupItemsMapForSingleAdjust[groupId] && Array.isArray(groupItemsMapForSingleAdjust[groupId]) ? groupItemsMapForSingleAdjust[groupId] : [];
@@ -2080,10 +2083,13 @@ export function InventoryCountList({
     // countNameがあればそれを使用、なければidを使用（後方互換性）
     const headNo = count?.countName || count?.id || "棚卸ID";
     // ✅ 管理画面で保存済みの名前を優先（ID→名前の切り替えを防ぐ）
+    // ✅ まとめて表示時は正規化キーで名前を取得（GID と数値の混在でずれないようにする）
     const groupNameText = isMultipleMode
       ? (Array.isArray(count?.productGroupNames) && count.productGroupNames.length > 0
           ? count.productGroupNames.join(", ")
-          : Array.from(productGroupNames.values()).join(", ") || "商品グループ")
+          : targetProductGroupIds?.length > 0
+            ? targetProductGroupIds.map((id) => productGroupNames.get(normalizeIdForMatch(id)) || id).join(", ") || "商品グループ"
+            : Array.from(productGroupNames.values()).join(", ") || "商品グループ")
       : count?.productGroupName || productGroupName || productGroupId || "商品グループ";
     
     // デバッグ: countとloadingの状態を確認
@@ -2267,7 +2273,7 @@ export function InventoryCountList({
       </s-box>
     );
     return () => setHeader?.(null);
-  }, [setHeader, count, locationName, productGroupName, productGroupId, isMultipleMode, productGroupNames, query, candidates.length, candidatesLoading, liteMode, loading, isReadOnly, denyEdit]);
+  }, [setHeader, count, locationName, productGroupName, productGroupId, isMultipleMode, productGroupNames, targetProductGroupIds, query, candidates.length, candidatesLoading, liteMode, loading, isReadOnly, denyEdit]);
 
   // Footer
   const currentTotal = useMemo(() => lines.reduce((s, l) => s + (l.currentQuantity || 0), 0), [lines]);
@@ -2798,7 +2804,7 @@ export function InventoryCountList({
                 <s-stack gap="base">
                   <s-text emphasis="bold">棚卸リスト（全グループ）</s-text>
                   {Array.from(linesByGroup.entries()).map(([groupId, groupLines]) => {
-                    const groupName = productGroupNames.get(groupId) || groupId;
+                    const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
                     // ✅ 完了判定：count.groupItems[groupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
                     // ✅ 確実に判定するため、countオブジェクトから直接取得
                     // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング（InventoryCountProductGroupSelectionと同じロジック）

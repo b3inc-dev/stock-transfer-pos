@@ -1233,14 +1233,7 @@ export async function action({ request }: ActionFunctionArgs) {
         return { ok: false, error: "商品グループは必須です" as const };
       }
 
-      // 一度に発行するグループ数を制限（GraphQLレート制限・タイムアウト・500エラーを防ぐ）
-      const MAX_GROUPS_PER_ISSUANCE = 30;
-      if (targetProductGroupIds.length > MAX_GROUPS_PER_ISSUANCE) {
-        return {
-          ok: false,
-          error: `一度に発行できるのは${MAX_GROUPS_PER_ISSUANCE}グループまでです。複数回に分けて発行してください。` as const,
-        };
-      }
+      // ※ グループ数制限は解除済み。後で「1グループあたりのSKU制限」「1IDあたりの商品グループ制限」を設定予定。
 
       // ロケーションを取得
       const locResp = await admin.graphql(
