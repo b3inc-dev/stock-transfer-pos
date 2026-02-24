@@ -2124,9 +2124,6 @@ export default function SettingsPage() {
                       >
                         アプリ表示件数（初回読み込み）
                       </div>
-                      <s-text tone="subdued" size="small">
-                        履歴一覧・商品リスト・検索リストの初回表示件数を統一します。設定数以上のデータは読込ボタンで手動読込できます。
-                      </s-text>
                     </div>
 
                     <div style={{ flex: "1 1 320px", minWidth: 280 }}>
