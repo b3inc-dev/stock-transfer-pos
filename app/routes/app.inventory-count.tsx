@@ -193,12 +193,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
           return groupItems.length > 0;
         });
         
-        // ✅ 商品グループが1つの場合のみ、古いデータ形式（itemsフィールド）を後方互換性として使用
-        // ✅ 複数商品グループがある場合は、必ずgroupItemsで判定する（itemsは使用しない）
-        const isSingleGroup = allIds.length === 1;
-        const hasItems = Array.isArray(c.items) && c.items.length > 0;
-        const hasNoGroupItems = Object.keys(groupItemsMap).length === 0;
-        const isCompleted = allDone || (isSingleGroup && hasItems && hasNoGroupItems);
+        // ✅ 完了は「全グループで groupItems[groupId].length > 0」のみとする（管理画面とアプリの表示を一致させる）
+        const isCompleted = allDone;
         
         // ✅ 全グループが完了していない場合は必ず"in_progress"に設定（既存のstatusを保持しない）
         if (!isCompleted && c.status === "completed") {
@@ -1837,8 +1833,15 @@ export default function InventoryCountPage() {
   // ✅ 未完了グループの商品リストを取得するためのfetcherとstate（モーダル用）
   const incompleteGroupProductsFetcher = useFetcher<typeof action>();
   const [incompleteGroupProducts, setIncompleteGroupProducts] = useState<Map<string, Array<any>>>(new Map());
+  // ✅ 取得中の未完了グループID（キー型の差で先頭グループが「まだ処理されていません」になるのを防ぐ＋ローディング表示用）
+  const [loadingIncompleteGroupIds, setLoadingIncompleteGroupIds] = useState<Set<string>>(new Set());
   const incompleteGroupFetchIndexRef = useRef<number>(0);
   const incompleteGroupIdsRef = useRef<string[]>([]);
+  // ✅ incompleteGroupProducts のキーは常に文字列で統一（productGroupIds が number のときの照合漏れを防ぐ）
+  const getIncompleteProductsForGroup = (groupId: string | number): Array<any> => {
+    const sk = String(groupId);
+    return incompleteGroupProducts.get(sk) ?? incompleteGroupProducts.get(groupId as string) ?? [];
+  };
   
   // ✅ 一覧表示用の未完了グループの商品リストを取得するためのfetcherとstate
   const incompleteGroupProductsForListFetcher = useFetcher<typeof action>();
@@ -1928,6 +1931,7 @@ export default function InventoryCountPage() {
   useEffect(() => {
     if (!modalOpen || !modalCount) {
       setIncompleteGroupProducts(new Map());
+      setLoadingIncompleteGroupIds(new Set());
       incompleteGroupFetchIndexRef.current = 0;
       incompleteGroupIdsRef.current = [];
       return;
@@ -1959,15 +1963,18 @@ export default function InventoryCountPage() {
       return groupItems.length === 0;
     });
 
-    // ✅ 未完了グループIDをrefに保存
-    incompleteGroupIdsRef.current = incompleteGroupIds;
+    // ✅ 未完了グループIDをrefに保存（submit では文字列で送る）
+    const incompleteGroupIdsStr = incompleteGroupIds.map((id) => String(id));
+    incompleteGroupIdsRef.current = incompleteGroupIdsStr;
     incompleteGroupFetchIndexRef.current = 0;
+    // ✅ 取得開始時に「読み込み中」としてマーク（先頭グループが一瞬「まだ処理されていません」になるのを防ぐ）
+    setLoadingIncompleteGroupIds(new Set(incompleteGroupIdsStr));
 
     // ✅ 最初のグループを取得
-    if (incompleteGroupIds.length > 0) {
+    if (incompleteGroupIdsStr.length > 0) {
       const formData = new FormData();
       formData.append("action", "get_incomplete_group_products");
-      formData.append("groupId", incompleteGroupIds[0]);
+      formData.append("groupId", incompleteGroupIdsStr[0]);
       formData.append("locationId", modalCount.locationId);
       incompleteGroupProductsFetcher.submit(formData, { method: "post" });
       incompleteGroupFetchIndexRef.current = 1;
@@ -1976,12 +1983,18 @@ export default function InventoryCountPage() {
 
   // ✅ 未完了グループの商品リスト取得完了時の処理
   useEffect(() => {
-    if (incompleteGroupProductsFetcher.data?.ok && incompleteGroupProductsFetcher.data?.products && incompleteGroupProductsFetcher.data?.groupId) {
+    if (incompleteGroupProductsFetcher.data?.ok && incompleteGroupProductsFetcher.data?.products != null && incompleteGroupProductsFetcher.data?.groupId) {
       const { groupId, products } = incompleteGroupProductsFetcher.data;
+      const groupKey = String(groupId);
       setIncompleteGroupProducts((prev) => {
         const newMap = new Map(prev);
-        newMap.set(groupId, products);
+        newMap.set(groupKey, products);
         return newMap;
+      });
+      setLoadingIncompleteGroupIds((prev) => {
+        const next = new Set(prev);
+        next.delete(groupKey);
+        return next;
       });
       
       // ✅ 次の未完了グループを取得（まだ取得していないグループがある場合）
@@ -4434,8 +4447,8 @@ export default function InventoryCountPage() {
                             }
                             // ✅ 複数グループでinventoryItemIdsが保存されていない場合は、groupItemsが空のまま（完了と判定しない）
                           }
-                          // ✅ 未完了グループの商品リストを取得
-                          const incompleteProducts = incompleteGroupProducts.get(groupId) || [];
+                          // ✅ 未完了グループの商品リストを取得（キー正規化で先頭グループの照合漏れを防ぐ）
+                          const incompleteProducts = getIncompleteProductsForGroup(groupId);
                           // ✅ 完了判定：groupItems[groupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
                           const isCompleted = groupItems.length > 0;
                           // ✅ 完了済みの場合はgroupItemsを使用、未完了の場合はincompleteProductsを使用
@@ -4541,8 +4554,8 @@ export default function InventoryCountPage() {
                         const sortedGroupItems = [...normalItemsForGroup, ...extraItemsForGroup];
                         itemsByGroup.set(groupId, sortedGroupItems);
                       } else {
-                        // ✅ 未完了グループの商品リストを取得
-                        const incompleteProducts = incompleteGroupProducts.get(groupId) || [];
+                        // ✅ 未完了グループの商品リストを取得（キー正規化で先頭グループの照合漏れを防ぐ）
+                        const incompleteProducts = getIncompleteProductsForGroup(groupId);
                         itemsByGroup.set(groupId, incompleteProducts);
                       }
                     }
@@ -4566,7 +4579,7 @@ export default function InventoryCountPage() {
                       const sortedGroupItems = [...normalItemsForGroup, ...extraItemsForGroup];
                       itemsByGroup.set(groupId, sortedGroupItems);
                     } else {
-                      const incompleteProducts = incompleteGroupProducts.get(groupId) || [];
+                      const incompleteProducts = getIncompleteProductsForGroup(groupId);
                       itemsByGroup.set(groupId, incompleteProducts);
                     }
                   }
@@ -4629,7 +4642,7 @@ export default function InventoryCountPage() {
                               // 1. groupItemsFromMapにデータがある場合（groupItemsが保存されている場合）→ 必ず完了済み（incompleteProductsForGroupの値は無視）
                               // 2. または、itemsByGroupの構築時に完了済みとして設定された場合（completedGroupsMapで追跡）
                               // ✅ 重要：groupItemsFromMapにデータがある場合、またはitemsByGroupの構築時に完了済みとして設定された場合は、incompleteProductsForGroupの値に関係なく完了済みと判定
-                              const incompleteProductsForGroup = incompleteGroupProducts.get(groupId) || [];
+                              const incompleteProductsForGroup = getIncompleteProductsForGroup(groupId);
                               const hasGroupItemsFromMap = groupItemsFromMap.length > 0;
                               const hasGroupItems = groupItems.length > 0;
                               // ✅ itemsByGroupの構築時に完了済みとして設定されたかどうかを確認
@@ -4710,7 +4723,9 @@ export default function InventoryCountPage() {
                                     </table>
                                   ) : (
                                     <div style={{ padding: "8px", fontSize: "14px", color: "#666" }}>
-                                      この商品グループはまだ処理されていません
+                                      {loadingIncompleteGroupIds.has(String(groupId))
+                                        ? "読み込み中..."
+                                        : "この商品グループはまだ処理されていません"}
                                     </div>
                                   )}
                                 </div>
@@ -4844,7 +4859,9 @@ export default function InventoryCountPage() {
                                     </table>
                                   ) : (
                                     <div style={{ padding: "8px", fontSize: "14px", color: "#666" }}>
-                                      この商品グループはまだ処理されていません
+                                      {loadingIncompleteGroupIds.has(String(singleGroupId))
+                                        ? "読み込み中..."
+                                        : "この商品グループはまだ処理されていません"}
                                     </div>
                                   )}
                                 </div>
@@ -4958,8 +4975,8 @@ export default function InventoryCountPage() {
                             const sortedGroupItems = [...normalItemsForGroup, ...extraItemsForGroup];
                             itemsByGroup.set(groupId, sortedGroupItems);
                           } else {
-                            // ✅ 未完了グループの商品リストを取得
-                            const incompleteProducts = incompleteGroupProducts.get(groupId) || [];
+                            // ✅ 未完了グループの商品リストを取得（キー正規化で先頭グループの照合漏れを防ぐ）
+                            const incompleteProducts = getIncompleteProductsForGroup(groupId);
                             itemsByGroup.set(groupId, incompleteProducts);
                           }
                         }
@@ -4994,8 +5011,8 @@ export default function InventoryCountPage() {
                           const sortedGroupItems = [...normalItemsForGroup, ...extraItemsForGroup];
                           itemsByGroup.set(groupId, sortedGroupItems);
                         } else {
-                          // ✅ 未完了グループの商品リストを取得
-                          const incompleteProducts = incompleteGroupProducts.get(groupId) || [];
+                          // ✅ 未完了グループの商品リストを取得（キー正規化で先頭グループの照合漏れを防ぐ）
+                          const incompleteProducts = getIncompleteProductsForGroup(groupId);
                           itemsByGroup.set(groupId, incompleteProducts);
                         }
                       }
@@ -5027,7 +5044,7 @@ export default function InventoryCountPage() {
                           }
                           const hasGroupItemsFromMap = groupItemsFromMap.length > 0;
                           const hasGroupItems = groupItems.length > 0;
-                          const incompleteProductsForGroup = incompleteGroupProducts.get(groupId) || [];
+                          const incompleteProductsForGroup = getIncompleteProductsForGroup(groupId);
                           const wasCompletedInItemsByGroup = hasGroupItems && incompleteProductsForGroup.length === 0;
                           const isGroupCompleted = hasGroupItemsFromMap || wasCompletedInItemsByGroup;
                           

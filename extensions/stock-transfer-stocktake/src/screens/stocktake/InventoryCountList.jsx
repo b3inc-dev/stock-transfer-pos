@@ -1324,25 +1324,18 @@ export function InventoryCountList({
             const groupItems = { ...(c.groupItems || {}) };
             
             // 各商品グループごとにgroupItemsに保存
-            // ✅ カウントした商品があるグループのみ確定（actualQuantity > 0 または currentQuantity !== actualQuantity の商品がある場合のみ）
+            // ✅ 確定操作したグループは全て groupItems に保存する（全て0・差分なしでも「完了」扱いにする）
             for (const [groupId, groupLines] of linesByGroup.entries()) {
               const groupName = productGroupNames.get(groupId) || groupId;
-              // ✅ グループ内にカウントした商品があるかチェック
-              // ✅ actualQuantity > 0 の場合：実数が0より大きい（カウントした）
-              // ✅ actualQuantity !== 0 && currentQuantity !== actualQuantity の場合：実数が0でなく、在庫数と実数が異なる（カウントした）
-              // ✅ グループ内にカウントした商品があるかチェック
-              // ✅ 在庫数と実数が異なる場合はカウントしたと判断（在庫10→実数0も含む）
-              // ✅ actualQuantity > 0 の場合もカウントしたと判断
               const hasCountedItems = groupLines.some((l) => {
                 const actualQty = Number(l.actualQuantity ?? 0);
                 const currentQty = Number(l.currentQuantity ?? 0);
                 return actualQty > 0 || currentQty !== actualQty;
               });
-              
-              // ✅ カウントした商品がないグループはスキップ（確定しない）
               if (!hasCountedItems) {
-                groupStatusMessages.push(`「${groupName}」は未カウントのためスキップ`);
-                continue;
+                groupStatusMessages.push(`「${groupName}」は差分なしで確定しました`);
+              } else {
+                groupStatusMessages.push(`「${groupName}」を確定しました`);
               }
               
               const linesSnapshot = groupLines.map((l) => ({
@@ -1370,7 +1363,6 @@ export function InventoryCountList({
                 isExtra: l.isExtra, // ✅ 予定外商品フラグを追加
               }));
               groupItems[groupId] = entry;
-              groupStatusMessages.push(`「${groupName}」を確定しました`);
             }
             
             // ✅ 確定済みグループの確認
