@@ -1382,9 +1382,14 @@ export async function action({ request }: ActionFunctionArgs) {
   // ✅ 未完了グループの商品リストと在庫数を取得
   if (actionType === "get_incomplete_group_products") {
     const groupId = formData.get("groupId") as string;
-    const locationId = formData.get("locationId") as string;
+    let locationId = (formData.get("locationId") as string)?.trim() ?? "";
     if (!groupId || !locationId) {
       return { ok: false, error: "グループIDまたはロケーションIDが指定されていません" as const };
+    }
+    // ✅ GraphQL inventoryLevel(locationId) 用に GID 形式に正規化（数値のみのとき在庫が取れない場合があるため）
+    if (!locationId.startsWith("gid://")) {
+      const numMatch = locationId.match(/\d+/);
+      if (numMatch) locationId = `gid://shopify/Location/${numMatch[0]}`;
     }
 
     try {
@@ -1837,6 +1842,8 @@ export default function InventoryCountPage() {
   const [loadingIncompleteGroupIds, setLoadingIncompleteGroupIds] = useState<Set<string>>(new Set());
   const incompleteGroupFetchIndexRef = useRef<number>(0);
   const incompleteGroupIdsRef = useRef<string[]>([]);
+  // ✅ 直前に submit した groupId（エラー応答時に loading を解除するため）
+  const lastSubmittedGroupIdRef = useRef<string | null>(null);
   // ✅ incompleteGroupProducts のキーは常に文字列で統一（productGroupIds が number のときの照合漏れを防ぐ）
   const getIncompleteProductsForGroup = (groupId: string | number): Array<any> => {
     const sk = String(groupId);
@@ -1972,6 +1979,7 @@ export default function InventoryCountPage() {
 
     // ✅ 最初のグループを取得
     if (incompleteGroupIdsStr.length > 0) {
+      lastSubmittedGroupIdRef.current = incompleteGroupIdsStr[0];
       const formData = new FormData();
       formData.append("action", "get_incomplete_group_products");
       formData.append("groupId", incompleteGroupIdsStr[0]);
@@ -1981,33 +1989,54 @@ export default function InventoryCountPage() {
     }
   }, [modalOpen, modalCount]);
 
-  // ✅ 未完了グループの商品リスト取得完了時の処理
+  // ✅ 未完了グループの商品リスト取得完了時の処理（成功時はデータ保存・loading 解除・次を submit、失敗時も loading を解除して「読み込み中」のままにならないようにする）
   useEffect(() => {
-    if (incompleteGroupProductsFetcher.data?.ok && incompleteGroupProductsFetcher.data?.products != null && incompleteGroupProductsFetcher.data?.groupId) {
-      const { groupId, products } = incompleteGroupProductsFetcher.data;
+    const data = incompleteGroupProductsFetcher.data;
+    if (!data) return;
+
+    const groupKeyFromResponse = data?.groupId != null ? String(data.groupId) : null;
+
+    if (data?.ok && data?.products != null && data?.groupId != null) {
+      const { groupId, products } = data;
       const groupKey = String(groupId);
-      setIncompleteGroupProducts((prev) => {
-        const newMap = new Map(prev);
-        newMap.set(groupKey, products);
-        return newMap;
-      });
       setLoadingIncompleteGroupIds((prev) => {
         const next = new Set(prev);
         next.delete(groupKey);
         return next;
+      });
+      setIncompleteGroupProducts((prev) => {
+        const newMap = new Map(prev);
+        newMap.set(groupKey, products);
+        return newMap;
       });
       
       // ✅ 次の未完了グループを取得（まだ取得していないグループがある場合）
       const currentIndex = incompleteGroupFetchIndexRef.current;
       const remainingGroupIds = incompleteGroupIdsRef.current;
       if (currentIndex < remainingGroupIds.length && modalCount) {
+        const nextGroupId = remainingGroupIds[currentIndex];
+        lastSubmittedGroupIdRef.current = nextGroupId;
         const formData = new FormData();
         formData.append("action", "get_incomplete_group_products");
-        formData.append("groupId", remainingGroupIds[currentIndex]);
+        formData.append("groupId", nextGroupId);
         formData.append("locationId", modalCount.locationId);
         incompleteGroupProductsFetcher.submit(formData, { method: "post" });
         incompleteGroupFetchIndexRef.current = currentIndex + 1;
+      } else {
+        lastSubmittedGroupIdRef.current = null;
       }
+      return;
+    }
+
+    // ✅ API が ok: false を返した場合や groupId がない場合：送信済み group の loading を解除（同じグループが「読み込み中」のまま残るのを防ぐ）
+    if (groupKeyFromResponse == null && lastSubmittedGroupIdRef.current != null) {
+      const groupKeyToClear = String(lastSubmittedGroupIdRef.current);
+      setLoadingIncompleteGroupIds((prev) => {
+        const next = new Set(prev);
+        next.delete(groupKeyToClear);
+        return next;
+      });
+      lastSubmittedGroupIdRef.current = null;
     }
   }, [incompleteGroupProductsFetcher.data, modalCount]);
 
@@ -2177,10 +2206,10 @@ export default function InventoryCountPage() {
         continue;
       }
       
-      // 既に取得済みの場合はスキップ
+      // 既に取得済みの場合はスキップ（キーは文字列で統一して照合）
       const countId = c.id;
       const existingMap = incompleteGroupProductsForList.get(countId);
-      if (existingMap && incompleteGroupIds.every((id) => existingMap.has(id))) {
+      if (existingMap && incompleteGroupIds.every((id) => existingMap.has(String(id)))) {
         continue;
       }
       
@@ -2209,20 +2238,22 @@ export default function InventoryCountPage() {
     if (incompleteGroupProductsForListFetcher.state === "idle" && incompleteGroupProductsForListFetcher.data?.ok && incompleteGroupProductsForListFetcher.data?.products && incompleteGroupProductsForListFetcher.data?.groupId) {
       const { groupId, products } = incompleteGroupProductsForListFetcher.data;
       
-      // どの棚卸IDのグループかを特定（最初に見つかった未完了グループを持つ棚卸IDを使用）
+      // どの棚卸IDのグループかを特定（最初に見つかった未完了グループを持つ棚卸IDを使用・キー型差を考慮）
+      const groupIdStr = String(groupId);
       let targetCountId: string | null = null;
       for (const [countId, incompleteGroupIds] of incompleteGroupIdsForListRef.current.entries()) {
-        if (incompleteGroupIds.includes(groupId)) {
+        if (incompleteGroupIds.some((id) => String(id) === groupIdStr)) {
           targetCountId = countId;
           break;
         }
       }
       
       if (targetCountId) {
+        const groupKey = String(groupId);
         setIncompleteGroupProductsForList((prev) => {
           const newMap = new Map(prev);
-          const countMap = newMap.get(targetCountId) || new Map();
-          countMap.set(groupId, products);
+          const countMap = new Map(newMap.get(targetCountId));
+          countMap.set(groupKey, products);
           newMap.set(targetCountId, countMap);
           return newMap;
         });
@@ -4162,9 +4193,10 @@ export default function InventoryCountPage() {
                     const incompleteGroupProductsForThisCount = incompleteGroupProductsForList.get(c.id) || new Map();
                     const itemsFromIncompleteGroups = allGroupIds.flatMap((groupId) => {
                       const groupItems = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
-                      // 未完了グループの場合、incompleteGroupProductsForListから取得
+                      // 未完了グループの場合、incompleteGroupProductsForListから取得（キー正規化で照合漏れ防止）
                       if (groupItems.length === 0) {
-                        return Array.isArray(incompleteGroupProductsForThisCount.get(groupId)) ? incompleteGroupProductsForThisCount.get(groupId) : [];
+                        const arr = incompleteGroupProductsForThisCount.get(String(groupId)) ?? incompleteGroupProductsForThisCount.get(groupId as string);
+                        return Array.isArray(arr) ? arr : [];
                       }
                       return [];
                     });
