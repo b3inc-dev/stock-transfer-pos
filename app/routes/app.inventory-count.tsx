@@ -481,6 +481,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const formData = await request.formData();
   const actionType = formData.get("action") as string;
 
+  try {
   // SKU検索は metafield 不要のため先に実行（ownerId 未取得で早期 return されないようにする）
   if (actionType === "search_variants_by_sku") {
     const query = (formData.get("query") as string)?.trim();
@@ -1720,6 +1721,10 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   return { ok: false, error: "不明なアクション" as const };
+  } catch (e) {
+    console.error("[inventory-count] action error:", e);
+    return { ok: false, error: "処理中にエラーが発生しました。しばらくしてからお試しください。" as const };
+  }
 }
 
 function escapeCsv(s: string) {
