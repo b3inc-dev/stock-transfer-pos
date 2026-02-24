@@ -1,6 +1,8 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "preact/hooks";
 import {
   readInventoryCounts,
+  readInventoryCountsFirstPage,
+  readInventoryCountsPage,
   writeInventoryCounts,
   getLocationName,
   getProductGroupName,
@@ -10,6 +12,7 @@ import {
   toLocationNumericId,
   fetchLocations,
   getGroupItemsByKey,
+  normalizeIdForMatch,
 } from "./stocktakeApi.js";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
@@ -107,11 +110,51 @@ export function InventoryCountConditions({
   const productGroupModeSelectionModalRef = useRef(null);
   // ✅ 未完了グループの在庫数を保存するstate（countId -> groupId -> currentQty）
   const [incompleteGroupQuantities, setIncompleteGroupQuantities] = useState(new Map());
+  const [chunkCount, setChunkCount] = useState(0);
+  const [loadedChunkCount, setLoadedChunkCount] = useState(0);
+
+  const filterByLocation = useCallback((list, locGid) => {
+    if (!locGid) return list;
+    const sessionNum = toLocationNumericId(locGid);
+    const sessionGid = toLocationGid(locGid) || locGid;
+    return list.filter((c) => {
+      const cid = c.locationId;
+      if (cid == null || cid === "") return true;
+      if (sessionNum && toLocationNumericId(cid) === sessionNum) return true;
+      if (toLocationGid(cid) === sessionGid || cid === locGid || cid === sessionGid) return true;
+      return false;
+    });
+  }, []);
 
   const listToShow = useMemo(() => {
     const base = Array.isArray(counts) ? counts : [];
     return viewMode === "completed" ? base.filter(isCompleted) : base.filter((c) => !isCompleted(c));
   }, [counts, viewMode]);
+
+  const hasMoreHistory = loadedChunkCount < chunkCount;
+  const loadMoreHistory = useCallback(async () => {
+    if (loadedChunkCount >= chunkCount) return;
+    setLoading(true);
+    try {
+      const result = await readInventoryCountsPage(loadedChunkCount);
+      const raw = Array.isArray(result.counts) ? result.counts : [];
+      let filtered = raw;
+      if (locationGid) {
+        filtered = filterByLocation(raw, locationGid);
+        if (filtered.length === 0 && raw.length > 0) filtered = raw;
+      }
+      setCounts((prev) => {
+        const next = [...prev, ...filtered];
+        next.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+        return next;
+      });
+      setLoadedChunkCount((prev) => prev + 1);
+    } catch (e) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }, [loadedChunkCount, chunkCount, locationGid, filterByLocation]);
 
   const baseAll = Array.isArray(counts) ? counts : [];
   const pendingCountsAll = baseAll.filter((c) => !isCompleted(c));
@@ -133,9 +176,10 @@ export function InventoryCountConditions({
         }
         if (Array.isArray(count.productGroupIds)) {
           for (const groupId of count.productGroupIds) {
-            if (!groupMap.has(groupId)) {
+            const key = normalizeIdForMatch(groupId);
+            if (!groupMap.has(key)) {
               const name = await getProductGroupName(groupId);
-              if (name) groupMap.set(groupId, name);
+              if (name) groupMap.set(key, name);
             }
           }
         }
@@ -207,35 +251,30 @@ export function InventoryCountConditions({
   const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
+    setChunkCount(0);
+    setLoadedChunkCount(0);
     try {
-      const allCounts = await readInventoryCounts();
-      let filtered = allCounts;
+      const result = await readInventoryCountsFirstPage();
+      let filtered = Array.isArray(result.counts) ? result.counts : [];
       if (locationGid) {
-        const sessionNum = toLocationNumericId(locationGid);
-        const sessionGid = toLocationGid(locationGid) || locationGid;
-        filtered = allCounts.filter((c) => {
-          const cid = c.locationId;
-          if (cid == null || cid === "") return true;
-          if (sessionNum && toLocationNumericId(cid) === sessionNum) return true;
-          if (toLocationGid(cid) === sessionGid || cid === locationGid || cid === sessionGid) return true;
-          return false;
-        });
-        if (filtered.length === 0 && allCounts.length > 0) filtered = allCounts;
+        filtered = filterByLocation(filtered, locationGid);
+        if (filtered.length === 0 && result.counts?.length > 0) filtered = result.counts;
       }
-      // ✅ 降順にソート（作成日時の新しい順）
-      const sorted = filtered.sort((a, b) => {
+      const sorted = [...filtered].sort((a, b) => {
         const t1 = new Date(a.createdAt || 0).getTime();
         const t2 = new Date(b.createdAt || 0).getTime();
-        return t2 - t1; // 降順
+        return t2 - t1;
       });
       setCounts(sorted);
+      setChunkCount(result.chunkCount ?? 0);
+      setLoadedChunkCount(1);
     } catch (e) {
-      setError(String(e?.message || e));
+      setError(String(e?.message ?? e));
       setCounts([]);
     } finally {
       setLoading(false);
     }
-  }, [locationGid]);
+  }, [locationGid, filterByLocation]);
 
   useEffect(() => {
     refresh();
@@ -369,10 +408,8 @@ export function InventoryCountConditions({
             </s-box>
           </s-stack>
 
-          {/* ✅ さらに読み込みボタン（入庫・出庫と同様の形式、ただしmetafieldは全件取得のため常に非表示） */}
-          {/* 注意: 棚卸はmetafieldから全件取得しているため、実際には追加読み込みは不要 */}
-          {/* pageInfoは常にfalseのため、読込ボタンは表示されない */}
-          {false && (
+          {/* ✅ さらに読み込みボタン（入庫・出庫と同様：設定数以上あるときにヘッダーに表示） */}
+          {hasMoreHistory ? (
             <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                 <s-text tone="subdued" size="small">
@@ -380,20 +417,19 @@ export function InventoryCountConditions({
                 </s-text>
                 <s-button
                   kind="secondary"
-                  onClick={() => {}}
-                  onPress={() => {}}
-                  disabled={true}
+                  onClick={() => loadMoreHistory()}
+                  onPress={() => loadMoreHistory()}
                 >
                   読込
                 </s-button>
               </s-stack>
             </s-box>
-          )}
+          ) : null}
         </s-stack>
       </s-box>
     );
     return () => setHeader?.(null);
-  }, [setHeader, viewMode, pendingCountsAll.length, completedCountsAll.length]);
+  }, [setHeader, viewMode, pendingCountsAll.length, completedCountsAll.length, hasMoreHistory, loadMoreHistory]);
 
   // ロケーション一覧はマウント時に取得（モーダル表示時に使用）
   useEffect(() => {
@@ -444,13 +480,13 @@ export function InventoryCountConditions({
                 const head = String(c?.countName || c?.id || "").trim() || "棚卸ID";
                 const date = formatDate(c?.createdAt);
                 const locationName = locationNames.get(c.locationId) || c.locationName || "-";
-                // ✅ 管理画面で保存済みの productGroupNames を優先（ID→名前の切り替えを防ぐ）
+                // ✅ 管理画面で保存済みの productGroupNames を優先。参照は正規化キーで（GID と数値の混在でずれないようにする）
                 const productGroupNamesList = Array.isArray(c.productGroupIds)
                   ? c.productGroupIds.map((id, i) => {
                       const fromCount = Array.isArray(c.productGroupNames) && c.productGroupNames[i];
-                      return fromCount || productGroupNames.get(id) || id;
+                      return fromCount || productGroupNames.get(normalizeIdForMatch(id)) || id;
                     }).join(", ")
-                  : c.productGroupName || productGroupNames.get(c.productGroupId) || c.productGroupId || "-";
+                  : c.productGroupName || productGroupNames.get(normalizeIdForMatch(c.productGroupId)) || c.productGroupId || "-";
                 const productGroupCount = Array.isArray(c.productGroupIds) ? c.productGroupIds.length : 1;
 
                 const rawStatus = String(c?.status || "").trim();

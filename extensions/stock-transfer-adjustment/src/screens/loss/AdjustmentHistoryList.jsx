@@ -1,5 +1,13 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "preact/hooks";
-import { readAdjustmentEntries, writeAdjustmentEntries, adjustInventoryToActual, fetchLocations, fetchVariantImage } from "./adjustmentApi.js";
+import {
+  readAdjustmentEntriesFirstPage,
+  readAdjustmentEntriesPage,
+  readAdjustmentEntriesFull,
+  writeAdjustmentEntries,
+  adjustInventoryToActual,
+  fetchLocations,
+  fetchVariantImage,
+} from "./adjustmentApi.js";
 import { getStatusBadgeTone } from "../../adjustmentHelpers.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
@@ -160,17 +168,21 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   const [cancelling, setCancelling] = useState("");
   const [imageUrls, setImageUrls] = useState(new Map()); // ✅ 画像URLキャッシュ
   const locs = Array.isArray(locationsProp) ? locationsProp : [];
+  const [chunkCount, setChunkCount] = useState(0);
+  const [loadedChunkCount, setLoadedChunkCount] = useState(0);
 
   const refreshLossHistory = useCallback(async () => {
     if (!sessionLocationGid) return;
     setLoading(true);
     setHistoryError("");
     setEntries([]);
-
+    setChunkCount(0);
+    setLoadedChunkCount(0);
     try {
-      const list = await readAdjustmentEntries();
-      const allEntries = Array.isArray(list) ? list : [];
-      setEntries(allEntries);
+      const result = await readAdjustmentEntriesFirstPage();
+      setEntries(Array.isArray(result.entries) ? result.entries : []);
+      setChunkCount(result.chunkCount ?? 0);
+      setLoadedChunkCount(1);
     } catch (e) {
       setHistoryError(String(e?.message ?? e));
       setEntries([]);
@@ -209,6 +221,22 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
     );
   }, [filteredByLoc, historyMode]);
 
+  const hasMoreHistory = loadedChunkCount < chunkCount;
+  const loadMoreHistory = useCallback(async () => {
+    if (loadedChunkCount >= chunkCount) return;
+    setLoading(true);
+    try {
+      const result = await readAdjustmentEntriesPage(loadedChunkCount);
+      const next = Array.isArray(result.entries) ? result.entries : [];
+      setEntries((prev) => [...prev, ...next]);
+      setLoadedChunkCount((prev) => prev + 1);
+    } catch (e) {
+      setHistoryError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }, [loadedChunkCount, chunkCount]);
+
   const activeCount = useMemo(
     () => filteredByLoc.filter((e) => e.status === "active").length,
     [filteredByLoc]
@@ -234,7 +262,6 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
       if (entry?.status !== "active" || !entry?.items?.length) return;
       setCancelling(entry.id);
       try {
-        // キャンセル時は在庫を元の currentQuantity に戻す
         const restoreItems = (entry.items || []).map((it) => ({
           inventoryItemId: it.inventoryItemId,
           currentQuantity: Number(it.quantity ?? 0),
@@ -247,14 +274,16 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
             referenceDocumentUri: entry.id,
           });
         }
+        const full = await readAdjustmentEntriesFull();
         const cancelledAt = new Date().toISOString();
-        const updated = entries.map((e) =>
-          e.id === entry.id
-            ? { ...e, status: "cancelled", cancelledAt }
-            : e
+        const updated = full.map((e) =>
+          e.id === entry.id ? { ...e, status: "cancelled", cancelledAt } : e
         );
         await writeAdjustmentEntries(updated);
-        setEntries(updated);
+        const result = await readAdjustmentEntriesFirstPage();
+        setEntries(Array.isArray(result.entries) ? result.entries : []);
+        setChunkCount(result.chunkCount ?? 0);
+        setLoadedChunkCount(1);
         setDetailId("");
         toast("キャンセルしました（在庫を戻しました）");
       } catch (e) {
@@ -264,7 +293,7 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
         cancelConfirmEntryRef.current = null;
       }
     },
-    [entries]
+    []
   );
 
 
@@ -358,10 +387,8 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
               </s-box>
             </s-stack>
 
-            {/* ✅ さらに読み込みボタン（入庫・出庫と同様の形式、ただしmetafieldは全件取得のため常に非表示） */}
-            {/* 注意: ロスはmetafieldから全件取得しているため、実際には追加読み込みは不要 */}
-            {/* pageInfoは常にfalseのため、読込ボタンは表示されない */}
-            {false && (
+            {/* 履歴一覧：設定件数を超える分はヘッダーの読込で表示（出庫・入庫・棚卸・ロスと同様） */}
+            {hasMoreHistory ? (
               <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
                 <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                   <s-text tone="subdued" size="small">
@@ -369,15 +396,14 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
                   </s-text>
                   <s-button
                     kind="secondary"
-                    onClick={() => {}}
-                    onPress={() => {}}
-                    disabled={true}
+                    onClick={loadMoreHistory}
+                    onPress={loadMoreHistory}
                   >
                     読込
                   </s-button>
                 </s-stack>
               </s-box>
-            )}
+            ) : null}
           </s-stack>
         </s-box>
       );
@@ -390,6 +416,8 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
     activeCount,
     cancelledCount,
     listToShow,
+    hasMoreHistory,
+    loadMoreHistory,
     sessionLocationGid,
     getLocationName,
     liteMode,

@@ -426,47 +426,146 @@ export async function fetchVariantImage(variantId) {
   }
 }
 
-export async function readAdjustmentEntries() {
-  const gql = `#graphql
-    query AdjustmentEntries {
-      currentAppInstallation {
-        id
-        metafield(namespace: "${ADJUSTMENT_NS}", key: "${ADJUSTMENT_KEY}") { id value type }
-      }
-    }`;
+// ---------- 調整エントリ v2: チャンク分割取得 ----------
+const ADJUSTMENT_V2_META_KEY = "adjustment_entries_v2_meta";
+const ADJUSTMENT_V2_CHUNK_PREFIX = "adjustment_entries_v2_";
+const ADJUSTMENT_CHUNK_SIZE_DEFAULT = 100;
+const ADJUSTMENT_METAFIELDS_SET_MAX = 25;
+
+async function getAdjustmentChunkSize() {
+  const settings = await fetchSettings();
+  const n = Number(settings?.outbound?.historyInitialLimit ?? ADJUSTMENT_CHUNK_SIZE_DEFAULT);
+  return Math.max(1, Math.min(250, n));
+}
+
+async function readAdjustmentManifest() {
+  const gql = `#graphql query AdjMeta { currentAppInstallation { metafield(namespace: "${ADJUSTMENT_NS}", key: "${ADJUSTMENT_V2_META_KEY}") { value } } }`;
   const d = await graphql(gql);
-  const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+  const raw = d?.currentAppInstallation?.metafield?.value;
+  if (raw == null || raw === "") return null;
   try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
+    const o = JSON.parse(raw);
+    if (o && typeof o.chunkSize === "number" && typeof o.chunkCount === "number") return o;
+  } catch {}
+  return null;
+}
+
+async function migrateAdjustmentV1ToV2() {
+  const gqlV1 = `#graphql query AdjV1 { currentAppInstallation { id metafield(namespace: "${ADJUSTMENT_NS}", key: "${ADJUSTMENT_KEY}") { id value type } } }`;
+  const d = await graphql(gqlV1);
+  const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+  let arr = [];
+  try {
+    const parsed = JSON.parse(raw);
+    arr = Array.isArray(parsed) ? parsed : [];
   } catch {
-    return [];
+    arr = [];
+  }
+  const chunkSize = await getAdjustmentChunkSize();
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize));
+  }
+  if (chunks.length === 0) chunks.push([]);
+  const ownerId = d?.currentAppInstallation?.id;
+  if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
+  const mutation = `#graphql mutation SetAdjChunks($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { id namespace key } userErrors { field message } } }`;
+  const metaValue = JSON.stringify({ chunkSize, chunkCount: chunks.length });
+  const metafields = [
+    { ownerId, namespace: ADJUSTMENT_NS, key: ADJUSTMENT_V2_META_KEY, type: "json", value: metaValue },
+    ...chunks.map((chunk, i) => ({ ownerId, namespace: ADJUSTMENT_NS, key: `${ADJUSTMENT_V2_CHUNK_PREFIX}${i}`, type: "json", value: JSON.stringify(chunk) })),
+  ];
+  for (let off = 0; off < metafields.length; off += ADJUSTMENT_METAFIELDS_SET_MAX) {
+    const batch = metafields.slice(off, off + ADJUSTMENT_METAFIELDS_SET_MAX);
+    const res = await graphql(mutation, { metafields: batch });
+    const errs = res?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
   }
 }
 
+export async function readAdjustmentEntriesFirstPage() {
+  let manifest = await readAdjustmentManifest();
+  if (!manifest) {
+    await migrateAdjustmentV1ToV2();
+    manifest = await readAdjustmentManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) return { entries: [], hasMore: false, chunkCount: 0 };
+  const chunkKey0 = `${ADJUSTMENT_V2_CHUNK_PREFIX}0`;
+  const gql = `#graphql query AdjFirstPage { currentAppInstallation { meta: metafield(namespace: "${ADJUSTMENT_NS}", key: "${ADJUSTMENT_V2_META_KEY}") { value } chunk0: metafield(namespace: "${ADJUSTMENT_NS}", key: "${chunkKey0}") { value } } }`;
+  const data = await graphql(gql);
+  const chunkRaw = data?.currentAppInstallation?.chunk0?.value ?? "[]";
+  try {
+    const list = JSON.parse(chunkRaw);
+    return { entries: Array.isArray(list) ? list : [], hasMore: manifest.chunkCount > 1, chunkCount: manifest.chunkCount };
+  } catch {
+    return { entries: [], hasMore: false, chunkCount: manifest.chunkCount };
+  }
+}
+
+export async function readAdjustmentEntriesPage(pageIndex) {
+  const manifest = await readAdjustmentManifest();
+  if (!manifest || pageIndex < 0 || pageIndex >= manifest.chunkCount) return { entries: [] };
+  const key = `${ADJUSTMENT_V2_CHUNK_PREFIX}${pageIndex}`;
+  const gql = `#graphql query AdjChunk($key: String!) { currentAppInstallation { metafield(namespace: "${ADJUSTMENT_NS}", key: $key) { value } } }`;
+  const d = await graphql(gql, { key });
+  const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+  try {
+    const arr = JSON.parse(raw);
+    return { entries: Array.isArray(arr) ? arr : [] };
+  } catch {
+    return { entries: [] };
+  }
+}
+
+export async function readAdjustmentEntriesFull() {
+  let manifest = await readAdjustmentManifest();
+  if (!manifest) {
+    await migrateAdjustmentV1ToV2();
+    manifest = await readAdjustmentManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) return [];
+  const all = [];
+  for (let i = 0; i < manifest.chunkCount; i++) {
+    const key = `${ADJUSTMENT_V2_CHUNK_PREFIX}${i}`;
+    const gql = `#graphql query AdjChunk($key: String!) { currentAppInstallation { metafield(namespace: "${ADJUSTMENT_NS}", key: $key) { value } } }`;
+    const d = await graphql(gql, { key });
+    const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) all.push(...arr);
+    } catch {}
+  }
+  return all;
+}
+
+export async function readAdjustmentEntries() {
+  return readAdjustmentEntriesFull();
+}
+
 export async function writeAdjustmentEntries(entries) {
+  const arr = Array.isArray(entries) ? entries : [];
+  const chunkSize = await getAdjustmentChunkSize();
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize));
+  }
+  if (chunks.length === 0) chunks.push([]);
   const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
   const d = await graphql(gqlApp);
   const ownerId = d?.currentAppInstallation?.id;
   if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
-  const mutation = `#graphql
-    mutation SetAdjustment($metafields: [MetafieldsSetInput!]!) {
-      metafieldsSet(metafields: $metafields) {
-        metafields { id namespace key }
-        userErrors { field message }
-      }
-    }`;
-  const res = await graphql(mutation, {
-    metafields: [{
-      ownerId,
-      namespace: ADJUSTMENT_NS,
-      key: ADJUSTMENT_KEY,
-      type: "json",
-      value: JSON.stringify(Array.isArray(entries) ? entries : []),
-    }],
-  });
-  const errs = res?.metafieldsSet?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+  const mutation = `#graphql mutation SetAdjustment($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { id namespace key } userErrors { field message } } }`;
+  const metaValue = JSON.stringify({ chunkSize, chunkCount: chunks.length });
+  const metafields = [
+    { ownerId, namespace: ADJUSTMENT_NS, key: ADJUSTMENT_V2_META_KEY, type: "json", value: metaValue },
+    ...chunks.map((chunk, i) => ({ ownerId, namespace: ADJUSTMENT_NS, key: `${ADJUSTMENT_V2_CHUNK_PREFIX}${i}`, type: "json", value: JSON.stringify(chunk) })),
+  ];
+  for (let off = 0; off < metafields.length; off += ADJUSTMENT_METAFIELDS_SET_MAX) {
+    const batch = metafields.slice(off, off + ADJUSTMENT_METAFIELDS_SET_MAX);
+    const res = await graphql(mutation, { metafields: batch });
+    const errs = res?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+  }
 }
 
 // locationIdをGID形式に変換（OutboundListと同じ処理）

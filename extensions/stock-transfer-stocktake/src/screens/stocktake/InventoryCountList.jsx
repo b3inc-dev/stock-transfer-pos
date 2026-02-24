@@ -205,8 +205,9 @@ export function InventoryCountList({
   const readOnlyRef = useRef(false);
   const toastReadOnlyOnceRef = useRef(false);
   const [addQtyById, setAddQtyById] = useState({}); // ✅ 入庫と同様：候補ごとの追加済み数量表示用
-  // ✅ まとめて表示：グループごと読込ボタンでどのグループを読み込み中か
+  // ✅ まとめて表示：グループごと読込ボタンでどのグループを読み込み中か（読込中は「読込中...」表示）
   const [loadingGroupId, setLoadingGroupId] = useState(null);
+  const loadingGroupIdRef = useRef(null); // ✅ 二重発火防止（onClick/onPress両方で呼ばれる場合）
 
   const denyEdit = useCallback(() => {
     if (!toastReadOnlyOnceRef.current) {
@@ -402,7 +403,7 @@ export function InventoryCountList({
     // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
     if (groupItemsForCurrentGroup.length === 0 && countItemsLegacy.length > 0 && currentGroupId) {
       try {
-        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
         const products = await fetchProductsByGroups([currentGroupId], count.locationId, {
           productFirst,
           filterByInventoryLevel: false,
@@ -452,7 +453,7 @@ export function InventoryCountList({
       try {
         // ✅ 完了済みの商品リスト：在庫は棚卸時の在庫数（currentQuantity）、実数は確定した在庫数（actualQuantity）を表示
         // ✅ 画像URLを取得するため、商品情報を取得
-        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
         const products = await fetchProductsByGroups([currentGroupId], count.locationId, {
           productFirst,
           filterByInventoryLevel: false,
@@ -665,7 +666,7 @@ export function InventoryCountList({
             // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
             // 商品グループの商品リストを取得してフィルタリング（inventoryItemIdsByGroupも渡してまとめて表示で全グループ取得できるようにする）
             try {
-              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
               const products = await fetchProductsByGroups([groupId], count.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
@@ -689,7 +690,7 @@ export function InventoryCountList({
             // ✅ 完了済みのグループ：groupItemsから読み込んで読み取り専用で表示
             // ✅ 画像URLを取得するため、商品情報を取得
             try {
-              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
               const products = await fetchProductsByGroups([groupId], count.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
@@ -876,7 +877,7 @@ export function InventoryCountList({
       }
 
       // 在庫レベルがある商品のみを取得（初期表示用）・入庫並み：1回の取得で currentQuantity 付きで返るため二重取得しない
-      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
       // ✅ さらに読み込む用の1回あたり件数（管理画面と揃える）
       // ✅ 常に画像付きで取得（画像ON/OFFは表示切替のみ。ロス・入庫・出庫と同様にリスト再読込しない）
       const rawProducts = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
@@ -928,10 +929,11 @@ export function InventoryCountList({
   const LOAD_PAGE_SIZE = 600;
   const handleLoadMoreProducts = useCallback(async () => {
     if (!count || !count.locationId || targetProductGroupIds.length === 0) return;
-    if (loadingMore || !hasMoreProducts) return;
+    if (loadingMoreRef.current || loadingMore || !hasMoreProducts) return;
+    loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
       const raw = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
         productFirst,
         filterByInventoryLevel: true,
@@ -968,12 +970,15 @@ export function InventoryCountList({
       console.error("[InventoryCountList] handleLoadMoreProducts error:", e);
     } finally {
       setLoadingMore(false);
+      loadingMoreRef.current = false;
     }
   }, [count, targetProductGroupIds, lines.length, hasMoreProducts, loadingMore, isMultipleMode, settings?.productList?.initialLimit]);
 
   // ✅ まとめて表示：グループごと「読込」ボタンでそのグループの商品だけ読み込む（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
   const loadGroupProducts = useCallback(async (groupId) => {
     if (!isMultipleMode || !count?.id || !count?.locationId || !groupId) return;
+    if (loadingGroupIdRef.current != null) return; // 二重発火防止
+    loadingGroupIdRef.current = groupId;
     setLoadingGroupId(groupId);
     const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
     try {
@@ -992,7 +997,7 @@ export function InventoryCountList({
       let groupItemsForGroup = getGroupItemsByKey(groupItemsMap, groupId);
       if (groupItemsForGroup.length === 0 && countItemsLegacy.length > 0) {
         try {
-          const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
           const products = await fetchProductsByGroups([groupId], count.locationId, {
             productFirst,
             filterByInventoryLevel: false,
@@ -1014,7 +1019,7 @@ export function InventoryCountList({
       let newLines = [];
 
       if (completedItems) {
-        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
         const products = await fetchProductsByGroups([groupId], count.locationId, {
           productFirst,
           filterByInventoryLevel: false,
@@ -1057,7 +1062,7 @@ export function InventoryCountList({
           })
         );
       } else {
-        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
         let products = await fetchProductsByGroups([groupId], count.locationId, {
           productFirst,
           filterByInventoryLevel: false,
@@ -1127,6 +1132,7 @@ export function InventoryCountList({
       toast(`グループ「${groupName}」の読み込みに失敗しました: ${e?.message || e}`);
     } finally {
       setLoadingGroupId(null);
+      loadingGroupIdRef.current = null;
     }
   }, [count, isMultipleMode, productGroupNames, settings?.productList?.initialLimit, showImages, liteMode]);
 
@@ -2855,7 +2861,8 @@ export function InventoryCountList({
                 <s-button
                   kind="secondary"
                   disabled={loadingMore}
-                  onPress={handleLoadMoreProducts}
+                  onClick={() => handleLoadMoreProducts()}
+                  onPress={() => handleLoadMoreProducts()}
                 >
                   {loadingMore ? "読込中..." : "読込"}
                 </s-button>
@@ -2948,6 +2955,7 @@ export function InventoryCountList({
                                 <s-button
                                   kind="secondary"
                                   disabled={loadingGroupId != null}
+                                  onClick={() => loadGroupProducts(groupId)}
                                   onPress={() => loadGroupProducts(groupId)}
                                 >
                                   {isLoadingThisGroup ? "読込中..." : "読込"}
@@ -2995,7 +3003,8 @@ export function InventoryCountList({
                       <s-button
                         kind="secondary"
                         disabled={loadingMore}
-                        onPress={handleLoadMoreProducts}
+                        onClick={() => handleLoadMoreProducts()}
+                        onPress={() => handleLoadMoreProducts()}
                       >
                         {loadingMore ? "読込中..." : "さらに読み込む"}
                       </s-button>
@@ -3033,7 +3042,8 @@ export function InventoryCountList({
                         <s-button
                           kind="secondary"
                           disabled={loadingMore}
-                          onPress={handleLoadMoreProducts}
+                          onClick={() => handleLoadMoreProducts()}
+                          onPress={() => handleLoadMoreProducts()}
                         >
                           {loadingMore ? "読込中..." : "さらに読み込む"}
                         </s-button>

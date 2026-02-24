@@ -738,35 +738,188 @@ export async function fetchSettings() {
 }
 
 // =========================
-// 発注エントリの読み書き
+// 発注エントリの読み書き（v2: チャンク分割取得で読込スピード統一）
 // =========================
 
 const ORDER_NS = "stock_transfer_pos";
 const ORDER_KEY = "order_request_entries_v1";
+const ORDER_V2_META_KEY = "order_request_entries_v2_meta";
+const ORDER_V2_CHUNK_PREFIX = "order_request_entries_v2_";
+const CHUNK_SIZE_DEFAULT = 100;
+const METAFIELDS_SET_MAX = 25;
 
-export async function readOrderEntries() {
+async function getOrderChunkSize() {
+  const settings = await fetchSettings();
+  const n = Number(settings?.outbound?.historyInitialLimit ?? CHUNK_SIZE_DEFAULT);
+  return Math.max(1, Math.min(250, n));
+}
+
+async function readOrderEntriesManifest() {
   const gql = `#graphql
-    query OrderEntries {
+    query OrderMeta {
+      currentAppInstallation {
+        metafield(namespace: "${ORDER_NS}", key: "${ORDER_V2_META_KEY}") { value }
+      }
+    }`;
+  const d = await graphql(gql);
+  const raw = d?.currentAppInstallation?.metafield?.value;
+  if (raw == null || raw === "") return null;
+  try {
+    const o = JSON.parse(raw);
+    if (o && typeof o.chunkSize === "number" && typeof o.chunkCount === "number") return o;
+  } catch {}
+  return null;
+}
+
+async function migrateOrderV1ToV2() {
+  const gqlV1 = `#graphql
+    query OrderV1 {
       currentAppInstallation {
         id
         metafield(namespace: "${ORDER_NS}", key: "${ORDER_KEY}") { id value type }
       }
     }`;
-  const d = await graphql(gql);
+  const d = await graphql(gqlV1);
   const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+  let arr = [];
   try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
+    const parsed = JSON.parse(raw);
+    arr = Array.isArray(parsed) ? parsed : [];
   } catch {
-    return [];
+    arr = [];
+  }
+  const chunkSize = await getOrderChunkSize();
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize));
+  }
+  if (chunks.length === 0) chunks.push([]);
+  const ownerId = d?.currentAppInstallation?.id;
+  if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
+  const mutation = `#graphql
+    mutation SetOrderChunks($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        metafields { id namespace key }
+        userErrors { field message }
+      }
+    }`;
+  const metaValue = JSON.stringify({ chunkSize, chunkCount: chunks.length });
+  const metafields = [
+    { ownerId, namespace: ORDER_NS, key: ORDER_V2_META_KEY, type: "json", value: metaValue },
+    ...chunks.map((chunk, i) => ({
+      ownerId,
+      namespace: ORDER_NS,
+      key: `${ORDER_V2_CHUNK_PREFIX}${i}`,
+      type: "json",
+      value: JSON.stringify(chunk),
+    })),
+  ];
+  for (let off = 0; off < metafields.length; off += METAFIELDS_SET_MAX) {
+    const batch = metafields.slice(off, off + METAFIELDS_SET_MAX);
+    const res = await graphql(mutation, { metafields: batch });
+    const errs = res?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
   }
 }
 
-export async function writeOrderEntries(entries) {
-  const gqlApp = `#graphql
-    query AppId {
-      currentAppInstallation { id }
+/** 初回表示用: マニフェスト＋先頭1チャンクだけ取得（読込スピード統一） */
+export async function readOrderEntriesFirstPage() {
+  let manifest = await readOrderEntriesManifest();
+  if (!manifest) {
+    await migrateOrderV1ToV2();
+    manifest = await readOrderEntriesManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) {
+    return { entries: [], hasMore: false, chunkCount: 0 };
+  }
+  const chunkKey0 = `${ORDER_V2_CHUNK_PREFIX}0`;
+  const gql = `#graphql
+    query OrderFirstPage {
+      currentAppInstallation {
+        meta: metafield(namespace: "${ORDER_NS}", key: "${ORDER_V2_META_KEY}") { value }
+        chunk0: metafield(namespace: "${ORDER_NS}", key: "${chunkKey0}") { value }
+      }
     }`;
+  const data = await graphql(gql);
+  const chunkRaw = data?.currentAppInstallation?.chunk0?.value ?? "[]";
+  try {
+    const entries = JSON.parse(chunkRaw);
+    const list = Array.isArray(entries) ? entries : [];
+    return {
+      entries: list,
+      hasMore: manifest.chunkCount > 1,
+      chunkCount: manifest.chunkCount,
+    };
+  } catch {
+    return { entries: [], hasMore: false, chunkCount: manifest.chunkCount };
+  }
+}
+
+/** 「読込」用: 指定ページのチャンクだけ取得 */
+export async function readOrderEntriesPage(pageIndex) {
+  const manifest = await readOrderEntriesManifest();
+  if (!manifest || pageIndex < 0 || pageIndex >= manifest.chunkCount) {
+    return { entries: [] };
+  }
+  const key = `${ORDER_V2_CHUNK_PREFIX}${pageIndex}`;
+  const gql = `#graphql
+    query OrderChunk($key: String!) {
+      currentAppInstallation {
+        metafield(namespace: "${ORDER_NS}", key: $key) { value }
+      }
+    }`;
+  const d = await graphql(gql, { key });
+  const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+  try {
+    const arr = JSON.parse(raw);
+    return { entries: Array.isArray(arr) ? arr : [] };
+  } catch {
+    return { entries: [] };
+  }
+}
+
+/** 更新用: 全チャンクを取得してマージした配列を返す */
+export async function readOrderEntriesFull() {
+  let manifest = await readOrderEntriesManifest();
+  if (!manifest) {
+    await migrateOrderV1ToV2();
+    manifest = await readOrderEntriesManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) return [];
+  const all = [];
+  for (let i = 0; i < manifest.chunkCount; i++) {
+    const key = `${ORDER_V2_CHUNK_PREFIX}${i}`;
+    const gql = `#graphql
+      query OrderChunk($key: String!) {
+        currentAppInstallation {
+          metafield(namespace: "${ORDER_NS}", key: $key) { value }
+        }
+      }`;
+    const d = await graphql(gql, { key });
+    const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) all.push(...arr);
+    } catch {}
+  }
+  return all;
+}
+
+/** 全件取得（後方互換: OrderProductList 等で使用） */
+export async function readOrderEntries() {
+  return readOrderEntriesFull();
+}
+
+export async function writeOrderEntries(entries) {
+  const arr = Array.isArray(entries) ? entries : [];
+  const chunkSize = await getOrderChunkSize();
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize));
+  }
+  if (chunks.length === 0) chunks.push([]);
+
+  const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
   const d = await graphql(gqlApp);
   const ownerId = d?.currentAppInstallation?.id;
   if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
@@ -779,18 +932,21 @@ export async function writeOrderEntries(entries) {
       }
     }`;
 
-  const res = await graphql(mutation, {
-    metafields: [
-      {
-        ownerId,
-        namespace: ORDER_NS,
-        key: ORDER_KEY,
-        type: "json",
-        value: JSON.stringify(Array.isArray(entries) ? entries : []),
-      },
-    ],
-  });
-
-  const errs = res?.metafieldsSet?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+  const metaValue = JSON.stringify({ chunkSize, chunkCount: chunks.length });
+  const metafields = [
+    { ownerId, namespace: ORDER_NS, key: ORDER_V2_META_KEY, type: "json", value: metaValue },
+    ...chunks.map((chunk, i) => ({
+      ownerId,
+      namespace: ORDER_NS,
+      key: `${ORDER_V2_CHUNK_PREFIX}${i}`,
+      type: "json",
+      value: JSON.stringify(chunk),
+    })),
+  ];
+  for (let off = 0; off < metafields.length; off += METAFIELDS_SET_MAX) {
+    const batch = metafields.slice(off, off + METAFIELDS_SET_MAX);
+    const res = await graphql(mutation, { metafields: batch });
+    const errs = res?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+  }
 }

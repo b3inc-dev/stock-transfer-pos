@@ -89,26 +89,167 @@ export async function fetchSettings() {
   }
 }
 
-// ---------- 仕入エントリ読み書き（管理画面と同じ metafield） ----------
-export async function readPurchaseEntries() {
+// ---------- 仕入エントリ読み書き（v2: チャンク分割取得） ----------
+const PURCHASE_V2_META_KEY = "purchase_entries_v2_meta";
+const PURCHASE_V2_CHUNK_PREFIX = "purchase_entries_v2_";
+const CHUNK_SIZE_DEFAULT = 100;
+const METAFIELDS_SET_MAX = 25;
+
+async function getPurchaseChunkSize() {
+  const settings = await fetchSettings();
+  const n = Number(settings?.outbound?.historyInitialLimit ?? CHUNK_SIZE_DEFAULT);
+  return Math.max(1, Math.min(250, n));
+}
+
+async function readPurchaseManifest() {
   const gql = `#graphql
-    query PurchaseEntries {
+    query PurchaseMeta {
+      currentAppInstallation {
+        metafield(namespace: "${PURCHASE_NS}", key: "${PURCHASE_V2_META_KEY}") { value }
+      }
+    }`;
+  const d = await graphql(gql);
+  const raw = d?.currentAppInstallation?.metafield?.value;
+  if (raw == null || raw === "") return null;
+  try {
+    const o = JSON.parse(raw);
+    if (o && typeof o.chunkSize === "number" && typeof o.chunkCount === "number") return o;
+  } catch {}
+  return null;
+}
+
+async function migratePurchaseV1ToV2() {
+  const gqlV1 = `#graphql
+    query PurchaseV1 {
       currentAppInstallation {
         id
         metafield(namespace: "${PURCHASE_NS}", key: "${PURCHASE_KEY}") { id value type }
       }
     }`;
-  const d = await graphql(gql);
+  const d = await graphql(gqlV1);
   const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+  let arr = [];
   try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
+    const parsed = JSON.parse(raw);
+    arr = Array.isArray(parsed) ? parsed : [];
   } catch {
-    return [];
+    arr = [];
+  }
+  const chunkSize = await getPurchaseChunkSize();
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize));
+  }
+  if (chunks.length === 0) chunks.push([]);
+  const ownerId = d?.currentAppInstallation?.id;
+  if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
+  const mutation = `#graphql
+    mutation SetPurchaseChunks($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        metafields { id namespace key }
+        userErrors { field message }
+      }
+    }`;
+  const metaValue = JSON.stringify({ chunkSize, chunkCount: chunks.length });
+  const metafields = [
+    { ownerId, namespace: PURCHASE_NS, key: PURCHASE_V2_META_KEY, type: "json", value: metaValue },
+    ...chunks.map((chunk, i) => ({
+      ownerId,
+      namespace: PURCHASE_NS,
+      key: `${PURCHASE_V2_CHUNK_PREFIX}${i}`,
+      type: "json",
+      value: JSON.stringify(chunk),
+    })),
+  ];
+  for (let off = 0; off < metafields.length; off += METAFIELDS_SET_MAX) {
+    const batch = metafields.slice(off, off + METAFIELDS_SET_MAX);
+    const res = await graphql(mutation, { metafields: batch });
+    const errs = res?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
   }
 }
 
+export async function readPurchaseEntriesFirstPage() {
+  let manifest = await readPurchaseManifest();
+  if (!manifest) {
+    await migratePurchaseV1ToV2();
+    manifest = await readPurchaseManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) {
+    return { entries: [], hasMore: false, chunkCount: 0 };
+  }
+  const chunkKey0 = `${PURCHASE_V2_CHUNK_PREFIX}0`;
+  const gql = `#graphql
+    query PurchaseFirstPage {
+      currentAppInstallation {
+        meta: metafield(namespace: "${PURCHASE_NS}", key: "${PURCHASE_V2_META_KEY}") { value }
+        chunk0: metafield(namespace: "${PURCHASE_NS}", key: "${chunkKey0}") { value }
+      }
+    }`;
+  const data = await graphql(gql);
+  const chunkRaw = data?.currentAppInstallation?.chunk0?.value ?? "[]";
+  try {
+    const entries = JSON.parse(chunkRaw);
+    const list = Array.isArray(entries) ? entries : [];
+    return { entries: list, hasMore: manifest.chunkCount > 1, chunkCount: manifest.chunkCount };
+  } catch {
+    return { entries: [], hasMore: false, chunkCount: manifest.chunkCount };
+  }
+}
+
+export async function readPurchaseEntriesPage(pageIndex) {
+  const manifest = await readPurchaseManifest();
+  if (!manifest || pageIndex < 0 || pageIndex >= manifest.chunkCount) return { entries: [] };
+  const key = `${PURCHASE_V2_CHUNK_PREFIX}${pageIndex}`;
+  const gql = `#graphql
+    query PurchaseChunk($key: String!) {
+      currentAppInstallation {
+        metafield(namespace: "${PURCHASE_NS}", key: $key) { value }
+      }
+    }`;
+  const d = await graphql(gql, { key });
+  const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+  try {
+    const arr = JSON.parse(raw);
+    return { entries: Array.isArray(arr) ? arr : [] };
+  } catch {
+    return { entries: [] };
+  }
+}
+
+export async function readPurchaseEntriesFull() {
+  let manifest = await readPurchaseManifest();
+  if (!manifest) {
+    await migratePurchaseV1ToV2();
+    manifest = await readPurchaseManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) return [];
+  const all = [];
+  for (let i = 0; i < manifest.chunkCount; i++) {
+    const key = `${PURCHASE_V2_CHUNK_PREFIX}${i}`;
+    const gql = `#graphql query PurchaseChunk($key: String!) { currentAppInstallation { metafield(namespace: "${PURCHASE_NS}", key: $key) { value } } }`;
+    const d = await graphql(gql, { key });
+    const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) all.push(...arr);
+    } catch {}
+  }
+  return all;
+}
+
+export async function readPurchaseEntries() {
+  return readPurchaseEntriesFull();
+}
+
 export async function writePurchaseEntries(entries) {
+  const arr = Array.isArray(entries) ? entries : [];
+  const chunkSize = await getPurchaseChunkSize();
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += chunkSize) {
+    chunks.push(arr.slice(i, i + chunkSize));
+  }
+  if (chunks.length === 0) chunks.push([]);
   const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
   const d = await graphql(gqlApp);
   const ownerId = d?.currentAppInstallation?.id;
@@ -120,17 +261,23 @@ export async function writePurchaseEntries(entries) {
         userErrors { field message }
       }
     }`;
-  const res = await graphql(mutation, {
-    metafields: [{
+  const metaValue = JSON.stringify({ chunkSize, chunkCount: chunks.length });
+  const metafields = [
+    { ownerId, namespace: PURCHASE_NS, key: PURCHASE_V2_META_KEY, type: "json", value: metaValue },
+    ...chunks.map((chunk, i) => ({
       ownerId,
       namespace: PURCHASE_NS,
-      key: PURCHASE_KEY,
+      key: `${PURCHASE_V2_CHUNK_PREFIX}${i}`,
       type: "json",
-      value: JSON.stringify(Array.isArray(entries) ? entries : []),
-    }],
-  });
-  const errs = res?.metafieldsSet?.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+      value: JSON.stringify(chunk),
+    })),
+  ];
+  for (let off = 0; off < metafields.length; off += METAFIELDS_SET_MAX) {
+    const batch = metafields.slice(off, off + METAFIELDS_SET_MAX);
+    const res = await graphql(mutation, { metafields: batch });
+    const errs = res?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+  }
 }
 
 // ---------- GID 変換・在庫調整（ロスと同型、delta は正で入庫） ----------

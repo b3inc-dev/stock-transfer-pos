@@ -118,3 +118,50 @@
 | **根拠** | Shopify の **Input/Pagination 上限 250** に合わせた値 | **入力 250 はバッチで遵守**。600 は **20 秒タイムアウトと 40 回リクエストから許容できる上限付近**。 |
 
 **結論**: 250 は **API 制限そのもの**（入力・connection の最大 250）に合わせた根拠がある。600 は **API では 250 以下に分割している** ため制限違反にならず、**読み込み速度と 20 秒タイムアウト** から「1 ページ 600 件まで」が同等の根拠（許容上限）として説明できる。
+
+---
+
+## 3. 管理画面で明細が全件読めない問題（4549 件 vs 5670 件）の原因と対策
+
+### 3.1 事象
+
+- 管理画面では棚卸明細が **4549 件**、アプリタイルでは **5670 件** 表示される。アプリタイルの件数が正しい。
+- 同じメタフィールドを参照しているにもかかわらず、管理画面側だけ件数が不足する。
+
+### 3.2 原因
+
+- **GraphQL のメタフィールド応答**には、環境や API バージョンによって **応答サイズの上限**（例: 値の切り詰め）がかかることがある。
+- 棚卸データを **80KB 単位のチャンク**で保存していたが、**1 チャンクに 1 件の棚卸**（例: 5670 明細）が丸ごと入る場合、そのチャンクが **100KB を超える**。管理画面の **loader が GraphQL でチャンクを読む際**、応答が切り詰められ、**途中までしか届かない**結果、4549 件程度で止まっていた。
+- アプリタイル（POS）は別経路で同じメタフィールドを読むため、切り詰めの影響を受けにくく 5670 件読めている可能性がある。
+
+### 3.3 対策（全リストを確実に読み込めるようにする）
+
+1. **チャンクサイズを 32KB に変更**  
+   - `INVENTORY_COUNTS_CHUNK_BYTES = 32_000` に統一（管理画面・POS 拡張の両方）。  
+   - 1 チャンクあたりのメタフィールド値が小さくなり、GraphQL 応答で切り詰められにくくする。
+
+2. **1 件の棚卸が 32KB を超える場合は「パート」に分割**  
+   - `groupItems` / `items` だけを複数パートに分割し、各パートを `_part: true`, `countId`, `partIndex`, `totalParts`, `countMeta`, `groupItems`, `items` の形式で保存。  
+   - 読込時は `countId` ごとにパートを集め、`partIndex` 順に結合して 1 件の棚卸に復元する。
+
+3. **管理画面・POS の両方で同一ロジック**  
+   - **読込**: `readInventoryCountsChunked`（管理画面）/ `readInventoryCountsRaw`（POS）で、チャンク配列内の「パート」を検出し、`mergeCountParts` で結合してから返す。  
+   - **書込**: `writeInventoryCountsChunked`（管理画面）/ `writeInventoryCounts`（POS）で、32KB を超える棚卸は `splitCountIntoParts` でパートに分割し、チャンクごとに 32KB 以下になるよう詰めて保存する。
+
+### 3.4 変更ファイル
+
+- **管理画面**: `app/routes/app.inventory-count.tsx`  
+  - `INVENTORY_COUNTS_CHUNK_BYTES` を 32_000 に変更。  
+  - `CountPart` 型と `mergeCountParts` / `splitCountIntoParts` を追加。  
+  - `readInventoryCountsChunked` でパート結合。  
+  - `writeInventoryCountsChunked` でパート分割と 32KB 以下のチャンク作成。
+- **POS 拡張**: `extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js`  
+  - `INVENTORY_COUNTS_CHUNK_BYTES` を 32_000 に変更。  
+  - `mergeCountParts` / `splitCountIntoParts` を追加。  
+  - `readInventoryCountsRaw` でパート結合。  
+  - `writeInventoryCounts` でチャンク＋パート分割で保存。
+
+### 3.5 運用上の注意
+
+- **既存データ**: すでに 80KB 超の 1 チャンクで保存されているデータは、**次に管理画面またはアプリから保存（POST）が走ったタイミング**で、上記の 32KB＋パート形式に再保存される。それ以降は管理画面でも全明細が読める。
+- **新規保存**: 今後は管理画面・アプリのどちらから保存しても、32KB チャンク＋パート分割で保存されるため、**全リストを確実に読み込める**。

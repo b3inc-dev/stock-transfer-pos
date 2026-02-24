@@ -11,6 +11,26 @@ const PRODUCT_GROUPS_KEY = "product_groups_v1";
 const INVENTORY_COUNTS_KEY = "inventory_counts_v1";
 const SETTINGS_KEY = "settings_v1";
 
+/**
+ * 管理画面・POS で全明細を確実に読むため：1チャンクあたりの最大バイト数。
+ * GraphQL のメタフィールド応答が大きいと切り詰められるため、32KB に抑えて確実に全件読めるようにする。
+ * 1件の棚卸がこれを超える場合は groupItems/items を複数パートに分割して保存する。
+ */
+const INVENTORY_COUNTS_CHUNK_BYTES = 32_000;
+const INVENTORY_COUNTS_CHUNK_KEY_PREFIX = "inventory_counts_v1_c";
+const METAFIELDS_SET_MAX = 25;
+
+/** 1件の棚卸が CHUNK_BYTES を超える場合の「パート」形式（読込時に結合する） */
+type CountPart = {
+  _part: true;
+  countId: string;
+  partIndex: number;
+  totalParts: number;
+  countMeta?: Record<string, unknown>;
+  groupItems?: Record<string, unknown[]>;
+  items?: unknown[];
+};
+
 // 棚卸履歴CSV列（設定の「棚卸履歴CSV出力項目設定」と一致。明細あり用）
 const STOCKTAKE_CSV_COLUMN_IDS = [
   "countId", "name", "date", "completedDate", "location", "productGroup", "status",
@@ -40,6 +60,277 @@ function getGroupItemsByKey(
   const n = normalizeIdForMatch(groupId);
   const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === n);
   return key && Array.isArray(groupItemsMap[key]) ? groupItemsMap[key] : [];
+}
+
+/** パート配列を1件の棚卸に結合する */
+function mergeCountParts(parts: CountPart[]): InventoryCount {
+  const sorted = [...parts].sort((a, b) => a.partIndex - b.partIndex);
+  const first = sorted[0];
+  const base = (first?.countMeta ? { ...first.countMeta } : {}) as Record<string, unknown>;
+  const groupItems: Record<string, unknown[]> = {};
+  const items: unknown[] = [];
+  for (const p of sorted) {
+    if (p.groupItems && typeof p.groupItems === "object") {
+      for (const [k, arr] of Object.entries(p.groupItems)) {
+        if (Array.isArray(arr)) {
+          if (!groupItems[k]) groupItems[k] = [];
+          groupItems[k].push(...arr);
+        }
+      }
+    }
+    if (Array.isArray(p.items)) items.push(...p.items);
+  }
+  base.groupItems = groupItems;
+  base.items = items;
+  return base as InventoryCount;
+}
+
+/**
+ * 棚卸メタフィールドをチャンク対応で読み込む（管理画面・応答サイズ制限で明細が欠ける問題を解消）。
+ * 単一 key の場合は従来どおり。_chunked の場合は複数 key を個別取得して結合する。
+ * チャンク内に「パート」形式（_part: true）が含まれる場合は countId ごとに結合してから返す。
+ */
+async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
+  const mainResp = await admin.graphql(
+    `#graphql
+      query InventoryCountMain {
+        currentAppInstallation {
+          metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value }
+        }
+      }
+    `
+  );
+  const mainJson = await mainResp.json();
+  const raw = mainJson?.data?.currentAppInstallation?.metafield?.value;
+  if (raw == null || raw === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (Array.isArray(parsed)) return parsed as InventoryCount[];
+  const desc = parsed as { _chunked?: boolean; totalChunks?: number };
+  if (!desc._chunked || typeof desc.totalChunks !== "number" || desc.totalChunks < 1) return [];
+  const fullCounts: InventoryCount[] = [];
+  const partsByCountId = new Map<string, CountPart[]>();
+  for (let i = 0; i < desc.totalChunks; i++) {
+    const key = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`;
+    const resp = await admin.graphql(
+      `#graphql
+        query InventoryCountChunk($key: String!) {
+          currentAppInstallation {
+            metafield(namespace: "${NS}", key: $key) { value }
+          }
+        }
+      `,
+      { variables: { key } }
+    );
+    const json = await resp.json();
+    const chunkRaw = json?.data?.currentAppInstallation?.metafield?.value;
+    if (chunkRaw == null) continue;
+    try {
+      const chunk = JSON.parse(chunkRaw);
+      if (!Array.isArray(chunk)) continue;
+      for (const el of chunk) {
+        if (el && typeof el === "object" && (el as CountPart)._part === true) {
+          const part = el as CountPart;
+          const list = partsByCountId.get(part.countId) ?? [];
+          list.push(part);
+          partsByCountId.set(part.countId, list);
+        } else {
+          fullCounts.push(el as InventoryCount);
+        }
+      }
+    } catch {
+      // skip invalid chunk
+    }
+  }
+  for (const parts of partsByCountId.values()) {
+    fullCounts.push(mergeCountParts(parts));
+  }
+  return fullCounts;
+}
+
+/** 1件の棚卸を CHUNK_BYTES 以下に収まるパートに分割する（groupItems/items のみ分割、メタは part 0 に） */
+function splitCountIntoParts(count: InventoryCount): CountPart[] {
+  const c = count as Record<string, unknown>;
+  const groupItems = (c.groupItems && typeof c.groupItems === "object" ? c.groupItems : {}) as Record<string, unknown[]>;
+  const items = Array.isArray(c.items) ? c.items : [];
+  const countMeta: Record<string, unknown> = { ...c };
+  delete countMeta.groupItems;
+  delete countMeta.items;
+
+  type Entry = { g: string; item: unknown };
+  const entries: Entry[] = [];
+  for (const [g, arr] of Object.entries(groupItems)) {
+    if (Array.isArray(arr)) for (const item of arr) entries.push({ g, item });
+  }
+  for (const item of items) entries.push({ g: "_legacy", item });
+
+  if (entries.length === 0) {
+    return [{ _part: true, countId: count.id, partIndex: 0, totalParts: 1, countMeta, groupItems: {}, items: [] }];
+  }
+
+  const parts: CountPart[] = [];
+  let partIndex = 0;
+  let current: { groupItems: Record<string, unknown[]>; items: unknown[] } = { groupItems: {}, items: [] };
+
+  function flush() {
+    if (Object.keys(current.groupItems).length === 0 && current.items.length === 0) return;
+    parts.push({
+      _part: true,
+      countId: count.id,
+      partIndex,
+      totalParts: 0,
+      countMeta: partIndex === 0 ? countMeta : undefined,
+      groupItems: { ...current.groupItems },
+      items: [...current.items],
+    });
+    partIndex++;
+    current = { groupItems: {}, items: [] };
+  }
+
+  function partSize() {
+    return JSON.stringify({
+      _part: true,
+      countId: count.id,
+      partIndex,
+      totalParts: 0,
+      countMeta: partIndex === 0 ? countMeta : undefined,
+      groupItems: current.groupItems,
+      items: current.items,
+    }).length;
+  }
+
+  for (const { g, item } of entries) {
+    const addToGroup = g !== "_legacy";
+    if (addToGroup) {
+      if (!current.groupItems[g]) current.groupItems[g] = [];
+      current.groupItems[g].push(item);
+    } else {
+      current.items.push(item);
+    }
+    if (partSize() > INVENTORY_COUNTS_CHUNK_BYTES) {
+      if (addToGroup) current.groupItems[g]!.pop();
+      else current.items.pop();
+      flush();
+      if (addToGroup) {
+        if (!current.groupItems[g]) current.groupItems[g] = [];
+        current.groupItems[g].push(item);
+      } else current.items.push(item);
+    }
+  }
+  flush();
+  parts.forEach((p) => (p.totalParts = parts.length));
+  return parts;
+}
+
+/**
+ * 棚卸メタフィールドをチャンク対応で保存（単体が CHUNK_BYTES を超える場合は groupItems/items をパート分割）。
+ */
+async function writeInventoryCountsChunked(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  counts: InventoryCount[],
+  ownerId: string
+): Promise<{ userErrors: Array<{ message?: string }> }> {
+  const arr = Array.isArray(counts) ? counts : [];
+  const payloads: (InventoryCount | CountPart)[][] = [];
+  let current: (InventoryCount | CountPart)[] = [];
+  let currentSize = 2;
+
+  for (const count of arr) {
+    const countStr = JSON.stringify(count);
+    if (countStr.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
+      if (currentSize + countStr.length + 1 > INVENTORY_COUNTS_CHUNK_BYTES && current.length > 0) {
+        payloads.push(current);
+        current = [];
+        currentSize = 2;
+      }
+      current.push(count);
+      currentSize += countStr.length + 1;
+    } else {
+      if (current.length > 0) {
+        payloads.push(current);
+        current = [];
+        currentSize = 2;
+      }
+      const parts = splitCountIntoParts(count);
+      for (const part of parts) {
+        const partStr = JSON.stringify(part);
+        if (currentSize + partStr.length + 1 > INVENTORY_COUNTS_CHUNK_BYTES && current.length > 0) {
+          payloads.push(current);
+          current = [];
+          currentSize = 2;
+        }
+        current.push(part);
+        currentSize += partStr.length + 1;
+      }
+    }
+  }
+  if (current.length > 0) payloads.push(current);
+
+  if (payloads.length === 0) {
+    const resp = await admin.graphql(
+      `#graphql
+        mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            userErrors { field message }
+          }
+        }
+      `,
+      { variables: { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" }] } }
+    );
+    const data = (await resp.json())?.data?.metafieldsSet;
+    return { userErrors: data?.userErrors ?? [] };
+  }
+
+  if (payloads.length === 1 && payloads[0].length === 1 && !(payloads[0][0] as CountPart)._part) {
+    const full = JSON.stringify(payloads[0]);
+    if (full.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
+      const resp = await admin.graphql(
+        `#graphql
+          mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+              userErrors { field message }
+            }
+          }
+        `,
+        { variables: { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full }] } }
+      );
+      const data = (await resp.json())?.data?.metafieldsSet;
+      return { userErrors: data?.userErrors ?? [] };
+    }
+  }
+
+  const chunks = payloads.map((p) => JSON.stringify(p));
+  const descriptor = JSON.stringify({ _chunked: true, totalChunks: chunks.length });
+  const metafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> = [
+    { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: descriptor },
+    ...chunks.map((value, i) => ({
+      ownerId,
+      namespace: NS,
+      key: `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`,
+      type: "json" as const,
+      value,
+    })),
+  ];
+  for (let i = 0; i < metafields.length; i += METAFIELDS_SET_MAX) {
+    const batch = metafields.slice(i, i + METAFIELDS_SET_MAX);
+    const resp = await admin.graphql(
+      `#graphql
+        mutation SetInventoryCountsChunk($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            userErrors { field message }
+          }
+        }
+      `,
+      { variables: { metafields: batch } }
+    );
+    const data = (await resp.json())?.data?.metafieldsSet;
+    if (data?.userErrors?.length) return { userErrors: data.userErrors };
+  }
+  return { userErrors: [] };
 }
 
 export type LocationNode = { id: string; name: string };
@@ -113,8 +404,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // ショップのタイムゾーンを取得
   const shopTimezone = await getShopTimezone(admin);
 
-  // ロケーション・メタフィールド・設定は単発取得。コレクション・商品はページネーションで全件取得
-  const [locResp, appResp, settingsResp] = await Promise.all([
+  // ロケーション・メタフィールド・設定は単発取得。棚卸はチャンク対応で全明細を確実に取得
+  const [locResp, appResp, settingsResp, inventoryCountsRaw] = await Promise.all([
     admin.graphql(
       `#graphql
         query Locations($first: Int!) {
@@ -128,7 +419,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
         query InventoryCountData {
           currentAppInstallation {
             productGroupsMetafield: metafield(namespace: "${NS}", key: "${PRODUCT_GROUPS_KEY}") { value }
-            inventoryCountsMetafield: metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value }
           }
         }
       `
@@ -142,6 +432,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
       `
     ),
+    readInventoryCountsChunked(admin),
   ]);
 
   const locData = await locResp.json();
@@ -164,12 +455,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
-  let inventoryCounts: InventoryCount[] = [];
-  const countsRaw = appData?.data?.currentAppInstallation?.inventoryCountsMetafield?.value;
-  if (typeof countsRaw === "string" && countsRaw) {
+  let inventoryCounts: InventoryCount[] = Array.isArray(inventoryCountsRaw) ? inventoryCountsRaw : [];
+  if (inventoryCounts.length > 0) {
     try {
-      const parsed = JSON.parse(countsRaw);
-      inventoryCounts = Array.isArray(parsed) ? parsed : [];
       
       // ✅ 完了判定を修正：全グループが完了している場合のみ完了ステータスにする
       inventoryCounts = inventoryCounts.map((c) => {
@@ -743,32 +1031,27 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
   }
 
-  // 現在のデータを取得
-  const currentResp = await admin.graphql(
-    `#graphql
-      query GetCurrentData {
-        currentAppInstallation {
-          productGroupsMetafield: metafield(namespace: "${NS}", key: "${PRODUCT_GROUPS_KEY}") { value }
-          inventoryCountsMetafield: metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value }
+  // 現在のデータを取得（棚卸はチャンク対応で全明細を取得）
+  const [currentResp, inventoryCountsFromChunked] = await Promise.all([
+    admin.graphql(
+      `#graphql
+        query GetCurrentData {
+          currentAppInstallation {
+            productGroupsMetafield: metafield(namespace: "${NS}", key: "${PRODUCT_GROUPS_KEY}") { value }
+          }
         }
-      }
-    `
-  );
+      `
+    ),
+    readInventoryCountsChunked(admin),
+  ]);
   const currentJson = await currentResp.json();
   let productGroups: ProductGroup[] = [];
-  let inventoryCounts: InventoryCount[] = [];
+  let inventoryCounts: InventoryCount[] = Array.isArray(inventoryCountsFromChunked) ? inventoryCountsFromChunked : [];
 
   const groupsRaw = currentJson?.data?.currentAppInstallation?.productGroupsMetafield?.value;
   if (typeof groupsRaw === "string" && groupsRaw) {
     try {
       productGroups = JSON.parse(groupsRaw) || [];
-    } catch {}
-  }
-
-  const countsRaw = currentJson?.data?.currentAppInstallation?.inventoryCountsMetafield?.value;
-  if (typeof countsRaw === "string" && countsRaw) {
-    try {
-      inventoryCounts = JSON.parse(countsRaw) || [];
     } catch {}
   }
 
@@ -1329,34 +1612,9 @@ export async function action({ request }: ActionFunctionArgs) {
       }
       inventoryCounts.push(newCount);
 
-      const saveResp = await admin.graphql(
-        `#graphql
-          mutation SaveInventoryCounts($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key type }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId,
-                namespace: NS,
-                key: INVENTORY_COUNTS_KEY,
-                type: "json",
-                value: payload,
-              },
-            ],
-          },
-        }
-      );
-
-      const saveJson = await saveResp.json();
-      const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
-      if (errs.length) {
-        return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") as const };
+      const { userErrors: saveErrs } = await writeInventoryCountsChunked(admin, inventoryCounts, ownerId);
+      if (saveErrs.length) {
+        return { ok: false, error: saveErrs.map((e: { message?: string }) => e.message).join(" / ") as const };
       }
 
       return {

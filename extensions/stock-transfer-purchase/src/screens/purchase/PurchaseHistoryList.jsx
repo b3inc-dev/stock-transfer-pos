@@ -4,6 +4,9 @@
  */
 import { useState, useMemo, useCallback, useEffect, useRef } from "preact/hooks";
 import {
+  readPurchaseEntriesFirstPage,
+  readPurchaseEntriesPage,
+  readPurchaseEntriesFull,
   readPurchaseEntries,
   writePurchaseEntries,
   fetchLocations,
@@ -460,6 +463,8 @@ export function PurchaseHistoryList({
   const [addQtyById, setAddQtyById] = useState({}); // 検索リストでの「追加済み」表示（variantId -> qty）
   const [candStockVersion, setCandStockVersion] = useState(0);
   const candStockCacheRef = useRef({ map: new Map(), fetched: new Set() });
+  const [chunkCount, setChunkCount] = useState(0);
+  const [loadedChunkCount, setLoadedChunkCount] = useState(0);
   const selectedEntry = useMemo(() => {
     if (!selectedEntryId) return null;
     return (Array.isArray(entries) ? entries : []).find((e) => e.id === selectedEntryId) || null;
@@ -467,10 +472,28 @@ export function PurchaseHistoryList({
   const historyDraftLoadedRef = useRef(false);
 
   const isCompleted = (e) => e.status === "received" || e.status === "cancelled";
+  const filteredByLoc = useMemo(
+    () => (Array.isArray(entries) ? entries : []).filter((e) => e.locationId === locationGid),
+    [entries, locationGid],
+  );
   const listToShow = useMemo(() => {
-    const base = Array.isArray(entries) ? entries : [];
-    return viewMode === "received" ? base.filter(isCompleted) : base.filter((e) => !isCompleted(e));
-  }, [entries, viewMode]);
+    return viewMode === "received" ? filteredByLoc.filter(isCompleted) : filteredByLoc.filter((e) => !isCompleted(e));
+  }, [filteredByLoc, viewMode]);
+  const hasMoreHistory = loadedChunkCount < chunkCount;
+  const loadMoreHistory = useCallback(async () => {
+    if (loadedChunkCount >= chunkCount) return;
+    setLoading(true);
+    try {
+      const result = await readPurchaseEntriesPage(loadedChunkCount);
+      const next = Array.isArray(result.entries) ? result.entries : [];
+      setEntries((prev) => [...prev, ...next]);
+      setLoadedChunkCount((prev) => prev + 1);
+    } catch (e) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }, [loadedChunkCount, chunkCount]);
   const baseAll = Array.isArray(entries) ? entries : [];
   const pendingEntriesAll = baseAll.filter((e) => !isCompleted(e));
   const completedEntriesAll = baseAll.filter(isCompleted);
@@ -486,12 +509,13 @@ export function PurchaseHistoryList({
     setLoading(true);
     setError("");
     setEntries([]);
+    setChunkCount(0);
+    setLoadedChunkCount(0);
     try {
-      const list = await readPurchaseEntries();
-      const allEntries = Array.isArray(list) ? list : [];
-      // 現在のロケーションでフィルター
-      const filtered = allEntries.filter((e) => e.locationId === locationGid);
-      setEntries(filtered);
+      const result = await readPurchaseEntriesFirstPage();
+      setEntries(Array.isArray(result.entries) ? result.entries : []);
+      setChunkCount(result.chunkCount ?? 0);
+      setLoadedChunkCount(1);
     } catch (e) {
       setError(String(e?.message ?? e));
       setEntries([]);
@@ -1426,6 +1450,18 @@ export function PurchaseHistoryList({
             <s-text tone="subdued" size="small">{loading ? "読み込み中..." : "表示できる仕入履歴がありません"}</s-text>
           ) : (
             <s-stack gap="base">
+              {hasMoreHistory ? (
+                <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
+                  <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
+                    <s-text tone="subdued" size="small">
+                      未読み込み一覧リストがあります。（過去分）
+                    </s-text>
+                    <s-button kind="secondary" onClick={loadMoreHistory} onPress={loadMoreHistory}>
+                      読込
+                    </s-button>
+                  </s-stack>
+                </s-box>
+              ) : null}
               {listToShow.map((e) => {
                 const head = String(e?.purchaseName || "").trim() || String(e?.id || "").trim() || "仕入ID";
                 const date = formatDate(e?.date || e?.createdAt);

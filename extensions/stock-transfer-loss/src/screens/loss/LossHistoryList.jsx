@@ -1,5 +1,13 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from "preact/hooks";
-import { readLossEntries, writeLossEntries, adjustInventoryAtLocation, fetchLocations, fetchVariantImage } from "./lossApi.js";
+import {
+  readLossEntriesFirstPage,
+  readLossEntriesPage,
+  readLossEntriesFull,
+  writeLossEntries,
+  adjustInventoryAtLocation,
+  fetchLocations,
+  fetchVariantImage,
+} from "./lossApi.js";
 import { getStatusBadgeTone } from "../../lossHelpers.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
@@ -167,17 +175,22 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   const [cancelling, setCancelling] = useState("");
   const [imageUrls, setImageUrls] = useState(new Map()); // ✅ 画像URLキャッシュ
   const locs = Array.isArray(locationsProp) ? locationsProp : [];
+  // ✅ アプリ表示件数（初回読み込み）と履歴の表示件数。出庫・入庫と同様に読込ボタンで増やす
+  const [chunkCount, setChunkCount] = useState(0);
+  const [loadedChunkCount, setLoadedChunkCount] = useState(0);
 
   const refreshLossHistory = useCallback(async () => {
     if (!sessionLocationGid) return;
     setLoading(true);
     setHistoryError("");
     setEntries([]);
-
+    setChunkCount(0);
+    setLoadedChunkCount(0);
     try {
-      const list = await readLossEntries();
-      const allEntries = Array.isArray(list) ? list : [];
-      setEntries(allEntries);
+      const result = await readLossEntriesFirstPage();
+      setEntries(Array.isArray(result.entries) ? result.entries : []);
+      setChunkCount(result.chunkCount ?? 0);
+      setLoadedChunkCount(1);
     } catch (e) {
       setHistoryError(String(e?.message ?? e));
       setEntries([]);
@@ -216,6 +229,22 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     );
   }, [filteredByLoc, historyMode]);
 
+  const hasMoreHistory = loadedChunkCount < chunkCount;
+  const loadMoreHistory = useCallback(async () => {
+    if (loadedChunkCount >= chunkCount) return;
+    setLoading(true);
+    try {
+      const result = await readLossEntriesPage(loadedChunkCount);
+      const next = Array.isArray(result.entries) ? result.entries : [];
+      setEntries((prev) => [...prev, ...next]);
+      setLoadedChunkCount((prev) => prev + 1);
+    } catch (e) {
+      setHistoryError(String(e?.message ?? e));
+    } finally {
+      setLoading(false);
+    }
+  }, [loadedChunkCount, chunkCount]);
+
   const activeCount = useMemo(
     () => filteredByLoc.filter((e) => e.status === "active").length,
     [filteredByLoc]
@@ -245,20 +274,22 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
           inventoryItemId: it.inventoryItemId,
           delta: +(it.quantity || 0),
         }));
-        // キャンセル時もreferenceDocumentUriを設定（ロスエントリIDを使用）
-        await adjustInventoryAtLocation({ 
-          locationId: entry.locationId, 
+        await adjustInventoryAtLocation({
+          locationId: entry.locationId,
           deltas,
           referenceDocumentUri: entry.id
         });
-        const cancelledAt = new Date().toISOString();
-        const updated = entries.map((e) =>
+        const full = await readLossEntriesFull();
+        const updated = full.map((e) =>
           e.id === entry.id
-            ? { ...e, status: "cancelled", cancelledAt }
+            ? { ...e, status: "cancelled", cancelledAt: new Date().toISOString() }
             : e
         );
         await writeLossEntries(updated);
-        setEntries(updated);
+        const result = await readLossEntriesFirstPage();
+        setEntries(Array.isArray(result.entries) ? result.entries : []);
+        setChunkCount(result.chunkCount ?? 0);
+        setLoadedChunkCount(1);
         setDetailId("");
         toast("キャンセルしました（在庫を戻しました）");
       } catch (e) {
@@ -268,7 +299,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
         cancelConfirmEntryRef.current = null;
       }
     },
-    [entries]
+    []
   );
 
 
@@ -363,10 +394,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
               </s-box>
             </s-stack>
 
-            {/* ✅ さらに読み込みボタン（入庫・出庫と同様の形式、ただしmetafieldは全件取得のため常に非表示） */}
-            {/* 注意: ロスはmetafieldから全件取得しているため、実際には追加読み込みは不要 */}
-            {/* pageInfoは常にfalseのため、読込ボタンは表示されない */}
-            {false && (
+            {/* ✅ さらに読み込みボタン（入庫・出庫と同様：設定数以上あるときにヘッダーに表示） */}
+            {hasMoreHistory ? (
               <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
                 <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                   <s-text tone="subdued" size="small">
@@ -374,15 +403,14 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
                   </s-text>
                   <s-button
                     kind="secondary"
-                    onClick={() => {}}
-                    onPress={() => {}}
-                    disabled={true}
+                    onClick={() => loadMoreHistory()}
+                    onPress={() => loadMoreHistory()}
                   >
                     読込
                   </s-button>
                 </s-stack>
               </s-box>
-            )}
+            ) : null}
           </s-stack>
         </s-box>
       );
@@ -395,6 +423,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     activeCount,
     cancelledCount,
     listToShow,
+    hasMoreHistory,
+    loadMoreHistory,
     sessionLocationGid,
     getLocationName,
     liteMode,
