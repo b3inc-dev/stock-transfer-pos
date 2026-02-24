@@ -13,6 +13,13 @@ import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 
+/** 一覧用：items を落として軽くする（入庫・出庫と同様にタップ後に詳細を扱うため） */
+function stripEntryForList(entry) {
+  if (!entry) return entry;
+  const { items, ...rest } = entry;
+  return { ...rest, items: [] };
+}
+
 // =========================
 // ヘルパー関数（LossProductListから移植）
 // =========================
@@ -185,6 +192,9 @@ export function OrderHistoryList({
   const locs = Array.isArray(locationsProp) ? locationsProp : [];
   const [chunkCount, setChunkCount] = useState(0);
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
+  /** タップ後に詳細表示する用（一覧は軽くし、詳細はここから取得・入庫・出庫と同様の操作感） */
+  const [detailEntry, setDetailEntry] = useState(null);
+  const fullEntriesByIdRef = useRef(new Map());
 
   const refreshOrderHistory = useCallback(async () => {
     if (!sessionLocationGid) return;
@@ -193,9 +203,13 @@ export function OrderHistoryList({
     setEntries([]);
     setChunkCount(0);
     setLoadedChunkCount(0);
+    setDetailEntry(null);
+    fullEntriesByIdRef.current = new Map();
     try {
       const result = await readOrderEntriesFirstPage();
-      setEntries(Array.isArray(result.entries) ? result.entries : []);
+      const raw = Array.isArray(result.entries) ? result.entries : [];
+      raw.forEach((e) => fullEntriesByIdRef.current.set(e.id, e));
+      setEntries(raw.map(stripEntryForList));
       setChunkCount(result.chunkCount ?? 0);
       setLoadedChunkCount(1);
     } catch (e) {
@@ -224,19 +238,34 @@ export function OrderHistoryList({
     return () => { mounted = false; };
   }, [locs.length, setLocations]);
 
-  // 現在のロケーションでフィルター（セッションのロケーションのみ表示）
+  // ロケーションIDをGID形式に正規化（管理画面が数値で保存している場合も一致させる）
+  const normalizeLocationGidForCompare = useCallback((s) => {
+    if (s == null || s === "") return "";
+    const str = String(s).trim();
+    if (str.startsWith("gid://shopify/Location/")) return str;
+    const num = str.replace(/^gid:\/\/shopify\/Location\//, "").trim();
+    if (/^\d+$/.test(num)) return `gid://shopify/Location/${num}`;
+    return str;
+  }, []);
+
+  // 現在のロケーションでフィルター（セッションのロケーションのみ表示。GID/数値両対応）
   const filteredByLoc = useMemo(() => {
     if (!sessionLocationGid) return [];
-    return entries.filter((e) => e.locationId === sessionLocationGid);
-  }, [entries, sessionLocationGid]);
+    const sessionNorm = normalizeLocationGidForCompare(sessionLocationGid);
+    if (!sessionNorm) return [];
+    return entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm);
+  }, [entries, sessionLocationGid, normalizeLocationGidForCompare]);
 
+  // 表示順: 新しい順（日付降順）。設定の表示件数はチャンク保存時に反映される
   const listToShow = useMemo(() => {
+    let list;
     if (historyMode === "pending") {
-      // 未処理のみ
-      return filteredByLoc.filter((e) => e.status === "pending");
+      list = filteredByLoc.filter((e) => e.status === "pending");
+    } else {
+      list = filteredByLoc.filter((e) => e.status !== "pending");
     }
-    // "processed" の場合は、未処理以外（発注済み＋キャンセル）を表示
-    return filteredByLoc.filter((e) => e.status !== "pending");
+    const dateKey = (e) => e.date || e.createdAt || "";
+    return [...list].sort((a, b) => (dateKey(b) > dateKey(a) ? 1 : dateKey(b) < dateKey(a) ? -1 : 0));
   }, [filteredByLoc, historyMode]);
 
   const hasMoreHistory = loadedChunkCount < chunkCount;
@@ -246,7 +275,8 @@ export function OrderHistoryList({
     try {
       const result = await readOrderEntriesPage(loadedChunkCount);
       const next = Array.isArray(result.entries) ? result.entries : [];
-      setEntries((prev) => [...prev, ...next]);
+      next.forEach((e) => fullEntriesByIdRef.current.set(e.id, e));
+      setEntries((prev) => [...prev, ...next.map(stripEntryForList)]);
       setLoadedChunkCount((prev) => prev + 1);
     } catch (e) {
       setHistoryError(String(e?.message ?? e));
@@ -287,10 +317,13 @@ export function OrderHistoryList({
         );
         await writeOrderEntries(updated);
         const result = await readOrderEntriesFirstPage();
-        setEntries(Array.isArray(result.entries) ? result.entries : []);
+        const raw = Array.isArray(result.entries) ? result.entries : [];
+        fullEntriesByIdRef.current = new Map(raw.map((e) => [e.id, e]));
+        setEntries(raw.map(stripEntryForList));
         setChunkCount(result.chunkCount ?? 0);
         setLoadedChunkCount(1);
         setDetailId("");
+        setDetailEntry(null);
         toast("発注をキャンセルしました（在庫は変わりません）");
       } catch (e) {
         toast(`キャンセルエラー: ${e?.message ?? e}`);
@@ -304,12 +337,15 @@ export function OrderHistoryList({
 
 
   const onTapHistoryEntry = useCallback((entry) => {
-    setDetailId(entry.id);
+    const id = entry?.id;
+    if (!id) return;
+    setDetailId(id);
+    setDetailEntry(fullEntriesByIdRef.current.get(id) ?? null);
   }, []);
 
   useEffect(() => {
     if (detailId) {
-      const entry = entries.find((e) => e.id === detailId);
+      const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
       if (!entry) {
         setHeader?.(null);
         return;
@@ -317,7 +353,8 @@ export function OrderHistoryList({
       
       // ✅ 出庫履歴詳細と同じヘッダーを追加
       const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
-      const currentFilteredByLoc = sessionLocationGid ? entries.filter((e) => e.locationId === sessionLocationGid) : [];
+      const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
+      const currentFilteredByLoc = sessionNorm ? entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm) : [];
       const orderName = formatOrderDisplayName(entry);
       const locName = entry.locationName || getLocationName(entry.locationId);
       const date = formatDate(entry.date || entry.createdAt);
@@ -422,6 +459,7 @@ export function OrderHistoryList({
     return () => setHeader?.(null);
   }, [
     detailId,
+    detailEntry,
     entries,
     historyMode,
     pendingCount,
@@ -430,14 +468,19 @@ export function OrderHistoryList({
     hasMoreHistory,
     loadMoreHistory,
     sessionLocationGid,
+    normalizeLocationGidForCompare,
     getLocationName,
     liteMode,
     onToggleLiteMode,
   ]);
 
   useEffect(() => {
+    if (!detailId) setDetailEntry(null);
+  }, [detailId]);
+
+  useEffect(() => {
     if (detailId) {
-      const entry = entries.find((e) => e.id === detailId);
+      const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
       if (!entry) {
         setDetailId("");
         return;
@@ -491,6 +534,7 @@ export function OrderHistoryList({
     return () => setFooter?.(null);
   }, [
     detailId,
+    detailEntry,
     entries,
     historyMode,
     listToShow.length,
@@ -507,10 +551,13 @@ export function OrderHistoryList({
   ]); // setFooter, filteredByLocを依存配列から除外（無限ループ防止）
 
   if (detailId) {
-    const e = entries.find((x) => x.id === detailId);
+    const e = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((x) => x.id === detailId);
     if (!e) {
-      setDetailId("");
-      return null;
+      return (
+        <s-box padding="base">
+          <s-text tone="subdued">読込中...</s-text>
+        </s-box>
+      );
     }
     const itemCount = e.items?.length ?? 0;
     const totalQty = (e.items ?? []).reduce((s, it) => s + (it.quantity || 0), 0);

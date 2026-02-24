@@ -19,6 +19,12 @@ import { getStatusBadgeTone } from "../../lossHelpers.js";
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
 import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
 
+function stripEntryForList(entry) {
+  if (!entry) return entry;
+  const { items, ...rest } = entry;
+  return { ...rest, items: [] };
+}
+
 // ヘルパー関数（入庫商品リストUIを参考）
 function normalizeVariantTitleForDisplay_(productTitle, variantTitle) {
   const p = String(productTitle || "").trim();
@@ -465,19 +471,34 @@ export function PurchaseHistoryList({
   const candStockCacheRef = useRef({ map: new Map(), fetched: new Set() });
   const [chunkCount, setChunkCount] = useState(0);
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
+  const fullEntriesByIdRef = useRef(new Map());
   const selectedEntry = useMemo(() => {
     if (!selectedEntryId) return null;
-    return (Array.isArray(entries) ? entries : []).find((e) => e.id === selectedEntryId) || null;
+    return fullEntriesByIdRef.current.get(selectedEntryId) ?? ((Array.isArray(entries) ? entries : []).find((e) => e.id === selectedEntryId) || null);
   }, [selectedEntryId, entries]);
   const historyDraftLoadedRef = useRef(false);
 
   const isCompleted = (e) => e.status === "received" || e.status === "cancelled";
-  const filteredByLoc = useMemo(
-    () => (Array.isArray(entries) ? entries : []).filter((e) => e.locationId === locationGid),
-    [entries, locationGid],
-  );
+  // ロケーションIDをGID形式に正規化（管理画面が数値で保存している場合も一致させる）
+  const normalizeLocationGidForCompare = useCallback((s) => {
+    if (s == null || s === "") return "";
+    const str = String(s).trim();
+    if (str.startsWith("gid://shopify/Location/")) return str;
+    const num = str.replace(/^gid:\/\/shopify\/Location\//, "").trim();
+    if (/^\d+$/.test(num)) return `gid://shopify/Location/${num}`;
+    return str;
+  }, []);
+  const filteredByLoc = useMemo(() => {
+    if (!locationGid) return [];
+    const sessionNorm = normalizeLocationGidForCompare(locationGid);
+    if (!sessionNorm) return [];
+    return (Array.isArray(entries) ? entries : []).filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm);
+  }, [entries, locationGid, normalizeLocationGidForCompare]);
+  // 表示順: 新しい順（日付降順）
   const listToShow = useMemo(() => {
-    return viewMode === "received" ? filteredByLoc.filter(isCompleted) : filteredByLoc.filter((e) => !isCompleted(e));
+    const list = viewMode === "received" ? filteredByLoc.filter(isCompleted) : filteredByLoc.filter((e) => !isCompleted(e));
+    const dateKey = (e) => e.date || e.receivedAt || e.createdAt || "";
+    return [...list].sort((a, b) => (dateKey(b) > dateKey(a) ? 1 : dateKey(b) < dateKey(a) ? -1 : 0));
   }, [filteredByLoc, viewMode]);
   const hasMoreHistory = loadedChunkCount < chunkCount;
   const loadMoreHistory = useCallback(async () => {
@@ -486,7 +507,8 @@ export function PurchaseHistoryList({
     try {
       const result = await readPurchaseEntriesPage(loadedChunkCount);
       const next = Array.isArray(result.entries) ? result.entries : [];
-      setEntries((prev) => [...prev, ...next]);
+      next.forEach((e) => fullEntriesByIdRef.current.set(e.id, e));
+      setEntries((prev) => [...prev, ...next.map(stripEntryForList)]);
       setLoadedChunkCount((prev) => prev + 1);
     } catch (e) {
       setError(String(e?.message ?? e));
@@ -511,9 +533,12 @@ export function PurchaseHistoryList({
     setEntries([]);
     setChunkCount(0);
     setLoadedChunkCount(0);
+    fullEntriesByIdRef.current = new Map();
     try {
       const result = await readPurchaseEntriesFirstPage();
-      setEntries(Array.isArray(result.entries) ? result.entries : []);
+      const raw = Array.isArray(result.entries) ? result.entries : [];
+      raw.forEach((e) => fullEntriesByIdRef.current.set(e.id, e));
+      setEntries(raw.map(stripEntryForList));
       setChunkCount(result.chunkCount ?? 0);
       setLoadedChunkCount(1);
     } catch (e) {
@@ -961,8 +986,9 @@ export function PurchaseHistoryList({
       }
 
       toast("入庫を確定しました");
-      // ローカル表示も更新
-      setEntries((prev) => prev.map((e) => (String(e.id) === String(entry.id) ? nextEntry : e)));
+      // ローカル表示も更新（一覧は軽く、refにフルを保持）
+      fullEntriesByIdRef.current.set(entry.id, nextEntry);
+      setEntries((prev) => prev.map((e) => (String(e.id) === String(entry.id) ? stripEntryForList(nextEntry) : e)));
       setSelectedEntryId("");
     } catch (e) {
       toast(`確定エラー: ${String(e?.message ?? e)}`);
@@ -1273,12 +1299,15 @@ export function PurchaseHistoryList({
     return () => setFooter?.(null);
   }, [setFooter, selectedEntryId, entries, displayLocationName, viewMode, listToShow.length, liteMode, onToggleLiteMode, refresh, loading, locationGid, submitting, handleConfirmSelected]);
 
-  // 商品リスト表示（入庫商品リストUIを参考）
+  // 商品リスト表示（入庫・出庫と同様にタップ後に詳細＝refから取得）
   if (selectedEntryId) {
-    const entry = entries.find((e) => e.id === selectedEntryId);
+    const entry = selectedEntry;
     if (!entry) {
-      setSelectedEntryId("");
-      return null;
+      return (
+        <s-box padding="base">
+          <s-text tone="subdued">読込中...</s-text>
+        </s-box>
+      );
     }
 
     const showImages = !liteMode;

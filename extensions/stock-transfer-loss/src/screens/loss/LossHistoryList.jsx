@@ -14,6 +14,12 @@ import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 
+function stripEntryForList(entry) {
+  if (!entry) return entry;
+  const { items, ...rest } = entry;
+  return { ...rest, items: [] };
+}
+
 // =========================
 // ヘルパー関数（LossProductListから移植）
 // =========================
@@ -178,6 +184,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   // ✅ アプリ表示件数（初回読み込み）と履歴の表示件数。出庫・入庫と同様に読込ボタンで増やす
   const [chunkCount, setChunkCount] = useState(0);
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
+  const [detailEntry, setDetailEntry] = useState(null);
+  const fullEntriesByIdRef = useRef(new Map());
 
   const refreshLossHistory = useCallback(async () => {
     if (!sessionLocationGid) return;
@@ -186,9 +194,13 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     setEntries([]);
     setChunkCount(0);
     setLoadedChunkCount(0);
+    setDetailEntry(null);
+    fullEntriesByIdRef.current = new Map();
     try {
       const result = await readLossEntriesFirstPage();
-      setEntries(Array.isArray(result.entries) ? result.entries : []);
+      const raw = Array.isArray(result.entries) ? result.entries : [];
+      raw.forEach((e) => fullEntriesByIdRef.current.set(e.id, e));
+      setEntries(raw.map(stripEntryForList));
       setChunkCount(result.chunkCount ?? 0);
       setLoadedChunkCount(1);
     } catch (e) {
@@ -217,16 +229,31 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     return () => { mounted = false; };
   }, [locs.length, setLocations]);
 
-  // 現在のロケーションでフィルター（セッションのロケーションのみ表示）
+  // ロケーションIDをGID形式に正規化（管理画面が数値で保存している場合も一致させる）
+  const normalizeLocationGidForCompare = useCallback((s) => {
+    if (s == null || s === "") return "";
+    const str = String(s).trim();
+    if (str.startsWith("gid://shopify/Location/")) return str;
+    const num = str.replace(/^gid:\/\/shopify\/Location\//, "").trim();
+    if (/^\d+$/.test(num)) return `gid://shopify/Location/${num}`;
+    return str;
+  }, []);
+
+  // 現在のロケーションでフィルター（セッションのロケーションのみ表示。GID/数値両対応）
   const filteredByLoc = useMemo(() => {
     if (!sessionLocationGid) return [];
-    return entries.filter((e) => e.locationId === sessionLocationGid);
-  }, [entries, sessionLocationGid]);
+    const sessionNorm = normalizeLocationGidForCompare(sessionLocationGid);
+    if (!sessionNorm) return [];
+    return entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm);
+  }, [entries, sessionLocationGid, normalizeLocationGidForCompare]);
 
+  // 表示順: 新しい順（日付降順）
   const listToShow = useMemo(() => {
-    return filteredByLoc.filter((e) =>
+    const list = filteredByLoc.filter((e) =>
       historyMode === "cancelled" ? e.status === "cancelled" : e.status === "active"
     );
+    const dateKey = (e) => e.date || e.createdAt || "";
+    return [...list].sort((a, b) => (dateKey(b) > dateKey(a) ? 1 : dateKey(b) < dateKey(a) ? -1 : 0));
   }, [filteredByLoc, historyMode]);
 
   const hasMoreHistory = loadedChunkCount < chunkCount;
@@ -236,7 +263,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     try {
       const result = await readLossEntriesPage(loadedChunkCount);
       const next = Array.isArray(result.entries) ? result.entries : [];
-      setEntries((prev) => [...prev, ...next]);
+      next.forEach((e) => fullEntriesByIdRef.current.set(e.id, e));
+      setEntries((prev) => [...prev, ...next.map(stripEntryForList)]);
       setLoadedChunkCount((prev) => prev + 1);
     } catch (e) {
       setHistoryError(String(e?.message ?? e));
@@ -287,10 +315,13 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
         );
         await writeLossEntries(updated);
         const result = await readLossEntriesFirstPage();
-        setEntries(Array.isArray(result.entries) ? result.entries : []);
+        const raw = Array.isArray(result.entries) ? result.entries : [];
+        fullEntriesByIdRef.current = new Map(raw.map((e) => [e.id, e]));
+        setEntries(raw.map(stripEntryForList));
         setChunkCount(result.chunkCount ?? 0);
         setLoadedChunkCount(1);
         setDetailId("");
+        setDetailEntry(null);
         toast("キャンセルしました（在庫を戻しました）");
       } catch (e) {
         toast(`キャンセルエラー: ${e?.message ?? e}`);
@@ -304,12 +335,19 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
 
 
   const onTapHistoryEntry = useCallback((entry) => {
-    setDetailId(entry.id);
+    const id = entry?.id;
+    if (!id) return;
+    setDetailId(id);
+    setDetailEntry(fullEntriesByIdRef.current.get(id) ?? null);
   }, []);
 
   useEffect(() => {
+    if (!detailId) setDetailEntry(null);
+  }, [detailId]);
+
+  useEffect(() => {
     if (detailId) {
-      const entry = entries.find((e) => e.id === detailId);
+      const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
       if (!entry) {
         setHeader?.(null);
         return;
@@ -317,7 +355,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
       
       // ✅ 出庫履歴詳細と同じヘッダーを追加
       const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
-      const currentFilteredByLoc = sessionLocationGid ? entries.filter((e) => e.locationId === sessionLocationGid) : [];
+      const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
+      const currentFilteredByLoc = sessionNorm ? entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm) : [];
       const lossName = formatLossName(entry, currentFilteredByLoc, entryIndex >= 0 ? entryIndex : 0);
       const locName = entry.locationName || getLocationName(entry.locationId);
       const date = formatDate(entry.date || entry.createdAt);
@@ -418,6 +457,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     return () => setHeader?.(null);
   }, [
     detailId,
+    detailEntry,
     entries,
     historyMode,
     activeCount,
@@ -433,7 +473,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
 
   useEffect(() => {
     if (detailId) {
-      const entry = entries.find((e) => e.id === detailId);
+      const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
       if (!entry) {
         setDetailId("");
         return;
@@ -441,7 +481,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
       const locName = entry.locationName || getLocationName(entry.locationId);
       const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
       // filteredByLocはentriesから動的に計算する（依存配列から除外）
-      const currentFilteredByLoc = sessionLocationGid ? entries.filter((e) => e.locationId === sessionLocationGid) : [];
+      const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
+      const currentFilteredByLoc = sessionNorm ? entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm) : [];
       const lossName = formatLossName(entry, currentFilteredByLoc, entryIndex >= 0 ? entryIndex : 0);
       const CANCEL_CONFIRM_MODAL_ID = `cancel-confirm-${entry.id}`;
       // 履歴商品リスト：左＝ステータス（バッジ）、右＝合計（商品リストの数量合計）
@@ -491,6 +532,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     return () => setFooter?.(null);
   }, [
     detailId,
+    detailEntry,
     entries,
     historyMode,
     listToShow.length,
@@ -507,16 +549,20 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   ]); // setFooter, filteredByLocを依存配列から除外（無限ループ防止）
 
   if (detailId) {
-    const e = entries.find((x) => x.id === detailId);
+    const e = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((x) => x.id === detailId);
     if (!e) {
-      setDetailId("");
-      return null;
+      return (
+        <s-box padding="base">
+          <s-text tone="subdued">読込中...</s-text>
+        </s-box>
+      );
     }
     const itemCount = e.items?.length ?? 0;
     const totalQty = (e.items ?? []).reduce((s, it) => s + (it.quantity || 0), 0);
     const entryIndex = listToShow.findIndex((entry) => entry.id === e.id);
     // filteredByLocはentriesから動的に計算する（依存配列から除外）
-    const currentFilteredByLoc = sessionLocationGid ? entries.filter((e) => e.locationId === sessionLocationGid) : [];
+    const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
+    const currentFilteredByLoc = sessionNorm ? entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm) : [];
     const lossName = formatLossName(e, currentFilteredByLoc, entryIndex >= 0 ? entryIndex : 0);
     
     // ✅ 出庫履歴詳細と同じデザインで商品リストを表示（画像表示ON/OFFはロス内で連動）
@@ -705,7 +751,8 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
           <s-stack gap="base">
             {listToShow.map((e, index) => {
               // filteredByLocはentriesから動的に計算する（依存配列から除外）
-              const currentFilteredByLoc = sessionLocationGid ? entries.filter((e) => e.locationId === sessionLocationGid) : [];
+              const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
+              const currentFilteredByLoc = sessionNorm ? entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm) : [];
               const lossName = formatLossName(e, currentFilteredByLoc, index);
               const date = formatDate(e.date || e.createdAt);
               const location = e.locationName || getLocationName(e.locationId);

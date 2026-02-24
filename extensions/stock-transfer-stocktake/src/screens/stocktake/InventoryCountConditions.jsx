@@ -141,7 +141,7 @@ export function InventoryCountConditions({
       let filtered = raw;
       if (locationGid) {
         filtered = filterByLocation(raw, locationGid);
-        if (filtered.length === 0 && raw.length > 0) filtered = raw;
+        // ログイン中ロケーション以外は表示しない
       }
       setCounts((prev) => {
         const next = [...prev, ...filtered];
@@ -258,7 +258,7 @@ export function InventoryCountConditions({
       let filtered = Array.isArray(result.counts) ? result.counts : [];
       if (locationGid) {
         filtered = filterByLocation(filtered, locationGid);
-        if (filtered.length === 0 && result.counts?.length > 0) filtered = result.counts;
+        // ログイン中ロケーション以外は表示しない（0件のときも全件フォールバックしない）
       }
       const sorted = [...filtered].sort((a, b) => {
         const t1 = new Date(a.createdAt || 0).getTime();
