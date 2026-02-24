@@ -9,6 +9,7 @@ import {
   toLocationGid,
   toLocationNumericId,
   fetchLocations,
+  getGroupItemsByKey,
 } from "./stocktakeApi.js";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
@@ -160,7 +161,7 @@ export function InventoryCountConditions({
         const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
 
         for (const groupId of allGroupIds) {
-          const groupItems = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+          const groupItems = getGroupItemsByKey(groupItemsMap, groupId);
           if (groupItems.length === 0) {
             tasks.push({ countId: count.id, groupId, locationId: count.locationId, inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null });
           }
@@ -484,7 +485,7 @@ export function InventoryCountConditions({
                                   const itemsFromItems = Array.isArray(c.items) && c.items.length > 0 ? c.items : null;
                                   const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
                                   const itemsFromGroup = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-                                    ? c.productGroupIds.flatMap((id) => Array.isArray(groupItemsMap[id]) ? groupItemsMap[id] : [])
+                                    ? c.productGroupIds.flatMap((id) => getGroupItemsByKey(groupItemsMap, id))
                                     : [];
                                   const allGroupItems = itemsFromItems || itemsFromGroup;
                                   // ✅ items/groupItemsが空でも、inventoryItemIdsByGroup（管理画面で保存）からSKU数を算出
@@ -501,7 +502,7 @@ export function InventoryCountConditions({
                                     const countQuantities = incompleteGroupQuantities.get(c.id);
                                     if (countQuantities) {
                                       for (const groupId of c.productGroupIds) {
-                                        const groupItems = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+                                        const groupItems = getGroupItemsByKey(groupItemsMap, groupId);
                                         if (groupItems.length === 0) {
                                           currentQty += countQuantities.get(groupId) || 0;
                                         }
@@ -556,7 +557,7 @@ export function InventoryCountConditions({
                                 const itemsFromItems = Array.isArray(c.items) && c.items.length > 0 ? c.items : null;
                                 const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
                                 const itemsFromGroup = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-                                  ? c.productGroupIds.flatMap((id) => Array.isArray(groupItemsMap[id]) ? groupItemsMap[id] : [])
+                                  ? c.productGroupIds.flatMap((id) => getGroupItemsByKey(groupItemsMap, id))
                                   : [];
                                 const allGroupItems = itemsFromItems || itemsFromGroup;
                                 let skuCount = allGroupItems.length;
@@ -572,7 +573,7 @@ export function InventoryCountConditions({
                                   const countQuantities = incompleteGroupQuantities.get(c.id);
                                   if (countQuantities) {
                                     for (const groupId of c.productGroupIds) {
-                                      const groupItems = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+                                      const groupItems = getGroupItemsByKey(groupItemsMap, groupId);
                                       if (groupItems.length === 0) {
                                         currentQty += countQuantities.get(groupId) || 0;
                                       }

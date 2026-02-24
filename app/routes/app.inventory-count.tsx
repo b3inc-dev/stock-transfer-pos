@@ -25,6 +25,23 @@ const STOCKTAKE_CSV_LABELS: Record<string, string> = {
 };
 const DEFAULT_STOCKTAKE_CSV_COLUMNS = [...STOCKTAKE_CSV_COLUMN_IDS];
 
+// POS と同一の正規化：groupItems キー照合で管理画面とタイルの表示を一致させる
+function normalizeIdForMatch(id: string | number | undefined | null): string {
+  const s = String(id ?? "").trim();
+  const lastSegment = s.split("/").pop() || s;
+  return lastSegment;
+}
+function getGroupItemsByKey(
+  groupItemsMap: Record<string, unknown[]> | undefined,
+  groupId: string
+): unknown[] {
+  if (!groupId || !groupItemsMap || typeof groupItemsMap !== "object") return [];
+  if (Array.isArray(groupItemsMap[groupId])) return groupItemsMap[groupId];
+  const n = normalizeIdForMatch(groupId);
+  const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === n);
+  return key && Array.isArray(groupItemsMap[key]) ? groupItemsMap[key] : [];
+}
+
 export type LocationNode = { id: string; name: string };
 export type CollectionNode = { 
   id: string; 
@@ -166,17 +183,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
         
         const groupItemsMap = (c as any)?.groupItems && typeof (c as any).groupItems === "object" ? (c as any).groupItems : {};
-        // ✅ 全グループが完了しているか判定：groupItems[id]が存在し、かつ配列の長さが0より大きい
+        // ✅ 全グループが完了しているか判定：groupItems[groupId]が存在し、かつ配列の長さが0より大きい（POS と同一の正規化キーで照合）
         // ✅ 棚卸ID発行後にグループを削除した場合：そのグループは「完了」とみなしてブロックしない（allDone で true を返す）
         const countItemsLegacy = Array.isArray(c.items) && c.items.length > 0 ? c.items : [];
         const allDone = allIds.every((id) => {
           const productGroup = productGroups.find((g) => String(g.id) === String(id));
           if (!productGroup) return true; // 削除済みグループは完了とみなす
-          let groupItems = Array.isArray(groupItemsMap[id]) ? groupItemsMap[id] : [];
-          if (groupItems.length === 0 && Object.keys(groupItemsMap).length > 0) {
-            const matchingKey = Object.keys(groupItemsMap).find((k) => k === String(id) || k === id || String(k) === String(id));
-            if (matchingKey) groupItems = Array.isArray(groupItemsMap[matchingKey]) ? groupItemsMap[matchingKey] : [];
-          }
+          let groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(id));
           // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
           if (groupItems.length === 0 && countItemsLegacy.length > 0) {
             const groupInventoryItemIds = productGroup?.inventoryItemIds || [];
@@ -2047,23 +2060,9 @@ export default function InventoryCountPage() {
     const groupItemsMap = (modalCount as any)?.groupItems && typeof (modalCount as any).groupItems === "object" ? (modalCount as any).groupItems : {};
 
     // 未完了グループの商品リストを取得（各グループごとに順次実行）
-    // ✅ 完了判定と同じロジックを使用（キーの型を考慮）
+    // ✅ 完了判定と同じロジック：getGroupItemsByKey で POS と同一の正規化キー照合
     const incompleteGroupIds = allGroupIds.filter((groupId) => {
-      // ✅ 完了判定と同じロジック：キーの型を考慮してgroupItemsを取得
-      let groupItems = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
-      // ✅ キーが一致しない場合、文字列変換を試す
-      if (groupItems.length === 0) {
-        groupItems = Array.isArray(groupItemsMap[String(groupId)]) ? groupItemsMap[String(groupId)] : [];
-      }
-      // ✅ さらに、groupItemsMapの全てのキーを確認
-      if (groupItems.length === 0 && Object.keys(groupItemsMap).length > 0) {
-        const matchingKey = Object.keys(groupItemsMap).find((key) => {
-          return key === String(groupId) || key === groupId || String(key) === String(groupId);
-        });
-        if (matchingKey) {
-          groupItems = Array.isArray(groupItemsMap[matchingKey]) ? groupItemsMap[matchingKey] : [];
-        }
-      }
+      const groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
       return groupItems.length === 0;
     });
 
@@ -2310,9 +2309,9 @@ export default function InventoryCountPage() {
         : c.productGroupId ? [c.productGroupId] : [];
       const groupItemsMap = (c as any)?.groupItems && typeof (c as any).groupItems === "object" ? (c as any).groupItems : {};
       
-      // 未完了グループIDを取得
+      // 未完了グループIDを取得（getGroupItemsByKey で POS と同一の正規化キー照合）
       const incompleteGroupIds = allGroupIds.filter((groupId) => {
-        const groupItems = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+        const groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
         return groupItems.length === 0;
       });
       
@@ -4314,13 +4313,13 @@ export default function InventoryCountPage() {
                       ? c.productGroupIds
                       : c.productGroupId ? [c.productGroupId] : [];
                     
-                    // ✅ 完了済みグループの商品を取得
-                    const itemsFromGroup = allGroupIds.flatMap((id) => Array.isArray(groupItemsMap[id]) ? groupItemsMap[id] : []);
+                    // ✅ 完了済みグループの商品を取得（getGroupItemsByKey で POS と同一の正規化キー照合）
+                    const itemsFromGroup = allGroupIds.flatMap((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(id)));
                     
                     // ✅ 未完了グループの商品リストを取得（一覧表示用）
                     const incompleteGroupProductsForThisCount = incompleteGroupProductsForList.get(c.id) || new Map();
                     const itemsFromIncompleteGroups = allGroupIds.flatMap((groupId) => {
-                      const groupItems = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+                      const groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                       // 未完了グループの場合、incompleteGroupProductsForListから取得（キー正規化で照合漏れ防止）
                       if (groupItems.length === 0) {
                         const arr = incompleteGroupProductsForThisCount.get(String(groupId)) ?? incompleteGroupProductsForThisCount.get(groupId as string);
@@ -4586,8 +4585,7 @@ export default function InventoryCountPage() {
                         // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
                         const countItemsLegacy = Array.isArray(modalCount.items) ? modalCount.items : [];
                         const progressInfo = allGroupIds.map((groupId) => {
-                          let groupItems = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
-                          // ✅ 問題2の修正: アプリ側と同じロジックに統一（複数グループでもitemsからフィルタリングを試みる）
+                          let groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                           // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
                           if (groupItems.length === 0 && countItemsLegacy.length > 0) {
                             // ✅ 商品グループのinventoryItemIdsを取得（保存されている場合）
@@ -4623,8 +4621,8 @@ export default function InventoryCountPage() {
                           return { groupId, groupName, isCompleted, totalQty: groupTotalQty, actualQty: groupActualQty };
                         });
                         const extraCount = allGroupIds.reduce((sum, id) => {
-                          const arr = Array.isArray(groupItemsMap[id]) ? groupItemsMap[id] : (Array.isArray(groupItemsMap[String(id)]) ? groupItemsMap[String(id)] : []);
-                          return sum + (arr || []).filter((it: any) => it?.isExtra).length;
+                          const arr = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(id));
+                          return sum + arr.filter((it: any) => it?.isExtra).length;
                         }, 0);
                         
                         return (
@@ -4673,22 +4671,8 @@ export default function InventoryCountPage() {
                   if (hasMultipleGroups) {
                     // ✅ 複数グループの場合：CSV出力と同じロジック
                     for (const groupId of allGroupIds) {
-                      // ✅ groupItemsMapからデータを取得（キーの型を考慮）
-                      let groupItems = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
-                      // ✅ キーが一致しない場合、文字列変換を試す
-                      if (groupItems.length === 0) {
-                        groupItems = Array.isArray(groupItemsMap[String(groupId)]) ? groupItemsMap[String(groupId)] : [];
-                      }
-                      // ✅ さらに、groupItemsMapの全てのキーを確認（デバッグ用）
-                      if (groupItems.length === 0 && Object.keys(groupItemsMap).length > 0) {
-                        // groupItemsMapのキーとallGroupIdsの値を比較
-                        const matchingKey = Object.keys(groupItemsMap).find((key) => {
-                          return key === String(groupId) || key === groupId || String(key) === String(groupId);
-                        });
-                        if (matchingKey) {
-                          groupItems = Array.isArray(groupItemsMap[matchingKey]) ? groupItemsMap[matchingKey] : [];
-                        }
-                      }
+                      // ✅ groupItemsMapからデータを取得（getGroupItemsByKey で POS と同一の正規化キー照合）
+                      let groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                       // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
                       if (groupItems.length === 0 && countItemsLegacy.length > 0) {
                         // ✅ 商品グループのinventoryItemIdsを取得（保存されている場合）
@@ -4720,9 +4704,9 @@ export default function InventoryCountPage() {
                       }
                     }
                   } else {
-                    // ✅ 単一グループの場合：後方互換性の処理
+                    // ✅ 単一グループの場合：後方互換性の処理（getGroupItemsByKey で POS と同一の正規化キー照合）
                     const groupId = allGroupIds[0];
-                    let groupItems = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+                    let groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                     if (groupItems.length === 0) {
                       const countItemsLegacy = Array.isArray(modalCount.items) ? modalCount.items : [];
                       if (countItemsLegacy.length > 0) {
@@ -4785,19 +4769,8 @@ export default function InventoryCountPage() {
                               // ✅ itemsByGroupから既に取得したデータを使用（完了済み・未完了の両方を含む）
                               const groupItems = itemsByGroup.get(groupId) || [];
                               
-                              // ✅ 完了判定：groupItemsMapにデータがあるかどうかで判定（キーの型を考慮）
-                              let groupItemsFromMap = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
-                              if (groupItemsFromMap.length === 0) {
-                                groupItemsFromMap = Array.isArray(groupItemsMap[String(groupId)]) ? groupItemsMap[String(groupId)] : [];
-                              }
-                              if (groupItemsFromMap.length === 0 && Object.keys(groupItemsMap).length > 0) {
-                                const matchingKey = Object.keys(groupItemsMap).find((key) => {
-                                  return key === String(groupId) || key === groupId || String(key) === String(groupId);
-                                });
-                                if (matchingKey) {
-                                  groupItemsFromMap = Array.isArray(groupItemsMap[matchingKey]) ? groupItemsMap[matchingKey] : [];
-                                }
-                              }
+                              // ✅ 完了判定：getGroupItemsByKey で POS と同一の正規化キー照合
+                              const groupItemsFromMap = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                               // ✅ 完了判定：
                               // 1. groupItemsFromMapにデータがある場合（groupItemsが保存されている場合）→ 必ず完了済み（incompleteProductsForGroupの値は無視）
                               // 2. または、itemsByGroupの構築時に完了済みとして設定された場合（completedGroupsMapで追跡）
@@ -5137,21 +5110,8 @@ export default function InventoryCountPage() {
                       if (hasMultipleGroups) {
                         // ✅ 複数グループの場合：モーダル表示と同じロジック
                         for (const groupId of allGroupIds) {
-                          // ✅ groupItemsMapからデータを取得（キーの型を考慮）
-                          let groupItems = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
-                          // ✅ キーが一致しない場合、文字列変換を試す
-                          if (groupItems.length === 0) {
-                            groupItems = Array.isArray(groupItemsMap[String(groupId)]) ? groupItemsMap[String(groupId)] : [];
-                          }
-                          // ✅ さらに、groupItemsMapの全てのキーを確認
-                          if (groupItems.length === 0 && Object.keys(groupItemsMap).length > 0) {
-                            const matchingKey = Object.keys(groupItemsMap).find((key) => {
-                              return key === String(groupId) || key === groupId || String(key) === String(groupId);
-                            });
-                            if (matchingKey) {
-                              groupItems = Array.isArray(groupItemsMap[matchingKey]) ? groupItemsMap[matchingKey] : [];
-                            }
-                          }
+                          // ✅ groupItemsMapからデータを取得（getGroupItemsByKey で POS と同一の正規化キー照合）
+                          let groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                           // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
                           if (groupItems.length === 0 && countItemsLegacy.length > 0) {
                             const productGroup = productGroups.find((g) => g.id === groupId);
@@ -5179,22 +5139,9 @@ export default function InventoryCountPage() {
                           }
                         }
                       } else {
-                        // ✅ 単一グループの場合：モーダル表示と同じロジック
+                        // ✅ 単一グループの場合：モーダル表示と同じロジック（getGroupItemsByKey で POS と同一の正規化キー照合）
                         const groupId = allGroupIds[0];
-                        let groupItems = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
-                        // ✅ キーが一致しない場合、文字列変換を試す
-                        if (groupItems.length === 0) {
-                          groupItems = Array.isArray(groupItemsMap[String(groupId)]) ? groupItemsMap[String(groupId)] : [];
-                        }
-                        // ✅ さらに、groupItemsMapの全てのキーを確認
-                        if (groupItems.length === 0 && Object.keys(groupItemsMap).length > 0) {
-                          const matchingKey = Object.keys(groupItemsMap).find((key) => {
-                            return key === String(groupId) || key === groupId || String(key) === String(groupId);
-                          });
-                          if (matchingKey) {
-                            groupItems = Array.isArray(groupItemsMap[matchingKey]) ? groupItemsMap[matchingKey] : [];
-                          }
-                        }
+                        let groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                         // ✅ 後方互換性：groupItemsがない場合、itemsフィールドを使用
                         if (groupItems.length === 0) {
                           if (countItemsLegacy.length > 0) {
@@ -5227,19 +5174,8 @@ export default function InventoryCountPage() {
                             ? modalCount.productGroupNames[allGroupIds.indexOf(groupId)] || groupId
                             : productGroups.find((g) => g.id === groupId)?.name || groupId;
                           
-                          // ✅ グループの完了状態を判定（モーダル表示と同じロジック）
-                          let groupItemsFromMap = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
-                          if (groupItemsFromMap.length === 0) {
-                            groupItemsFromMap = Array.isArray(groupItemsMap[String(groupId)]) ? groupItemsMap[String(groupId)] : [];
-                          }
-                          if (groupItemsFromMap.length === 0 && Object.keys(groupItemsMap).length > 0) {
-                            const matchingKey = Object.keys(groupItemsMap).find((key) => {
-                              return key === String(groupId) || key === groupId || String(key) === String(groupId);
-                            });
-                            if (matchingKey) {
-                              groupItemsFromMap = Array.isArray(groupItemsMap[matchingKey]) ? groupItemsMap[matchingKey] : [];
-                            }
-                          }
+                          // ✅ グループの完了状態を判定（getGroupItemsByKey で POS と同一の正規化キー照合）
+                          const groupItemsFromMap = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                           const hasGroupItemsFromMap = groupItemsFromMap.length > 0;
                           const hasGroupItems = groupItems.length > 0;
                           const incompleteProductsForGroup = getIncompleteProductsForGroup(groupId);
@@ -5262,7 +5198,7 @@ export default function InventoryCountPage() {
                         const groupName = Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
                           ? modalCount.productGroupNames[0]
                           : modalCount.productGroupName || modalCount.productGroupId || "-";
-                        const groupItemsFromMap = Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+                        const groupItemsFromMap = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                         const isGroupCompleted = groupItemsFromMap.length > 0;
                         
                         (modalCount.items || []).forEach((item) => {

@@ -182,8 +182,8 @@ export async function readInventoryCounts() {
       const allDone = allIds.every((id) => {
         const groupExists = productGroups.some((g) => String(g.id) === String(id));
         if (!groupExists) return true; // 削除済みグループは完了とみなす
-        const items = groupItemsMap[id] ?? groupItemsMap[String(id)];
-        return Array.isArray(items) && items.length > 0;
+        const items = getGroupItemsByKey(groupItemsMap, id);
+        return items.length > 0;
       });
       const isCompleted = allDone;
       
@@ -294,6 +294,16 @@ export function normalizeIdForMatch(id) {
   const lastSegment = s.split("/").pop() || s;
   return lastSegment;
 }
+
+// groupItems のキー照合（GID と数値 ID の混在で取れない不具合対策。管理画面とPOSで明細数・在庫数が一致するようにする）
+export function getGroupItemsByKey(groupItemsMap, groupId) {
+  if (!groupId || !groupItemsMap || typeof groupItemsMap !== "object") return [];
+  if (Array.isArray(groupItemsMap[groupId])) return groupItemsMap[groupId];
+  const n = normalizeIdForMatch(groupId);
+  const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === n);
+  return key && Array.isArray(groupItemsMap[key]) ? groupItemsMap[key] : [];
+}
+
 function findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, groupId) {
   if (!inventoryItemIdsByGroup || typeof inventoryItemIdsByGroup !== "object") return undefined;
   if (inventoryItemIdsByGroup[groupId]) return inventoryItemIdsByGroup[groupId];

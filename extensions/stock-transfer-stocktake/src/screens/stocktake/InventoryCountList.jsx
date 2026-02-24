@@ -205,6 +205,8 @@ export function InventoryCountList({
   const readOnlyRef = useRef(false);
   const toastReadOnlyOnceRef = useRef(false);
   const [addQtyById, setAddQtyById] = useState({}); // ✅ 入庫と同様：候補ごとの追加済み数量表示用
+  // ✅ まとめて表示：グループごと読込ボタンでどのグループを読み込み中か
+  const [loadingGroupId, setLoadingGroupId] = useState(null);
 
   const denyEdit = useCallback(() => {
     if (!toastReadOnlyOnceRef.current) {
@@ -776,81 +778,8 @@ export function InventoryCountList({
               allLines.push(...completedLines);
             }
           } else {
-            // ✅ 未完了のグループ：商品リストをAPIから取得して編集可能で表示
-            try {
-              // ✅ 問題1の修正: filterByInventoryLevel: falseに変更（在庫レベルが0でも商品を表示）
-              // ✅ 単一グループモードと同じロジックに統一（商品グループごとに選択した場合も表示されるため）
-              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-              let products = await fetchProductsByGroups([groupId], count.locationId, {
-                productFirst,
-                filterByInventoryLevel: false,
-                includeImages: showImages && !liteMode,
-                ...fetchOptsBase,
-              });
-              // ✅ 一時的な readProductGroups 失敗で0件になることがあるため、1回だけリトライ（約1秒待機後に再取得）
-              if (products.length === 0) {
-                await new Promise((r) => setTimeout(r, 1000));
-                products = await fetchProductsByGroups([groupId], count.locationId, {
-                  productFirst,
-                  filterByInventoryLevel: false,
-                  includeImages: showImages && !liteMode,
-                  ...fetchOptsBase,
-                });
-              }
-              if (products.length === 0) {
-                continue; // 次のグループへ
-              }
-              
-              // ✅ 商品リストを取得して、在庫数を取得してlinesを作成
-              let linesWithCurrent = [];
-              try {
-                linesWithCurrent = await Promise.all(
-                  products.map(async (p) => {
-                    try {
-                      const currentQty = await getCurrentQuantity(p.inventoryItemId, count.locationId);
-                      return {
-                        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                        variantId: p.variantId,
-                        inventoryItemId: p.inventoryItemId,
-                        productTitle: p.productTitle ?? "",
-                        variantTitle: p.variantTitle ?? "",
-                        sku: p.sku ?? "",
-                        barcode: p.barcode ?? "",
-                        imageUrl: p.imageUrl ?? "",
-                        currentQuantity: currentQty !== null ? currentQty : 0,
-                        actualQuantity: 0, // ✅ 初期値は0（スキャンで積み上げる方式）
-                        isReadOnly: false, // ✅ 未完了は編集可能
-                        productGroupId: groupId, // ✅ どのグループに属するか記録
-                      };
-                    } catch (qtyError) {
-                      // エラーが発生した商品も追加する（在庫数は0として扱う）
-                      return {
-                        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                        variantId: p.variantId,
-                        inventoryItemId: p.inventoryItemId,
-                        productTitle: p.productTitle ?? "",
-                        variantTitle: p.variantTitle ?? "",
-                        sku: p.sku ?? "",
-                        barcode: p.barcode ?? "",
-                        imageUrl: p.imageUrl ?? "",
-                        currentQuantity: 0,
-                        actualQuantity: 0,
-                        isReadOnly: false,
-                        productGroupId: groupId,
-                      };
-                    }
-                  })
-                );
-              } catch (promiseError) {
-                throw promiseError;
-              }
-              
-              allLines.push(...linesWithCurrent);
-            } catch (e) {
-              toast(`グループ「${groupName}」の商品読み込みに失敗しました: ${e?.message || e}`);
-              // ✅ エラーが発生した場合でも、空の配列を追加してグループを表示（エラーメッセージを表示するため）
-              // エラー時は何も追加しない（表示ロジックで「読み込み中...」が表示される）
-            }
+            // ✅ 未完了のグループ：初期表示では読まない。グループごと「読込」ボタンで読み込む（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
+            // ここでは何も追加しない。UIで「読込」が押されたときに loadGroupProducts(groupId) が呼ばれる
           }
         }
         
@@ -1041,6 +970,165 @@ export function InventoryCountList({
       setLoadingMore(false);
     }
   }, [count, targetProductGroupIds, lines.length, hasMoreProducts, loadingMore, isMultipleMode, settings?.productList?.initialLimit]);
+
+  // ✅ まとめて表示：グループごと「読込」ボタンでそのグループの商品だけ読み込む（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
+  const loadGroupProducts = useCallback(async (groupId) => {
+    if (!isMultipleMode || !count?.id || !count?.locationId || !groupId) return;
+    setLoadingGroupId(groupId);
+    const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
+    try {
+      const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
+      const countItemsLegacy = Array.isArray(count?.items) ? count.items : [];
+      let cachedProductGroups = [];
+      try {
+        cachedProductGroups = await readProductGroups();
+      } catch (e) {
+        console.error("[InventoryCountList] readProductGroups in loadGroupProducts:", e);
+      }
+      const fetchOptsBase = {
+        inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
+        ...(cachedProductGroups.length > 0 ? { cachedProductGroups } : {}),
+      };
+      let groupItemsForGroup = getGroupItemsByKey(groupItemsMap, groupId);
+      if (groupItemsForGroup.length === 0 && countItemsLegacy.length > 0) {
+        try {
+          const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          const products = await fetchProductsByGroups([groupId], count.locationId, {
+            productFirst,
+            filterByInventoryLevel: false,
+            includeImages: false,
+            ...fetchOptsBase,
+          });
+          const productInventoryItemIds = new Set(
+            products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
+          );
+          groupItemsForGroup = countItemsLegacy.filter((item) => {
+            const itemId = String(item?.inventoryItemId || "").trim();
+            return productInventoryItemIds.has(itemId);
+          });
+        } catch (e) {
+          console.error(`[InventoryCountList] filter legacy for group ${groupId}:`, e);
+        }
+      }
+      const completedItems = groupItemsForGroup.length > 0 ? groupItemsForGroup : null;
+      let newLines = [];
+
+      if (completedItems) {
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+        const products = await fetchProductsByGroups([groupId], count.locationId, {
+          productFirst,
+          filterByInventoryLevel: false,
+          includeImages: showImages && !liteMode,
+          ...fetchOptsBase,
+        });
+        const productMap = new Map();
+        products.forEach((p) => {
+          if (p.inventoryItemId) productMap.set(String(p.inventoryItemId).trim(), p);
+        });
+        newLines = await Promise.all(
+          completedItems.map(async (it, i) => {
+            const t = (it?.title || it?.sku || "-").split(" / ");
+            const inventoryItemIdStr = String(it?.inventoryItemId || "").trim();
+            const product = productMap.get(inventoryItemIdStr);
+            let imageUrl = product?.imageUrl ?? "";
+            const isExtra = Boolean(it?.isExtra);
+            if (isExtra && !imageUrl && it?.imageUrl) imageUrl = String(it.imageUrl);
+            if (isExtra && !imageUrl && showImages && !liteMode && (it?.barcode || it?.sku)) {
+              try {
+                const resolved = await resolveVariantByCode(it.barcode || it.sku, { includeImages: true });
+                if (resolved?.imageUrl) imageUrl = resolved.imageUrl;
+              } catch {}
+            }
+            return {
+              id: String(it?.id ?? `ro-${groupId}-${Date.now()}-${i}`),
+              variantId: it?.variantId ?? null,
+              inventoryItemId: it?.inventoryItemId ?? null,
+              productTitle: t[0] || "",
+              variantTitle: t[1] || "",
+              sku: String(it?.sku ?? ""),
+              barcode: String(it?.barcode ?? ""),
+              imageUrl,
+              currentQuantity: Number(it?.currentQuantity ?? 0),
+              actualQuantity: Number(it?.actualQuantity ?? 0),
+              isReadOnly: true,
+              isExtra,
+              productGroupId: groupId,
+            };
+          })
+        );
+      } else {
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+        let products = await fetchProductsByGroups([groupId], count.locationId, {
+          productFirst,
+          filterByInventoryLevel: false,
+          includeImages: showImages && !liteMode,
+          ...fetchOptsBase,
+        });
+        if (products.length === 0) {
+          await new Promise((r) => setTimeout(r, 1000));
+          products = await fetchProductsByGroups([groupId], count.locationId, {
+            productFirst,
+            filterByInventoryLevel: false,
+            includeImages: showImages && !liteMode,
+            ...fetchOptsBase,
+          });
+        }
+        const linesWithCurrent = await Promise.all(
+          products.map(async (p) => {
+            try {
+              const currentQty = await getCurrentQuantity(p.inventoryItemId, count.locationId);
+              return {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                variantId: p.variantId,
+                inventoryItemId: p.inventoryItemId,
+                productTitle: p.productTitle ?? "",
+                variantTitle: p.variantTitle ?? "",
+                sku: p.sku ?? "",
+                barcode: p.barcode ?? "",
+                imageUrl: p.imageUrl ?? "",
+                currentQuantity: currentQty !== null ? currentQty : 0,
+                actualQuantity: 0,
+                isReadOnly: false,
+                productGroupId: groupId,
+              };
+            } catch {
+              return {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                variantId: p.variantId,
+                inventoryItemId: p.inventoryItemId,
+                productTitle: p.productTitle ?? "",
+                variantTitle: p.variantTitle ?? "",
+                sku: p.sku ?? "",
+                barcode: p.barcode ?? "",
+                imageUrl: p.imageUrl ?? "",
+                currentQuantity: 0,
+                actualQuantity: 0,
+                isReadOnly: false,
+                productGroupId: groupId,
+              };
+            }
+          })
+        );
+        newLines = linesWithCurrent;
+      }
+
+      setLines((prev) => {
+        const rest = prev.filter((l) => l.productGroupId !== groupId);
+        return [...rest, ...newLines];
+      });
+      if (newLines.length > 0 && !completedItems) {
+        const prevSet = initialInventoryItemIdsRef.current || new Set();
+        const addIds = newLines.filter((l) => !l.isExtra).map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean);
+        initialInventoryItemIdsRef.current = new Set([...prevSet, ...addIds]);
+      }
+      const hasIncomplete = newLines.some((l) => !l.isReadOnly);
+      setIsReadOnlyState(count?.status === "completed" || !hasIncomplete);
+    } catch (e) {
+      toast(`グループ「${groupName}」の読み込みに失敗しました: ${e?.message || e}`);
+    } finally {
+      setLoadingGroupId(null);
+    }
+  }, [count, isMultipleMode, productGroupNames, settings?.productList?.initialLimit, showImages, liteMode]);
 
   // ✅ linesRef を lines と同期（入庫の rowsRef と同様）
   useEffect(() => {
@@ -1585,9 +1673,9 @@ export function InventoryCountList({
           const groupItemsMapForAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
           for (const groupId of targetProductGroupIds) {
             const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-            // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
+            // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）。getGroupItemsByKey で正規化キー照合
             if (!linesByGroup.has(groupId)) {
-              const groupItemsForGroup = groupId && groupItemsMapForAdjust[groupId] && Array.isArray(groupItemsMapForAdjust[groupId]) ? groupItemsMapForAdjust[groupId] : [];
+              const groupItemsForGroup = getGroupItemsByKey(groupItemsMapForAdjust, groupId);
               if (groupItemsForGroup.length > 0) {
                 groupStatusMessagesForAdjust.push(`「${groupName}」は確定済みのためスキップ`);
               }
@@ -1733,9 +1821,9 @@ export function InventoryCountList({
             const groupItemsMapForNoAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
             for (const groupId of targetProductGroupIds) {
               const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
+              // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）。getGroupItemsByKey で正規化キー照合
               if (!linesByGroup.has(groupId)) {
-                const groupItemsForGroup = groupId && groupItemsMapForNoAdjust[groupId] && Array.isArray(groupItemsMapForNoAdjust[groupId]) ? groupItemsMapForNoAdjust[groupId] : [];
+                const groupItemsForGroup = getGroupItemsByKey(groupItemsMapForNoAdjust, groupId);
                 if (groupItemsForGroup.length > 0) {
                   groupStatusMessagesForNoAdjust.push(`「${groupName}」は確定済みのためスキップ`);
                 }
@@ -1978,9 +2066,9 @@ export function InventoryCountList({
             const groupItemsMapForSingleAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
             for (const groupId of targetProductGroupIds) {
               const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
+              // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）。getGroupItemsByKey で正規化キー照合
               if (!linesByGroup.has(groupId)) {
-                const groupItemsForGroup = groupId && groupItemsMapForSingleAdjust[groupId] && Array.isArray(groupItemsMapForSingleAdjust[groupId]) ? groupItemsMapForSingleAdjust[groupId] : [];
+                const groupItemsForGroup = getGroupItemsByKey(groupItemsMapForSingleAdjust, groupId);
                 if (groupItemsForGroup.length > 0) {
                   groupStatusMessagesForSingleAdjust.push(`「${groupName}」は確定済みのためスキップ`);
                 }
@@ -2845,9 +2933,9 @@ export function InventoryCountList({
                       ? groupItemsFromMap.length
                       : groupLines.length;
                     
-                    // ✅ 未完了グループで商品リストが空の場合でも、グループタイトルを表示する
-                    // ✅ loadingがfalseで、かつ商品リストが空の場合のみ「商品がありません」を表示
+                    // ✅ 未完了グループで商品リストが空の場合：グループごと「読込」ボタンを表示（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
                     if (groupLines.length === 0 && !isGroupCompleted && !loading) {
+                      const isLoadingThisGroup = loadingGroupId === groupId;
                       return (
                         <s-box key={groupId} padding="small">
                           <s-stack gap="small">
@@ -2857,11 +2945,17 @@ export function InventoryCountList({
                               </s-text>
                               <s-stack direction="inline" gap="small" alignItems="center">
                                 <s-badge tone="subdued">未完了</s-badge>
-                                <s-text tone="subdued" size="small">0件</s-text>
+                                <s-button
+                                  kind="secondary"
+                                  disabled={loadingGroupId != null}
+                                  onPress={() => loadGroupProducts(groupId)}
+                                >
+                                  {isLoadingThisGroup ? "読込中..." : "読込"}
+                                </s-button>
                               </s-stack>
                             </s-stack>
                             <s-text tone="subdued" size="small">
-                              商品がありません
+                              {isLoadingThisGroup ? "読み込み中..." : "読込ボタンで商品リストを読み込みます"}
                             </s-text>
                           </s-stack>
                         </s-box>
