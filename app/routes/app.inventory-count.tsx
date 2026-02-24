@@ -164,32 +164,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
         
         const groupItemsMap = (c as any)?.groupItems && typeof (c as any).groupItems === "object" ? (c as any).groupItems : {};
         // ✅ 全グループが完了しているか判定：groupItems[id]が存在し、かつ配列の長さが0より大きい
-        // ✅ InventoryCountProductGroupSelectionと同じロジック：各グループIDについて、groupItems[groupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
+        // ✅ 棚卸ID発行後にグループを削除した場合：そのグループは「完了」とみなしてブロックしない（allDone で true を返す）
         const countItemsLegacy = Array.isArray(c.items) && c.items.length > 0 ? c.items : [];
         const allDone = allIds.every((id) => {
+          const productGroup = productGroups.find((g) => String(g.id) === String(id));
+          if (!productGroup) return true; // 削除済みグループは完了とみなす
           let groupItems = Array.isArray(groupItemsMap[id]) ? groupItemsMap[id] : [];
-          // ✅ 問題2の修正: アプリ側と同じロジックに統一（複数グループでもitemsからフィルタリングを試みる）
+          if (groupItems.length === 0 && Object.keys(groupItemsMap).length > 0) {
+            const matchingKey = Object.keys(groupItemsMap).find((k) => k === String(id) || k === id || String(k) === String(id));
+            if (matchingKey) groupItems = Array.isArray(groupItemsMap[matchingKey]) ? groupItemsMap[matchingKey] : [];
+          }
           // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
-          // ✅ InventoryCountProductGroupSelectionと同じロジック：groupItemsが空の場合、itemsフィールドから該当グループの商品をフィルタリング
           if (groupItems.length === 0 && countItemsLegacy.length > 0) {
-            // ✅ 商品グループのinventoryItemIdsを取得（保存されている場合）
-            const productGroup = productGroups.find((g) => g.id === id);
             const groupInventoryItemIds = productGroup?.inventoryItemIds || [];
-            
             if (groupInventoryItemIds.length > 0) {
-              // ✅ inventoryItemIdsが保存されている場合、それを使ってフィルタリング
               const groupInventoryItemIdsSet = new Set(groupInventoryItemIds);
               groupItems = countItemsLegacy.filter((item) => {
                 const itemId = String(item?.inventoryItemId || "").trim();
                 return groupInventoryItemIdsSet.has(itemId);
               });
             } else if (allIds.length === 1) {
-              // ✅ 単一グループの場合、itemsフィールドのデータをそのまま使用（後方互換性）
               groupItems = countItemsLegacy;
             }
-            // ✅ 複数グループでinventoryItemIdsが保存されていない場合は、groupItemsが空のまま（完了と判定しない）
           }
-          // ✅ 完了判定：groupItemsが存在し、かつ配列の長さが0より大きい場合に完了と判定
           return groupItems.length > 0;
         });
         

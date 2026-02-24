@@ -164,7 +164,10 @@ export async function readInventoryCounts() {
     // ✅ 既存データにcountNameがない場合、生成して付与
     const hasMissingCountName = counts.some((c) => !c.countName);
     
-    // ✅ 完了判定を修正：全グループが完了している場合のみ完了ステータスにする
+    // ✅ 現在の商品グループ一覧（棚卸ID発行後に削除されたグループを「完了」とみなすため）
+    const productGroups = await readProductGroups();
+    
+    // ✅ 完了判定：全グループが完了している場合のみ完了。管理画面と統一（後方互換は廃止）。削除済みグループは完了とみなす。
     let needsUpdate = false;
     const countsFixed = counts.map((c) => {
       const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
@@ -172,25 +175,18 @@ export async function readInventoryCounts() {
         : c.productGroupId ? [c.productGroupId] : [];
       
       if (allIds.length === 0) {
-        // 商品グループがない場合は既存のステータスを保持
         return c;
       }
       
       const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
-      // ✅ 全グループが完了しているか判定：groupItems[id]が存在し、かつ配列の長さが0より大きい
       const allDone = allIds.every((id) => {
-        const items = groupItemsMap[id];
+        const groupExists = productGroups.some((g) => String(g.id) === String(id));
+        if (!groupExists) return true; // 削除済みグループは完了とみなす
+        const items = groupItemsMap[id] ?? groupItemsMap[String(id)];
         return Array.isArray(items) && items.length > 0;
       });
+      const isCompleted = allDone;
       
-      // ✅ 商品グループが1つの場合のみ、古いデータ形式（itemsフィールド）を後方互換性として使用
-      // ✅ 複数商品グループがある場合は、必ずgroupItemsで判定する（itemsは使用しない）
-      const isSingleGroup = allIds.length === 1;
-      const hasItems = Array.isArray(c.items) && c.items.length > 0;
-      const hasNoGroupItems = Object.keys(groupItemsMap).length === 0;
-      const isCompleted = allDone || (isSingleGroup && hasItems && hasNoGroupItems);
-      
-      // ✅ 全グループが完了していない場合は必ず"in_progress"に設定（既存のstatusを保持しない）
       if (!isCompleted && c.status === "completed") {
         needsUpdate = true;
         return {
@@ -200,7 +196,6 @@ export async function readInventoryCounts() {
         };
       }
       
-      // ✅ 全グループが完了している場合は"completed"に設定
       if (isCompleted && c.status !== "completed") {
         needsUpdate = true;
         return {
