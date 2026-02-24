@@ -630,9 +630,9 @@ export function PurchaseHistoryList({
     let alive = true;
     (async () => {
       try {
-        const list = await searchVariants(q, { first: 50, includeImages: !liteMode });
+        const result = await searchVariants(q, { first: 50, includeImages: !liteMode });
         if (!alive) return;
-        setCandidates(Array.isArray(list) ? list : []);
+        setCandidates(result?.nodes ?? []);
       } catch (e) {
         if (!alive) return;
         setCandidates([]);

@@ -308,7 +308,9 @@ function findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, groupId) {
 // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用して商品をフィルタリング（生成時の状態を保持）
 // ✅ cachedProductGroups を渡すと readProductGroups() をスキップし、まとめて表示で全グループが同じスナップショットを参照して安定表示
 export async function fetchProductsByGroups(productGroupIds, locationId, opts = {}) {
-  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null } = opts;
+  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null, offset: optsOffset = 0, limit: optsLimit } = opts;
+  const offset = Math.max(0, Number(optsOffset) || 0);
+  const limit = optsLimit != null && optsLimit > 0 ? Math.max(1, Math.min(Number(optsLimit), 2000)) : null;
   const groups = (Array.isArray(cachedProductGroups) && cachedProductGroups.length > 0)
     ? cachedProductGroups
     : await readProductGroups();
@@ -483,12 +485,16 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
     return true;
   });
 
+  // ✅ さらに読み込む用：offset/limit を適用
+  const variantsToProcess = limit != null ? uniqueVariants.slice(offset, offset + limit) : uniqueVariants;
+  const hasMore = limit != null ? uniqueVariants.length > offset + limit : false;
+
   // 在庫レベルでフィルタリング（初期表示用）・入庫並みに1回の取得で currentQuantity 付きで返す
   const QTY_BATCH_SIZE = 15;
-  if (filterByInventoryLevel && locationId && uniqueVariants.length > 0) {
+  if (filterByInventoryLevel && locationId && variantsToProcess.length > 0) {
     const variantsWithInventory = [];
-    for (let i = 0; i < uniqueVariants.length; i += QTY_BATCH_SIZE) {
-      const batch = uniqueVariants.slice(i, i + QTY_BATCH_SIZE);
+    for (let i = 0; i < variantsToProcess.length; i += QTY_BATCH_SIZE) {
+      const batch = variantsToProcess.slice(i, i + QTY_BATCH_SIZE);
       const results = await Promise.all(
         batch.map(async (v) => {
           try {
@@ -504,10 +510,12 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
       );
       results.filter((r) => r != null).forEach((r) => variantsWithInventory.push(r));
     }
+    if (limit != null) return { products: variantsWithInventory, hasMore };
     return variantsWithInventory;
   }
 
-  return uniqueVariants;
+  if (limit != null) return { products: variantsToProcess, hasMore };
+  return variantsToProcess;
 }
 
 // 現在の在庫数を取得

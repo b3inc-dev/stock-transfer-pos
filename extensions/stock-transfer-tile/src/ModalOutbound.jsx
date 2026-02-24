@@ -5558,6 +5558,8 @@ function OutboundList({
   const [loading, setLoading] = useState(false);
   const [searchMountKey, setSearchMountKey] = useState(0);
   const [candidatesDisplayLimit, setCandidatesDisplayLimit] = useState(50); // 初期表示50件（「さらに表示」で追加読み込み可能）
+  const [searchPageInfo, setSearchPageInfo] = useState({ hasNextPage: false, endCursor: null }); // 候補のサーバー側「さらに読み込む」用
+  const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
 
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -5960,26 +5962,30 @@ function OutboundList({
       if (!raw) {
         if (mounted) {
           setCandidates([]);
+          setSearchPageInfo({ hasNextPage: false, endCursor: null });
           setLoading(false);
-          setCandidatesDisplayLimit(20); // 検索クリア時に表示件数もリセット
+          setCandidatesDisplayLimit(20);
         }
         return;
       }
 
-      // 1文字から検索可能に変更（文字数制限を削除）
       setLoading(true);
       try {
         const includeImages = showImages && !liteMode;
         const searchLimit = Math.max(10, Math.min(50, Number(settings?.searchList?.initialLimit ?? 50)));
-        const list = await searchVariants(raw, { includeImages, first: searchLimit });
+        const result = await searchVariants(raw, { includeImages, first: searchLimit });
+        const list = result?.nodes ?? [];
+        const pageInfo = result?.pageInfo ?? { hasNextPage: false, endCursor: null };
         if (mounted) {
           setCandidates(Array.isArray(list) ? list : []);
-          setCandidatesDisplayLimit(20); // 新しい検索時は表示件数をリセット
+          setSearchPageInfo(pageInfo);
+          setCandidatesDisplayLimit(20);
         }
       } catch (e) {
         toast(`検索エラー: ${toUserMessage(e)}`);
         if (mounted) {
           setCandidates([]);
+          setSearchPageInfo({ hasNextPage: false, endCursor: null });
           setCandidatesDisplayLimit(20);
         }
       } finally {
@@ -6007,14 +6013,33 @@ function OutboundList({
   const closeSearchHard = () => {
     setQuery("");
     setCandidates([]);
-    setCandidatesDisplayLimit(20); // 検索クリア時に表示件数もリセット
+    setSearchPageInfo({ hasNextPage: false, endCursor: null });
+    setCandidatesDisplayLimit(20);
     setSearchMountKey((k) => k + 1);
   };
 
-  // 「さらに表示」ボタン用
   const handleShowMoreCandidates = useCallback(() => {
     setCandidatesDisplayLimit((prev) => prev + 20);
   }, []);
+
+  const handleLoadMoreSearch = useCallback(async () => {
+    const raw = String(debouncedQuery || "").trim();
+    if (!raw || loadingMoreSearch || !searchPageInfo?.hasNextPage || !searchPageInfo?.endCursor) return;
+    setLoadingMoreSearch(true);
+    try {
+      const searchLimit = Math.max(10, Math.min(50, Number(settings?.searchList?.initialLimit ?? 50)));
+      const result = await searchVariants(raw, { includeImages: showImages && !liteMode, first: searchLimit, after: searchPageInfo.endCursor });
+      const list = result?.nodes ?? [];
+      const pageInfo = result?.pageInfo ?? { hasNextPage: false, endCursor: null };
+      setCandidates((prev) => [...prev, ...list]);
+      setSearchPageInfo(pageInfo);
+      setCandidatesDisplayLimit((prev) => prev + list.length);
+    } catch (e) {
+      toast(`追加読み込みに失敗しました: ${toUserMessage(e)}`);
+    } finally {
+      setLoadingMoreSearch(false);
+    }
+  }, [debouncedQuery, searchPageInfo?.hasNextPage, searchPageInfo?.endCursor, loadingMoreSearch, showImages, liteMode, settings?.searchList?.initialLimit]);
 
   const upsertLineByResolvedVariant = async (resolved, { incBy = 1, closeSearch = true } = {}) => {
     if (!resolved?.inventoryItemId || !resolved?.variantId) {
@@ -7559,11 +7584,19 @@ function OutboundList({
               return <CandidateRow key={stableKey} c={c} idx={idx} />;
             })}
             
-            {/* ✅ 「さらに表示」ボタン */}
+            {/* 「さらに表示」ボタン（取得済み候補の表示件数増加） */}
             {hasMoreCandidates ? (
               <s-box padding="small">
                 <s-button kind="secondary" onClick={handleShowMoreCandidates} onPress={handleShowMoreCandidates}>
                   さらに表示（残り {candidates.length - candidatesDisplayLimit}件）
+                </s-button>
+              </s-box>
+            ) : null}
+            {/* サーバー側「さらに読み込む」 */}
+            {searchPageInfo?.hasNextPage ? (
+              <s-box padding="small">
+                <s-button kind="secondary" disabled={loadingMoreSearch} onClick={handleLoadMoreSearch} onPress={handleLoadMoreSearch}>
+                  {loadingMoreSearch ? "読込中..." : "さらに読み込む"}
                 </s-button>
               </s-box>
             ) : null}
@@ -8509,21 +8542,27 @@ function buildVariantSearchQuery(raw) {
   return uniq.join(" OR ");
 }
 
+// 戻り値: { nodes, pageInfo }（pageInfo: { hasNextPage, endCursor }）。呼び出し側は result.nodes を使用
 async function searchVariants(q, opts = {}) {
   const includeImages = opts?.includeImages !== false;
+  const after = opts?.after ?? null;
 
   const firstRaw = Number(opts?.first ?? opts?.limit ?? 50);
-  const first = Math.max(10, Math.min(50, Number.isFinite(firstRaw) ? firstRaw : 50));
+  const first = Math.max(10, Math.min(250, Number.isFinite(firstRaw) ? firstRaw : 50));
 
   const query = buildVariantSearchQuery(q);
-  if (!query) return []; // ここで止めることで「1文字入力で固まる」を回避
+  if (!query) return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
 
-  // 画像不要なら最初から軽量クエリへ
+  const variables = { first, query };
+  if (after) variables.after = after;
+
+  const pageInfoFragment = "pageInfo { hasNextPage endCursor }";
+
   if (!includeImages) {
     const requestBody = {
       query: `#graphql
-        query GetVariants($first: Int!, $query: String!) {
-          productVariants(first: $first, query: $query) {
+        query GetVariants($first: Int!, $query: String!, $after: String) {
+          productVariants(first: $first, query: $query, after: $after) {
             nodes {
               id
               title
@@ -8532,9 +8571,10 @@ async function searchVariants(q, opts = {}) {
               inventoryItem { id }
               product { title }
             }
+            ${pageInfoFragment}
           }
         }`,
-      variables: { first, query },
+      variables,
     };
 
     const res = await fetch("shopify:admin/api/graphql.json", {
@@ -8545,9 +8585,8 @@ async function searchVariants(q, opts = {}) {
 
     const json = await res.json();
     if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-    const nodes = json?.data?.productVariants?.nodes ?? [];
-
-    return nodes.map((n) => ({
+    const conn = json?.data?.productVariants ?? {};
+    const nodes = (conn.nodes ?? []).map((n) => ({
       variantId: n.id,
       inventoryItemId: n.inventoryItem?.id,
       productTitle: n.product?.title ?? "",
@@ -8556,14 +8595,15 @@ async function searchVariants(q, opts = {}) {
       barcode: n.barcode ?? "",
       imageUrl: "",
     }));
+    const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+    return { nodes, pageInfo };
   }
 
-  // 画像あり（試す→ダメならフォールバック）
   try {
     const requestBody = {
       query: `#graphql
-        query GetVariants($first: Int!, $query: String!) {
-          productVariants(first: $first, query: $query) {
+        query GetVariants($first: Int!, $query: String!, $after: String) {
+          productVariants(first: $first, query: $query, after: $after) {
             nodes {
               id
               title
@@ -8576,9 +8616,10 @@ async function searchVariants(q, opts = {}) {
                 featuredImage { url }
               }
             }
+            ${pageInfoFragment}
           }
         }`,
-      variables: { first, query },
+      variables,
     };
 
     const res = await fetch("shopify:admin/api/graphql.json", {
@@ -8589,9 +8630,8 @@ async function searchVariants(q, opts = {}) {
 
     const json = await res.json();
     if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-    const nodes = json?.data?.productVariants?.nodes ?? [];
-
-    return nodes.map((n) => ({
+    const conn = json?.data?.productVariants ?? {};
+    const nodes = (conn.nodes ?? []).map((n) => ({
       variantId: n.id,
       inventoryItemId: n.inventoryItem?.id,
       productTitle: n.product?.title ?? "",
@@ -8600,8 +8640,9 @@ async function searchVariants(q, opts = {}) {
       barcode: n.barcode ?? "",
       imageUrl: n.image?.url ?? n.product?.featuredImage?.url ?? "",
     }));
+    const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+    return { nodes, pageInfo };
   } catch (e) {
-    // （既存フォールバックがこの後に続くなら、そのまま残してOK）
     throw e;
   }
 }
@@ -10773,8 +10814,8 @@ async function resolveVariantByCode(codeRaw, { includeImages = false } = {}) {
   if (cached?.variantId && cached?.inventoryItemId) return cached;
 
   // 2) network (searchVariants)
-  const list = await searchVariants(code, { includeImages });
-  const v = pickBestVariant_(code, list);
+  const { nodes } = await searchVariants(code, { includeImages });
+  const v = pickBestVariant_(code, nodes);
   if (!v?.variantId || !v?.inventoryItemId) return null;
 
   const resolved = {

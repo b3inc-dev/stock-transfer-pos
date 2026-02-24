@@ -374,6 +374,8 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
   const [searchMountKey, setSearchMountKey] = useState(0);
   const [settings, setSettings] = useState(null); // ✅ 設定を読み込む
   const [candidatesDisplayLimit, setCandidatesDisplayLimit] = useState(50); // ✅ 初期表示50件（設定で変更可能）
+  const [searchPageInfo, setSearchPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ✅ 検索のサーバー側「さらに読み込む」用
+  const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
@@ -614,6 +616,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       if (!raw) {
         if (mounted) {
           setCandidates([]);
+          setSearchPageInfo({ hasNextPage: false, endCursor: null });
           setLoading(false);
           setCandidatesDisplayLimit(20); // ✅ 検索クリア時に表示件数もリセット
         }
@@ -627,9 +630,12 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         // ✅ 設定から検索リストの表示件数を取得（デフォルト50件）
         const searchLimit = settings?.searchList?.initialLimit ?? 50;
         const first = Math.max(10, Math.min(50, Number.isFinite(searchLimit) ? searchLimit : 50));
-        const list = await searchVariants(raw, { includeImages, first });
+        const result = await searchVariants(raw, { includeImages, first });
+        const list = result?.nodes ?? [];
+        const pageInfo = result?.pageInfo ?? { hasNextPage: false, endCursor: null };
         if (mounted) {
           setCandidates(Array.isArray(list) ? list : []);
+          setSearchPageInfo(pageInfo);
           // ✅ 設定から検索リストの初期表示件数を取得（デフォルト20件、設定の20-50%程度）
           const displayLimit = Math.max(20, Math.min(50, Math.floor(first * 0.4) || 20));
           setCandidatesDisplayLimit(displayLimit);
@@ -638,6 +644,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         toast(`検索エラー: ${toUserMessage(e)}`);
         if (mounted) {
           setCandidates([]);
+          setSearchPageInfo({ hasNextPage: false, endCursor: null });
           const searchLimit = settings?.searchList?.initialLimit ?? 50;
           const displayLimit = Math.max(20, Math.min(50, Math.floor((searchLimit || 50) * 0.4) || 20));
           setCandidatesDisplayLimit(displayLimit);
@@ -1078,10 +1085,31 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
 
   const hasMoreCandidates = candidates.length > candidatesDisplayLimit;
 
-  // ✅ 「さらに表示」ボタン用
+  // ✅ 「さらに表示」ボタン用（クライアント側：既に取得した候補の表示件数を増やす）
   const handleShowMoreCandidates = useCallback(() => {
     setCandidatesDisplayLimit((prev) => prev + 20);
   }, []);
+
+  // ✅ サーバー側「さらに読み込む」用（次のページを取得して候補に追加）
+  const handleLoadMoreSearch = useCallback(async () => {
+    const raw = String(debouncedQuery || "").trim();
+    if (!raw || loadingMoreSearch || !searchPageInfo?.hasNextPage || !searchPageInfo?.endCursor) return;
+    setLoadingMoreSearch(true);
+    try {
+      const searchLimit = settings?.searchList?.initialLimit ?? 50;
+      const first = Math.max(10, Math.min(50, Number.isFinite(searchLimit) ? searchLimit : 50));
+      const result = await searchVariants(raw, { includeImages: showImages && !liteMode, first, after: searchPageInfo.endCursor });
+      const list = result?.nodes ?? [];
+      const pageInfo = result?.pageInfo ?? { hasNextPage: false, endCursor: null };
+      setCandidates((prev) => [...prev, ...list]);
+      setSearchPageInfo(pageInfo);
+      setCandidatesDisplayLimit((prev) => prev + list.length); // 追加分も表示
+    } catch (e) {
+      toast(`追加読み込みに失敗しました: ${toUserMessage(e)}`);
+    } finally {
+      setLoadingMoreSearch(false);
+    }
+  }, [debouncedQuery, searchPageInfo?.hasNextPage, searchPageInfo?.endCursor, loadingMoreSearch, showImages, liteMode, settings?.searchList?.initialLimit]);
 
   // CandidateRow コンポーネント（OutboundListと同じデザイン）
   const CandidateRow = ({ c, idx }) => {
@@ -1377,11 +1405,19 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
               return <CandidateRow key={stableKey} c={c} idx={idx} />;
             })}
             
-            {/* ✅ 「さらに表示」ボタン */}
+            {/* ✅ 「さらに表示」ボタン（取得済み候補の表示件数増加） */}
             {hasMoreCandidates ? (
               <s-box padding="small">
                 <s-button kind="secondary" onClick={handleShowMoreCandidates} onPress={handleShowMoreCandidates}>
                   さらに表示（残り {candidates.length - candidatesDisplayLimit}件）
+                </s-button>
+              </s-box>
+            ) : null}
+            {/* ✅ サーバー側「さらに読み込む」（次の検索結果ページを取得） */}
+            {searchPageInfo?.hasNextPage ? (
+              <s-box padding="small">
+                <s-button kind="secondary" disabled={loadingMoreSearch} onClick={handleLoadMoreSearch} onPress={handleLoadMoreSearch}>
+                  {loadingMoreSearch ? "読込中..." : "さらに読み込む"}
                 </s-button>
               </s-box>
             ) : null}

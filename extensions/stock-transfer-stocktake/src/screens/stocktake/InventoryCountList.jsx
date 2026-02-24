@@ -172,6 +172,8 @@ export function InventoryCountList({
 }) {
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [hasMoreProducts, setHasMoreProducts] = useState(false); // ✅ さらに読み込む用
+  const [loadingMore, setLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false); // ✅ 在庫更新用の別状態（出庫リストと同じ方式）
   const [submitting, setSubmitting] = useState(false);
   const [query, setQuery] = useState("");
@@ -362,7 +364,8 @@ export function InventoryCountList({
       });
       return;
     }
-    
+    setHasMoreProducts(false); // ✅ 初回読み込み時はリセット（メイン経路で上書き）
+
     // ✅ count.id / locationId / productGroupId（単一モード）が変わった場合は、draftLoadedRefをリセット
     const currentCountId = String(count.id || "").trim();
     const currentLocationId = String(count.locationId || "").trim();
@@ -934,14 +937,20 @@ export function InventoryCountList({
 
       // 在庫レベルがある商品のみを取得（初期表示用）・入庫並み：1回の取得で currentQuantity 付きで返るため二重取得しない
       const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+      // ✅ さらに読み込む用の1回あたり件数（管理画面と揃える）
       // ✅ 常に画像付きで取得（画像ON/OFFは表示切替のみ。ロス・入庫・出庫と同様にリスト再読込しない）
-      const products = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
+      const rawProducts = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
         productFirst,
         filterByInventoryLevel: true,
         includeImages: true,
         inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
+        offset: 0,
+        limit: 600,
       });
-      console.log("[InventoryCountList] fetchProductsByGroups result", { productCount: products.length });
+      const products = Array.isArray(rawProducts) ? rawProducts : (rawProducts?.products ?? []);
+      const hasMore = rawProducts?.hasMore ?? false;
+      setHasMoreProducts(hasMore);
+      console.log("[InventoryCountList] fetchProductsByGroups result", { productCount: products.length, hasMore });
       
       // fetchProductsByGroups が filterByInventoryLevel: true のとき currentQuantity を付与して返すため再取得不要
       const currentGroupIdForSingle = !isMultipleMode && targetProductGroupIds?.length > 0 ? targetProductGroupIds[0] : null;
@@ -974,6 +983,53 @@ export function InventoryCountList({
       console.log("[InventoryCountList] loadProducts completed, loading set to false");
     }
   }, [count, targetProductGroupIds, readOnlyProp, productGroupId, isMultipleMode]);
+
+  // ✅ さらに読み込む（POS棚卸リスト用）
+  const LOAD_PAGE_SIZE = 600;
+  const handleLoadMoreProducts = useCallback(async () => {
+    if (!count || !count.locationId || targetProductGroupIds.length === 0) return;
+    if (loadingMore || !hasMoreProducts) return;
+    setLoadingMore(true);
+    try {
+      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+      const raw = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
+        productFirst,
+        filterByInventoryLevel: true,
+        includeImages: true,
+        inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
+        offset: lines.length,
+        limit: LOAD_PAGE_SIZE,
+      });
+      const products = Array.isArray(raw) ? raw : (raw?.products ?? []);
+      const hasMore = raw?.hasMore ?? false;
+      setHasMoreProducts(hasMore);
+      const currentGroupIdForSingle = !isMultipleMode && targetProductGroupIds?.length > 0 ? targetProductGroupIds[0] : null;
+      const newLines = products.map((p, idx) => ({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${idx}`,
+        variantId: p.variantId,
+        inventoryItemId: p.inventoryItemId,
+        productTitle: p.productTitle ?? "",
+        variantTitle: p.variantTitle ?? "",
+        sku: p.sku ?? "",
+        barcode: p.barcode ?? "",
+        imageUrl: p.imageUrl ?? "",
+        currentQuantity: p.currentQuantity != null ? p.currentQuantity : 0,
+        actualQuantity: 0,
+        productGroupId: currentGroupIdForSingle,
+      }));
+      setLines((prev) => [...prev, ...newLines]);
+      if (newLines.length > 0) {
+        const prevSet = initialInventoryItemIdsRef.current || new Set();
+        const addIds = newLines.map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean);
+        initialInventoryItemIdsRef.current = new Set([...prevSet, ...addIds]);
+      }
+    } catch (e) {
+      toast(`追加読み込みに失敗しました: ${e?.message || e}`);
+      console.error("[InventoryCountList] handleLoadMoreProducts error:", e);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [count, targetProductGroupIds, lines.length, hasMoreProducts, loadingMore, isMultipleMode, settings?.productList?.initialLimit]);
 
   // ✅ linesRef を lines と同期（入庫の rowsRef と同様）
   useEffect(() => {
@@ -2687,26 +2743,23 @@ export function InventoryCountList({
         </s-box>
       ) : (
         <>
-          {/* ✅ 未読み込み商品リストがある場合は最上部に表示（入庫・出庫と同様の形式、ただしmetafieldは全件取得のため常に非表示） */}
-          {/* 注意: 棚卸はmetafieldから全件取得しているため、実際には追加読み込みは不要 */}
-          {/* pageInfoは常にfalseのため、読込ボタンは表示されない */}
-          {false && (
+          {/* ✅ 未読み込み商品がある場合は最上部に表示（入庫・出庫の読込ボタンと同様） */}
+          {hasMoreProducts ? (
             <s-box padding="base">
               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                 <s-text tone="subdued" size="small">
-                  未読み込み商品リストがあります。（要読込）
+                  未読み込みの商品があります。（要読込）
                 </s-text>
                 <s-button
                   kind="secondary"
-                  onClick={() => {}}
-                  onPress={() => {}}
-                  disabled={true}
+                  disabled={loadingMore}
+                  onPress={handleLoadMoreProducts}
                 >
-                  読込
+                  {loadingMore ? "読込中..." : "読込"}
                 </s-button>
               </s-stack>
             </s-box>
-          )}
+          ) : null}
 
           {/* ✅ まとめて表示モード：商品グループごとにセクションを分けて表示 */}
           {isMultipleMode ? (() => {
@@ -2829,6 +2882,17 @@ export function InventoryCountList({
                       </s-box>
                     );
                   })}
+                  {hasMoreProducts && (
+                    <s-box padding="small" paddingBlockStart="base">
+                      <s-button
+                        kind="secondary"
+                        disabled={loadingMore}
+                        onPress={handleLoadMoreProducts}
+                      >
+                        {loadingMore ? "読込中..." : "さらに読み込む"}
+                      </s-button>
+                    </s-box>
+                  )}
                 </s-stack>
               </s-box>
             );
@@ -2856,6 +2920,17 @@ export function InventoryCountList({
                         <InventoryCountLineRow key={l.id} line={l} onRemove={undefined} />
                       ))}
                     </s-stack>
+                    {hasMoreProducts && (
+                      <s-box paddingBlockStart="small">
+                        <s-button
+                          kind="secondary"
+                          disabled={loadingMore}
+                          onPress={handleLoadMoreProducts}
+                        >
+                          {loadingMore ? "読込中..." : "さらに読み込む"}
+                        </s-button>
+                      </s-box>
+                    )}
                   </s-stack>
                 </s-box>
               );

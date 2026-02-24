@@ -88,100 +88,40 @@ function buildVariantSearchQuery(raw) {
   return uniq.join(" OR ");
 }
 
+// ✅ 戻り値: { nodes, pageInfo }。呼び出し側は result.nodes を使用
 export async function searchVariants(q, opts = {}) {
   const includeImages = opts?.includeImages !== false;
-
+  const after = opts?.after ?? null;
   const firstRaw = Number(opts?.first ?? opts?.limit ?? 50);
-  const first = Math.max(10, Math.min(50, Number.isFinite(firstRaw) ? firstRaw : 50));
-
+  const first = Math.max(10, Math.min(250, Number.isFinite(firstRaw) ? firstRaw : 50));
   const query = buildVariantSearchQuery(q);
-  if (!query) return []; // ✅ ここで止めることで「1文字入力で固まる」を回避
+  if (!query) return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
 
-  // 画像不要なら最初から軽量クエリへ
-  if (!includeImages) {
-    const requestBody = {
-      query: `#graphql
-        query GetVariants($first: Int!, $query: String!) {
-          productVariants(first: $first, query: $query) {
-            nodes {
-              id
-              title
-              sku
-              barcode
-              inventoryItem { id }
-              product { title }
-            }
-          }
-        }`,
-      variables: { first, query },
-    };
-
-    const res = await fetch("shopify:admin/api/graphql.json", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
-
-    const json = await res.json();
-    if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-    const nodes = json?.data?.productVariants?.nodes ?? [];
-
-    return nodes.map((n) => ({
-      variantId: n.id,
-      inventoryItemId: n.inventoryItem?.id,
-      productTitle: n.product?.title ?? "",
-      variantTitle: n.title ?? "",
-      sku: n.sku ?? "",
-      barcode: n.barcode ?? "",
-      imageUrl: "",
-    }));
-  }
-
-  // 画像あり（試す→ダメならフォールバック）
-  try {
-    const requestBody = {
-      query: `#graphql
-        query GetVariants($first: Int!, $query: String!) {
-          productVariants(first: $first, query: $query) {
-            nodes {
-              id
-              title
-              sku
-              barcode
-              image { url }
-              inventoryItem { id }
-              product {
-                title
-                featuredImage { url }
-              }
-            }
-          }
-        }`,
-      variables: { first, query },
-    };
-
-    const res = await fetch("shopify:admin/api/graphql.json", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
-
-    const json = await res.json();
-    if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-    const nodes = json?.data?.productVariants?.nodes ?? [];
-
-    return nodes.map((n) => ({
-      variantId: n.id,
-      inventoryItemId: n.inventoryItem?.id,
-      productTitle: n.product?.title ?? "",
-      variantTitle: n.title ?? "",
-      sku: n.sku ?? "",
-      barcode: n.barcode ?? "",
-      imageUrl: n.image?.url ?? n.product?.featuredImage?.url ?? "",
-    }));
-  } catch (e) {
-    throw e;
-  }
+  const variables = { first, query };
+  if (after) variables.after = after;
+  const nodesQuery = includeImages
+    ? `nodes { id title sku barcode image { url } inventoryItem { id } product { title featuredImage { url } } }`
+    : `nodes { id title sku barcode inventoryItem { id } product { title } }`;
+  const gql = `#graphql
+    query GetVariants($first: Int!, $query: String!, $after: String) {
+      productVariants(first: $first, query: $query, after: $after) {
+        ${nodesQuery}
+        pageInfo { hasNextPage endCursor }
+      }
+    }`;
+  const d = await graphql(gql, variables);
+  const conn = d?.productVariants ?? {};
+  const nodes = (conn.nodes ?? []).map((n) => ({
+    variantId: n.id,
+    inventoryItemId: n.inventoryItem?.id,
+    productTitle: n.product?.title ?? "",
+    variantTitle: n.title ?? "",
+    sku: n.sku ?? "",
+    barcode: n.barcode ?? "",
+    imageUrl: includeImages ? (n.image?.url ?? n.product?.featuredImage?.url ?? "") : "",
+  }));
+  const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+  return { nodes, pageInfo };
 }
 
 // コード正規化（JAN/SKU 共通）
@@ -443,8 +383,8 @@ export async function resolveVariantByCode(codeRaw, { includeImages = false } = 
   if (cached?.variantId && cached?.inventoryItemId) return cached;
 
   // 2) network (searchVariants)
-  const list = await searchVariants(code, { includeImages });
-  const v = pickBestVariant_(code, list);
+  const { nodes } = await searchVariants(code, { includeImages });
+  const v = pickBestVariant_(code, nodes);
   if (!v?.variantId || !v?.inventoryItemId) return null;
 
   const resolved = {

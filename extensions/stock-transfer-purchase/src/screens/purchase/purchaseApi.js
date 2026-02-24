@@ -212,23 +212,27 @@ function buildVariantSearchQuery(raw) {
   return Array.from(new Set(parts)).join(" OR ");
 }
 
+// ✅ 戻り値: { nodes, pageInfo }。呼び出し側は result.nodes を使用
 export async function searchVariants(q, opts = {}) {
   const includeImages = opts?.includeImages !== false;
+  const after = opts?.after ?? null;
   const firstRaw = Number(opts?.first ?? opts?.limit ?? 50);
-  const first = Math.max(10, Math.min(50, Number.isFinite(firstRaw) ? firstRaw : 50));
+  const first = Math.max(10, Math.min(250, Number.isFinite(firstRaw) ? firstRaw : 50));
   const query = buildVariantSearchQuery(q);
-  if (!query) return [];
+  if (!query) return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
 
   const nodesQuery = includeImages
     ? `nodes { id title sku barcode image { url } inventoryItem { id } product { title featuredImage { url } } }`
     : `nodes { id title sku barcode inventoryItem { id } product { title } }`;
   const gql = `#graphql
-    query GetVariants($first: Int!, $query: String!) {
-      productVariants(first: $first, query: $query) { ${nodesQuery} }
+    query GetVariants($first: Int!, $query: String!, $after: String) {
+      productVariants(first: $first, query: $query, after: $after) { ${nodesQuery} pageInfo { hasNextPage endCursor } }
     }`;
-  const d = await graphql(gql, { first, query });
-  const nodes = d?.productVariants?.nodes ?? [];
-  return nodes.map((n) => ({
+  const variables = { first, query };
+  if (after) variables.after = after;
+  const d = await graphql(gql, variables);
+  const conn = d?.productVariants ?? {};
+  const nodes = (conn.nodes ?? []).map((n) => ({
     variantId: n.id,
     inventoryItemId: n.inventoryItem?.id,
     productTitle: n.product?.title ?? "",
@@ -237,13 +241,15 @@ export async function searchVariants(q, opts = {}) {
     barcode: n.barcode ?? "",
     imageUrl: n.image?.url ?? n.product?.featuredImage?.url ?? "",
   }));
+  const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+  return { nodes, pageInfo };
 }
 
 export async function resolveVariantByCode(codeRaw, opts = {}) {
   const code = String(codeRaw ?? "").trim().replace(/\s+/g, "").toUpperCase();
   if (!code) return null;
-  const list = await searchVariants(code, { includeImages: opts?.includeImages !== false });
-  const v = list.find((x) => x.barcode === code || x.sku === code) || list[0];
+  const { nodes } = await searchVariants(code, { includeImages: opts?.includeImages !== false });
+  const v = nodes.find((x) => x.barcode === code || x.sku === code) || nodes[0];
   return v ?? null;
 }
 

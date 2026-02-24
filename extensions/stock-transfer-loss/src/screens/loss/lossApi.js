@@ -88,21 +88,36 @@ function buildVariantSearchQuery(raw) {
   return uniq.join(" OR ");
 }
 
+// ✅ 戻り値: { nodes, pageInfo }（pageInfo: { hasNextPage, endCursor }）。従来の配列を期待する呼び出しは result.nodes を使用すること
 export async function searchVariants(q, opts = {}) {
   const includeImages = opts?.includeImages !== false;
+  const after = opts?.after ?? null;
 
   const firstRaw = Number(opts?.first ?? opts?.limit ?? 50);
-  const first = Math.max(10, Math.min(50, Number.isFinite(firstRaw) ? firstRaw : 50));
+  const first = Math.max(10, Math.min(250, Number.isFinite(firstRaw) ? firstRaw : 50));
 
   const query = buildVariantSearchQuery(q);
-  if (!query) return []; // ✅ ここで止めることで「1文字入力で固まる」を回避
+  if (!query) return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+
+  const mapNode = (n, withImg) => ({
+    variantId: n.id,
+    inventoryItemId: n.inventoryItem?.id,
+    productTitle: n.product?.title ?? "",
+    variantTitle: n.title ?? "",
+    sku: n.sku ?? "",
+    barcode: n.barcode ?? "",
+    imageUrl: withImg ? (n.image?.url ?? n.product?.featuredImage?.url ?? "") : "",
+  });
+
+  const variables = { first, query };
+  if (after) variables.after = after;
 
   // 画像不要なら最初から軽量クエリへ
   if (!includeImages) {
     const requestBody = {
       query: `#graphql
-        query GetVariants($first: Int!, $query: String!) {
-          productVariants(first: $first, query: $query) {
+        query GetVariants($first: Int!, $query: String!, $after: String) {
+          productVariants(first: $first, query: $query, after: $after) {
             nodes {
               id
               title
@@ -111,9 +126,10 @@ export async function searchVariants(q, opts = {}) {
               inventoryItem { id }
               product { title }
             }
+            pageInfo { hasNextPage endCursor }
           }
         }`,
-      variables: { first, query },
+      variables,
     };
 
     const res = await fetch("shopify:admin/api/graphql.json", {
@@ -124,25 +140,18 @@ export async function searchVariants(q, opts = {}) {
 
     const json = await res.json();
     if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-    const nodes = json?.data?.productVariants?.nodes ?? [];
-
-    return nodes.map((n) => ({
-      variantId: n.id,
-      inventoryItemId: n.inventoryItem?.id,
-      productTitle: n.product?.title ?? "",
-      variantTitle: n.title ?? "",
-      sku: n.sku ?? "",
-      barcode: n.barcode ?? "",
-      imageUrl: "",
-    }));
+    const conn = json?.data?.productVariants ?? {};
+    const nodes = (conn.nodes ?? []).map((n) => mapNode(n, false));
+    const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+    return { nodes, pageInfo };
   }
 
-  // 画像あり（試す→ダメならフォールバック）
+  // 画像あり
   try {
     const requestBody = {
       query: `#graphql
-        query GetVariants($first: Int!, $query: String!) {
-          productVariants(first: $first, query: $query) {
+        query GetVariants($first: Int!, $query: String!, $after: String) {
+          productVariants(first: $first, query: $query, after: $after) {
             nodes {
               id
               title
@@ -155,9 +164,10 @@ export async function searchVariants(q, opts = {}) {
                 featuredImage { url }
               }
             }
+            pageInfo { hasNextPage endCursor }
           }
         }`,
-      variables: { first, query },
+      variables,
     };
 
     const res = await fetch("shopify:admin/api/graphql.json", {
@@ -168,17 +178,10 @@ export async function searchVariants(q, opts = {}) {
 
     const json = await res.json();
     if (json.errors?.length) throw new Error(JSON.stringify(json.errors));
-    const nodes = json?.data?.productVariants?.nodes ?? [];
-
-    return nodes.map((n) => ({
-      variantId: n.id,
-      inventoryItemId: n.inventoryItem?.id,
-      productTitle: n.product?.title ?? "",
-      variantTitle: n.title ?? "",
-      sku: n.sku ?? "",
-      barcode: n.barcode ?? "",
-      imageUrl: n.image?.url ?? n.product?.featuredImage?.url ?? "",
-    }));
+    const conn = json?.data?.productVariants ?? {};
+    const nodes = (conn.nodes ?? []).map((n) => mapNode(n, true));
+    const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+    return { nodes, pageInfo };
   } catch (e) {
     throw e;
   }
@@ -443,8 +446,8 @@ export async function resolveVariantByCode(codeRaw, { includeImages = false } = 
   if (cached?.variantId && cached?.inventoryItemId) return cached;
 
   // 2) network (searchVariants)
-  const list = await searchVariants(code, { includeImages });
-  const v = pickBestVariant_(code, list);
+  const { nodes } = await searchVariants(code, { includeImages });
+  const v = pickBestVariant_(code, nodes);
   if (!v?.variantId || !v?.inventoryItemId) return null;
 
   const resolved = {
