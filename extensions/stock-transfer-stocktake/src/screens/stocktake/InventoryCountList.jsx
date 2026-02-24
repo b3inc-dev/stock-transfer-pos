@@ -258,7 +258,14 @@ export function InventoryCountList({
         if (mounted) setSettings(s);
       } catch (e) {
         console.error("[InventoryCountList] fetchSettings error:", e);
-        if (mounted) setSettings({ version: 1, carriers: [] });
+        if (mounted)
+          setSettings({
+            version: 1,
+            carriers: [],
+            outbound: { historyInitialLimit: 100 },
+            productList: { initialLimit: 250 },
+            searchList: { initialLimit: 50 },
+          });
       }
     })();
     return () => { mounted = false; };
@@ -462,7 +469,7 @@ export function InventoryCountList({
     // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
     if (groupItemsForCurrentGroup.length === 0 && countItemsLegacy.length > 0 && currentGroupId) {
       try {
-        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
         const products = await fetchProductsByGroups([currentGroupId], c.locationId, {
           productFirst,
           filterByInventoryLevel: false,
@@ -512,7 +519,7 @@ export function InventoryCountList({
       try {
         // ✅ 完了済みの商品リスト：在庫は棚卸時の在庫数（currentQuantity）、実数は確定した在庫数（actualQuantity）を表示
         // ✅ 画像URLを取得するため、商品情報を取得
-        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
         const products = await fetchProductsByGroups([currentGroupId], c.locationId, {
           productFirst,
           filterByInventoryLevel: false,
@@ -725,7 +732,7 @@ export function InventoryCountList({
             // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
             // 商品グループの商品リストを取得してフィルタリング（inventoryItemIdsByGroupも渡してまとめて表示で全グループ取得できるようにする）
             try {
-              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
               const products = await fetchProductsByGroups([groupId], c.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
@@ -749,7 +756,7 @@ export function InventoryCountList({
             // ✅ 完了済みのグループ：groupItemsから読み込んで読み取り専用で表示
             // ✅ 画像URLを取得するため、商品情報を取得
             try {
-              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+              const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
               const products = await fetchProductsByGroups([groupId], c.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
@@ -936,7 +943,7 @@ export function InventoryCountList({
       }
 
       // 在庫レベルがある商品のみを取得（初期表示用）・入庫並み：1回の取得で currentQuantity 付きで返るため二重取得しない
-      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
       // ✅ さらに読み込む用の1回あたり件数（管理画面と揃える）
       // ✅ 常に画像付きで取得（画像ON/OFFは表示切替のみ。ロス・入庫・出庫と同様にリスト再読込しない）
       const rawProducts = await fetchProductsByGroups(targetProductGroupIds, c.locationId, {
@@ -992,7 +999,7 @@ export function InventoryCountList({
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
       const raw = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
         productFirst,
         filterByInventoryLevel: true,
@@ -1056,7 +1063,7 @@ export function InventoryCountList({
       let groupItemsForGroup = getGroupItemsByKey(groupItemsMap, groupId);
       if (groupItemsForGroup.length === 0 && countItemsLegacy.length > 0) {
         try {
-          const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+          const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
           const products = await fetchProductsByGroups([groupId], count.locationId, {
             productFirst,
             filterByInventoryLevel: false,
@@ -1078,7 +1085,7 @@ export function InventoryCountList({
       let newLines = [];
 
       if (completedItems) {
-        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
         const products = await fetchProductsByGroups([groupId], count.locationId, {
           productFirst,
           filterByInventoryLevel: false,
@@ -1121,7 +1128,7 @@ export function InventoryCountList({
           })
         );
       } else {
-        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
+        const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
         let products = await fetchProductsByGroups([groupId], c.locationId, {
           productFirst,
           filterByInventoryLevel: false,

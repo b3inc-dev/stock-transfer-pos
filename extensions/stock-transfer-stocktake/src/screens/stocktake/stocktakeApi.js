@@ -737,18 +737,26 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
   );
   if (targetGroups.length === 0) return [];
 
+  const effectiveFirst = Math.max(1, Math.min(250, Number(opts?.productFirst ?? opts?.initialLimit ?? 250)));
+  let hasMoreFromSavedIds = false;
+  let usedSavedIdsPath = false;
   const allVariants = [];
   for (const group of targetGroups) {
     // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用（生成時の状態を保持）
     // ✅ キー照合を正規化して行い、管理画面とPOSでID形式が違っても取得できるようにする
     const savedInventoryItemIds = findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, group.id);
     if (savedInventoryItemIds && Array.isArray(savedInventoryItemIds) && savedInventoryItemIds.length > 0) {
-      // ✅ 保存されたinventoryItemIdsを使用して商品を取得（GraphQLで直接取得）
-      // ✅ 保存されたinventoryItemIdsを使用して商品を取得
-      // ✅ inventoryItemからvariantを取得するため、バッチで取得
+      // ✅ 表示件数（productFirst）を適用。未適用だと450件等を一括取得して長時間読み込みになる
+      // ✅ 初回は effectiveFirst 件まで、さらに読み込むは offset + limit で続きを取得
+      const pageSize = offset === 0
+        ? Math.min(limit ?? effectiveFirst, effectiveFirst)
+        : (limit ?? effectiveFirst);
+      const idsToFetch = savedInventoryItemIds.slice(offset, offset + pageSize);
+      if (savedInventoryItemIds.length > offset + idsToFetch.length) hasMoreFromSavedIds = true;
+      usedSavedIdsPath = true;
       const batchSize = 50;
-      for (let i = 0; i < savedInventoryItemIds.length; i += batchSize) {
-        const batch = savedInventoryItemIds.slice(i, i + batchSize);
+      for (let i = 0; i < idsToFetch.length; i += batchSize) {
+        const batch = idsToFetch.slice(i, i + batchSize);
         const gql = includeImages
           ? `#graphql
             query InventoryItems($ids: [ID!]!) {
@@ -901,9 +909,11 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
     return true;
   });
 
-  // ✅ さらに読み込む用：offset/limit を適用
-  const variantsToProcess = limit != null ? uniqueVariants.slice(offset, offset + limit) : uniqueVariants;
-  const hasMore = limit != null ? uniqueVariants.length > offset + limit : false;
+  // ✅ さらに読み込む用：offset/limit を適用（saved IDs 経路では取得時に既にページング済みのため slice しない）
+  const variantsToProcess = usedSavedIdsPath
+    ? uniqueVariants
+    : (limit != null ? uniqueVariants.slice(offset, offset + limit) : uniqueVariants);
+  const hasMore = limit != null ? (uniqueVariants.length > offset + limit || hasMoreFromSavedIds) : false;
 
   // 在庫レベルでフィルタリング（初期表示用）・入庫並みに1回の取得で currentQuantity 付きで返す
   const QTY_BATCH_SIZE = 15;
@@ -931,6 +941,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
   }
 
   if (limit != null) return { products: variantsToProcess, hasMore };
+  if (hasMoreFromSavedIds) return { products: variantsToProcess, hasMore: true };
   return variantsToProcess;
 }
 
@@ -1472,9 +1483,21 @@ export async function fetchSettings() {
     if (parsed && parsed.version === 1) {
       return parsed;
     }
-    return { version: 1, carriers: [] };
+    return {
+      version: 1,
+      carriers: [],
+      outbound: { historyInitialLimit: 100 },
+      productList: { initialLimit: 250 },
+      searchList: { initialLimit: 50 },
+    };
   } catch (e) {
     console.error("[fetchSettings] error:", e);
-    return { version: 1, carriers: [] };
+    return {
+      version: 1,
+      carriers: [],
+      outbound: { historyInitialLimit: 100 },
+      productList: { initialLimit: 250 },
+      searchList: { initialLimit: 50 },
+    };
   }
 }

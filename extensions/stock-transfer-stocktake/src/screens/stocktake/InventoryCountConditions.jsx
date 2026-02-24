@@ -279,20 +279,35 @@ export function InventoryCountConditions({
     setChunkCount(0);
     setLoadedChunkCount(0);
     try {
-      const result = await readInventoryCountsFirstPage();
-      let filtered = Array.isArray(result.counts) ? result.counts : [];
+      let result = await readInventoryCountsFirstPage();
+      let allFetched = Array.isArray(result.counts) ? [...result.counts] : [];
+      let loadedChunks = 1;
+      const totalChunks = result.chunkCount ?? 0;
       if (locationGid) {
-        filtered = filterByLocation(filtered, locationGid);
-        // ログイン中ロケーション以外は表示しない（0件のときも全件フォールバックしない）
+        let filtered = filterByLocation(allFetched, locationGid);
+        while (filtered.length === 0 && allFetched.length > 0 && loadedChunks < totalChunks) {
+          const next = await readInventoryCountsPage(loadedChunks);
+          const nextCounts = Array.isArray(next.counts) ? next.counts : [];
+          allFetched = [...allFetched, ...nextCounts];
+          loadedChunks += 1;
+          filtered = filterByLocation(allFetched, locationGid);
+        }
+        const sorted = [...filtered].sort((a, b) => {
+          const t1 = new Date(a.createdAt || 0).getTime();
+          const t2 = new Date(b.createdAt || 0).getTime();
+          return t2 - t1;
+        });
+        setCounts(sorted);
+      } else {
+        const sorted = [...allFetched].sort((a, b) => {
+          const t1 = new Date(a.createdAt || 0).getTime();
+          const t2 = new Date(b.createdAt || 0).getTime();
+          return t2 - t1;
+        });
+        setCounts(sorted);
       }
-      const sorted = [...filtered].sort((a, b) => {
-        const t1 = new Date(a.createdAt || 0).getTime();
-        const t2 = new Date(b.createdAt || 0).getTime();
-        return t2 - t1;
-      });
-      setCounts(sorted);
-      setChunkCount(result.chunkCount ?? 0);
-      setLoadedChunkCount(1);
+      setChunkCount(totalChunks);
+      setLoadedChunkCount(loadedChunks);
     } catch (e) {
       setError(String(e?.message ?? e));
       setCounts([]);
