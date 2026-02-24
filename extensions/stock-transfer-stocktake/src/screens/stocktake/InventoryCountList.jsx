@@ -62,6 +62,15 @@ const INVENTORY_COUNT_DRAFT_PREFIX = "stock_transfer_pos_inventory_count_draft_v
 const INVENTORY_COUNT_DRAFT_LEGACY_KEY = "stock_transfer_pos_inventory_count_draft_v1"; // 単一グループ用（ロス・出庫と同様の単一キー）
 const CONFIRM_INVENTORY_COUNT_MODAL_ID = "confirm-inventory-count-modal";
 
+// groupItems のキー照合（GID と数値 ID の混在で取れない不具合対策。管理画面と POS で明細数が一致するようにする）
+function getGroupItemsByKey(groupItemsMap, groupId) {
+  if (!groupId || !groupItemsMap || typeof groupItemsMap !== "object") return [];
+  if (Array.isArray(groupItemsMap[groupId])) return groupItemsMap[groupId];
+  const n = normalizeIdForMatch(groupId);
+  const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === n);
+  return key && Array.isArray(groupItemsMap[key]) ? groupItemsMap[key] : [];
+}
+
 // 複数商品グループ時のみ使用：商品グループごとに別キーで下書きを管理（入庫の inboundDraftKey と同様）
 function inventoryCountDraftKey({ countId, locationId, productGroupId }) {
   const c = String(countId || "").trim();
@@ -288,7 +297,7 @@ export function InventoryCountList({
   // ✅ 初期値の計算（簡易判定）
   const currentGroupIdInitial = productGroupId || (targetProductGroupIds && targetProductGroupIds.length > 0 ? targetProductGroupIds[0] : null);
   const groupItemsMapForReadOnlyInitial = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-  let groupItemsForCurrentGroupReadOnlyInitial = currentGroupIdInitial && groupItemsMapForReadOnlyInitial[currentGroupIdInitial] && Array.isArray(groupItemsMapForReadOnlyInitial[currentGroupIdInitial]) ? groupItemsMapForReadOnlyInitial[currentGroupIdInitial] : [];
+  let groupItemsForCurrentGroupReadOnlyInitial = getGroupItemsByKey(groupItemsMapForReadOnlyInitial, currentGroupIdInitial);
   // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング（簡易判定）
   const countItemsLegacyForReadOnlyInitial = Array.isArray(count?.items) ? count.items : [];
   if (groupItemsForCurrentGroupReadOnlyInitial.length === 0 && countItemsLegacyForReadOnlyInitial.length > 0 && currentGroupIdInitial) {
@@ -385,9 +394,8 @@ export function InventoryCountList({
     }
     const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
     // ✅ 完了判定：groupItemsMap[currentGroupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
-    // ✅ 確実に判定するため、currentGroupIdとgroupItemsMapの両方をチェック
-    // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング（InventoryCountProductGroupSelectionと同じロジック）
-    let groupItemsForCurrentGroup = currentGroupId && groupItemsMap[currentGroupId] && Array.isArray(groupItemsMap[currentGroupId]) ? groupItemsMap[currentGroupId] : [];
+    // ✅ キー照合は getGroupItemsByKey で正規化（GID と数値の混在で取れない不具合対策）
+    let groupItemsForCurrentGroup = getGroupItemsByKey(groupItemsMap, currentGroupId);
     const countItemsLegacy = Array.isArray(count?.items) ? count.items : [];
     // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
     if (groupItemsForCurrentGroup.length === 0 && countItemsLegacy.length > 0 && currentGroupId) {
@@ -650,7 +658,7 @@ export function InventoryCountList({
           // ✅ 完了判定：groupItemsMap[groupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
           // ✅ 確実に判定するため、groupIdとgroupItemsMapの両方をチェック
           // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング（InventoryCountProductGroupSelectionと同じロジック）
-          let groupItemsForGroup = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+          let groupItemsForGroup = getGroupItemsByKey(groupItemsMap, groupId);
           if (groupItemsForGroup.length === 0 && countItemsLegacy.length > 0) {
             // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
             // 商品グループの商品リストを取得してフィルタリング（inventoryItemIdsByGroupも渡してまとめて表示で全グループ取得できるようにする）
@@ -1430,7 +1438,7 @@ export function InventoryCountList({
               const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
               // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
               if (!linesByGroup.has(groupId)) {
-                const groupItemsForGroup = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+                const groupItemsForGroup = getGroupItemsByKey(groupItemsMap, groupId);
                 if (groupItemsForGroup.length > 0) {
                   groupStatusMessages.push(`「${groupName}」は確定済みのためスキップ`);
                 }
@@ -1441,8 +1449,8 @@ export function InventoryCountList({
               ? c.productGroupIds
               : c.productGroupId ? [c.productGroupId] : [];
             const allDone = allIds.length > 0 && allIds.every((id) => {
-              const items = groupItems[id];
-              return Array.isArray(items) && items.length > 0;
+              const items = getGroupItemsByKey(groupItems, id);
+              return items.length > 0;
             });
             
             // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
@@ -1738,8 +1746,8 @@ export function InventoryCountList({
               ? c.productGroupIds
               : c.productGroupId ? [c.productGroupId] : [];
             const allDone = allIds.length > 0 && allIds.every((id) => {
-              const items = groupItems[id];
-              return Array.isArray(items) && items.length > 0;
+              const items = getGroupItemsByKey(groupItems, id);
+              return items.length > 0;
             });
             
             // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
@@ -1810,7 +1818,7 @@ export function InventoryCountList({
             // ✅ 全グループが完了しているか判定：groupItems[id]が存在し、かつ配列の長さが0より大きい（入庫のシップメント完了判定と同じ実装）
             // 未処理のグループが1つでもあれば未完了（全グループが処理済みの場合のみ完了）
             const allDone = allIds.length > 0 && allIds.every((id) => {
-              const items = groupItems[id];
+              const items = getGroupItemsByKey(groupItems, id);
               // ✅ 配列が存在し、かつ長さが0より大きい場合のみ完了と判定
               return Array.isArray(items) && items.length > 0;
             });
@@ -1983,8 +1991,8 @@ export function InventoryCountList({
               ? c.productGroupIds
               : c.productGroupId ? [c.productGroupId] : [];
             const allDone = allIds.length > 0 && allIds.every((id) => {
-              const items = groupItems[id];
-              return Array.isArray(items) && items.length > 0;
+              const items = getGroupItemsByKey(groupItems, id);
+              return items.length > 0;
             });
             
             // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
@@ -2031,7 +2039,7 @@ export function InventoryCountList({
             // ✅ 全グループが完了しているか判定：groupItems[id]が存在し、かつ配列の長さが0より大きい（入庫のシップメント完了判定と同じ実装）
             // 未処理のグループが1つでもあれば未完了（全グループが処理済みの場合のみ完了）
             const allDone = allIds.length > 0 && allIds.every((id) => {
-              const items = groupItems[id];
+              const items = getGroupItemsByKey(groupItems, id);
               // ✅ 配列が存在し、かつ長さが0より大きい場合のみ完了と判定
               return Array.isArray(items) && items.length > 0;
             });
@@ -2809,7 +2817,7 @@ export function InventoryCountList({
                     // ✅ 確実に判定するため、countオブジェクトから直接取得
                     // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング（InventoryCountProductGroupSelectionと同じロジック）
                     const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-                    let groupItemsFromMap = groupId && groupItemsMap[groupId] && Array.isArray(groupItemsMap[groupId]) ? groupItemsMap[groupId] : [];
+                    let groupItemsFromMap = getGroupItemsByKey(groupItemsMap, groupId);
                     // ✅ 後方互換性：groupItemsがない場合、loadProductsで既に処理されているが、表示時の判定でも確認
                     // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング（InventoryCountProductGroupSelectionと同じロジック）
                     const countItemsLegacy = Array.isArray(count?.items) ? count.items : [];
