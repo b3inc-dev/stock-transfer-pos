@@ -12,6 +12,7 @@ import {
   writePurchaseEntries,
   fetchLocations,
   fetchVariantImage,
+  fetchSettings,
   adjustInventoryAtLocation,
   searchVariants,
   fetchVariantAvailable,
@@ -475,6 +476,37 @@ export function PurchaseHistoryList({
   const [chunkCount, setChunkCount] = useState(0);
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
   const fullEntriesByIdRef = useRef(new Map());
+  const [settings, setSettings] = useState(null);
+  const [detailDisplayLimit, setDetailDisplayLimit] = useState(250);
+  const DETAIL_LOAD_PAGE_SIZE = 600;
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const s = await fetchSettings();
+        if (mounted) setSettings(s);
+      } catch (e) {
+        console.error("[PurchaseHistoryList] fetchSettings error:", e);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const detailInitialLimit = useMemo(
+    () => Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250))),
+    [settings?.productList?.initialLimit]
+  );
+
+  useEffect(() => {
+    if (!selectedEntryId) return;
+    setDetailDisplayLimit(detailInitialLimit);
+  }, [selectedEntryId, detailInitialLimit]);
+
+  const loadMoreDetailItems = useCallback(() => {
+    setDetailDisplayLimit((prev) => prev + DETAIL_LOAD_PAGE_SIZE);
+  }, []);
+
   const selectedEntry = useMemo(() => {
     if (!selectedEntryId) return null;
     return detailEntryFetched ?? fullEntriesByIdRef.current.get(selectedEntryId) ?? ((Array.isArray(entries) ? entries : []).find((e) => e.id === selectedEntryId) || null);
@@ -1396,7 +1428,7 @@ export function PurchaseHistoryList({
               <s-text tone="subdued" size="small">商品がありません</s-text>
             ) : (
               <s-stack gap="none">
-                {lines.map((l, idx) => {
+                {lines.slice(0, detailDisplayLimit).map((l, idx) => {
                   const sku = String(l.sku || "").trim();
                   const barcode = String(l.barcode || "").trim();
                   const skuLine = `${sku ? `SKU: ${sku}` : ""}${sku && barcode ? " / " : ""}${barcode ? `JAN: ${barcode}` : ""}`.trim();
@@ -1434,10 +1466,17 @@ export function PurchaseHistoryList({
                           </s-stack>
                         </s-stack>
                       </s-box>
-                      {idx < lines.length - 1 ? <s-divider /> : null}
+                      {idx < Math.min(lines.length, detailDisplayLimit) - 1 ? <s-divider /> : null}
                     </s-box>
                   );
                 })}
+                {lines.length > detailDisplayLimit ? (
+                  <s-box padding="base" paddingBlockStart="none">
+                    <s-button kind="secondary" onClick={loadMoreDetailItems} onPress={loadMoreDetailItems}>
+                      さらに読み込む
+                    </s-button>
+                  </s-box>
+                ) : null}
               </s-stack>
             )}
           </s-stack>

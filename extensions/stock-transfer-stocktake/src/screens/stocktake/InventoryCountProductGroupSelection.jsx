@@ -128,94 +128,87 @@ export function InventoryCountProductGroupSelection({
     const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
     const countItemsLegacy = Array.isArray(c?.items) ? c.items : [];
 
+    // ✅ レート制限回避：グループを順次処理し、在庫数取得は15件ずつバッチで実行（stocktakeApi の QTY_BATCH_SIZE と同様）
+    const QTY_BATCH_SIZE = 15;
+    const toProducts = (raw) => (Array.isArray(raw) ? raw : (raw?.products ?? []));
+
     try {
-      await Promise.all(
-        productGroupIds.map(async (groupId) => {
-          try {
-            let groupItems = getGroupItemsByKey(groupItemsMap, groupId);
-            const isGroupCompleted = groupItems.length > 0;
-            
-            // ✅ 未処理グループでも在庫数を表示するため、商品リストを取得して在庫数を計算
-            let totalQty = 0;
-            let actualQty = 0;
-            
-            let skuCount = 0;
-            if (isGroupCompleted) {
-              // ✅ 完了済みグループ：groupItemsから数量を計算
-              skuCount = groupItems.length;
-              totalQty = groupItems.reduce((sum, item) => sum + Number(item?.currentQuantity || 0), 0);
-              actualQty = groupItems.reduce((sum, item) => sum + Number(item?.actualQuantity || 0), 0);
-            } else {
-              // ✅ 未処理グループ：商品リストを取得して在庫数を計算
-              if (groupItems.length === 0) {
-                // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
-                // ✅ SKU/CSVグループ用に inventoryItemIdsByGroup を渡す
-                const products = await fetchProductsByGroups([groupId], c.locationId, {
-                  filterByInventoryLevel: false,
-                  includeImages: false,
-                  inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
-                });
-                const productInventoryItemIds = new Set(
-                  products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
-                );
-                groupItems = countItemsLegacy.filter((item) => {
-                  const itemId = String(item?.inventoryItemId || "").trim();
-                  return productInventoryItemIds.has(itemId);
-                });
-                if (groupItems.length === 0) skuCount = products.length;
-              }
-              
-              // ✅ 未処理グループでも商品リストから在庫数を取得
-              if (groupItems.length === 0) {
-                // ✅ groupItemsが空の場合、商品グループの商品リストを取得して在庫数を計算
-                // ✅ SKU/CSVグループ用に inventoryItemIdsByGroup を渡す
-                const products = await fetchProductsByGroups([groupId], c.locationId, {
-                  filterByInventoryLevel: false,
-                  includeImages: false,
-                  inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
-                });
-                
-                // ✅ 各商品の在庫数を取得して合計を計算
-                const inventoryQuantities = await Promise.all(
-                  products.map(async (p) => {
+      for (const groupId of productGroupIds) {
+        try {
+          let groupItems = getGroupItemsByKey(groupItemsMap, groupId);
+          const isGroupCompleted = groupItems.length > 0;
+
+          let totalQty = 0;
+          let actualQty = 0;
+          let skuCount = 0;
+
+          if (isGroupCompleted) {
+            skuCount = groupItems.length;
+            totalQty = groupItems.reduce((sum, item) => sum + Number(item?.currentQuantity || 0), 0);
+            actualQty = groupItems.reduce((sum, item) => sum + Number(item?.actualQuantity || 0), 0);
+          } else {
+            if (groupItems.length === 0) {
+              const raw = await fetchProductsByGroups([groupId], c.locationId, {
+                filterByInventoryLevel: false,
+                includeImages: false,
+                inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
+              });
+              const products = toProducts(raw);
+              const productInventoryItemIds = new Set(
+                products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
+              );
+              groupItems = countItemsLegacy.filter((item) => {
+                const itemId = String(item?.inventoryItemId || "").trim();
+                return productInventoryItemIds.has(itemId);
+              });
+              if (groupItems.length === 0) skuCount = products.length;
+            }
+
+            if (groupItems.length === 0) {
+              const raw = await fetchProductsByGroups([groupId], c.locationId, {
+                filterByInventoryLevel: false,
+                includeImages: false,
+                inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
+              });
+              const products = toProducts(raw);
+              skuCount = products.length;
+              // ✅ 一括 Promise.all はレート制限で失敗しやすいため、15件ずつバッチで取得
+              for (let i = 0; i < products.length; i += QTY_BATCH_SIZE) {
+                const batch = products.slice(i, i + QTY_BATCH_SIZE);
+                const qtys = await Promise.all(
+                  batch.map(async (p) => {
                     const qty = await getCurrentQuantity(p.inventoryItemId, c.locationId);
                     return qty !== null ? qty : 0;
                   })
                 );
-                skuCount = products.length;
-                totalQty = inventoryQuantities.reduce((sum, qty) => sum + qty, 0);
-                actualQty = 0; // 未処理なので実数は0
-              } else {
-                // ✅ groupItemsがある場合（後方互換性）、そこから数量を計算
-                skuCount = groupItems.length;
-                totalQty = groupItems.reduce((sum, item) => sum + Number(item?.currentQuantity || 0), 0);
-                actualQty = groupItems.reduce((sum, item) => sum + Number(item?.actualQuantity || 0), 0);
+                totalQty += qtys.reduce((sum, qty) => sum + qty, 0);
               }
+              actualQty = 0;
+            } else {
+              skuCount = groupItems.length;
+              totalQty = groupItems.reduce((sum, item) => sum + Number(item?.currentQuantity || 0), 0);
+              actualQty = groupItems.reduce((sum, item) => sum + Number(item?.actualQuantity || 0), 0);
             }
-
-            // ✅ inventoryItemIdsByGroup から SKU 数を取得（items/groupItems が空の場合のフォールバック）
-            if (skuCount === 0 && c?.inventoryItemIdsByGroup?.[groupId]) {
-              const ids = c.inventoryItemIdsByGroup[groupId];
-              skuCount = Array.isArray(ids) ? ids.length : 0;
-            }
-
-            // 状態を判定
-            // ✅ 完了判定：groupItemsが存在し、かつ配列の長さが0より大きい場合に「処理済み」と判定
-            let status = "未処理";
-            if (isGroupCompleted) {
-              status = "処理済み";
-            } else if (groupItems.length === 0 && countItemsLegacy.length > 0) {
-              // ✅ 後方互換性：groupItemsがないが、itemsフィールドにデータがある場合は「処理中」と表示
-              status = "処理中";
-            }
-
-            qtyMap.set(groupId, { total: totalQty, actual: actualQty, status, skuCount });
-          } catch (e) {
-            console.error(`Failed to get quantity for product group ${groupId}:`, e);
-            qtyMap.set(groupId, { total: 0, actual: 0, status: "未処理", skuCount: 0 });
           }
-        })
-      );
+
+          if (skuCount === 0 && c?.inventoryItemIdsByGroup?.[groupId]) {
+            const ids = c.inventoryItemIdsByGroup[groupId];
+            skuCount = Array.isArray(ids) ? ids.length : 0;
+          }
+
+          let status = "未処理";
+          if (isGroupCompleted) {
+            status = "処理済み";
+          } else if (groupItems.length === 0 && countItemsLegacy.length > 0) {
+            status = "処理中";
+          }
+
+          qtyMap.set(groupId, { total: totalQty, actual: actualQty, status, skuCount });
+        } catch (e) {
+          console.error(`Failed to get quantity for product group ${groupId}:`, e);
+          qtyMap.set(groupId, { total: 0, actual: 0, status: "未処理", skuCount: 0 });
+        }
+      }
     } catch (e) {
       console.error("Failed to load product group quantities:", e);
     }

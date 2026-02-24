@@ -73,38 +73,48 @@ function normalizeScanCode_(code) {
     .replace(/[^0-9A-Z._-]/g, "");
 }
 
+// ✅ 戻り値: { nodes, pageInfo }（検索の「さらに読み込む」用）。従来の配列を期待する呼び出しは result?.nodes を使用
 export async function searchVariants(q, opts = {}) {
   const includeImages = opts?.includeImages !== false;
+  const after = opts?.after ?? null;
   const first = Math.max(10, Math.min(50, Number(opts?.first) || 50));
   const query = buildVariantSearchQuery(q);
-  if (!query) return [];
+  if (!query) return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+
+  const variables = { first, query };
+  if (after) variables.after = after;
+
+  const mapNode = (n, withImg) => ({
+    variantId: n.id,
+    inventoryItemId: n.inventoryItem?.id,
+    productTitle: n.product?.title ?? "",
+    variantTitle: n.title ?? "",
+    sku: n.sku ?? "",
+    barcode: n.barcode ?? "",
+    imageUrl: withImg ? (n.image?.url ?? n.product?.featuredImage?.url ?? "") : "",
+  });
 
   // 画像不要なら最初から軽量クエリへ
   if (!includeImages) {
     const gql = `#graphql
-      query GetVariants($first: Int!, $query: String!) {
-        productVariants(first: $first, query: $query) {
+      query GetVariants($first: Int!, $query: String!, $after: String) {
+        productVariants(first: $first, query: $query, after: $after) {
           nodes { id title sku barcode inventoryItem { id } product { title } }
+          pageInfo { hasNextPage endCursor }
         }
       }`;
-    const data = await graphql(gql, { first, query });
-    const nodes = data?.productVariants?.nodes ?? [];
-    return nodes.map((n) => ({
-      variantId: n.id,
-      inventoryItemId: n.inventoryItem?.id,
-      productTitle: n.product?.title ?? "",
-      variantTitle: n.title ?? "",
-      sku: n.sku ?? "",
-      barcode: n.barcode ?? "",
-      imageUrl: "",
-    }));
+    const data = await graphql(gql, variables);
+    const conn = data?.productVariants ?? {};
+    const nodes = (conn.nodes ?? []).map((n) => mapNode(n, false));
+    const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+    return { nodes, pageInfo };
   }
 
   // 画像あり
   try {
     const gql = `#graphql
-      query GetVariants($first: Int!, $query: String!) {
-        productVariants(first: $first, query: $query) {
+      query GetVariants($first: Int!, $query: String!, $after: String) {
+        productVariants(first: $first, query: $query, after: $after) {
           nodes {
             id
             title
@@ -117,38 +127,28 @@ export async function searchVariants(q, opts = {}) {
               featuredImage { url }
             }
           }
+          pageInfo { hasNextPage endCursor }
         }
       }`;
-    const data = await graphql(gql, { first, query });
-    const nodes = data?.productVariants?.nodes ?? [];
-    return nodes.map((n) => ({
-      variantId: n.id,
-      inventoryItemId: n.inventoryItem?.id,
-      productTitle: n.product?.title ?? "",
-      variantTitle: n.title ?? "",
-      sku: n.sku ?? "",
-      barcode: n.barcode ?? "",
-      imageUrl: n.image?.url ?? n.product?.featuredImage?.url ?? "",
-    }));
+    const data = await graphql(gql, variables);
+    const conn = data?.productVariants ?? {};
+    const nodes = (conn.nodes ?? []).map((n) => mapNode(n, true));
+    const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+    return { nodes, pageInfo };
   } catch (e) {
     // フォールバック: 画像なしで再試行
     const gql = `#graphql
-      query GetVariants($first: Int!, $query: String!) {
-        productVariants(first: $first, query: $query) {
+      query GetVariants($first: Int!, $query: String!, $after: String) {
+        productVariants(first: $first, query: $query, after: $after) {
           nodes { id title sku barcode inventoryItem { id } product { title } }
+          pageInfo { hasNextPage endCursor }
         }
       }`;
-    const data = await graphql(gql, { first, query });
-    const nodes = data?.productVariants?.nodes ?? [];
-    return nodes.map((n) => ({
-      variantId: n.id,
-      inventoryItemId: n.inventoryItem?.id,
-      productTitle: n.product?.title ?? "",
-      variantTitle: n.title ?? "",
-      sku: n.sku ?? "",
-      barcode: n.barcode ?? "",
-      imageUrl: "",
-    }));
+    const data = await graphql(gql, variables);
+    const conn = data?.productVariants ?? {};
+    const nodes = (conn.nodes ?? []).map((n) => mapNode(n, false));
+    const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+    return { nodes, pageInfo };
   }
 }
 
@@ -726,9 +726,11 @@ function findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, groupId) {
 // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用して商品をフィルタリング（生成時の状態を保持）
 // ✅ cachedProductGroups を渡すと readProductGroups() をスキップし、まとめて表示で全グループが同じスナップショットを参照して安定表示
 export async function fetchProductsByGroups(productGroupIds, locationId, opts = {}) {
-  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null, offset: optsOffset = 0, limit: optsLimit } = opts;
+  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null, offset: optsOffset = 0, limit: optsLimit, collectionPageInfo: optsCollectionPageInfo = null } = opts;
   const offset = Math.max(0, Number(optsOffset) || 0);
   const limit = optsLimit != null && optsLimit > 0 ? Math.max(1, Math.min(Number(optsLimit), 2000)) : null;
+  /** コレクション経路の「さらに読み込む」用。前回レスポンスの pageInfo を渡すと after で次ページを取得する */
+  const collectionPageInfo = optsCollectionPageInfo && typeof optsCollectionPageInfo === "object" ? optsCollectionPageInfo : null;
   const groups = (Array.isArray(cachedProductGroups) && cachedProductGroups.length > 0)
     ? cachedProductGroups
     : await readProductGroups();
@@ -742,6 +744,8 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
   const effectiveFirst = Math.max(1, Math.min(250, Number(opts?.productFirst ?? opts?.initialLimit ?? 250)));
   let hasMoreFromSavedIds = false;
   let usedSavedIdsPath = false;
+  /** コレクション経路用：各コレクションの pageInfo（さらに読み込むでクライアントに返し、次回 after で渡す） */
+  let collectionPageInfoResult = {};
   const allVariants = [];
   for (const group of targetGroups) {
     // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用（生成時の状態を保持）
@@ -822,20 +826,98 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
       continue; // ✅ 保存されたinventoryItemIdsを使用した場合は、通常のコレクション取得処理をスキップ
     }
     
-    // ✅ 通常の処理：コレクションから商品を取得
+    // ✅ 通常の処理：コレクションから商品を取得（初回は first のみ、さらに読み込むは after で次ページ取得）
     if (!group.collectionIds?.length) continue;
+    const productFirst = Math.max(1, Math.min(250, Number(opts?.productFirst ?? opts?.initialLimit ?? 250)));
     for (const collectionId of group.collectionIds) {
-      // ✅ collectionConfigsからselectedVariantIdsを取得
+      // ✅ さらに読み込む時：このコレクションに cursor がある場合のみ次ページを取得
+      if (offset > 0 && collectionPageInfo) {
+        const pageInfo = collectionPageInfo[collectionId];
+        if (!pageInfo?.hasNextPage || !pageInfo?.endCursor) continue;
+        const gqlWithPageInfo = includeImages
+          ? `#graphql
+            query CollectionProductsPage($id: ID!, $first: Int!, $after: String) {
+              collection(id: $id) {
+                products(first: $first, after: $after) {
+                  nodes {
+                    title
+                    featuredImage { url }
+                    variants(first: 250) {
+                      nodes {
+                        id
+                        title
+                        sku
+                        barcode
+                        image { url }
+                        inventoryItem { id }
+                      }
+                    }
+                  }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }`
+          : `#graphql
+            query CollectionProductsPage($id: ID!, $first: Int!, $after: String) {
+              collection(id: $id) {
+                products(first: $first, after: $after) {
+                  nodes {
+                    title
+                    variants(first: 250) {
+                      nodes {
+                        id
+                        title
+                        sku
+                        barcode
+                        inventoryItem { id }
+                      }
+                    }
+                  }
+                  pageInfo { hasNextPage endCursor }
+                }
+              }
+            }`;
+        try {
+          const data = await graphql(gqlWithPageInfo, { id: collectionId, first: productFirst, after: pageInfo.endCursor });
+          const products = data?.collection?.products?.nodes ?? [];
+          const nextPageInfo = data?.collection?.products?.pageInfo ?? {};
+          collectionPageInfoResult[collectionId] = { hasNextPage: !!nextPageInfo.hasNextPage, endCursor: nextPageInfo.endCursor ?? null };
+          const collectionConfig = group.collectionConfigs?.find((c) => c.collectionId === collectionId);
+          const selectedVariantIds = collectionConfig?.selectedVariantIds || [];
+          const shouldFilterBySelected = selectedVariantIds.length > 0;
+          for (const p of products) {
+            const variants = p.variants?.nodes ?? [];
+            for (const v of variants) {
+              if (v.inventoryItem?.id) {
+                if (shouldFilterBySelected && !selectedVariantIds.includes(v.id)) continue;
+                allVariants.push({
+                  variantId: v.id,
+                  inventoryItemId: v.inventoryItem.id,
+                  productTitle: p.title ?? "",
+                  variantTitle: v.title ?? "",
+                  sku: v.sku ?? "",
+                  barcode: v.barcode ?? "",
+                  imageUrl: includeImages ? (v.image?.url ?? p.featuredImage?.url ?? "") : "",
+                });
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`Collection ${collectionId} (next page) fetch error:`, e);
+        }
+        continue;
+      }
+      if (offset > 0) continue; // ✅ さらに読み込む時でこのコレクションに cursor がない場合はスキップ（初回取得で重複させない）
+
+      // ✅ 初回取得：pageInfo を取得して返し、さらに読み込むで after に渡す
       const collectionConfig = group.collectionConfigs?.find((c) => c.collectionId === collectionId);
       const selectedVariantIds = collectionConfig?.selectedVariantIds || [];
-      // ✅ selectedVariantIdsが空の場合は全選択（既存の動作を維持）
       const shouldFilterBySelected = selectedVariantIds.length > 0;
-      
       const gql = includeImages
         ? `#graphql
-          query CollectionProducts($id: ID!, $first: Int!) {
+          query CollectionProducts($id: ID!, $first: Int!, $after: String) {
             collection(id: $id) {
-              products(first: $first) {
+              products(first: $first, after: $after) {
                 nodes {
                   title
                   featuredImage { url }
@@ -850,13 +932,14 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
                     }
                   }
                 }
+                pageInfo { hasNextPage endCursor }
               }
             }
           }`
         : `#graphql
-          query CollectionProducts($id: ID!, $first: Int!) {
+          query CollectionProducts($id: ID!, $first: Int!, $after: String) {
             collection(id: $id) {
-              products(first: $first) {
+              products(first: $first, after: $after) {
                 nodes {
                   title
                   variants(first: 250) {
@@ -869,21 +952,20 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
                     }
                   }
                 }
+                pageInfo { hasNextPage endCursor }
               }
             }
           }`;
       try {
-        const productFirst = Math.max(1, Math.min(250, Number(opts?.productFirst ?? opts?.initialLimit ?? 250)));
-        const data = await graphql(gql, { id: collectionId, first: productFirst });
+        const data = await graphql(gql, { id: collectionId, first: productFirst, after: null });
         const products = data?.collection?.products?.nodes ?? [];
+        const pageInfo = data?.collection?.products?.pageInfo ?? {};
+        collectionPageInfoResult[collectionId] = { hasNextPage: !!pageInfo.hasNextPage, endCursor: pageInfo.endCursor ?? null };
         for (const p of products) {
           const variants = p.variants?.nodes ?? [];
           for (const v of variants) {
             if (v.inventoryItem?.id) {
-              // ✅ selectedVariantIdsが指定されている場合は、選択されたバリアントのみを追加
-              if (shouldFilterBySelected && !selectedVariantIds.includes(v.id)) {
-                continue; // 選択されていないバリアントはスキップ
-              }
+              if (shouldFilterBySelected && !selectedVariantIds.includes(v.id)) continue;
               allVariants.push({
                 variantId: v.id,
                 inventoryItemId: v.inventoryItem.id,
@@ -911,11 +993,20 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
     return true;
   });
 
-  // ✅ さらに読み込む用：offset/limit を適用（saved IDs 経路では取得時に既にページング済みのため slice しない）
+  // ✅ コレクション経路で「さらに読み込む」時は allVariants が「次ページ分だけ」なので offset でスライスしない
+  const usedCollectionCursorPath = offset > 0 && collectionPageInfo && Object.keys(collectionPageInfoResult).length > 0;
+  const hasMoreFromCollection = Object.values(collectionPageInfoResult).some((p) => p.hasNextPage);
   const variantsToProcess = usedSavedIdsPath
     ? uniqueVariants
-    : (limit != null ? uniqueVariants.slice(offset, offset + limit) : uniqueVariants);
-  const hasMore = limit != null ? (uniqueVariants.length > offset + limit || hasMoreFromSavedIds) : false;
+    : usedCollectionCursorPath
+      ? (limit != null ? uniqueVariants.slice(0, limit) : uniqueVariants)
+      : (limit != null ? uniqueVariants.slice(offset, offset + limit) : uniqueVariants);
+  const hasMore = limit != null
+    ? (uniqueVariants.length > offset + limit || hasMoreFromSavedIds || hasMoreFromCollection)
+    : false;
+  const mergedCollectionPageInfo = collectionPageInfo
+    ? { ...collectionPageInfo, ...collectionPageInfoResult }
+    : collectionPageInfoResult;
 
   // 在庫レベルでフィルタリング（初期表示用）・入庫並みに1回の取得で currentQuantity 付きで返す
   const QTY_BATCH_SIZE = 15;
@@ -938,11 +1029,19 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
       );
       results.filter((r) => r != null).forEach((r) => variantsWithInventory.push(r));
     }
-    if (limit != null) return { products: variantsWithInventory, hasMore };
+    if (limit != null) {
+      const out = { products: variantsWithInventory, hasMore };
+      if (Object.keys(mergedCollectionPageInfo).length > 0) out.collectionPageInfo = mergedCollectionPageInfo;
+      return out;
+    }
     return variantsWithInventory;
   }
 
-  if (limit != null) return { products: variantsToProcess, hasMore };
+  if (limit != null) {
+    const out = { products: variantsToProcess, hasMore };
+    if (Object.keys(mergedCollectionPageInfo).length > 0) out.collectionPageInfo = mergedCollectionPageInfo;
+    return out;
+  }
   if (hasMoreFromSavedIds) return { products: variantsToProcess, hasMore: true };
   return variantsToProcess;
 }
@@ -1427,7 +1526,8 @@ export async function resolveVariantByCode(codeRaw, { includeImages = false } = 
   }
 
   // 2) network (searchVariants)
-  const list = await searchVariants(code, { includeImages, first: 50 });
+  const result = await searchVariants(code, { includeImages, first: 50 });
+  const list = result?.nodes ?? [];
   const v = pickBestVariant_(code, list);
   if (!v?.variantId || !v?.inventoryItemId) {
     // ✅ ネットワークから取得できなかった場合、キャッシュがあればそれを返す

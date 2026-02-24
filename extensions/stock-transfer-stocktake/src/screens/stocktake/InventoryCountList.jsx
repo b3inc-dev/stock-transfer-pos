@@ -198,6 +198,8 @@ export function InventoryCountList({
   const [query, setQuery] = useState("");
   const [candidates, setCandidates] = useState([]);
   const [candidatesLoading, setCandidatesLoading] = useState(false);
+  const [searchPageInfo, setSearchPageInfo] = useState({ hasNextPage: false, endCursor: null });
+  const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [locationName, setLocationName] = useState("");
   const [productGroupName, setProductGroupName] = useState("");
   const [productGroupNames, setProductGroupNames] = useState(new Map());
@@ -219,6 +221,7 @@ export function InventoryCountList({
   const loadingGroupIdRef = useRef(null); // ✅ 二重発火防止（onClick/onPress両方で呼ばれる場合）
   const loadingMoreRef = useRef(false); // ✅ さらに読み込むの二重発火防止（入庫・出庫と同様）
   const hasMoreProductsRef = useRef(false); // ✅ タップ時に最新の hasMoreProducts を参照（スタレ閉じ込め防止）
+  const collectionPageInfoRef = useRef(null); // ✅ コレクション経路の「さらに読み込む」用（前回の pageInfo を after で渡す）
 
   const denyEdit = useCallback(() => {
     if (!toastReadOnlyOnceRef.current) {
@@ -703,12 +706,28 @@ export function InventoryCountList({
           initialInventoryItemIdsRef.current = new Set(
             draftLines.filter((l) => !l.isExtra).map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
           );
+          // ✅ 下書き復元時：「さらに読み込む」を有効化（未読込分がある場合）。復元後に残りを読めるようにする
+          const idsByGroup = c?.inventoryItemIdsByGroup;
+          let hasMoreRestored = false;
+          if (idsByGroup && typeof idsByGroup === "object") {
+            let totalIds = 0;
+            for (const gid of targetProductGroupIds) {
+              const key = Object.keys(idsByGroup).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(gid));
+              if (key && Array.isArray(idsByGroup[key])) totalIds += idsByGroup[key].length;
+            }
+            hasMoreRestored = totalIds > draftLines.length;
+          } else {
+            const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+            hasMoreRestored = draftLines.length >= productFirst;
+          }
+          setHasMoreProducts(hasMoreRestored);
+          hasMoreProductsRef.current = hasMoreRestored;
           // ✅ まとめて表示モードの場合、isReadOnlyStateを適切に設定
           const hasIncompleteGroups = draftLines.some((l) => !l.isReadOnly);
           const isAllCompleted = c?.status === "completed" || !hasIncompleteGroups;
           setIsReadOnlyState(isAllCompleted);
           setLoading(false);
-          console.log("[InventoryCountList] Draft loaded (multiple mode), lines count:", draftLines.length);
+          console.log("[InventoryCountList] Draft loaded (multiple mode), lines count:", draftLines.length, "hasMoreProducts:", hasMoreRestored);
           return;
         }
         
@@ -944,13 +963,31 @@ export function InventoryCountList({
         initialInventoryItemIdsRef.current = new Set(
           linesToSet.filter((l) => !l.isExtra).map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
         );
+        // ✅ 下書き復元時：「さらに読み込む」を有効化（未読込分がある場合）。復元後に残りを読めるようにする
+        const idsByGroup = c?.inventoryItemIdsByGroup;
+        let hasMoreRestored = false;
+        if (idsByGroup && typeof idsByGroup === "object") {
+          const groupIds = currentGroupId ? [currentGroupId] : targetProductGroupIds;
+          let totalIds = 0;
+          for (const gid of groupIds) {
+            const key = Object.keys(idsByGroup).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(gid));
+            if (key && Array.isArray(idsByGroup[key])) totalIds += idsByGroup[key].length;
+          }
+          hasMoreRestored = totalIds > linesToSet.length;
+        } else {
+          const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          hasMoreRestored = linesToSet.length >= productFirst;
+        }
+        setHasMoreProducts(hasMoreRestored);
+        hasMoreProductsRef.current = hasMoreRestored;
         setLoading(false);
-        console.log("[InventoryCountList] Draft loaded, lines count:", linesToSet.length, isMultipleMode ? "(all groups)" : `(group: ${currentGroupId})`);
+        console.log("[InventoryCountList] Draft loaded, lines count:", linesToSet.length, isMultipleMode ? "(all groups)" : `(group: ${currentGroupId})`, "hasMoreProducts:", hasMoreRestored);
         return;
       }
 
       // 在庫レベルがある商品のみを取得（初期表示用）・入庫並み：1回の取得で currentQuantity 付きで返るため二重取得しない
       const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+      collectionPageInfoRef.current = null; // ✅ 棚卸/グループ切り替え時は cursor をリセット
       // ✅ さらに読み込む用の1回あたり件数（管理画面と揃える）
       // ✅ 常に画像付きで取得（画像ON/OFFは表示切替のみ。ロス・入庫・出庫と同様にリスト再読込しない）
       const rawProducts = await fetchProductsByGroups(targetProductGroupIds, c.locationId, {
@@ -964,6 +1001,7 @@ export function InventoryCountList({
       const products = Array.isArray(rawProducts) ? rawProducts : (rawProducts?.products ?? []);
       const hasMore = rawProducts?.hasMore ?? false;
       setHasMoreProducts(hasMore);
+      collectionPageInfoRef.current = rawProducts?.collectionPageInfo ?? null; // ✅ コレクション経路のさらに読み込む用
       console.log("[InventoryCountList] fetchProductsByGroups result", { productCount: products.length, hasMore });
       
       // fetchProductsByGroups が filterByInventoryLevel: true のとき currentQuantity を付与して返すため再取得不要
@@ -1014,12 +1052,14 @@ export function InventoryCountList({
         filterByInventoryLevel: true,
         includeImages: true,
         inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
+        collectionPageInfo: collectionPageInfoRef.current || undefined,
         offset: lines.length,
         limit: LOAD_PAGE_SIZE,
       });
       const products = Array.isArray(raw) ? raw : (raw?.products ?? []);
       const hasMore = raw?.hasMore ?? false;
       setHasMoreProducts(hasMore);
+      if (raw?.collectionPageInfo != null) collectionPageInfoRef.current = raw.collectionPageInfo;
       const currentGroupIdForSingle = !isMultipleMode && targetProductGroupIds?.length > 0 ? targetProductGroupIds[0] : null;
       const newLines = products.map((p, idx) => ({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${idx}`,
@@ -1138,7 +1178,7 @@ export function InventoryCountList({
         );
       } else {
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-        let products = await fetchProductsByGroups([groupId], c.locationId, {
+        let products = await fetchProductsByGroups([groupId], count.locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
@@ -1146,7 +1186,7 @@ export function InventoryCountList({
         });
         if (products.length === 0) {
           await new Promise((r) => setTimeout(r, 1000));
-          products = await fetchProductsByGroups([groupId], c.locationId, {
+          products = await fetchProductsByGroups([groupId], count.locationId, {
             productFirst,
             filterByInventoryLevel: false,
             includeImages: showImages && !liteMode,
@@ -1156,7 +1196,7 @@ export function InventoryCountList({
         const linesWithCurrent = await Promise.all(
           products.map(async (p) => {
             try {
-              const currentQty = await getCurrentQuantity(p.inventoryItemId, c.locationId);
+              const currentQty = await getCurrentQuantity(p.inventoryItemId, count.locationId);
               return {
                 id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 variantId: p.variantId,
@@ -1434,6 +1474,7 @@ export function InventoryCountList({
       if (!q) {
         if (mounted) {
           setCandidates([]);
+          setSearchPageInfo({ hasNextPage: false, endCursor: null });
           setCandidatesLoading(false);
           setAddQtyById({}); // ✅ 入庫と同様：検索クリア時に候補ごとの追加済み数量をリセット
         }
@@ -1442,11 +1483,19 @@ export function InventoryCountList({
       setCandidatesLoading(true);
       try {
         const searchLimit = Math.max(10, Math.min(50, Number(settings?.searchList?.initialLimit ?? 50)));
-        const list = await searchVariants(q, { first: searchLimit, includeImages: showImages && !liteMode });
-        if (mounted) setCandidates(Array.isArray(list) ? list : []);
+        const result = await searchVariants(q, { first: searchLimit, includeImages: showImages && !liteMode });
+        const list = result?.nodes ?? [];
+        const pageInfo = result?.pageInfo ?? { hasNextPage: false, endCursor: null };
+        if (mounted) {
+          setCandidates(Array.isArray(list) ? list : []);
+          setSearchPageInfo(pageInfo);
+        }
       } catch (e) {
         toast(`検索エラー: ${e?.message ?? e}`);
-        if (mounted) setCandidates([]);
+        if (mounted) {
+          setCandidates([]);
+          setSearchPageInfo({ hasNextPage: false, endCursor: null });
+        }
       } finally {
         if (mounted) setCandidatesLoading(false);
       }
@@ -1456,6 +1505,25 @@ export function InventoryCountList({
       mounted = false;
     };
   }, [debouncedQuery, showImages, liteMode, settings, setAddQtyById]);
+
+  // ✅ 検索リストの「さらに読み込む」（50件超の次のページを取得・出庫と同様）
+  const handleLoadMoreSearch = useCallback(async () => {
+    const raw = String(debouncedQuery || "").trim();
+    if (!raw || loadingMoreSearch || !searchPageInfo?.hasNextPage || !searchPageInfo?.endCursor) return;
+    setLoadingMoreSearch(true);
+    try {
+      const searchLimit = Math.max(10, Math.min(50, Number(settings?.searchList?.initialLimit ?? 50)));
+      const result = await searchVariants(raw, { includeImages: showImages && !liteMode, first: searchLimit, after: searchPageInfo.endCursor });
+      const list = result?.nodes ?? [];
+      const pageInfo = result?.pageInfo ?? { hasNextPage: false, endCursor: null };
+      setCandidates((prev) => [...prev, ...list]);
+      setSearchPageInfo(pageInfo);
+    } catch (e) {
+      toast(`検索の追加読み込みに失敗しました: ${e?.message ?? e}`);
+    } finally {
+      setLoadingMoreSearch(false);
+    }
+  }, [debouncedQuery, searchPageInfo?.hasNextPage, searchPageInfo?.endCursor, loadingMoreSearch, showImages, liteMode, settings?.searchList?.initialLimit]);
 
   // 実数を更新
   const updateActualQuantity = useCallback((id, delta) => {
@@ -2932,7 +3000,7 @@ export function InventoryCountList({
             </s-text>
             {candidates.length > 0 ? (
               <>
-                {candidates.slice(0, 50).map((c, idx) => {
+                {candidates.map((c, idx) => {
                   const stableKey = String(c?.variantId || c?.inventoryItemId || c?.sku || c?.barcode || `${c?.productTitle}__${c?.variantTitle}`);
                   return (
                     <InventoryCountCandidateRow
@@ -2944,6 +3012,18 @@ export function InventoryCountList({
                     />
                   );
                 })}
+                {searchPageInfo?.hasNextPage ? (
+                  <s-box paddingBlockStart="small">
+                    <s-button
+                      kind="secondary"
+                      disabled={loadingMoreSearch}
+                      onClick={() => handleLoadMoreSearch()}
+                      onPress={() => handleLoadMoreSearch()}
+                    >
+                      {loadingMoreSearch ? "読込中..." : "さらに読み込む"}
+                    </s-button>
+                  </s-box>
+                ) : null}
               </>
             ) : candidatesLoading ? (
               <s-text tone="subdued" size="small">読み込み中...</s-text>

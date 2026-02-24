@@ -8,6 +8,7 @@ import {
   adjustInventoryToActual,
   fetchLocations,
   fetchVariantImage,
+  fetchSettings,
 } from "./adjustmentApi.js";
 import { getStatusBadgeTone } from "../../adjustmentHelpers.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
@@ -180,6 +181,36 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
   const [detailEntry, setDetailEntry] = useState(null);
   const fullEntriesByIdRef = useRef(new Map());
+  const [settings, setSettings] = useState(null);
+  const [detailDisplayLimit, setDetailDisplayLimit] = useState(250);
+  const DETAIL_LOAD_PAGE_SIZE = 600;
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const s = await fetchSettings();
+        if (mounted) setSettings(s);
+      } catch (e) {
+        console.error("[AdjustmentHistoryList] fetchSettings error:", e);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const detailInitialLimit = useMemo(
+    () => Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250))),
+    [settings?.productList?.initialLimit]
+  );
+
+  useEffect(() => {
+    if (!detailId) return;
+    setDetailDisplayLimit(detailInitialLimit);
+  }, [detailId, detailInitialLimit]);
+
+  const loadMoreDetailItems = useCallback(() => {
+    setDetailDisplayLimit((prev) => prev + DETAIL_LOAD_PAGE_SIZE);
+  }, []);
 
   const refreshLossHistory = useCallback(async () => {
     if (!sessionLocationGid) return;
@@ -362,17 +393,16 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   }, [detailId]);
 
   useEffect(() => {
-    if (!detailId) return;
-    if (detailLoading) {
-      setHeader?.(<s-box padding="base"><s-text tone="subdued">読み込み中...</s-text></s-box>);
-      return;
-    }
-    if (!detailEntry) {
-      setHeader?.(<s-box padding="base"><s-text tone="critical">詳細の取得に失敗しました</s-text></s-box>);
-      return;
-    }
-    const entry = detailEntry;
-      
+    if (detailId) {
+      if (detailLoading) {
+        setHeader?.(<s-box padding="base"><s-text tone="subdued">読み込み中...</s-text></s-box>);
+        return () => setHeader?.(null);
+      }
+      if (!detailEntry) {
+        setHeader?.(<s-box padding="base"><s-text tone="critical">詳細の取得に失敗しました</s-text></s-box>);
+        return () => setHeader?.(null);
+      }
+      const entry = detailEntry;
       // ✅ 出庫履歴詳細と同じヘッダーを追加
       const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
       const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
@@ -478,6 +508,8 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
     detailId,
     detailEntry,
     detailLoading,
+    detailDisplayLimit,
+    loadMoreDetailItems,
     entries,
     historyMode,
     activeCount,
@@ -682,8 +714,8 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
           <s-stack gap="base">
             {historyError ? <s-text tone="critical">{historyError}</s-text> : null}
 
-            {/* ✅ 商品リスト（出庫履歴詳細と同じデザイン） */}
-            {(e.items ?? []).map((it, idx) => {
+            {/* ✅ 商品リスト（設定の初回表示件数で表示、さらに読み込むで追加） */}
+            {((e.items ?? []).slice(0, detailDisplayLimit)).map((it, idx) => {
             // ✅ productTitleとvariantTitleを取得（titleから分割する場合も考慮）
             let productTitle = String(it.productTitle || "").trim();
             let variantTitle = String(it.variantTitle || "").trim();
@@ -748,10 +780,17 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
                 </s-box>
 
                 {/* divider は padding の外へ（上下の偏りを消す） */}
-                {idx < (e.items ?? []).length - 1 ? <s-divider /> : null}
+                {idx < Math.min((e.items ?? []).length, detailDisplayLimit) - 1 ? <s-divider /> : null}
               </s-box>
             );
             })}
+            {(e.items ?? []).length > detailDisplayLimit ? (
+              <s-box padding="base" paddingBlockStart="none">
+                <s-button kind="secondary" onClick={loadMoreDetailItems} onPress={loadMoreDetailItems}>
+                  さらに読み込む
+                </s-button>
+              </s-box>
+            ) : null}
           </s-stack>
         </s-box>
       </>
