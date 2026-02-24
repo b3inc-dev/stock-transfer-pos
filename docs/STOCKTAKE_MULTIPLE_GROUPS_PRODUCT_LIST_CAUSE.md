@@ -85,6 +85,11 @@ if (group.inventoryItemIds && group.inventoryItemIds.length > 0) {
 これにより、タイムアウトによる 502 を避けつつ、可能な範囲で全グループ分を保存する。  
 グループ数が多くて時間内に終わらない場合は、「商品グループ設定」で各グループを一度編集保存（コレクションから商品取得）してから棚卸IDを発行すると、既存の `inventoryItemIds` が使われて発行が軽くなる。
 
+### 39 グループ・約 5800 商品で「Application Error」になる要因と対策（2026-02）
+
+- **要因**: ①発行処理のどこかで未捕捉の例外（GraphQL エラー・メタフィールド保存失敗・ネットワーク等）が発生すると Remix の ErrorBoundary が表示され「Application Error」になる。②メタフィールド値の合計が大きすぎる（39 グループ×約 5800 の inventoryItemId を保存すると JSON が 500KB 超になりうる）と、保存失敗やリクエストタイムアウトで例外になる。
+- **対策（実装済み）**: ①`create_inventory_count` 全体を try/catch で囲み、例外時は「棚卸IDの発行中にエラーが発生しました。時間をおいて再度お試しください。」を返して Application Error を出さない。②保存前の JSON サイズが 500KB を超える場合は、その棚卸だけ `inventoryItemIdsByGroup` を保存せず（`inventoryItemIdsOmittedDueToSize` を付与）、棚卸は発行成功とする。POS ではコレクションから商品を読み込む。③時間予算を 22 秒→25 秒に延長してタイムアウトを少し緩和。
+
 ---
 
 ## 「まとめて表示」で読めないグループが、グループごと表示のあとだと表示される理由

@@ -73,6 +73,8 @@ export type InventoryCount = {
   productGroupName?: string; // 後方互換性のため残す
   productGroupNames?: string[]; // 商品グループ名の配列
   inventoryItemIdsByGroup?: Record<string, string[]>; // ✅ 商品グループごとのinventoryItemIds（生成時の状態を保持）
+  /** メタフィールドサイズ制限のためIDを保存せず省略した場合 true。POSはコレクション/SKUから読み込む */
+  inventoryItemIdsOmittedDueToSize?: boolean;
   status: "draft" | "in_progress" | "completed" | "cancelled";
   createdAt: string; // 作成日時（ISO）
   completedAt?: string; // 完了日時（ISO）
@@ -1182,121 +1184,149 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (actionType === "create_inventory_count") {
-    const locationId = formData.get("locationId") as string;
-    const productGroupIdStr = formData.get("productGroupId") as string; // 後方互換性のため残す
-    const productGroupIdsStr = formData.get("productGroupIds") as string; // 複数選択対応
+    try {
+      const locationId = formData.get("locationId") as string;
+      const productGroupIdStr = formData.get("productGroupId") as string; // 後方互換性のため残す
+      const productGroupIdsStr = formData.get("productGroupIds") as string; // 複数選択対応
 
-    if (!locationId) {
-      return { ok: false, error: "ロケーションは必須です" as const };
-    }
-
-    // 複数選択対応：productGroupIdsがあればそれを使用、なければproductGroupIdを使用（後方互換性）
-    let targetProductGroupIds: string[] = [];
-    if (productGroupIdsStr) {
-      try {
-        targetProductGroupIds = JSON.parse(productGroupIdsStr);
-      } catch {
-        targetProductGroupIds = productGroupIdsStr.split(",").filter(Boolean);
+      if (!locationId) {
+        return { ok: false, error: "ロケーションは必須です" as const };
       }
-    } else if (productGroupIdStr) {
-      targetProductGroupIds = [productGroupIdStr];
-    }
 
-    if (targetProductGroupIds.length === 0) {
-      return { ok: false, error: "商品グループは必須です" as const };
-    }
-
-    // ロケーションを取得
-    const locResp = await admin.graphql(
-      `#graphql
-        query Locations($first: Int!) {
-          locations(first: $first) { nodes { id name } }
+      // 複数選択対応：productGroupIdsがあればそれを使用、なければproductGroupIdを使用（後方互換性）
+      let targetProductGroupIds: string[] = [];
+      if (productGroupIdsStr) {
+        try {
+          targetProductGroupIds = JSON.parse(productGroupIdsStr);
+        } catch {
+          targetProductGroupIds = productGroupIdsStr.split(",").filter(Boolean);
         }
-      `,
-      { variables: { first: 250 } }
-    );
-    const locData = await locResp.json();
-    const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
-
-    // 商品グループ名とinventoryItemIdsを取得（全グループ分を取得してPOSのまとめて表示で読めるようにする）
-    // ✅ 制限: リクエストタイムアウト（例: Render 30秒）を避けるため、一定時間を超えたら残りはスキップして保存する
-    const INVENTORY_IDS_FETCH_MS = 22_000; //  platform の 30 秒タイムアウトより手前に収める
-    const fetchStart = Date.now();
-    const groupNames: string[] = [];
-    const inventoryItemIdsByGroup: Record<string, string[]> = {};
-    for (const groupId of targetProductGroupIds) {
-      if (Date.now() - fetchStart > INVENTORY_IDS_FETCH_MS) {
-        console.warn("[inventory-count] inventoryItemIds fetch time budget exceeded, saving count with partial groups");
-        break;
+      } else if (productGroupIdStr) {
+        targetProductGroupIds = [productGroupIdStr];
       }
-      const group = productGroups.find((g) => g.id === groupId);
-      if (!group) {
-        return { ok: false, error: `商品グループが見つかりません: ${groupId}` as const };
+
+      if (targetProductGroupIds.length === 0) {
+        return { ok: false, error: "商品グループは必須です" as const };
       }
-      groupNames.push(group.name);
-      try {
-        const ids = await getInventoryItemIdsForGroup(admin, group);
-        if (ids.length > 0) {
-          inventoryItemIdsByGroup[groupId] = ids;
-        }
-      } catch (e) {
-        console.error(`[inventory-count] getInventoryItemIdsForGroup failed for group ${groupId}:`, e);
-        // 1グループ失敗しても他は続行し、取得できた分だけ保存する
-      }
-    }
 
-    const loc = locations.find((l) => l.id === locationId);
-    // 既存の棚卸数をカウントして連番を決定（#C0000形式）
-    const existingCount = Array.isArray(inventoryCounts) ? inventoryCounts.length : 0;
-    const countName = `#C${String(existingCount + 1).padStart(4, "0")}`;
-    
-    const newCount: InventoryCount = {
-      id: generateId("count"),
-      countName, // 表示用名称を追加
-      locationId,
-      locationName: loc?.name,
-      productGroupId: targetProductGroupIds[0], // 後方互換性のため残す
-      productGroupIds: targetProductGroupIds,
-      productGroupName: groupNames[0], // 後方互換性のため残す
-      productGroupNames: groupNames,
-      inventoryItemIdsByGroup: Object.keys(inventoryItemIdsByGroup).length > 0 ? inventoryItemIdsByGroup : undefined, // ✅ 生成時の商品リストを保存
-      status: "draft",
-      createdAt: new Date().toISOString(),
-    };
-
-    inventoryCounts.push(newCount);
-
-    const saveResp = await admin.graphql(
-      `#graphql
-        mutation SaveInventoryCounts($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key type }
-            userErrors { field message }
+      // ロケーションを取得
+      const locResp = await admin.graphql(
+        `#graphql
+          query Locations($first: Int!) {
+            locations(first: $first) { nodes { id name } }
           }
+        `,
+        { variables: { first: 250 } }
+      );
+      const locData = await locResp.json();
+      const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
+
+      // 商品グループ名とinventoryItemIdsを取得（全グループ分を取得してPOSのまとめて表示で読めるようにする）
+      // ✅ 制限: リクエストタイムアウト（例: Render 30秒）を避けるため、一定時間を超えたら残りはスキップして保存する
+      const INVENTORY_IDS_FETCH_MS = 25_000; //  platform の 30 秒タイムアウトより手前に収める（39グループ等で余裕を持たせる）
+      const fetchStart = Date.now();
+      const groupNames: string[] = [];
+      const inventoryItemIdsByGroup: Record<string, string[]> = {};
+      for (const groupId of targetProductGroupIds) {
+        if (Date.now() - fetchStart > INVENTORY_IDS_FETCH_MS) {
+          console.warn("[inventory-count] inventoryItemIds fetch time budget exceeded, saving count with partial groups");
+          break;
         }
-      `,
-      {
-        variables: {
-          metafields: [
-            {
-              ownerId,
-              namespace: NS,
-              key: INVENTORY_COUNTS_KEY,
-              type: "json",
-              value: JSON.stringify(inventoryCounts),
-            },
-          ],
-        },
+        const group = productGroups.find((g) => g.id === groupId);
+        if (!group) {
+          return { ok: false, error: `商品グループが見つかりません: ${groupId}` as const };
+        }
+        groupNames.push(group.name);
+        try {
+          const ids = await getInventoryItemIdsForGroup(admin, group);
+          if (ids.length > 0) {
+            inventoryItemIdsByGroup[groupId] = ids;
+          }
+        } catch (e) {
+          console.error(`[inventory-count] getInventoryItemIdsForGroup failed for group ${groupId}:`, e);
+          // 1グループ失敗しても他は続行し、取得できた分だけ保存する
+        }
       }
-    );
 
-    const saveJson = await saveResp.json();
-    const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
-    if (errs.length) {
-      return { ok: false, error: errs.map((e: any) => e.message).join(" / ") as const };
+      const loc = locations.find((l) => l.id === locationId);
+      // 既存の棚卸数をカウントして連番を決定（#C0000形式）
+      const existingCount = Array.isArray(inventoryCounts) ? inventoryCounts.length : 0;
+      const countName = `#C${String(existingCount + 1).padStart(4, "0")}`;
+
+      // メタフィールド値は 2MB 制限（API 2026-04 以降は 16KB の可能性あり）。大きすぎる場合は ID を保存せず POS でコレクションから読む
+      const METAFIELD_VALUE_MAX_BYTES = 500_000; // 500KB に抑えてリクエストタイムアウト・保存失敗を防ぐ
+      let inventoryItemIdsOmittedDueToSize = false;
+      let inventoryItemIdsToSave: Record<string, string[]> | undefined =
+        Object.keys(inventoryItemIdsByGroup).length > 0 ? inventoryItemIdsByGroup : undefined;
+
+      const newCount: InventoryCount = {
+        id: generateId("count"),
+        countName,
+        locationId,
+        locationName: loc?.name,
+        productGroupId: targetProductGroupIds[0],
+        productGroupIds: targetProductGroupIds,
+        productGroupName: groupNames[0],
+        productGroupNames: groupNames,
+        inventoryItemIdsByGroup: inventoryItemIdsToSave,
+        inventoryItemIdsOmittedDueToSize,
+        status: "draft",
+        createdAt: new Date().toISOString(),
+      };
+
+      let payload = JSON.stringify([...inventoryCounts, newCount]);
+      if (payload.length > METAFIELD_VALUE_MAX_BYTES) {
+        inventoryItemIdsOmittedDueToSize = true;
+        inventoryItemIdsToSave = undefined;
+        newCount.inventoryItemIdsByGroup = undefined;
+        newCount.inventoryItemIdsOmittedDueToSize = true;
+        payload = JSON.stringify([...inventoryCounts, newCount]);
+      }
+      inventoryCounts.push(newCount);
+
+      const saveResp = await admin.graphql(
+        `#graphql
+          mutation SaveInventoryCounts($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) {
+              metafields { id namespace key type }
+              userErrors { field message }
+            }
+          }
+        `,
+        {
+          variables: {
+            metafields: [
+              {
+                ownerId,
+                namespace: NS,
+                key: INVENTORY_COUNTS_KEY,
+                type: "json",
+                value: payload,
+              },
+            ],
+          },
+        }
+      );
+
+      const saveJson = await saveResp.json();
+      const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
+      if (errs.length) {
+        return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") as const };
+      }
+
+      return {
+        ok: true,
+        inventoryCountId: newCount.id,
+        countName: newCount.countName,
+        inventoryItemIdsOmittedDueToSize: newCount.inventoryItemIdsOmittedDueToSize ?? false,
+      };
+    } catch (e) {
+      console.error("[inventory-count] create_inventory_count failed:", e);
+      return {
+        ok: false,
+        error: "棚卸IDの発行中にエラーが発生しました。時間をおいて再度お試しください。" as const,
+      };
     }
-
-    return { ok: true, inventoryCountId: newCount.id };
   }
 
   if (actionType === "get_collection_products") {
@@ -3927,6 +3957,11 @@ export default function InventoryCountPage() {
                             <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
                               履歴タブで確認・CSV出力できます。
                             </s-text>
+                            {fetcher.data.inventoryItemIdsOmittedDueToSize && (
+                              <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "6px" }}>
+                                商品数が多いため、POSではコレクションから商品を読み込みます。
+                              </s-text>
+                            )}
                           </s-box>
                         )}
                       </s-stack>

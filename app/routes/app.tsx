@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { Outlet, redirect, useLoaderData, useNavigation, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
@@ -213,11 +214,44 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle };
 };
 
+const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000; // 5分（有料プランでも LB/プロキシのアイドル切断を防ぐ）
+
 export default function App() {
   const { apiKey, shopPlan, storeHandle } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isLoading = navigation.state === "loading";
   const { features, distribution } = shopPlan;
+  const keepaliveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    const ping = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        fetch("/app/keepalive", { method: "GET", credentials: "same-origin" }).catch(() => {});
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        ping();
+        keepaliveIntervalRef.current = setInterval(ping, KEEPALIVE_INTERVAL_MS);
+      } else {
+        if (keepaliveIntervalRef.current) {
+          clearInterval(keepaliveIntervalRef.current);
+          keepaliveIntervalRef.current = null;
+        }
+      }
+    };
+    if (document.visibilityState === "visible") {
+      keepaliveIntervalRef.current = setInterval(ping, KEEPALIVE_INTERVAL_MS);
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (keepaliveIntervalRef.current) {
+        clearInterval(keepaliveIntervalRef.current);
+        keepaliveIntervalRef.current = null;
+      }
+    };
+  }, []);
 
   return (
     <AppProvider embedded apiKey={apiKey}>
