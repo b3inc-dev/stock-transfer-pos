@@ -148,6 +148,7 @@ export function InventoryCountConditions({
   const loadMoreHistory = useCallback(async () => {
     if (loadedChunkCount >= chunkCount) return;
     setLoading(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const listLimit = await getStocktakeListLimit();
       const accumulated = [];
@@ -284,6 +285,7 @@ export function InventoryCountConditions({
     setError("");
     setChunkCount(0);
     setLoadedChunkCount(0);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       let result = await readInventoryCountsFirstPage();
       let allFetched = Array.isArray(result.counts) ? [...result.counts] : [];

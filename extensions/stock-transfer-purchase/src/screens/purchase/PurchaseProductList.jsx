@@ -629,6 +629,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       }
 
       setLoading(true);
+      await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
       try {
         const includeImages = showImages && !liteMode;
         const searchLimit = settings?.searchList?.initialLimit ?? 50;
@@ -1115,6 +1116,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     const raw = String(debouncedQuery || "").trim();
     if (!raw || loadingMoreSearch || !searchPageInfo?.hasNextPage || !searchPageInfo?.endCursor) return;
     setLoadingMoreSearch(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const searchLimit = settings?.searchList?.initialLimit ?? 50;
       const first = Math.max(10, Math.min(50, Number.isFinite(searchLimit) ? searchLimit : 50));

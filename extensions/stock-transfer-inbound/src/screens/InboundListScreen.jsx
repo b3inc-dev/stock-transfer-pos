@@ -235,6 +235,8 @@ export function InboundListScreen({
   const [addLoading, setAddLoading] = useState(false);
   const [addCandidates, setAddCandidates] = useState([]);
   const [addCandidatesDisplayLimit, setAddCandidatesDisplayLimit] = useState(50); // REFERENCE 同型: 初期表示50件（「さらに表示」で追加読み込み可能）
+  const [addSearchPageInfo, setAddSearchPageInfo] = useState({ hasNextPage: false, endCursor: null });
+  const [loadingMoreAddSearch, setLoadingMoreAddSearch] = useState(false);
   const [addQtyById, setAddQtyById] = useState({});
   const [inbCandidateStockVersion, setInbCandidateStockVersion] = useState(0);
   const inbCandidateStockCacheRef = useRef(new Map());
@@ -363,6 +365,7 @@ export function InboundListScreen({
   const refreshPending = async () => {
     if (!locationGid) return;
     setPendingLoading(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const listLimit = Math.max(1, Math.min(250, Number(appState?.outbound?.settings?.inbound?.listInitialLimit ?? settings?.inbound?.listInitialLimit ?? 100)));
       const data = await fetchPendingTransfersForDestination(locationGid, { first: listLimit });
@@ -650,6 +653,7 @@ export function InboundListScreen({
   const loadMoreLineItems_ = useCallback(async () => {
     if (loadingMore || !lineItemsPageInfo?.hasNextPage || !lineItemsPageInfo?.endCursor || !selectedShipmentId || !locationGid) return;
     setLoadingMore(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     const ac = new AbortController();
     try {
       const result = await fetchInventoryShipmentEnriched(selectedShipmentId, {
@@ -886,24 +890,50 @@ export function InboundListScreen({
     let alive = true;
     const q = String(debouncedAddQuery || "").trim();
     if (q.length < 1) {
-      if (alive) { setAddCandidates([]); setAddCandidatesDisplayLimit(20); }
+      if (alive) { setAddCandidates([]); setAddSearchPageInfo({ hasNextPage: false, endCursor: null }); setAddCandidatesDisplayLimit(20); }
       return;
     }
     (async () => {
       try {
         if (alive) setAddLoading(true);
-        const list = await searchVariants(q, { first: searchLimit, includeImages: Boolean(showImages && !liteMode) });
+        const result = await searchVariants(q, { first: searchLimit, includeImages: Boolean(showImages && !liteMode) });
         if (!alive) return;
+        const list = result?.nodes ?? [];
+        const pageInfo = result?.pageInfo ?? { hasNextPage: false, endCursor: null };
         setAddCandidates(Array.isArray(list) ? list : []);
+        setAddSearchPageInfo(pageInfo);
         setAddCandidatesDisplayLimit(20);
       } catch (e) {
-        if (alive) setAddCandidates([]);
+        if (alive) { setAddCandidates([]); setAddSearchPageInfo({ hasNextPage: false, endCursor: null }); }
       } finally {
         if (alive) setAddLoading(false);
       }
     })();
     return () => { alive = false; };
   }, [debouncedAddQuery, showImages, liteMode, searchLimit]);
+
+  const handleLoadMoreAddSearch = useCallback(async () => {
+    const raw = String(debouncedAddQuery || "").trim();
+    if (!raw || loadingMoreAddSearch || !addSearchPageInfo?.hasNextPage || !addSearchPageInfo?.endCursor) return;
+    setLoadingMoreAddSearch(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
+    try {
+      const result = await searchVariants(raw, {
+        first: searchLimit,
+        includeImages: Boolean(showImages && !liteMode),
+        after: addSearchPageInfo.endCursor,
+      });
+      const list = result?.nodes ?? [];
+      const pageInfo = result?.pageInfo ?? { hasNextPage: false, endCursor: null };
+      setAddCandidates((prev) => [...prev, ...list]);
+      setAddSearchPageInfo(pageInfo);
+      setAddCandidatesDisplayLimit((prev) => prev + list.length);
+    } catch (e) {
+      toast(`検索の追加読み込みに失敗しました: ${toUserMessage(e)}`);
+    } finally {
+      setLoadingMoreAddSearch(false);
+    }
+  }, [debouncedAddQuery, addSearchPageInfo?.hasNextPage, addSearchPageInfo?.endCursor, loadingMoreAddSearch, showImages, liteMode, searchLimit]);
 
   const waitForOk = useCallback(async (title, msg) => {
     scanPausedRef.current = true;
@@ -1842,6 +1872,13 @@ export function InboundListScreen({
                   <s-box padding="small">
                     <s-button kind="secondary" onClick={() => handleShowMoreAddCandidates_(setAddCandidatesDisplayLimit)} onPress={() => handleShowMoreAddCandidates_(setAddCandidatesDisplayLimit)}>
                       さらに表示（残り {addCandidates.length - addCandidatesDisplayLimit}件）
+                    </s-button>
+                  </s-box>
+                ) : null}
+                {addSearchPageInfo?.hasNextPage ? (
+                  <s-box padding="small">
+                    <s-button kind="secondary" disabled={loadingMoreAddSearch} onClick={handleLoadMoreAddSearch} onPress={handleLoadMoreAddSearch}>
+                      {loadingMoreAddSearch ? "読込中..." : "さらに読み込む"}
                     </s-button>
                   </s-box>
                 ) : null}

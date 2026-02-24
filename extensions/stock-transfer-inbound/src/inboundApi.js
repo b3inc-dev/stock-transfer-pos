@@ -604,33 +604,39 @@ function buildVariantSearchQuery_(raw) {
   return [...new Set(parts)].join(" OR ");
 }
 
+// ✅ 戻り値: { nodes, pageInfo }（検索の「さらに読み込む」用）。従来の配列を期待する呼び出しは result?.nodes を使用
 export async function searchVariants(q, opts = {}) {
   const includeImages = opts?.includeImages !== false;
+  const after = opts?.after ?? null;
   const first = Math.max(10, Math.min(50, Number(opts?.first) || 50));
   const query = buildVariantSearchQuery_(q);
-  if (!query) return [];
+  if (!query) return { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } };
+  const variables = { first, query };
+  if (after) variables.after = after;
   const gql = includeImages
     ? `#graphql
-      query GetVariants($first: Int!, $query: String!) {
-        productVariants(first: $first, query: $query) {
+      query GetVariants($first: Int!, $query: String!, $after: String) {
+        productVariants(first: $first, query: $query, after: $after) {
           nodes {
             id title sku barcode image { url }
             inventoryItem { id }
             product { title featuredImage { url } }
           }
+          pageInfo { hasNextPage endCursor }
         }
       }`
     : `#graphql
-      query GetVariants($first: Int!, $query: String!) {
-        productVariants(first: $first, query: $query) {
+      query GetVariants($first: Int!, $query: String!, $after: String) {
+        productVariants(first: $first, query: $query, after: $after) {
           nodes {
             id title sku barcode inventoryItem { id } product { title }
           }
+          pageInfo { hasNextPage endCursor }
         }
       }`;
-  const data = await adminGraphql(gql, { first, query }, opts);
-  const nodes = data?.productVariants?.nodes ?? [];
-  return nodes.map((n) => ({
+  const data = await adminGraphql(gql, variables, opts);
+  const conn = data?.productVariants ?? {};
+  const nodes = (conn.nodes ?? []).map((n) => ({
     variantId: n.id,
     inventoryItemId: n.inventoryItem?.id,
     productTitle: n.product?.title ?? "",
@@ -639,6 +645,8 @@ export async function searchVariants(q, opts = {}) {
     barcode: n.barcode ?? "",
     imageUrl: includeImages ? (n.image?.url ?? n.product?.featuredImage?.url ?? "") : "",
   }));
+  const pageInfo = conn.pageInfo ?? { hasNextPage: false, endCursor: null };
+  return { nodes, pageInfo };
 }
 
 /** バリアントの指定ロケーション在庫（available）を取得。Modal_REFERENCE 互換。 */
@@ -904,7 +912,8 @@ export async function resolveVariantByCode(codeRaw, { includeImages = false } = 
   if (!code) return null;
   const cached = await VariantCache.get(code);
   if (cached?.variantId && cached?.inventoryItemId) return cached;
-  const list = await searchVariants(code, { includeImages });
+  const result = await searchVariants(code, { includeImages });
+  const list = result?.nodes ?? [];
   const v = pickBestVariant_(code, list);
   if (!v?.variantId || !v?.inventoryItemId) return null;
   const resolved = {

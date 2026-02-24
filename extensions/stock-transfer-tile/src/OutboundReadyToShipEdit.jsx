@@ -73,6 +73,7 @@ export default function OutboundReadyToShipEdit({
     setLoading(true);
     setError("");
     setDetail(null);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const data = await adminGraphql(TRANSFER_DETAIL_QUERY, { id: tid }, { signal: ac.signal || undefined });
       const t = data?.inventoryTransfer;

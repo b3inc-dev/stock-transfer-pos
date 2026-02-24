@@ -1045,6 +1045,7 @@ export function InventoryCountList({
     if (!hasMoreProductsRef.current) return;
     loadingMoreRef.current = true;
     setLoadingMore(true);
+    await new Promise((r) => setTimeout(r, 0)); // ✅ 押した直後に「読込中...」を描画してから取得開始（反応が遅く見えるのを防ぐ）
     try {
       const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
       const raw = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
@@ -1095,6 +1096,7 @@ export function InventoryCountList({
     if (loadingGroupIdRef.current != null) return; // 二重発火防止
     loadingGroupIdRef.current = groupId;
     setLoadingGroupId(groupId);
+    await new Promise((r) => setTimeout(r, 0)); // ✅ 押した直後に「読込中...」を描画してから取得開始
     const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
     try {
       const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
@@ -1511,6 +1513,7 @@ export function InventoryCountList({
     const raw = String(debouncedQuery || "").trim();
     if (!raw || loadingMoreSearch || !searchPageInfo?.hasNextPage || !searchPageInfo?.endCursor) return;
     setLoadingMoreSearch(true);
+    await new Promise((r) => setTimeout(r, 0)); // ✅ 押した直後に「読込中...」を描画してから取得開始
     try {
       const searchLimit = Math.max(10, Math.min(50, Number(settings?.searchList?.initialLimit ?? 50)));
       const result = await searchVariants(raw, { includeImages: showImages && !liteMode, first: searchLimit, after: searchPageInfo.endCursor });

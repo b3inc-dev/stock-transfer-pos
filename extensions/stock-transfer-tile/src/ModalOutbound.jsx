@@ -1671,6 +1671,7 @@ function OutboundConditions({
       historySelectedShipmentIndex: 0,
     });
 
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const historyLimit = Math.max(1, Math.min(250, Number(settings?.outbound?.historyInitialLimit ?? 100)));
       const all = await fetchTransfersForOriginAll(originLocationGid, { first: historyLimit });
@@ -2770,6 +2771,7 @@ function OutboundHistoryConditions({
       historySelectedShipmentIndex: 0,
     });
 
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const historyLimit = Math.max(1, Math.min(250, Number(outbound?.settings?.outbound?.historyInitialLimit ?? 100)));
       const result = await fetchTransfersForOriginAll(originLocationGid, { first: historyLimit });
@@ -2915,6 +2917,7 @@ function OutboundHistoryConditions({
     if (loadingMore) return; // 既に読み込み中の場合はスキップ
 
     setLoadingMore(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const historyLimit = Math.max(1, Math.min(250, Number(outbound?.settings?.outbound?.historyInitialLimit ?? 100)));
       const result = await fetchTransfersForOriginAll(originLocationGid, {
@@ -3272,6 +3275,7 @@ function OutboundShipmentSelection({
     setLoading(true);
     setError("");
     setDetail(null);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const d = await fetchInventoryTransferDetailForHistory({ id: transferId });
       setDetail(d);
@@ -4487,6 +4491,7 @@ function OutboundHistoryDetail({
     if (loadingMore || !lineItemsPageInfo?.hasNextPage || !lineItemsPageInfo?.endCursor) return;
 
     setLoadingMore(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     const ac = new AbortController();
     try {
       const sid = String(selectedShipmentId || detail?.shipments?.[0]?.id || "").trim();
@@ -4617,6 +4622,7 @@ function OutboundHistoryDetail({
     if (!originLocationGidForDetail || !Array.isArray(items) || items.length === 0) return;
     const silent = !!opts?.silent;
     setStockRefreshing(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const results = await Promise.all(
         items.map(async (it) => {
@@ -6033,6 +6039,7 @@ function OutboundList({
     const raw = String(debouncedQuery || "").trim();
     if (!raw || loadingMoreSearch || !searchPageInfo?.hasNextPage || !searchPageInfo?.endCursor) return;
     setLoadingMoreSearch(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const searchLimit = Math.max(10, Math.min(50, Number(settings?.searchList?.initialLimit ?? 50)));
       const result = await searchVariants(raw, { includeImages: showImages && !liteMode, first: searchLimit, after: searchPageInfo.endCursor });

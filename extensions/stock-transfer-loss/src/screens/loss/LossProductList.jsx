@@ -626,6 +626,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
 
       // ✅ 1文字から検索可能に変更（文字数制限を削除）
       setLoading(true);
+      await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
       try {
         const includeImages = showImages && !liteMode; // ✅ 軽量モードがOFFの時だけ画像表示
         // ✅ 設定から検索リストの表示件数を取得（デフォルト50件）
@@ -1095,6 +1096,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     const raw = String(debouncedQuery || "").trim();
     if (!raw || loadingMoreSearch || !searchPageInfo?.hasNextPage || !searchPageInfo?.endCursor) return;
     setLoadingMoreSearch(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const searchLimit = settings?.searchList?.initialLimit ?? 50;
       const first = Math.max(10, Math.min(50, Number.isFinite(searchLimit) ? searchLimit : 50));

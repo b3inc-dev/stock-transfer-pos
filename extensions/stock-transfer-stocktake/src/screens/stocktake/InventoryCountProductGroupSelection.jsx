@@ -246,6 +246,7 @@ export function InventoryCountProductGroupSelection({
     if (loadingQuantitiesRef.current) return;
     loadingQuantitiesRef.current = true;
     setLoadingQuantities(true);
+    await new Promise((r) => setTimeout(r, 0)); // ✅ 押した直後に「読込中...」を描画してから取得開始
     try {
       await loadProductGroupQuantities();
     } finally {

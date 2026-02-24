@@ -229,6 +229,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     setLoadedChunkCount(0);
     setDetailEntry(null);
     fullEntriesByIdRef.current = new Map();
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const result = await readLossEntriesFirstPage();
       const raw = Array.isArray(result.entries) ? result.entries : [];
@@ -293,6 +294,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   const loadMoreHistory = useCallback(async () => {
     if (loadedChunkCount >= chunkCount) return;
     setLoading(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const result = await readLossEntriesPage(loadedChunkCount);
       const next = Array.isArray(result.entries) ? result.entries : [];

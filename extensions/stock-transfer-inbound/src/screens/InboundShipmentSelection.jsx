@@ -75,6 +75,7 @@ export function InboundShipmentSelection({
     if (!transferId || !locationGid) return;
     setLoading(true);
     setError("");
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const useCache = !forceRefetch && cachedTransfer && String(cachedTransfer?.id || "").trim() === transferId;
       if (useCache) {

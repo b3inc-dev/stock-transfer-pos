@@ -726,9 +726,11 @@ function findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, groupId) {
 // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用して商品をフィルタリング（生成時の状態を保持）
 // ✅ cachedProductGroups を渡すと readProductGroups() をスキップし、まとめて表示で全グループが同じスナップショットを参照して安定表示
 export async function fetchProductsByGroups(productGroupIds, locationId, opts = {}) {
-  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null, offset: optsOffset = 0, limit: optsLimit, collectionPageInfo: optsCollectionPageInfo = null } = opts;
+  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null, offset: optsOffset = 0, limit: optsLimit, collectionPageInfo: optsCollectionPageInfo = null, timeoutMs: optsTimeoutMs } = opts;
   const offset = Math.max(0, Number(optsOffset) || 0);
   const limit = optsLimit != null && optsLimit > 0 ? Math.max(1, Math.min(Number(optsLimit), 2000)) : null;
+  /** タイムアウト：初回は40秒・追加読み込みは60秒。初回20秒に根拠はなく、大グループや遅い回線で切れるため初回も40秒にしている */
+  const timeoutMs = Number.isFinite(Number(optsTimeoutMs)) ? Number(optsTimeoutMs) : (offset > 0 ? 60000 : 40000);
   /** コレクション経路の「さらに読み込む」用。前回レスポンスの pageInfo を渡すと after で次ページを取得する */
   const collectionPageInfo = optsCollectionPageInfo && typeof optsCollectionPageInfo === "object" ? optsCollectionPageInfo : null;
   const groups = (Array.isArray(cachedProductGroups) && cachedProductGroups.length > 0)
@@ -801,7 +803,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
               }
             }`;
         try {
-          const data = await graphql(gql, { ids: batch });
+          const data = await graphql(gql, { ids: batch }, { timeoutMs });
           const nodes = data?.nodes ?? [];
           for (const node of nodes) {
             if (node?.variant && node.id) {
@@ -878,7 +880,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
               }
             }`;
         try {
-          const data = await graphql(gqlWithPageInfo, { id: collectionId, first: productFirst, after: pageInfo.endCursor });
+          const data = await graphql(gqlWithPageInfo, { id: collectionId, first: productFirst, after: pageInfo.endCursor }, { timeoutMs });
           const products = data?.collection?.products?.nodes ?? [];
           const nextPageInfo = data?.collection?.products?.pageInfo ?? {};
           collectionPageInfoResult[collectionId] = { hasNextPage: !!nextPageInfo.hasNextPage, endCursor: nextPageInfo.endCursor ?? null };
@@ -957,7 +959,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
             }
           }`;
       try {
-        const data = await graphql(gql, { id: collectionId, first: productFirst, after: null });
+        const data = await graphql(gql, { id: collectionId, first: productFirst, after: null }, { timeoutMs });
         const products = data?.collection?.products?.nodes ?? [];
         const pageInfo = data?.collection?.products?.pageInfo ?? {};
         collectionPageInfoResult[collectionId] = { hasNextPage: !!pageInfo.hasNextPage, endCursor: pageInfo.endCursor ?? null };

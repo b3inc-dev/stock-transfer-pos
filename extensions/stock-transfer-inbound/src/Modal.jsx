@@ -212,6 +212,7 @@ function InboundConditions({
     // 既存データをクリア（一度読み込まれたデータが残らないように）
     setTransfers([]);
     setTransfersPageInfo({ hasNextPage: false, endCursor: null });
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const result = await fetchTransfersForDestinationAll(locationGid, { first: listInitialLimit });
       const baseTransfers = Array.isArray(result?.transfers) ? result.transfers : [];
@@ -249,6 +250,7 @@ function InboundConditions({
   const loadMoreTransfers_ = useCallback(async () => {
     if (!locationGid || !transfersPageInfo?.hasNextPage || !transfersPageInfo?.endCursor || loadingMore) return;
     setLoadingMore(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const result = await fetchTransfersForDestinationAll(locationGid, {
         after: transfersPageInfo.endCursor,

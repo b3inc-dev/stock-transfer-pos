@@ -539,6 +539,7 @@ export function PurchaseHistoryList({
   const loadMoreHistory = useCallback(async () => {
     if (loadedChunkCount >= chunkCount) return;
     setLoading(true);
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const result = await readPurchaseEntriesPage(loadedChunkCount);
       const next = Array.isArray(result.entries) ? result.entries : [];
@@ -569,6 +570,7 @@ export function PurchaseHistoryList({
     setChunkCount(0);
     setLoadedChunkCount(0);
     fullEntriesByIdRef.current = new Map();
+    await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       const result = await readPurchaseEntriesFirstPage();
       const raw = Array.isArray(result.entries) ? result.entries : [];
