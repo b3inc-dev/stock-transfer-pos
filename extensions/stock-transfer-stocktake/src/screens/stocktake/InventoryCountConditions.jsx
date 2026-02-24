@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useEffect, useRef } from "preact/hooks"
 import {
   readInventoryCountsFirstPage,
   readInventoryCountsPage,
+  getStocktakeListLimit,
   getLocationName,
   getProductGroupName,
   fetchProductsByGroups,
@@ -143,23 +144,28 @@ export function InventoryCountConditions({
   }, [counts, viewMode]);
 
   const hasMoreHistory = loadedChunkCount < chunkCount;
+  // ✅ さらに読み込み：新しい順で読むため「次のチャンク」は chunkCount - 1 - loadedChunkCount。設定の履歴一覧数（listLimit）ずつ読むまで複数チャンク取得
   const loadMoreHistory = useCallback(async () => {
     if (loadedChunkCount >= chunkCount) return;
     setLoading(true);
     try {
-      const result = await readInventoryCountsPage(loadedChunkCount);
-      const raw = Array.isArray(result.counts) ? result.counts : [];
-      let filtered = raw;
-      if (locationGid) {
-        filtered = filterByLocation(raw, locationGid);
-        // ログイン中ロケーション以外は表示しない
+      const listLimit = await getStocktakeListLimit();
+      const accumulated = [];
+      let nextLoaded = loadedChunkCount;
+      while (nextLoaded < chunkCount && accumulated.length < listLimit) {
+        const chunkIndex = chunkCount - 1 - nextLoaded;
+        const result = await readInventoryCountsPage(chunkIndex);
+        const raw = Array.isArray(result.counts) ? result.counts : [];
+        const filtered = locationGid ? filterByLocation(raw, locationGid) : raw;
+        accumulated.push(...filtered);
+        nextLoaded += 1;
       }
       setCounts((prev) => {
-        const next = [...prev, ...filtered];
+        const next = [...prev, ...accumulated];
         next.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
         return next;
       });
-      setLoadedChunkCount((prev) => prev + 1);
+      setLoadedChunkCount(nextLoaded);
     } catch (e) {
       setError(String(e?.message ?? e));
     } finally {
@@ -286,7 +292,8 @@ export function InventoryCountConditions({
       if (locationGid) {
         let filtered = filterByLocation(allFetched, locationGid);
         while (filtered.length === 0 && allFetched.length > 0 && loadedChunks < totalChunks) {
-          const next = await readInventoryCountsPage(loadedChunks);
+          const chunkIndex = totalChunks - 1 - loadedChunks;
+          const next = await readInventoryCountsPage(chunkIndex);
           const nextCounts = Array.isArray(next.counts) ? next.counts : [];
           allFetched = [...allFetched, ...nextCounts];
           loadedChunks += 1;

@@ -274,7 +274,7 @@ function fixCountsStatusOnly(counts, productGroups) {
   });
 }
 
-async function getStocktakeListLimit() {
+export async function getStocktakeListLimit() {
   const settings = await fetchSettings();
   const n = Number(settings?.outbound?.historyInitialLimit ?? 100);
   return Math.max(1, Math.min(250, n));
@@ -336,15 +336,17 @@ export async function readInventoryCountsFirstPage() {
     return { counts: [], hasMore: false, chunkCount: 0 };
   }
   const totalChunks = parsed.totalChunks;
-  const key0 = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}0`;
-  const gql0 = `#graphql
-    query InventoryCountChunk0 {
+  // ✅ 並びは新しい順で表示するため、保存順（古い→新しい）の逆で読む。初回は「最後のチャンク」を取得
+  const firstChunkIndex = totalChunks - 1;
+  const keyFirst = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${firstChunkIndex}`;
+  const gqlFirst = `#graphql
+    query InventoryCountChunk($key: String!) {
       currentAppInstallation {
-        metafield(namespace: "${NS}", key: "${key0}") { value }
+        metafield(namespace: "${NS}", key: $key) { value }
       }
     }`;
-  const d0 = await graphql(gql0);
-  const chunkRaw = d0?.currentAppInstallation?.metafield?.value;
+  const dFirst = await graphql(gqlFirst, { key: keyFirst });
+  const chunkRaw = dFirst?.currentAppInstallation?.metafield?.value;
   let counts = [];
   if (chunkRaw) {
     try {

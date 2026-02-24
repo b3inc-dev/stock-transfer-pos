@@ -217,6 +217,8 @@ export function InventoryCountList({
   // ✅ まとめて表示：グループごと読込ボタンでどのグループを読み込み中か（読込中は「読込中...」表示）
   const [loadingGroupId, setLoadingGroupId] = useState(null);
   const loadingGroupIdRef = useRef(null); // ✅ 二重発火防止（onClick/onPress両方で呼ばれる場合）
+  const loadingMoreRef = useRef(false); // ✅ さらに読み込むの二重発火防止（入庫・出庫と同様）
+  const hasMoreProductsRef = useRef(false); // ✅ タップ時に最新の hasMoreProducts を参照（スタレ閉じ込め防止）
 
   const denyEdit = useCallback(() => {
     if (!toastReadOnlyOnceRef.current) {
@@ -270,6 +272,11 @@ export function InventoryCountList({
     })();
     return () => { mounted = false; };
   }, []);
+
+  // ✅ さらに読み込む：タップ時に最新の hasMoreProducts を参照するため ref を同期（入庫・出庫と同様）
+  useEffect(() => {
+    hasMoreProductsRef.current = hasMoreProducts;
+  }, [hasMoreProducts]);
   
   // ✅ 一覧タップ後：最小情報のときだけ棚卸1件をAPI取得（商品グループタップ→商品リスト読み込み）
   useEffect(() => {
@@ -995,7 +1002,9 @@ export function InventoryCountList({
   const LOAD_PAGE_SIZE = 600;
   const handleLoadMoreProducts = useCallback(async () => {
     if (!count || !count.locationId || targetProductGroupIds.length === 0) return;
-    if (loadingMoreRef.current || loadingMore || !hasMoreProducts) return;
+    if (loadingMoreRef.current || loadingMore) return;
+    // ✅ ref で最新値を参照（スタレ閉じ込めでタップ時に false のまま return するのを防ぐ）
+    if (!hasMoreProductsRef.current) return;
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
@@ -1038,7 +1047,7 @@ export function InventoryCountList({
       setLoadingMore(false);
       loadingMoreRef.current = false;
     }
-  }, [count, targetProductGroupIds, lines.length, hasMoreProducts, loadingMore, isMultipleMode, settings?.productList?.initialLimit]);
+  }, [count, targetProductGroupIds, lines.length, loadingMore, isMultipleMode, settings?.productList?.initialLimit]);
 
   // ✅ まとめて表示：グループごと「読込」ボタンでそのグループの商品だけ読み込む（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
   const loadGroupProducts = useCallback(async (groupId) => {
