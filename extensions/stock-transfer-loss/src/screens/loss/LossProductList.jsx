@@ -425,9 +425,9 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         const s = await fetchSettings();
         if (mounted) {
           setSettings(s);
-          // 検索リストの初期表示件数を設定から読み込む
-          const searchLimit = s?.searchList?.initialLimit ?? 50;
-          setCandidatesDisplayLimit(Math.max(20, Math.min(50, searchLimit))); // 20-50の範囲に制限
+          // 商品リストの初期表示件数を設定から読み込む（最大250、推奨250）
+          const productLimit = Math.max(1, Math.min(250, Number(s?.productList?.initialLimit ?? 250)));
+          setCandidatesDisplayLimit(productLimit);
         }
       } catch (e) {
         console.error("[LossProductList] fetchSettings error:", e);
@@ -618,7 +618,8 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
           setCandidates([]);
           setSearchPageInfo({ hasNextPage: false, endCursor: null });
           setLoading(false);
-          setCandidatesDisplayLimit(20); // ✅ 検索クリア時に表示件数もリセット
+          const productLimit = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          setCandidatesDisplayLimit(productLimit);
         }
         return;
       }
@@ -636,18 +637,17 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         if (mounted) {
           setCandidates(Array.isArray(list) ? list : []);
           setSearchPageInfo(pageInfo);
-          // ✅ 設定から検索リストの初期表示件数を取得（デフォルト20件、設定の20-50%程度）
-          const displayLimit = Math.max(20, Math.min(50, Math.floor(first * 0.4) || 20));
-          setCandidatesDisplayLimit(displayLimit);
+          // ✅ 設定の商品リスト表示件数で検索結果の初回表示件数を制御
+          const productLimit = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          setCandidatesDisplayLimit(Math.min(list.length, productLimit));
         }
       } catch (e) {
         toast(`検索エラー: ${toUserMessage(e)}`);
         if (mounted) {
           setCandidates([]);
           setSearchPageInfo({ hasNextPage: false, endCursor: null });
-          const searchLimit = settings?.searchList?.initialLimit ?? 50;
-          const displayLimit = Math.max(20, Math.min(50, Math.floor((searchLimit || 50) * 0.4) || 20));
-          setCandidatesDisplayLimit(displayLimit);
+          const productLimit = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          setCandidatesDisplayLimit(productLimit);
         }
       } finally {
         if (mounted) setLoading(false);

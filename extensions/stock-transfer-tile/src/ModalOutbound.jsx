@@ -5557,9 +5557,16 @@ function OutboundList({
   const [candidates, setCandidates] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searchMountKey, setSearchMountKey] = useState(0);
-  const [candidatesDisplayLimit, setCandidatesDisplayLimit] = useState(50); // 初期表示50件（「さらに表示」で追加読み込み可能）
+  const productListInitialLimit = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+  const [candidatesDisplayLimit, setCandidatesDisplayLimit] = useState(productListInitialLimit); // 商品リスト設定（初回表示件数）
   const [searchPageInfo, setSearchPageInfo] = useState({ hasNextPage: false, endCursor: null }); // 候補のサーバー側「さらに読み込む」用
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
+
+  // 設定の商品リスト表示件数に同期（設定読み込み後や変更時に反映）
+  useEffect(() => {
+    const limit = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+    setCandidatesDisplayLimit((prev) => (prev === limit ? prev : limit));
+  }, [settings?.productList?.initialLimit]);
 
   const [refreshing, setRefreshing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -5964,7 +5971,7 @@ function OutboundList({
           setCandidates([]);
           setSearchPageInfo({ hasNextPage: false, endCursor: null });
           setLoading(false);
-          setCandidatesDisplayLimit(20);
+          setCandidatesDisplayLimit(productListInitialLimit);
         }
         return;
       }
@@ -5979,14 +5986,14 @@ function OutboundList({
         if (mounted) {
           setCandidates(Array.isArray(list) ? list : []);
           setSearchPageInfo(pageInfo);
-          setCandidatesDisplayLimit(20);
+          setCandidatesDisplayLimit(Math.min(list.length, productListInitialLimit));
         }
       } catch (e) {
         toast(`検索エラー: ${toUserMessage(e)}`);
         if (mounted) {
           setCandidates([]);
           setSearchPageInfo({ hasNextPage: false, endCursor: null });
-          setCandidatesDisplayLimit(20);
+          setCandidatesDisplayLimit(productListInitialLimit);
         }
       } finally {
         if (mounted) setLoading(false);
@@ -5997,7 +6004,7 @@ function OutboundList({
     return () => {
       mounted = false;
     };
-  }, [debouncedQuery, showImages, liteMode]);
+  }, [debouncedQuery, showImages, liteMode, productListInitialLimit]);
 
   const setLines = (updater) => {
     setStateSlice(setAppState, "outbound", (prev) => {
@@ -6014,7 +6021,7 @@ function OutboundList({
     setQuery("");
     setCandidates([]);
     setSearchPageInfo({ hasNextPage: false, endCursor: null });
-    setCandidatesDisplayLimit(20);
+    setCandidatesDisplayLimit(productListInitialLimit);
     setSearchMountKey((k) => k + 1);
   };
 

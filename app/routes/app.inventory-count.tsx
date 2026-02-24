@@ -1786,6 +1786,9 @@ export async function action({ request }: ActionFunctionArgs) {
                   { variables: { id: inventoryItemId, loc: locationId } }
                 );
                 const json = await resp.json();
+                if (Array.isArray(json?.errors) && json.errors.length > 0) {
+                  console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern1):", JSON.stringify(json.errors));
+                }
                 const item = json?.data?.inventoryItem;
                 if (!item?.variant) return null;
                 const productTitle = item.variant.product?.title ?? "";
@@ -1805,7 +1808,8 @@ export async function action({ request }: ActionFunctionArgs) {
                   actualQuantity: 0,
                   delta: 0,
                 };
-              } catch {
+              } catch (e) {
+                console.error("[inventory-count] get_incomplete_group_products item failed (pattern1):", inventoryItemId, (e as Error)?.message ?? String(e));
                 return null;
               }
             })
@@ -1862,6 +1866,9 @@ export async function action({ request }: ActionFunctionArgs) {
                     { variables: { id: inventoryItemId, loc: locationId } }
                   );
                   const json = await resp.json();
+                  if (Array.isArray(json?.errors) && json.errors.length > 0) {
+                    console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern1b):", JSON.stringify(json.errors));
+                  }
                   const item = json?.data?.inventoryItem;
                   if (!item?.variant) return null;
                   const productTitle = item.variant.product?.title ?? "";
@@ -1881,7 +1888,8 @@ export async function action({ request }: ActionFunctionArgs) {
                     actualQuantity: 0,
                     delta: 0,
                   };
-                } catch {
+                } catch (e) {
+                  console.error("[inventory-count] get_incomplete_group_products item failed (pattern1b):", inventoryItemId, (e as Error)?.message ?? String(e));
                   return null;
                 }
               })
@@ -2004,6 +2012,9 @@ export async function action({ request }: ActionFunctionArgs) {
                 { variables: { id: product.inventoryItemId, loc: locationId } }
               );
               const qtyData = await qtyResp.json();
+              if (Array.isArray(qtyData?.errors) && qtyData.errors.length > 0) {
+                console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern2 qty):", JSON.stringify(qtyData.errors));
+              }
               const level = qtyData?.data?.inventoryItem?.inventoryLevel;
               const qty = level?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
               const currentQuantity = qty !== null && qty !== undefined ? Number(qty) : 0;
@@ -2041,7 +2052,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
   return { ok: false, error: "不明なアクション" as const };
   } catch (e) {
-    console.error("[inventory-count] action error:", e);
+    const err = e as { message?: string; errors?: { graphQLErrors?: unknown[] }; body?: { errors?: { graphQLErrors?: unknown[] } } };
+    if (Array.isArray(err?.errors?.graphQLErrors) && err.errors.graphQLErrors.length > 0) {
+      console.error("[inventory-count] action error graphQLErrors:", JSON.stringify(err.errors.graphQLErrors));
+    } else if (Array.isArray(err?.body?.errors?.graphQLErrors) && err.body.errors.graphQLErrors.length > 0) {
+      console.error("[inventory-count] action error graphQLErrors (body):", JSON.stringify(err.body.errors.graphQLErrors));
+    }
+    console.error("[inventory-count] action error:", err?.message ?? e);
     return { ok: false, error: "処理中にエラーが発生しました。しばらくしてからお試しください。" as const };
   }
 }

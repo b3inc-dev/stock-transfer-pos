@@ -425,9 +425,9 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         const s = await fetchSettings();
         if (mounted) {
           setSettings(s);
-          // 検索リストの初期表示件数を設定から読み込む
-          const searchLimit = s?.searchList?.initialLimit ?? 50;
-          setCandidatesDisplayLimit(Math.max(20, Math.min(50, searchLimit))); // 20-50の範囲に制限
+          // 商品リストの初期表示件数を設定から読み込む（最大250、推奨250）
+          const productLimit = Math.max(1, Math.min(250, Number(s?.productList?.initialLimit ?? 250)));
+          setCandidatesDisplayLimit(productLimit);
         }
       } catch (e) {
         console.error("[LossProductList] fetchSettings error:", e);
@@ -620,7 +620,8 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           setCandidates([]);
           setSearchPageInfo({ hasNextPage: false, endCursor: null });
           setLoading(false);
-          setCandidatesDisplayLimit(20);
+          const productLimit = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          setCandidatesDisplayLimit(productLimit);
         }
         return;
       }
@@ -636,17 +637,16 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         if (mounted) {
           setCandidates(Array.isArray(list) ? list : []);
           setSearchPageInfo(pageInfo);
-          const displayLimit = Math.max(20, Math.min(50, Math.floor(first * 0.4) || 20));
-          setCandidatesDisplayLimit(displayLimit);
+          const productLimit = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          setCandidatesDisplayLimit(Math.min(list.length, productLimit));
         }
       } catch (e) {
         toast(`検索エラー: ${toUserMessage(e)}`);
         if (mounted) {
           setCandidates([]);
           setSearchPageInfo({ hasNextPage: false, endCursor: null });
-          const searchLimit = settings?.searchList?.initialLimit ?? 50;
-          const displayLimit = Math.max(20, Math.min(50, Math.floor((searchLimit || 50) * 0.4) || 20));
-          setCandidatesDisplayLimit(displayLimit);
+          const productLimit = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          setCandidatesDisplayLimit(productLimit);
         }
       } finally {
         if (mounted) setLoading(false);

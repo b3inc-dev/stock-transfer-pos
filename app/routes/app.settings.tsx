@@ -280,8 +280,8 @@ function defaultSettings(): SettingsV1 {
       allowExtraReceive: true,
       listInitialLimit: 100, // 入庫リスト 初回。API上限250、推奨100
     },
-    productList: { initialLimit: 100 }, // 初回読み込み件数と統一。上限250、推奨100
-    searchList: { initialLimit: 50 },   // 初回読み込みと統一（API上限50）
+    productList: { initialLimit: 250 }, // 商品リスト初回表示。上限250、推奨250
+    searchList: { initialLimit: 50 },   // 検索結果初回表示（API上限50）
   };
 }
 
@@ -650,10 +650,10 @@ function sanitizeSettings(input: any): SettingsV1 {
     };
   }
 
-  // 商品リスト表示件数（初期）。履歴・商品・検索で統一。上限250、推奨100
+  // 商品リスト表示件数（初期）。上限250、推奨250
   if (input?.productList && typeof input.productList === "object") {
     s.productList = {
-      initialLimit: clampInt(input.productList.initialLimit, 1, 250, 100),
+      initialLimit: clampInt(input.productList.initialLimit, 1, 250, 250),
     };
   }
 
@@ -896,8 +896,12 @@ export default function SettingsPage() {
     }
   }, [searchParams]);
 
-  // アプリ表示件数（初回読み込み）の入力検証エラー（1入力に統一）
-  const [displayCountErrors, setDisplayCountErrors] = useState<{ initialLoad?: string }>({});
+  // アプリ表示件数（初回読み込み）の入力検証エラー（履歴一覧・商品リスト・検索リストの3項目別）
+  const [displayCountErrors, setDisplayCountErrors] = useState<{
+    historyList?: string;
+    productList?: string;
+    searchList?: string;
+  }>({});
 
   const readValue = (e: any) => String(e?.currentTarget?.value ?? e?.currentValue?.value ?? "");
 
@@ -937,8 +941,11 @@ export default function SettingsPage() {
     [settings, initial],
   );
   const hasDisplayCountError = useMemo(
-    () => !!displayCountErrors.initialLoad,
-    [displayCountErrors.initialLoad],
+    () =>
+      !!displayCountErrors.historyList ||
+      !!displayCountErrors.productList ||
+      !!displayCountErrors.searchList,
+    [displayCountErrors.historyList, displayCountErrors.productList, displayCountErrors.searchList],
   );
 
   // 保存成功したらサニタイズ後の settings で state を更新（同じ fetcher.data で二重適用しない）
@@ -2104,7 +2111,7 @@ export default function SettingsPage() {
                   </div>
                 </s-box>
 
-                {/* アプリ表示件数（初回読み込み）：1入力で履歴・商品・検索を統一。出庫・入庫・仕入・発注・ロス・棚卸・調整で同一件数を使用。 */}
+                {/* アプリ表示件数（初回読み込み）：履歴一覧リスト・商品リスト・検索リストの3項目を別々に設定。出庫履歴/入庫履歴は履歴一覧リスト、商品リスト/検索リストは出庫・入庫・ロス等で使用。 */}
                 <s-box padding="base">
                   <div
                     style={{
@@ -2124,6 +2131,9 @@ export default function SettingsPage() {
                       >
                         アプリ表示件数（初回読み込み）
                       </div>
+                      <s-text tone="subdued" size="small">
+                        履歴一覧・商品リスト・検索リストごとに初回表示件数を設定します。
+                      </s-text>
                     </div>
 
                     <div style={{ flex: "1 1 320px", minWidth: 280 }}>
@@ -2136,51 +2146,110 @@ export default function SettingsPage() {
                         }}
                       >
                         <s-stack gap="base">
+                          {/* 履歴一覧リスト：出庫履歴・入庫履歴・ロス履歴に適用。outbound.historyInitialLimit と inbound.listInitialLimit を同じ値で設定 */}
                           <s-text-field
                             type="text"
                             inputMode="numeric"
                             pattern="[0-9]*"
-                            label="初回読み込み件数"
+                            label="履歴一覧リスト"
                             value={String(settings.outbound?.historyInitialLimit ?? 100)}
-                            helpText={displayCountErrors.initialLoad}
-                            tone={displayCountErrors.initialLoad ? "critical" : undefined}
+                            helpText={displayCountErrors.historyList}
+                            tone={displayCountErrors.historyList ? "critical" : undefined}
                             onInput={(e: any) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 250, 100);
-                              setDisplayCountErrors((prev) => ({
-                                ...prev,
-                                initialLoad: r.error ?? undefined,
-                              }));
+                              setDisplayCountErrors((prev) => ({ ...prev, historyList: r.error ?? undefined }));
                               if (r.shouldUpdate) {
                                 const v = r.value;
                                 setSettings((s) => ({
                                   ...s,
                                   outbound: { ...(s.outbound ?? {}), historyInitialLimit: v },
                                   inbound: { ...(s.inbound ?? {}), listInitialLimit: v },
-                                  productList: { ...(s.productList ?? {}), initialLimit: v },
-                                  searchList: { ...(s.searchList ?? {}), initialLimit: Math.min(v, 50) },
                                 }));
                               }
                             }}
                             onChange={(e: any) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 250, 100);
-                              setDisplayCountErrors((prev) => ({
-                                ...prev,
-                                initialLoad: r.error ?? undefined,
-                              }));
+                              setDisplayCountErrors((prev) => ({ ...prev, historyList: r.error ?? undefined }));
                               if (r.shouldUpdate) {
                                 const v = r.value;
                                 setSettings((s) => ({
                                   ...s,
                                   outbound: { ...(s.outbound ?? {}), historyInitialLimit: v },
                                   inbound: { ...(s.inbound ?? {}), listInitialLimit: v },
-                                  productList: { ...(s.productList ?? {}), initialLimit: v },
-                                  searchList: { ...(s.searchList ?? {}), initialLimit: Math.min(v, 50) },
                                 }));
                               }
                             }}
                           />
                           <s-text tone="subdued" size="small">
-                            最大250件、推奨100件。（検索リストはAPI制限により最大50件）
+                            出庫・入庫・ロス履歴の一覧。最大250件、推奨100件。
+                          </s-text>
+
+                          {/* 商品リスト：出庫・入庫・ロス等の商品リスト（追加行表示）に適用 */}
+                          <s-text-field
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            label="商品リスト"
+                            value={String(settings.productList?.initialLimit ?? 250)}
+                            helpText={displayCountErrors.productList}
+                            tone={displayCountErrors.productList ? "critical" : undefined}
+                            onInput={(e: any) => {
+                              const r = parseDisplayCountInput(readValue(e), 1, 250, 250);
+                              setDisplayCountErrors((prev) => ({ ...prev, productList: r.error ?? undefined }));
+                              if (r.shouldUpdate) {
+                                setSettings((s) => ({
+                                  ...s,
+                                  productList: { ...(s.productList ?? {}), initialLimit: r.value },
+                                }));
+                              }
+                            }}
+                            onChange={(e: any) => {
+                              const r = parseDisplayCountInput(readValue(e), 1, 250, 250);
+                              setDisplayCountErrors((prev) => ({ ...prev, productList: r.error ?? undefined }));
+                              if (r.shouldUpdate) {
+                                setSettings((s) => ({
+                                  ...s,
+                                  productList: { ...(s.productList ?? {}), initialLimit: r.value },
+                                }));
+                              }
+                            }}
+                          />
+                          <s-text tone="subdued" size="small">
+                            出庫・入庫・ロス等の商品リスト初回表示。最大250件、推奨250件。
+                          </s-text>
+
+                          {/* 検索リスト：検索結果表示に適用。API上限50 */}
+                          <s-text-field
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            label="検索リスト"
+                            value={String(settings.searchList?.initialLimit ?? 50)}
+                            helpText={displayCountErrors.searchList}
+                            tone={displayCountErrors.searchList ? "critical" : undefined}
+                            onInput={(e: any) => {
+                              const r = parseDisplayCountInput(readValue(e), 1, 50, 50);
+                              setDisplayCountErrors((prev) => ({ ...prev, searchList: r.error ?? undefined }));
+                              if (r.shouldUpdate) {
+                                setSettings((s) => ({
+                                  ...s,
+                                  searchList: { ...(s.searchList ?? {}), initialLimit: r.value },
+                                }));
+                              }
+                            }}
+                            onChange={(e: any) => {
+                              const r = parseDisplayCountInput(readValue(e), 1, 50, 50);
+                              setDisplayCountErrors((prev) => ({ ...prev, searchList: r.error ?? undefined }));
+                              if (r.shouldUpdate) {
+                                setSettings((s) => ({
+                                  ...s,
+                                  searchList: { ...(s.searchList ?? {}), initialLimit: r.value },
+                                }));
+                              }
+                            }}
+                          />
+                          <s-text tone="subdued" size="small">
+                            検索結果の初回表示。API制限により最大50件。
                           </s-text>
                         </s-stack>
                       </div>
