@@ -822,7 +822,12 @@ async function migrateOrderV1ToV2() {
   }
 }
 
-/** 初回表示用: マニフェスト＋先頭1チャンクだけ取得（読込スピード統一） */
+async function getOrderInitialDisplayLimit() {
+  const n = await getOrderChunkSize();
+  return Math.max(1, Math.min(250, n));
+}
+
+/** 初回表示用: マニフェスト＋先頭1チャンクだけ取得（設定の表示件数でスライス） */
 export async function readOrderEntriesFirstPage() {
   let manifest = await readOrderEntriesManifest();
   if (!manifest) {
@@ -844,15 +849,44 @@ export async function readOrderEntriesFirstPage() {
   const chunkRaw = data?.currentAppInstallation?.chunk0?.value ?? "[]";
   try {
     const entries = JSON.parse(chunkRaw);
-    const list = Array.isArray(entries) ? entries : [];
+    const fullList = Array.isArray(entries) ? entries : [];
+    const limit = await getOrderInitialDisplayLimit();
+    const list = fullList.slice(0, limit);
+    const hasMore = fullList.length > limit || manifest.chunkCount > 1;
     return {
       entries: list,
-      hasMore: manifest.chunkCount > 1,
+      hasMore,
       chunkCount: manifest.chunkCount,
     };
   } catch {
     return { entries: [], hasMore: false, chunkCount: manifest.chunkCount };
   }
+}
+
+/** 指定IDのエントリを1件取得（一覧タップ後の詳細用） */
+export async function readOrderEntryById(entryId) {
+  if (!entryId) return null;
+  const id = String(entryId).trim();
+  let manifest = await readOrderEntriesManifest();
+  if (!manifest) {
+    await migrateOrderV1ToV2();
+    manifest = await readOrderEntriesManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) return null;
+  for (let i = 0; i < manifest.chunkCount; i++) {
+    const key = `${ORDER_V2_CHUNK_PREFIX}${i}`;
+    const gql = `#graphql query OrderChunk($key: String!) { currentAppInstallation { metafield(namespace: "${ORDER_NS}", key: $key) { value } } }`;
+    const d = await graphql(gql, { key });
+    const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        const found = arr.find((e) => String(e?.id ?? "").trim() === id);
+        if (found) return found;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 /** 「読込」用: 指定ページのチャンクだけ取得 */

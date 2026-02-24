@@ -1717,8 +1717,9 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!groupId || !locationId) {
       return { ok: false, error: "グループIDまたはロケーションIDが指定されていません" as const };
     }
-    const DELAY_BETWEEN_BATCHES_MS = 80; // レート制限・スロットルによる500を防ぐ
+    const DELAY_BETWEEN_BATCHES_MS = 180; // レート制限を避ける（80→180ms：根本対策）
     const MAX_PRODUCTS_PER_GROUP = 600;   // 1リクエストあたりの取得上限（タイムアウト・500防止）
+    const THROTTLE_RETRY_DELAY_MS = 1500; // Throttled 時に1回だけリトライするまでの待機（明細欠け対策）
     const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     // ✅ GraphQL inventoryLevel(locationId) 用に GID 形式に正規化（数値のみのとき在庫が取れない場合があるため）
     if (!locationId.startsWith("gid://")) {
@@ -1744,7 +1745,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
       // パターン1: inventoryItemIds のみ（CSVインポート等）→ 並列で商品情報＋在庫を取得
       if ((!productGroup.collectionIds?.length) && productGroup.inventoryItemIds?.length) {
-        const BATCH_SIZE = 10;
+        const BATCH_SIZE = 5; // 同時並列数を減らして Throttled を防ぐ（根本対策）
         const ids = productGroup.inventoryItemIds.slice(offset, offset + MAX_PRODUCTS_PER_GROUP);
         const hasMore = productGroup.inventoryItemIds.length > offset + MAX_PRODUCTS_PER_GROUP;
         const allResults: Array<{
@@ -1785,9 +1786,38 @@ export async function action({ request }: ActionFunctionArgs) {
                   `,
                   { variables: { id: inventoryItemId, loc: locationId } }
                 );
-                const json = await resp.json();
+                let json = await resp.json();
                 if (Array.isArray(json?.errors) && json.errors.length > 0) {
                   console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern1):", JSON.stringify(json.errors));
+                  // 根本対策：errors に Throttled が含まれていて data が無い場合は1回だけリトライ
+                  const hasThrottledInErrors = json.errors.some((e: { message?: string }) => /throttle/i.test(String(e?.message ?? "")));
+                  if (hasThrottledInErrors && !json?.data?.inventoryItem) {
+                    await delay(THROTTLE_RETRY_DELAY_MS);
+                    const respRetry = await admin.graphql(
+                      `#graphql
+                    query ItemAndLevel($id: ID!, $loc: ID!) {
+                      inventoryItem(id: $id) {
+                        id
+                        variant {
+                          id
+                          title
+                          sku
+                          barcode
+                          product { title }
+                        }
+                        inventoryLevel(locationId: $loc) {
+                          quantities(names: ["available"]) { name quantity }
+                        }
+                      }
+                    }
+                  `,
+                      { variables: { id: inventoryItemId, loc: locationId } }
+                    );
+                    json = await respRetry.json();
+                    if (Array.isArray(json?.errors) && json.errors.length > 0) {
+                      console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern1 errors-retry):", JSON.stringify(json.errors));
+                    }
+                  }
                 }
                 const item = json?.data?.inventoryItem;
                 if (!item?.variant) return null;
@@ -1809,7 +1839,61 @@ export async function action({ request }: ActionFunctionArgs) {
                   delta: 0,
                 };
               } catch (e) {
-                console.error("[inventory-count] get_incomplete_group_products item failed (pattern1):", inventoryItemId, (e as Error)?.message ?? String(e));
+                const errMsg = (e as Error)?.message ?? String(e);
+                const isThrottled = /throttle/i.test(errMsg);
+                if (isThrottled) {
+                  await delay(THROTTLE_RETRY_DELAY_MS);
+                  try {
+                    const resp2 = await admin.graphql(
+                      `#graphql
+                    query ItemAndLevel($id: ID!, $loc: ID!) {
+                      inventoryItem(id: $id) {
+                        id
+                        variant {
+                          id
+                          title
+                          sku
+                          barcode
+                          product { title }
+                        }
+                        inventoryLevel(locationId: $loc) {
+                          quantities(names: ["available"]) { name quantity }
+                        }
+                      }
+                    }
+                  `,
+                      { variables: { id: inventoryItemId, loc: locationId } }
+                    );
+                    const json2 = await resp2.json();
+                    if (Array.isArray(json2?.errors) && json2.errors.length > 0) {
+                      console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern1 retry):", JSON.stringify(json2.errors));
+                      return null;
+                    }
+                    const item2 = json2?.data?.inventoryItem;
+                    if (!item2?.variant) return null;
+                    const productTitle2 = item2.variant.product?.title ?? "";
+                    const variantTitle2 = item2.variant.title ?? "";
+                    const fullTitle2 = variantTitle2 && variantTitle2 !== "Default Title" ? `${productTitle2}/${variantTitle2}` : productTitle2;
+                    const qty2 = item2.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
+                    const currentQuantity2 = qty2 !== null && qty2 !== undefined ? Number(qty2) : 0;
+                    return {
+                      variantId: item2.variant.id,
+                      inventoryItemId: item2.id,
+                      productTitle: productTitle2,
+                      variantTitle: variantTitle2,
+                      sku: item2.variant.sku ?? "",
+                      barcode: item2.variant.barcode,
+                      title: fullTitle2,
+                      currentQuantity: currentQuantity2,
+                      actualQuantity: 0,
+                      delta: 0,
+                    };
+                  } catch (e2) {
+                    console.error("[inventory-count] get_incomplete_group_products item failed (pattern1 retry):", inventoryItemId, (e2 as Error)?.message ?? String(e2));
+                    return null;
+                  }
+                }
+                console.error("[inventory-count] get_incomplete_group_products item failed (pattern1):", inventoryItemId, errMsg);
                 return null;
               }
             })
@@ -1826,7 +1910,7 @@ export async function action({ request }: ActionFunctionArgs) {
         const ids = resolvedIds.slice(offset, offset + MAX_PRODUCTS_PER_GROUP);
         const hasMore1b = resolvedIds.length > offset + MAX_PRODUCTS_PER_GROUP;
         if (ids.length > 0) {
-          const BATCH_SIZE = 10;
+          const BATCH_SIZE = 5; // 同時並列数を減らして Throttled を防ぐ（根本対策）
           const allResults: Array<{
             variantId: string;
             inventoryItemId: string;
@@ -1865,9 +1949,37 @@ export async function action({ request }: ActionFunctionArgs) {
                     `,
                     { variables: { id: inventoryItemId, loc: locationId } }
                   );
-                  const json = await resp.json();
+                  let json = await resp.json();
                   if (Array.isArray(json?.errors) && json.errors.length > 0) {
                     console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern1b):", JSON.stringify(json.errors));
+                    const hasThrottledInErrors = json.errors.some((e: { message?: string }) => /throttle/i.test(String(e?.message ?? "")));
+                    if (hasThrottledInErrors && !json?.data?.inventoryItem) {
+                      await delay(THROTTLE_RETRY_DELAY_MS);
+                      const respRetry = await admin.graphql(
+                        `#graphql
+                      query ItemAndLevel($id: ID!, $loc: ID!) {
+                        inventoryItem(id: $id) {
+                          id
+                          variant {
+                            id
+                            title
+                            sku
+                            barcode
+                            product { title }
+                          }
+                          inventoryLevel(locationId: $loc) {
+                            quantities(names: ["available"]) { name quantity }
+                          }
+                        }
+                      }
+                    `,
+                        { variables: { id: inventoryItemId, loc: locationId } }
+                      );
+                      json = await respRetry.json();
+                      if (Array.isArray(json?.errors) && json.errors.length > 0) {
+                        console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern1b errors-retry):", JSON.stringify(json.errors));
+                      }
+                    }
                   }
                   const item = json?.data?.inventoryItem;
                   if (!item?.variant) return null;
@@ -1889,7 +2001,61 @@ export async function action({ request }: ActionFunctionArgs) {
                     delta: 0,
                   };
                 } catch (e) {
-                  console.error("[inventory-count] get_incomplete_group_products item failed (pattern1b):", inventoryItemId, (e as Error)?.message ?? String(e));
+                  const errMsg = (e as Error)?.message ?? String(e);
+                  const isThrottled = /throttle/i.test(errMsg);
+                  if (isThrottled) {
+                    await delay(THROTTLE_RETRY_DELAY_MS);
+                    try {
+                      const resp2 = await admin.graphql(
+                        `#graphql
+                      query ItemAndLevel($id: ID!, $loc: ID!) {
+                        inventoryItem(id: $id) {
+                          id
+                          variant {
+                            id
+                            title
+                            sku
+                            barcode
+                            product { title }
+                          }
+                          inventoryLevel(locationId: $loc) {
+                            quantities(names: ["available"]) { name quantity }
+                          }
+                        }
+                      }
+                    `,
+                        { variables: { id: inventoryItemId, loc: locationId } }
+                      );
+                      const json2 = await resp2.json();
+                      if (Array.isArray(json2?.errors) && json2.errors.length > 0) {
+                        console.error("[inventory-count] get_incomplete_group_products GraphQL errors (pattern1b retry):", JSON.stringify(json2.errors));
+                        return null;
+                      }
+                      const item2 = json2?.data?.inventoryItem;
+                      if (!item2?.variant) return null;
+                      const productTitle2 = item2.variant.product?.title ?? "";
+                      const variantTitle2 = item2.variant.title ?? "";
+                      const fullTitle2 = variantTitle2 && variantTitle2 !== "Default Title" ? `${productTitle2}/${variantTitle2}` : productTitle2;
+                      const qty2 = item2.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
+                      const currentQuantity2 = qty2 !== null && qty2 !== undefined ? Number(qty2) : 0;
+                      return {
+                        variantId: item2.variant.id,
+                        inventoryItemId: item2.id,
+                        productTitle: productTitle2,
+                        variantTitle: variantTitle2,
+                        sku: item2.variant.sku ?? "",
+                        barcode: item2.variant.barcode,
+                        title: fullTitle2,
+                        currentQuantity: currentQuantity2,
+                        actualQuantity: 0,
+                        delta: 0,
+                      };
+                    } catch (e2) {
+                      console.error("[inventory-count] get_incomplete_group_products item failed (pattern1b retry):", inventoryItemId, (e2 as Error)?.message ?? String(e2));
+                      return null;
+                    }
+                  }
+                  console.error("[inventory-count] get_incomplete_group_products item failed (pattern1b):", inventoryItemId, errMsg);
                   return null;
                 }
               })
@@ -2235,11 +2401,6 @@ export default function InventoryCountPage() {
     incompleteGroupProductsFetcher.submit(formData, { method: "post" });
   };
   
-  // ✅ 一覧表示用の未完了グループの商品リストを取得するためのfetcherとstate
-  const incompleteGroupProductsForListFetcher = useFetcher<typeof action>();
-  const [incompleteGroupProductsForList, setIncompleteGroupProductsForList] = useState<Map<string, Map<string, Array<any>>>>(new Map());
-  const incompleteGroupFetchIndexForListRef = useRef<Map<string, number>>(new Map());
-  const incompleteGroupIdsForListRef = useRef<Map<string, string[]>>(new Map());
   const csvFileInputRef = useRef<HTMLInputElement>(null);
   const [csvImportMode, setCsvImportMode] = useState<"append" | "replace" | "new_only">("append");
   const [csvPreviewRows, setCsvPreviewRows] = useState<{ groupName: string; sku: string }[]>([]);
@@ -2576,96 +2737,8 @@ export default function InventoryCountPage() {
   }, [inventoryCounts, locationFilters, statusFilters]);
 
   // ✅ 一覧表示で未完了グループの商品リストを取得
-  useEffect(() => {
-    // 表示されている棚卸IDについて、未完了グループの商品リストを取得
-    for (const c of filteredCounts) {
-      const allGroupIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-        ? c.productGroupIds
-        : c.productGroupId ? [c.productGroupId] : [];
-      const groupItemsMap = (c as any)?.groupItems && typeof (c as any).groupItems === "object" ? (c as any).groupItems : {};
-      
-      // 未完了グループIDを取得（getGroupItemsByKey で POS と同一の正規化キー照合）
-      const incompleteGroupIds = allGroupIds.filter((groupId) => {
-        const groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
-        return groupItems.length === 0;
-      });
-      
-      // 未完了グループがない場合はスキップ
-      if (incompleteGroupIds.length === 0) {
-        continue;
-      }
-      
-      // 既に取得済みの場合はスキップ（キーは文字列で統一して照合）
-      const countId = c.id;
-      const existingMap = incompleteGroupProductsForList.get(countId);
-      if (existingMap && incompleteGroupIds.every((id) => existingMap.has(String(id)))) {
-        continue;
-      }
-      
-      // 取得中の場合はスキップ（fetcherがloading中の場合）
-      if (incompleteGroupProductsForListFetcher.state !== "idle") {
-        continue;
-      }
-      
-      // 未完了グループIDをrefに保存
-      incompleteGroupIdsForListRef.current.set(countId, incompleteGroupIds);
-      incompleteGroupFetchIndexForListRef.current.set(countId, 0);
-      
-      // 最初のグループを取得
-      const formData = new FormData();
-      formData.append("action", "get_incomplete_group_products");
-      formData.append("groupId", incompleteGroupIds[0]);
-      formData.append("locationId", c.locationId);
-      formData.append("offset", "0");
-      incompleteGroupProductsForListFetcher.submit(formData, { method: "post" });
-      incompleteGroupFetchIndexForListRef.current.set(countId, 1);
-      break; // 一度に1つの棚卸IDのみ処理
-    }
-  }, [filteredCounts, incompleteGroupProductsForList, incompleteGroupProductsForListFetcher.state]);
-
-  // ✅ 一覧表示用の未完了グループの商品リスト取得完了時の処理
-  useEffect(() => {
-    if (incompleteGroupProductsForListFetcher.state === "idle" && incompleteGroupProductsForListFetcher.data?.ok && incompleteGroupProductsForListFetcher.data?.products && incompleteGroupProductsForListFetcher.data?.groupId) {
-      const { groupId, products } = incompleteGroupProductsForListFetcher.data;
-      
-      // どの棚卸IDのグループかを特定（最初に見つかった未完了グループを持つ棚卸IDを使用・キー型差を考慮）
-      const groupIdStr = String(groupId);
-      let targetCountId: string | null = null;
-      for (const [countId, incompleteGroupIds] of incompleteGroupIdsForListRef.current.entries()) {
-        if (incompleteGroupIds.some((id) => String(id) === groupIdStr)) {
-          targetCountId = countId;
-          break;
-        }
-      }
-      
-      if (targetCountId) {
-        const groupKey = String(groupId);
-        setIncompleteGroupProductsForList((prev) => {
-          const newMap = new Map(prev);
-          const countMap = new Map(newMap.get(targetCountId));
-          countMap.set(groupKey, products);
-          newMap.set(targetCountId, countMap);
-          return newMap;
-        });
-        
-        // ✅ 次の未完了グループを取得（まだ取得していないグループがある場合）
-        const currentIndex = incompleteGroupFetchIndexForListRef.current.get(targetCountId) || 0;
-        const remainingGroupIds = incompleteGroupIdsForListRef.current.get(targetCountId) || [];
-        if (currentIndex < remainingGroupIds.length) {
-          const c = filteredCounts.find((c) => c.id === targetCountId);
-          if (c) {
-            const formData = new FormData();
-            formData.append("action", "get_incomplete_group_products");
-            formData.append("groupId", remainingGroupIds[currentIndex]);
-            formData.append("locationId", c.locationId);
-            formData.append("offset", "0");
-            incompleteGroupProductsForListFetcher.submit(formData, { method: "post" });
-            incompleteGroupFetchIndexForListRef.current.set(targetCountId, currentIndex + 1);
-          }
-        }
-      }
-    }
-  }, [incompleteGroupProductsForListFetcher.data, incompleteGroupProductsForListFetcher.state, filteredCounts]);
+  // ✅ 502根本対策：一覧では未完了グループの母数を取得しない（get_incomplete_group_products はモーダルを開いたときのみ呼ぶ）。
+  // 履歴タブを開いている間の長時間 POST 連続を防ぎ、GET（loader）のタイムアウト・502 を解消する。
 
   const locationById = useMemo(() => {
     const m: Record<string, string> = {};
@@ -4591,17 +4664,9 @@ export default function InventoryCountPage() {
                     // ✅ 完了済みグループの商品を取得（getGroupItemsByKey で POS と同一の正規化キー照合）
                     const itemsFromGroup = allGroupIds.flatMap((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(id)));
                     
-                    // ✅ 未完了グループの商品リストを取得（一覧表示用）
-                    const incompleteGroupProductsForThisCount = incompleteGroupProductsForList.get(c.id) || new Map();
-                    const itemsFromIncompleteGroups = allGroupIds.flatMap((groupId) => {
-                      const groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
-                      // 未完了グループの場合、incompleteGroupProductsForListから取得（キー正規化で照合漏れ防止）
-                      if (groupItems.length === 0) {
-                        const arr = incompleteGroupProductsForThisCount.get(String(groupId)) ?? incompleteGroupProductsForThisCount.get(groupId as string);
-                        return Array.isArray(arr) ? arr : [];
-                      }
-                      return [];
-                    });
+                    // ✅ 502根本対策：一覧では未完了グループの母数取得をしないため、未完了分の商品は一覧に含めない（母数は「-」表示）
+                    const itemsFromIncompleteGroups: unknown[] = [];
+                    const hasIncompleteGroup = allGroupIds.some((groupId) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId)).length === 0);
                     
                     // ✅ 複数グループの場合、未完了グループの商品も含めるため、itemsフィールドから取得（後方互換性）
                     // ✅ itemsフィールドには全グループの商品が含まれている（確定処理で修正済み）
@@ -4612,7 +4677,7 @@ export default function InventoryCountPage() {
                       ? c.items.filter((it) => !completedGroupInventoryItemIds.has(it.inventoryItemId) && !incompleteGroupInventoryItemIds.has(it.inventoryItemId))
                       : [];
                     
-                    // ✅ 完了済みグループの商品 + 未完了グループの商品（incompleteGroupProductsForListから取得、なければitemsフィールドから）
+                    // ✅ 完了済みグループの商品 + 未完了分（一覧では未取得のため空）+ items 後方互換
                     // ✅ 単一グループの場合でも、未完了グループの商品リストを含める
                     const allGroupItems = hasMultipleGroups
                       ? [...itemsFromGroup, ...itemsFromIncompleteGroups, ...itemsFromItemsForIncomplete]
@@ -4738,7 +4803,7 @@ export default function InventoryCountPage() {
                                 <span style={getStatusBadgeStyle(c.status)}>{statusLabel}</span>
                               </s-text>
                               <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                                {itemCount}件・実数{totalQty}{currentQty > 0 ? `/${currentQty}` : "/-"}
+                                {itemCount}件・実数{totalQty}{hasIncompleteGroup ? "/-" : currentQty > 0 ? `/${currentQty}` : "/-"}
                               </s-text>
                             </div>
                           </div>

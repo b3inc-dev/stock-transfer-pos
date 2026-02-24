@@ -169,6 +169,11 @@ async function migratePurchaseV1ToV2() {
   }
 }
 
+async function getPurchaseInitialDisplayLimit() {
+  const n = await getPurchaseChunkSize();
+  return Math.max(1, Math.min(250, n));
+}
+
 export async function readPurchaseEntriesFirstPage() {
   let manifest = await readPurchaseManifest();
   if (!manifest) {
@@ -190,11 +195,40 @@ export async function readPurchaseEntriesFirstPage() {
   const chunkRaw = data?.currentAppInstallation?.chunk0?.value ?? "[]";
   try {
     const entries = JSON.parse(chunkRaw);
-    const list = Array.isArray(entries) ? entries : [];
-    return { entries: list, hasMore: manifest.chunkCount > 1, chunkCount: manifest.chunkCount };
+    const fullList = Array.isArray(entries) ? entries : [];
+    const limit = await getPurchaseInitialDisplayLimit();
+    const list = fullList.slice(0, limit);
+    const hasMore = fullList.length > limit || manifest.chunkCount > 1;
+    return { entries: list, hasMore, chunkCount: manifest.chunkCount };
   } catch {
     return { entries: [], hasMore: false, chunkCount: manifest.chunkCount };
   }
+}
+
+/** 指定IDのエントリを1件取得（一覧タップ後の詳細用） */
+export async function readPurchaseEntryById(entryId) {
+  if (!entryId) return null;
+  const id = String(entryId).trim();
+  let manifest = await readPurchaseManifest();
+  if (!manifest) {
+    await migratePurchaseV1ToV2();
+    manifest = await readPurchaseManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) return null;
+  for (let i = 0; i < manifest.chunkCount; i++) {
+    const key = `${PURCHASE_V2_CHUNK_PREFIX}${i}`;
+    const gql = `#graphql query PurchaseChunk($key: String!) { currentAppInstallation { metafield(namespace: "${PURCHASE_NS}", key: $key) { value } } }`;
+    const d = await graphql(gql, { key });
+    const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        const found = arr.find((e) => String(e?.id ?? "").trim() === id);
+        if (found) return found;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 export async function readPurchaseEntriesPage(pageIndex) {

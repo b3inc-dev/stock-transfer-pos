@@ -299,6 +299,7 @@ export async function readInventoryCountsFirstPage() {
     return { counts: [], hasMore: false, chunkCount: 0 };
   }
   const productGroups = await readProductGroups();
+  const listLimit = await getStocktakeListLimit();
 
   if (Array.isArray(parsed)) {
     if (parsed.length === 0) return { counts: [], hasMore: false, chunkCount: 0 };
@@ -326,7 +327,9 @@ export async function readInventoryCountsFirstPage() {
     })();
     const totalChunks = desc?.totalChunks ?? 1;
     counts = fixCountsStatusOnly(counts, productGroups);
-    return { counts, hasMore: totalChunks > 1, chunkCount: totalChunks };
+    const limited = counts.slice(0, listLimit);
+    const hasMore = counts.length > listLimit || totalChunks > 1;
+    return { counts: limited, hasMore, chunkCount: totalChunks };
   }
 
   if (!parsed?._chunked || typeof parsed.totalChunks !== "number" || parsed.totalChunks < 1) {
@@ -350,7 +353,9 @@ export async function readInventoryCountsFirstPage() {
     } catch {}
   }
   counts = fixCountsStatusOnly(counts, productGroups);
-  return { counts, hasMore: totalChunks > 1, chunkCount: totalChunks };
+  const limited = counts.slice(0, listLimit);
+  const hasMore = counts.length > listLimit || totalChunks > 1;
+  return { counts: limited, hasMore, chunkCount: totalChunks };
 }
 
 /**
@@ -402,6 +407,20 @@ export async function readInventoryCountsPage(pageIndex) {
   }
   counts = fixCountsStatusOnly(counts, productGroups);
   return { counts };
+}
+
+/**
+ * 棚卸IDで1件だけ取得（一覧タップ後の商品グループ読み込み用）
+ */
+export async function readInventoryCountById(countId) {
+  if (!countId) return null;
+  const id = String(countId).trim();
+  const counts = await readInventoryCountsRaw();
+  const found = counts.find((c) => String(c?.id) === id);
+  if (!found) return null;
+  const productGroups = await readProductGroups();
+  const fixed = fixCountsStatusOnly([found], productGroups);
+  return fixed[0] ?? null;
 }
 
 export async function readInventoryCounts() {

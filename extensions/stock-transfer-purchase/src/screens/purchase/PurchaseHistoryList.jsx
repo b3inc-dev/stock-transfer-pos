@@ -7,6 +7,7 @@ import {
   readPurchaseEntriesFirstPage,
   readPurchaseEntriesPage,
   readPurchaseEntriesFull,
+  readPurchaseEntryById,
   readPurchaseEntries,
   writePurchaseEntries,
   fetchLocations,
@@ -460,6 +461,8 @@ export function PurchaseHistoryList({
   const [error, setError] = useState("");
   const [entries, setEntries] = useState([]);
   const [selectedEntryId, setSelectedEntryId] = useState("");
+  const [detailEntryFetched, setDetailEntryFetched] = useState(null); // 一覧タップ後にAPIで取得した1件（再描画用）
+  const [detailLoading, setDetailLoading] = useState(false);
   const [imageUrls, setImageUrls] = useState(new Map()); // 画像URLキャッシュ
   const [query, setQuery] = useState("");
   const [candidates, setCandidates] = useState([]);
@@ -474,8 +477,8 @@ export function PurchaseHistoryList({
   const fullEntriesByIdRef = useRef(new Map());
   const selectedEntry = useMemo(() => {
     if (!selectedEntryId) return null;
-    return fullEntriesByIdRef.current.get(selectedEntryId) ?? ((Array.isArray(entries) ? entries : []).find((e) => e.id === selectedEntryId) || null);
-  }, [selectedEntryId, entries]);
+    return detailEntryFetched ?? fullEntriesByIdRef.current.get(selectedEntryId) ?? ((Array.isArray(entries) ? entries : []).find((e) => e.id === selectedEntryId) || null);
+  }, [selectedEntryId, entries, detailEntryFetched]);
   const historyDraftLoadedRef = useRef(false);
 
   const isCompleted = (e) => e.status === "received" || e.status === "cancelled";
@@ -568,13 +571,43 @@ export function PurchaseHistoryList({
 
   const onTapEntry = useCallback((entry) => {
     setSelectedEntryId(entry.id);
-    // 詳細に入った瞬間に検索状態を初期化
+    setDetailEntryFetched(null);
     setQuery("");
     setCandidates([]);
     setImageUrls(new Map());
     setExtras([]);
     setAddQtyById({});
   }, []);
+
+  // 一覧タップ後：ref に無い場合は API で1件取得
+  useEffect(() => {
+    if (!selectedEntryId) {
+      setDetailEntryFetched(null);
+      setDetailLoading(false);
+      return;
+    }
+    if (fullEntriesByIdRef.current.get(selectedEntryId)) {
+      setDetailEntryFetched(null);
+      setDetailLoading(false);
+      return;
+    }
+    let mounted = true;
+    setDetailLoading(true);
+    readPurchaseEntryById(selectedEntryId)
+      .then((entry) => {
+        if (mounted && entry) {
+          fullEntriesByIdRef.current.set(entry.id, entry);
+          setDetailEntryFetched(entry);
+        }
+      })
+      .catch((e) => {
+        if (mounted) toast(`詳細の取得に失敗しました: ${String(e?.message ?? e)}`);
+      })
+      .finally(() => {
+        if (mounted) setDetailLoading(false);
+      });
+    return () => { mounted = false; };
+  }, [selectedEntryId]);
 
   // 選択中エントリに合わせて編集用 lines を生成
   useEffect(() => {
@@ -585,13 +618,15 @@ export function PurchaseHistoryList({
       return;
     }
     const entry = (Array.isArray(entries) ? entries : []).find((e) => e.id === selectedEntryId);
-    if (!entry) {
+    const fullEntry = detailEntryFetched ?? fullEntriesByIdRef.current.get(selectedEntryId) ?? entry;
+    if (!fullEntry) {
       setLines([]);
       setExtras([]);
       historyDraftLoadedRef.current = false;
       return;
     }
-    const next = (Array.isArray(entry.items) ? entry.items : []).map((it, idx) => {
+    const entryForLines = fullEntry;
+    const next = (Array.isArray(entryForLines.items) ? entryForLines.items : []).map((it, idx) => {
       const productTitle = String(it.productTitle || "").trim() || String(it.title || "").trim() || "(unknown)";
       // pending(from order) は option1-3 を持つことがある。received(from POS) は variantTitle を持つ。
       const optFromFields = [it.option1, it.option2, it.option3].map((s) => String(s || "").trim()).filter(Boolean);
@@ -607,7 +642,7 @@ export function PurchaseHistoryList({
         imageUrl: it.imageUrl || "",
         plannedQty: Math.max(0, Number(it.quantity || 0)),
         // 入庫の未処理（未入庫）と同じ：初期は 0（検品で積み上げる）
-        receiveQty: entry.status === "pending" ? 0 : Math.max(0, Number(it.quantity || 0)),
+        receiveQty: entryForLines.status === "pending" ? 0 : Math.max(0, Number(it.quantity || 0)),
       });
     });
     setLines(next);
@@ -618,17 +653,17 @@ export function PurchaseHistoryList({
       try {
         if (historyDraftLoadedRef.current) return;
         if (!SHOPIFY?.storage?.get) return;
-        const key = `${PURCHASE_HISTORY_DRAFT_PREFIX}${entry.id}`;
+        const key = `${PURCHASE_HISTORY_DRAFT_PREFIX}${entryForLines.id}`;
         const saved = await SHOPIFY.storage.get(key);
         if (!saved || typeof saved !== "object") return;
-        if (String(saved.entryId || "") !== String(entry.id)) return;
+        if (String(saved.entryId || "") !== String(entryForLines.id)) return;
 
         const savedLinesRaw = Array.isArray(saved.lines) ? saved.lines : [];
         const savedExtrasRaw = Array.isArray(saved.extras) ? saved.extras : [];
 
         const normLines = savedLinesRaw
           .map((l, i) => ({
-            id: String(l?.id ?? `${entry.id}-L-${i}`),
+            id: String(l?.id ?? `${entryForLines.id}-L-${i}`),
             inventoryItemId: l?.inventoryItemId ?? null,
             variantId: l?.variantId ?? null,
             productTitle: String(l?.productTitle || ""),
@@ -643,7 +678,7 @@ export function PurchaseHistoryList({
 
         const normExtras = savedExtrasRaw
           .map((l, i) => ({
-            id: String(l?.id ?? `${entry.id}-E-${i}`),
+            id: String(l?.id ?? `${entryForLines.id}-E-${i}`),
             inventoryItemId: l?.inventoryItemId ?? null,
             variantId: l?.variantId ?? null,
             productTitle: String(l?.productTitle || ""),
@@ -666,7 +701,7 @@ export function PurchaseHistoryList({
         console.error("[PurchaseHistoryList] failed to load draft", e);
       }
     })();
-  }, [selectedEntryId, entries]);
+  }, [selectedEntryId, entries, detailEntryFetched]);
 
   // 検索（入庫商品リストの「検索」ブロック相当）
   useEffect(() => {

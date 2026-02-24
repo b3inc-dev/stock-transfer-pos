@@ -546,6 +546,12 @@ async function migrateLossV1ToV2() {
   }
 }
 
+/** 初回表示件数（設定の historyInitialLimit） */
+async function getLossInitialDisplayLimit() {
+  const n = await getLossChunkSize();
+  return Math.max(1, Math.min(250, n));
+}
+
 export async function readLossEntriesFirstPage() {
   let manifest = await readLossManifest();
   if (!manifest) {
@@ -559,10 +565,40 @@ export async function readLossEntriesFirstPage() {
   const chunkRaw = data?.currentAppInstallation?.chunk0?.value ?? "[]";
   try {
     const list = JSON.parse(chunkRaw);
-    return { entries: Array.isArray(list) ? list : [], hasMore: manifest.chunkCount > 1, chunkCount: manifest.chunkCount };
+    const fullList = Array.isArray(list) ? list : [];
+    const limit = await getLossInitialDisplayLimit();
+    const entries = fullList.slice(0, limit);
+    const hasMore = fullList.length > limit || manifest.chunkCount > 1;
+    return { entries, hasMore, chunkCount: manifest.chunkCount };
   } catch {
     return { entries: [], hasMore: false, chunkCount: manifest.chunkCount };
   }
+}
+
+/** 指定IDのエントリを1件取得（一覧タップ後の詳細用。チャンクを順に読んで該当を探す） */
+export async function readLossEntryById(entryId) {
+  if (!entryId) return null;
+  const id = String(entryId).trim();
+  let manifest = await readLossManifest();
+  if (!manifest) {
+    await migrateLossV1ToV2();
+    manifest = await readLossManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) return null;
+  for (let i = 0; i < manifest.chunkCount; i++) {
+    const key = `${LOSS_V2_CHUNK_PREFIX}${i}`;
+    const gql = `#graphql query LossChunk($key: String!) { currentAppInstallation { metafield(namespace: "${LOSS_NS}", key: $key) { value } } }`;
+    const d = await graphql(gql, { key });
+    const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        const found = arr.find((e) => String(e?.id ?? "").trim() === id);
+        if (found) return found;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 export async function readLossEntriesPage(pageIndex) {

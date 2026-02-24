@@ -3,6 +3,7 @@ import {
   readAdjustmentEntriesFirstPage,
   readAdjustmentEntriesPage,
   readAdjustmentEntriesFull,
+  readAdjustmentEntryById,
   writeAdjustmentEntries,
   adjustInventoryToActual,
   fetchLocations,
@@ -173,6 +174,7 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   const [detailId, setDetailId] = useState("");
   const [cancelling, setCancelling] = useState("");
   const [imageUrls, setImageUrls] = useState(new Map()); // ✅ 画像URLキャッシュ
+  const [detailLoading, setDetailLoading] = useState(false); // ✅ 一覧タップ後の詳細API取得中
   const locs = Array.isArray(locationsProp) ? locationsProp : [];
   const [chunkCount, setChunkCount] = useState(0);
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
@@ -332,20 +334,44 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
     const id = entry?.id;
     if (!id) return;
     setDetailId(id);
-    setDetailEntry(fullEntriesByIdRef.current.get(id) ?? null);
+    setDetailEntry(null);
   }, []);
 
   useEffect(() => {
-    if (!detailId) setDetailEntry(null);
+    if (!detailId) {
+      setDetailEntry(null);
+      setDetailLoading(false);
+      return;
+    }
+    let mounted = true;
+    setDetailLoading(true);
+    readAdjustmentEntryById(detailId)
+      .then((entry) => {
+        if (mounted) setDetailEntry(entry ?? null);
+      })
+      .catch((e) => {
+        if (mounted) {
+          toast(`詳細の取得に失敗しました: ${String(e?.message ?? e)}`);
+          setDetailEntry(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) setDetailLoading(false);
+      });
+    return () => { mounted = false; };
   }, [detailId]);
 
   useEffect(() => {
-    if (detailId) {
-      const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
-      if (!entry) {
-        setHeader?.(null);
-        return;
-      }
+    if (!detailId) return;
+    if (detailLoading) {
+      setHeader?.(<s-box padding="base"><s-text tone="subdued">読み込み中...</s-text></s-box>);
+      return;
+    }
+    if (!detailEntry) {
+      setHeader?.(<s-box padding="base"><s-text tone="critical">詳細の取得に失敗しました</s-text></s-box>);
+      return;
+    }
+    const entry = detailEntry;
       
       // ✅ 出庫履歴詳細と同じヘッダーを追加
       const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
@@ -451,6 +477,7 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   }, [
     detailId,
     detailEntry,
+    detailLoading,
     entries,
     historyMode,
     activeCount,
@@ -467,10 +494,8 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   useEffect(() => {
     if (detailId) {
       const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
-      if (!entry) {
-        setDetailId("");
-        return;
-      }
+      if (!entry && !detailLoading) setDetailId("");
+      if (!entry) return;
       const locName = entry.locationName || getLocationName(entry.locationId);
       const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
       // filteredByLocはentriesから動的に計算する（依存配列から除外）
@@ -526,6 +551,7 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   }, [
     detailId,
     detailEntry,
+    detailLoading,
     entries,
     historyMode,
     listToShow.length,
@@ -543,10 +569,17 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
 
   if (detailId) {
     const e = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((x) => x.id === detailId);
+    if (detailLoading) {
+      return (
+        <s-box padding="base">
+          <s-text tone="subdued">読み込み中...</s-text>
+        </s-box>
+      );
+    }
     if (!e) {
       return (
         <s-box padding="base">
-          <s-text tone="subdued">読込中...</s-text>
+          <s-text tone="critical">詳細の取得に失敗しました</s-text>
         </s-box>
       );
     }

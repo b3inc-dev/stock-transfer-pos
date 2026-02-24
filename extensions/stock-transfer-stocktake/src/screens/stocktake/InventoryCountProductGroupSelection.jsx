@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "preact/hooks";
-import { getProductGroupName, getLocationName, readInventoryCounts, writeInventoryCounts, fetchProductsByGroups, getCurrentQuantity, normalizeIdForMatch } from "./stocktakeApi.js";
+import { getProductGroupName, getLocationName, readInventoryCountById, readInventoryCounts, writeInventoryCounts, fetchProductsByGroups, getCurrentQuantity, normalizeIdForMatch } from "./stocktakeApi.js";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
 
@@ -14,6 +14,11 @@ function getGroupItemsByKey(groupItemsMap, groupId) {
   return key && Array.isArray(groupItemsMap[key]) ? groupItemsMap[key] : [];
 }
 
+/** 一覧から渡された count が最小情報のみか（groupItems なし） */
+function isMinimalCount(c) {
+  return c && typeof c === "object" && c.id && !(c.groupItems && typeof c.groupItems === "object");
+}
+
 export function InventoryCountProductGroupSelection({
   count,
   onNext,
@@ -23,48 +28,105 @@ export function InventoryCountProductGroupSelection({
 }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [fullCount, setFullCount] = useState(null); // ✅ 一覧タップ後に readInventoryCountById で取得したフルデータ
+  const [countLoading, setCountLoading] = useState(false);
+  const [countError, setCountError] = useState("");
   const [productGroups, setProductGroups] = useState([]);
   const [productGroupNames, setProductGroupNames] = useState(new Map());
   const [productGroupQuantities, setProductGroupQuantities] = useState(new Map()); // ✅ 各商品グループの数量情報（読込ボタンで取得。初回は自動読込しない）
   const [loadingQuantities, setLoadingQuantities] = useState(false); // ✅ 在庫数読込中の表示用（ヘッダーで「読込中...」表示）
   const loadingQuantitiesRef = useRef(false); // ✅ 二重発火防止（onClick/onPress両方で呼ばれる場合）
 
+  const effectiveCount = fullCount ?? (count?.groupItems ? count : null);
+
+  // ✅ 一覧タップ後：最小情報のときだけ棚卸1件をAPI取得
+  useEffect(() => {
+    if (!count?.id) {
+      setFullCount(null);
+      setCountLoading(false);
+      setCountError("");
+      return;
+    }
+    if (!isMinimalCount(count)) {
+      setFullCount(count);
+      return;
+    }
+    let mounted = true;
+    setCountLoading(true);
+    setCountError("");
+    readInventoryCountById(count.id)
+      .then(async (fetched) => {
+        if (!mounted) return;
+        if (!fetched) {
+          setFullCount(null);
+          setCountError("棚卸の取得に失敗しました");
+          return;
+        }
+        if (fetched.status === "draft") {
+          try {
+            const allCounts = await readInventoryCounts();
+            const updated = allCounts.map((c) =>
+              c.id === count.id ? { ...c, status: "in_progress" } : c
+            );
+            await writeInventoryCounts(updated);
+            fetched = { ...fetched, status: "in_progress" };
+          } catch (e) {
+            console.error("Failed to update count status:", e);
+          }
+        }
+        setFullCount(fetched);
+      })
+      .catch((e) => {
+        if (mounted) {
+          setCountError(String(e?.message ?? e));
+          setFullCount(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) setCountLoading(false);
+      });
+    return () => { mounted = false; };
+  }, [count?.id]);
+
   // 商品グループ名を取得（Map のキーは正規化キーで統一し、GID と数値の混在でずれないようにする）
   useEffect(() => {
+    const c = effectiveCount ?? count;
     const loadNames = async () => {
       const groupMap = new Map();
-      const productGroupIds = Array.isArray(count?.productGroupIds) ? count.productGroupIds : [];
+      const productGroupIds = Array.isArray(c?.productGroupIds) ? c.productGroupIds : [];
       for (const groupId of productGroupIds) {
         const name = await getProductGroupName(groupId);
         if (name) groupMap.set(normalizeIdForMatch(groupId), name);
       }
       setProductGroupNames(groupMap);
     };
-    if (count?.productGroupIds) {
+    if (c?.productGroupIds?.length) {
       loadNames();
     }
-  }, [count]);
+  }, [effectiveCount, count]);
 
   // 商品グループ情報を準備（管理画面で保存済みの productGroupNames を優先。参照は正規化キーで）
   useEffect(() => {
-    if (!count) return;
-    const productGroupIds = Array.isArray(count.productGroupIds) ? count.productGroupIds : [];
-    const namesFromCount = Array.isArray(count.productGroupNames) ? count.productGroupNames : [];
+    const c = effectiveCount ?? count;
+    if (!c) return;
+    const productGroupIds = Array.isArray(c.productGroupIds) ? c.productGroupIds : [];
+    const namesFromCount = Array.isArray(c.productGroupNames) ? c.productGroupNames : [];
     setProductGroups(productGroupIds.map((id, i) => ({
       id,
       name: namesFromCount[i] || productGroupNames.get(normalizeIdForMatch(id)) || id,
     })));
-  }, [count, productGroupNames]);
+  }, [effectiveCount, count, productGroupNames]);
 
   // ✅ 各商品グループの数量情報を取得（入庫のシップメント選択画面と同じ方式）
   const loadProductGroupQuantities = useCallback(async () => {
-    if (!count || !count.locationId) return;
-    const productGroupIds = Array.isArray(count.productGroupIds) ? count.productGroupIds : [];
+    const c = effectiveCount;
+    if (!c || !c.locationId) return;
+    const productGroupIds = Array.isArray(c.productGroupIds) ? c.productGroupIds : [];
     if (productGroupIds.length === 0) return;
 
     const qtyMap = new Map();
-    const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-    const countItemsLegacy = Array.isArray(count?.items) ? count.items : [];
+    const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
+    const countItemsLegacy = Array.isArray(c?.items) ? c.items : [];
 
     try {
       await Promise.all(
@@ -88,10 +150,10 @@ export function InventoryCountProductGroupSelection({
               if (groupItems.length === 0) {
                 // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
                 // ✅ SKU/CSVグループ用に inventoryItemIdsByGroup を渡す
-                const products = await fetchProductsByGroups([groupId], count.locationId, {
+                const products = await fetchProductsByGroups([groupId], c.locationId, {
                   filterByInventoryLevel: false,
                   includeImages: false,
-                  inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
+                  inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
                 });
                 const productInventoryItemIds = new Set(
                   products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
@@ -107,16 +169,16 @@ export function InventoryCountProductGroupSelection({
               if (groupItems.length === 0) {
                 // ✅ groupItemsが空の場合、商品グループの商品リストを取得して在庫数を計算
                 // ✅ SKU/CSVグループ用に inventoryItemIdsByGroup を渡す
-                const products = await fetchProductsByGroups([groupId], count.locationId, {
+                const products = await fetchProductsByGroups([groupId], c.locationId, {
                   filterByInventoryLevel: false,
                   includeImages: false,
-                  inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
+                  inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
                 });
                 
                 // ✅ 各商品の在庫数を取得して合計を計算
                 const inventoryQuantities = await Promise.all(
                   products.map(async (p) => {
-                    const qty = await getCurrentQuantity(p.inventoryItemId, count.locationId);
+                    const qty = await getCurrentQuantity(p.inventoryItemId, c.locationId);
                     return qty !== null ? qty : 0;
                   })
                 );
@@ -132,8 +194,8 @@ export function InventoryCountProductGroupSelection({
             }
 
             // ✅ inventoryItemIdsByGroup から SKU 数を取得（items/groupItems が空の場合のフォールバック）
-            if (skuCount === 0 && count?.inventoryItemIdsByGroup?.[groupId]) {
-              const ids = count.inventoryItemIdsByGroup[groupId];
+            if (skuCount === 0 && c?.inventoryItemIdsByGroup?.[groupId]) {
+              const ids = c.inventoryItemIdsByGroup[groupId];
               skuCount = Array.isArray(ids) ? ids.length : 0;
             }
 
@@ -159,46 +221,31 @@ export function InventoryCountProductGroupSelection({
     }
 
     setProductGroupQuantities(qtyMap);
-  }, [count]);
+  }, [effectiveCount]);
 
   // ✅ 初回は在庫数を自動読込しない。ヘッダー「在庫数読込」またはフッター「再読込」で取得（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
 
-  // ✅ グループ選択時：先に画面遷移してからステータス更新を非同期で実行し、タップ遅延を防ぐ
+  // ✅ グループ選択時：商品リストへ遷移（count は fullCount で渡す）
   const onSelectProductGroup = useCallback(
     (productGroupId) => {
-      if (!count) return;
+      const c = effectiveCount;
+      if (!c) return;
 
-      const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
+      const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
       const groupItemsForGroup = getGroupItemsByKey(groupItemsMap, productGroupId);
       const hasGroupItems = groupItemsForGroup.length > 0;
-      const isGroupCompleted = hasGroupItems || count?.status === "completed";
+      const isGroupCompleted = hasGroupItems || c?.status === "completed";
 
-      // 即座に商品リストへ遷移（タップ反応を遅らせない）
       onNext?.({
-        countId: count.id,
-        count: count,
+        countId: c.id,
+        count: c,
         productGroupId: productGroupId,
         productGroupIds: [productGroupId],
         productGroupMode: "single",
         readOnly: isGroupCompleted,
       });
-
-      // draft のときはバックグラウンドでステータスを in_progress に更新（遷移をブロックしない）
-      if (!isGroupCompleted && count.status === "draft") {
-        (async () => {
-          try {
-            const allCounts = await readInventoryCounts();
-            const updated = allCounts.map((c) =>
-              c.id === count.id ? { ...c, status: "in_progress" } : c
-            );
-            await writeInventoryCounts(updated);
-          } catch (e) {
-            console.error("Failed to update count status:", e);
-          }
-        })();
-      }
     },
-    [count, onNext]
+    [effectiveCount, onNext]
   );
 
   // ✅ ヘッダー／フッターどちらから呼ばれても確実に実行。二重発火防止と読込中表示（ヘッダーで「読込中...」）
@@ -216,11 +263,36 @@ export function InventoryCountProductGroupSelection({
 
   // Header（在庫数読込ボタン：左側・明細4行の上下中央。POSヘッダーではonClickが確実なためインラインで呼び出し。読込中は「読込中...」）
   useEffect(() => {
+    const c = effectiveCount ?? count;
+    if (countLoading) {
+      setHeader?.(<s-box padding="base"><s-text tone="subdued">読み込み中...</s-text></s-box>);
+      return () => setHeader?.(null);
+    }
+    if (countError) {
+      setHeader?.(<s-box padding="base"><s-text tone="critical">{countError}</s-text></s-box>);
+      return () => setHeader?.(null);
+    }
     setHeader?.(
       <s-box padding="base">
-        <s-stack direction="inline" alignItems="center" gap="base" style={{ width: "100%" }}>
-          {count?.locationId ? (
-            <s-box style={{ flexShrink: 0 }}>
+        <s-stack direction="inline" alignItems="center" justifyContent="space-between" gap="base" style={{ width: "100%" }}>
+          <s-stack gap="none" style={{ flex: "1 1 auto", minWidth: 0 }}>
+            <s-text emphasis="bold">商品グループを選択</s-text>
+            {c ? (
+              <s-stack gap="none">
+                <s-text tone="subdued" size="small">
+                  {String(c?.countName || c?.id || "").trim() || "棚卸ID"}
+                </s-text>
+                <s-text tone="subdued" size="small">
+                  ロケーション: {c.locationName || c.locationId || "-"}
+                </s-text>
+                <s-text tone="subdued" size="small">
+                  商品グループ数: {productGroups.length}
+                </s-text>
+              </s-stack>
+            ) : null}
+          </s-stack>
+          {c?.locationId ? (
+            <s-box style={{ flexShrink: 0, display: "flex", alignItems: "center" }}>
               <s-button
                 kind="secondary"
                 disabled={loadingQuantities}
@@ -231,31 +303,16 @@ export function InventoryCountProductGroupSelection({
               </s-button>
             </s-box>
           ) : null}
-          <s-stack gap="none" style={{ flex: "1 1 auto", minWidth: 0 }}>
-            <s-text emphasis="bold">商品グループを選択</s-text>
-            {count ? (
-              <s-stack gap="none">
-                <s-text tone="subdued" size="small">
-                  {String(count?.countName || count?.id || "").trim() || "棚卸ID"}
-                </s-text>
-                <s-text tone="subdued" size="small">
-                  ロケーション: {count.locationName || count.locationId || "-"}
-                </s-text>
-                <s-text tone="subdued" size="small">
-                  商品グループ数: {productGroups.length}
-                </s-text>
-              </s-stack>
-            ) : null}
-          </s-stack>
         </s-stack>
       </s-box>
     );
     return () => setHeader?.(null);
-  }, [setHeader, count, productGroups.length, loadingQuantities, handleLoadQuantities]);
+  }, [setHeader, count, effectiveCount, productGroups.length, loadingQuantities, handleLoadQuantities, countLoading, countError]);
 
   // Footer
   useEffect(() => {
-    const countName = String(count?.countName || count?.id || "").trim() || "-";
+    const c = effectiveCount ?? count;
+    const countName = String(c?.countName || c?.id || "").trim() || "-";
     setFooter?.(
       <FixedFooterNavBar
         summaryLeft={countName}
@@ -269,6 +326,22 @@ export function InventoryCountProductGroupSelection({
     );
     return () => setFooter?.(null);
   }, [setFooter, count?.countName, count?.id, productGroups.length, onBack, handleLoadQuantities, loadingQuantities]);
+
+  if (countLoading) {
+    return (
+      <s-box padding="base">
+        <s-text tone="subdued">読み込み中...</s-text>
+      </s-box>
+    );
+  }
+
+  if (countError || (count?.id && !effectiveCount)) {
+    return (
+      <s-box padding="base">
+        <s-text tone="critical">{countError || "棚卸の取得に失敗しました"}</s-text>
+      </s-box>
+    );
+  }
 
   if (loading) {
     return (

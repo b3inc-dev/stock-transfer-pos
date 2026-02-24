@@ -483,6 +483,11 @@ async function migrateAdjustmentV1ToV2() {
   }
 }
 
+async function getAdjustmentInitialDisplayLimit() {
+  const n = await getAdjustmentChunkSize();
+  return Math.max(1, Math.min(250, n));
+}
+
 export async function readAdjustmentEntriesFirstPage() {
   let manifest = await readAdjustmentManifest();
   if (!manifest) {
@@ -496,10 +501,40 @@ export async function readAdjustmentEntriesFirstPage() {
   const chunkRaw = data?.currentAppInstallation?.chunk0?.value ?? "[]";
   try {
     const list = JSON.parse(chunkRaw);
-    return { entries: Array.isArray(list) ? list : [], hasMore: manifest.chunkCount > 1, chunkCount: manifest.chunkCount };
+    const fullList = Array.isArray(list) ? list : [];
+    const limit = await getAdjustmentInitialDisplayLimit();
+    const entries = fullList.slice(0, limit);
+    const hasMore = fullList.length > limit || manifest.chunkCount > 1;
+    return { entries, hasMore, chunkCount: manifest.chunkCount };
   } catch {
     return { entries: [], hasMore: false, chunkCount: manifest.chunkCount };
   }
+}
+
+/** 指定IDのエントリを1件取得（一覧タップ後の詳細用） */
+export async function readAdjustmentEntryById(entryId) {
+  if (!entryId) return null;
+  const id = String(entryId).trim();
+  let manifest = await readAdjustmentManifest();
+  if (!manifest) {
+    await migrateAdjustmentV1ToV2();
+    manifest = await readAdjustmentManifest();
+  }
+  if (!manifest || manifest.chunkCount === 0) return null;
+  for (let i = 0; i < manifest.chunkCount; i++) {
+    const key = `${ADJUSTMENT_V2_CHUNK_PREFIX}${i}`;
+    const gql = `#graphql query AdjChunk($key: String!) { currentAppInstallation { metafield(namespace: "${ADJUSTMENT_NS}", key: $key) { value } } }`;
+    const d = await graphql(gql, { key });
+    const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        const found = arr.find((e) => String(e?.id ?? "").trim() === id);
+        if (found) return found;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 export async function readAdjustmentEntriesPage(pageIndex) {

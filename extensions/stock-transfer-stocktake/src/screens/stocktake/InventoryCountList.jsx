@@ -5,6 +5,7 @@ import {
   adjustInventoryToActual,
   searchVariants,
   readInventoryCounts,
+  readInventoryCountById,
   writeInventoryCounts,
   getLocationName,
   getProductGroupName,
@@ -165,6 +166,10 @@ function useDebounce(value, ms) {
   return v;
 }
 
+function isMinimalCount(c) {
+  return c && typeof c === "object" && c.id && !(c.groupItems && typeof c.groupItems === "object");
+}
+
 export function InventoryCountList({
   countId,
   count,
@@ -182,6 +187,10 @@ export function InventoryCountList({
 }) {
   const [lines, setLines] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [fullCount, setFullCount] = useState(null);
+  const [countLoading, setCountLoading] = useState(false);
+  const [countError, setCountError] = useState("");
+  const effectiveCount = fullCount ?? (isMinimalCount(count) ? null : count);
   const [hasMoreProducts, setHasMoreProducts] = useState(false); // ✅ さらに読み込む用
   const [loadingMore, setLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false); // ✅ 在庫更新用の別状態（出庫リストと同じ方式）
@@ -255,6 +264,55 @@ export function InventoryCountList({
     return () => { mounted = false; };
   }, []);
   
+  // ✅ 一覧タップ後：最小情報のときだけ棚卸1件をAPI取得（商品グループタップ→商品リスト読み込み）
+  useEffect(() => {
+    if (!count?.id) {
+      setFullCount(null);
+      setCountLoading(false);
+      setCountError("");
+      return;
+    }
+    if (!isMinimalCount(count)) {
+      setFullCount(null);
+      return;
+    }
+    let mounted = true;
+    setCountLoading(true);
+    setCountError("");
+    readInventoryCountById(count.id)
+      .then(async (fetched) => {
+        if (!mounted) return;
+        if (!fetched) {
+          setFullCount(null);
+          setCountError("棚卸の取得に失敗しました");
+          return;
+        }
+        if (fetched.status === "draft") {
+          try {
+            const allCounts = await readInventoryCounts();
+            const updated = allCounts.map((c) =>
+              c.id === count.id ? { ...c, status: "in_progress" } : c
+            );
+            await writeInventoryCounts(updated);
+            fetched = { ...fetched, status: "in_progress" };
+          } catch (e) {
+            console.error("Failed to update count status:", e);
+          }
+        }
+        setFullCount(fetched);
+      })
+      .catch((e) => {
+        if (mounted) {
+          setCountError(String(e?.message ?? e));
+          setFullCount(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) setCountLoading(false);
+      });
+    return () => { mounted = false; };
+  }, [count?.id]);
+
   // ✅ prefsの変更を監視（親から渡されていない場合のローカル同期）
   useEffect(() => {
     if (liteModeProp !== undefined && liteModeProp !== null) return;
@@ -361,12 +419,13 @@ export function InventoryCountList({
     loadNames();
   }, [count, productGroupId, isMultipleMode, targetProductGroupIds]);
 
-  // 商品リストを読み込む
+  // 商品リストを読み込む（effectiveCount: 一覧タップ後はAPI取得したフルデータ）
   const loadProducts = useCallback(async () => {
+    const c = effectiveCount ?? count;
     isLoadingProductsRef.current = true; // ✅ loadProducts開始時に即座にフラグを立てる（自動保存をスキップするため）
-    if (!count || !count.locationId) {
+    if (!c || !c.locationId) {
       isLoadingProductsRef.current = false; // ✅ 早期リターン時はフラグを下ろす
-      console.log("[InventoryCountList] loadProducts skipped: missing count or locationId", { count, locationId: count?.locationId });
+      console.log("[InventoryCountList] loadProducts skipped: missing count or locationId", { count: c, locationId: c?.locationId });
       return;
     }
     if (targetProductGroupIds.length === 0) {
@@ -374,7 +433,7 @@ export function InventoryCountList({
       console.log("[InventoryCountList] loadProducts skipped: targetProductGroupIds is empty", { 
         productGroupIds, 
         productGroupId, 
-        countProductGroupIds: count?.productGroupIds,
+        countProductGroupIds: c?.productGroupIds,
         targetProductGroupIds 
       });
       return;
@@ -382,8 +441,8 @@ export function InventoryCountList({
     setHasMoreProducts(false); // ✅ 初回読み込み時はリセット（メイン経路で上書き）
 
     // ✅ count.id / locationId / productGroupId（単一モード）が変わった場合は、draftLoadedRefをリセット
-    const currentCountId = String(count.id || "").trim();
-    const currentLocationId = String(count.locationId || "").trim();
+    const currentCountId = String(c.id || "").trim();
+    const currentLocationId = String(c.locationId || "").trim();
     const currentGroupId = productGroupId || (targetProductGroupIds?.[0] || null);
     if (
       lastDraftCountIdRef.current !== currentCountId ||
@@ -395,20 +454,20 @@ export function InventoryCountList({
       lastDraftLocationIdRef.current = currentLocationId;
       if (!isMultipleMode) lastDraftProductGroupIdRef.current = currentGroupId;
     }
-    const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
+    const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
     // ✅ 完了判定：groupItemsMap[currentGroupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
     // ✅ キー照合は getGroupItemsByKey で正規化（GID と数値の混在で取れない不具合対策）
     let groupItemsForCurrentGroup = getGroupItemsByKey(groupItemsMap, currentGroupId);
-    const countItemsLegacy = Array.isArray(count?.items) ? count.items : [];
+    const countItemsLegacy = Array.isArray(c?.items) ? c.items : [];
     // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
     if (groupItemsForCurrentGroup.length === 0 && countItemsLegacy.length > 0 && currentGroupId) {
       try {
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
-        const products = await fetchProductsByGroups([currentGroupId], count.locationId, {
+        const products = await fetchProductsByGroups([currentGroupId], c.locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: false,
-          inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
+          inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
         });
         const productInventoryItemIds = new Set(
           products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
@@ -425,12 +484,12 @@ export function InventoryCountList({
     
     // ✅ 複数商品グループがある場合はgroupItemsを優先、1つの商品グループのみの場合はitemsフィールドを後方互換性として使用
     // ✅ ただし、単一グループモードでgroupItemsにデータがある場合は、必ずgroupItemsを優先（選択したグループのデータのみを表示）
-    const isMultipleGroups = targetProductGroupIds.length > 1 || (Array.isArray(count?.productGroupIds) && count.productGroupIds.length > 1);
+    const isMultipleGroups = targetProductGroupIds.length > 1 || (Array.isArray(c?.productGroupIds) && c.productGroupIds.length > 1);
     // ✅ 複数商品グループを持つ棚卸IDかどうか（下書きキーは「表示中のグループ数」ではなく「棚卸IDが持つグループ数」で判定）
-    const countHasMultipleGroups = Array.isArray(count?.productGroupIds) && count.productGroupIds.length > 1;
+    const countHasMultipleGroups = Array.isArray(c?.productGroupIds) && c.productGroupIds.length > 1;
     // ✅ グループごとに表示する場合：選択したグループのデータのみを表示（storedItemsFromGroupを優先）
     // ✅ 単一グループモードでgroupItemsにデータがない場合のみ、itemsフィールドを後方互換性として使用
-    const storedItemsFromItems = !isMultipleGroups && !storedItemsFromGroup && Array.isArray(count?.items) && count.items.length > 0 ? count.items : null;
+    const storedItemsFromItems = !isMultipleGroups && !storedItemsFromGroup && Array.isArray(c?.items) && c.items.length > 0 ? c.items : null;
     // ✅ グループごとに表示する場合：選択したグループのデータのみを表示（storedItemsFromGroupを優先）
     const storedItems = storedItemsFromGroup || storedItemsFromItems;
 
@@ -438,7 +497,7 @@ export function InventoryCountList({
     // ✅ 完了判定：groupItemsMap[currentGroupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
     // ✅ InventoryCountProductGroupSelectionと同じロジック：groupItemsが存在し、かつ配列の長さが0より大きい場合に完了と判定
     const isGroupCompleted = storedItemsFromGroup !== null && groupItemsForCurrentGroup.length > 0;
-    const isReadOnlyCalculated = readOnlyProp || isGroupCompleted || count?.status === "completed";
+    const isReadOnlyCalculated = readOnlyProp || isGroupCompleted || c?.status === "completed";
     
     // ✅ まとめて表示モードの場合は、最初の処理ブロックをスキップしてまとめて表示モードの処理に進む
     // ✅ まとめて表示モードの場合は、isReadOnlyStateをまとめて表示モードの処理内で設定する
@@ -454,11 +513,11 @@ export function InventoryCountList({
         // ✅ 完了済みの商品リスト：在庫は棚卸時の在庫数（currentQuantity）、実数は確定した在庫数（actualQuantity）を表示
         // ✅ 画像URLを取得するため、商品情報を取得
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
-        const products = await fetchProductsByGroups([currentGroupId], count.locationId, {
+        const products = await fetchProductsByGroups([currentGroupId], c.locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
-          inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
+          inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
         });
         const productMap = new Map();
         products.forEach((p) => {
@@ -561,7 +620,7 @@ export function InventoryCountList({
     }
 
     console.log("[InventoryCountList] loadProducts starting", { 
-      locationId: count.locationId, 
+      locationId: c.locationId, 
       targetProductGroupIds,
       isMultipleMode
     });
@@ -575,8 +634,8 @@ export function InventoryCountList({
         let draftLines = [];
         try {
           if (SHOPIFY?.storage?.get && targetProductGroupIds.length > 0) {
-            const currentCountId = String(count.id || "").trim();
-            const currentLocationId = String(count.locationId || "").trim();
+            const currentCountId = String(c.id || "").trim();
+            const currentLocationId = String(c.locationId || "").trim();
             const allGroupDrafts = await Promise.all(
               targetProductGroupIds.map(async (groupId) => {
                 const key = inventoryCountDraftKey({
@@ -632,7 +691,7 @@ export function InventoryCountList({
           );
           // ✅ まとめて表示モードの場合、isReadOnlyStateを適切に設定
           const hasIncompleteGroups = draftLines.some((l) => !l.isReadOnly);
-          const isAllCompleted = count?.status === "completed" || !hasIncompleteGroups;
+          const isAllCompleted = c?.status === "completed" || !hasIncompleteGroups;
           setIsReadOnlyState(isAllCompleted);
           setLoading(false);
           console.log("[InventoryCountList] Draft loaded (multiple mode), lines count:", draftLines.length);
@@ -640,9 +699,9 @@ export function InventoryCountList({
         }
         
         const allLines = [];
-        const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
+        const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
         // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
-        const countItemsLegacy = Array.isArray(count?.items) ? count.items : [];
+        const countItemsLegacy = Array.isArray(c?.items) ? c.items : [];
         // ✅ まとめて表示で全グループが同じスナップショットを参照するよう、先に1回だけ取得して渡す（初回の readProductGroups 失敗・遅延で一部グループが0件になるのを防ぐ）
         let cachedProductGroups = [];
         try {
@@ -651,7 +710,7 @@ export function InventoryCountList({
           console.error("[InventoryCountList] readProductGroups failed (will retry per group):", e);
         }
         const fetchOptsBase = {
-          inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
+          inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
           ...(cachedProductGroups.length > 0 ? { cachedProductGroups } : {}),
         };
         
@@ -667,7 +726,7 @@ export function InventoryCountList({
             // 商品グループの商品リストを取得してフィルタリング（inventoryItemIdsByGroupも渡してまとめて表示で全グループ取得できるようにする）
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
-              const products = await fetchProductsByGroups([groupId], count.locationId, {
+              const products = await fetchProductsByGroups([groupId], c.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
                 includeImages: false,
@@ -691,7 +750,7 @@ export function InventoryCountList({
             // ✅ 画像URLを取得するため、商品情報を取得
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
-              const products = await fetchProductsByGroups([groupId], count.locationId, {
+              const products = await fetchProductsByGroups([groupId], c.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
                 includeImages: showImages && !liteMode,
@@ -806,8 +865,8 @@ export function InventoryCountList({
       if (!draftLoadedRef.current) {
         try {
           if (SHOPIFY?.storage?.get) {
-            const currentCountId = String(count.id || "").trim();
-            const currentLocationId = String(count.locationId || "").trim();
+            const currentCountId = String(c.id || "").trim();
+            const currentLocationId = String(c.locationId || "").trim();
             const currentGroupId = productGroupId || (targetProductGroupIds?.[0] || null);
             let raw = null;
             if (countHasMultipleGroups && currentGroupId) {
@@ -880,11 +939,11 @@ export function InventoryCountList({
       const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
       // ✅ さらに読み込む用の1回あたり件数（管理画面と揃える）
       // ✅ 常に画像付きで取得（画像ON/OFFは表示切替のみ。ロス・入庫・出庫と同様にリスト再読込しない）
-      const rawProducts = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
+      const rawProducts = await fetchProductsByGroups(targetProductGroupIds, c.locationId, {
         productFirst,
         filterByInventoryLevel: true,
         includeImages: true,
-        inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
+        inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
         offset: 0,
         limit: 600,
       });
@@ -923,7 +982,7 @@ export function InventoryCountList({
       isLoadingProductsRef.current = false; // ✅ loadProducts完了時にフラグを下ろす
       console.log("[InventoryCountList] loadProducts completed, loading set to false");
     }
-  }, [count, targetProductGroupIds, readOnlyProp, productGroupId, isMultipleMode]);
+  }, [effectiveCount, count, targetProductGroupIds, readOnlyProp, productGroupId, isMultipleMode]);
 
   // ✅ さらに読み込む（POS棚卸リスト用）
   const LOAD_PAGE_SIZE = 600;
@@ -1063,7 +1122,7 @@ export function InventoryCountList({
         );
       } else {
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 100)));
-        let products = await fetchProductsByGroups([groupId], count.locationId, {
+        let products = await fetchProductsByGroups([groupId], c.locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
@@ -1071,7 +1130,7 @@ export function InventoryCountList({
         });
         if (products.length === 0) {
           await new Promise((r) => setTimeout(r, 1000));
-          products = await fetchProductsByGroups([groupId], count.locationId, {
+          products = await fetchProductsByGroups([groupId], c.locationId, {
             productFirst,
             filterByInventoryLevel: false,
             includeImages: showImages && !liteMode,
@@ -1081,7 +1140,7 @@ export function InventoryCountList({
         const linesWithCurrent = await Promise.all(
           products.map(async (p) => {
             try {
-              const currentQty = await getCurrentQuantity(p.inventoryItemId, count.locationId);
+              const currentQty = await getCurrentQuantity(p.inventoryItemId, c.locationId);
               return {
                 id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 variantId: p.variantId,
@@ -1127,7 +1186,7 @@ export function InventoryCountList({
         initialInventoryItemIdsRef.current = new Set([...prevSet, ...addIds]);
       }
       const hasIncomplete = newLines.some((l) => !l.isReadOnly);
-      setIsReadOnlyState(count?.status === "completed" || !hasIncomplete);
+      setIsReadOnlyState(c?.status === "completed" || !hasIncomplete);
     } catch (e) {
       toast(`グループ「${groupName}」の読み込みに失敗しました: ${e?.message || e}`);
     } finally {
@@ -1154,8 +1213,9 @@ export function InventoryCountList({
   }, []);
 
   useEffect(() => {
+    if (count?.id && isMinimalCount(count) && !effectiveCount) return;
     loadProducts();
-  }, [loadProducts]);
+  }, [loadProducts, count?.id, effectiveCount]);
 
   // ✅ 自動保存（lines変更時に下書きを保存）
   // ✅ 入庫の複数シップメントと同様：商品グループごとに別キーで保存
@@ -2185,14 +2245,31 @@ export function InventoryCountList({
     // countNameがあればそれを使用、なければidを使用（後方互換性）
     const headNo = count?.countName || count?.id || "棚卸ID";
     // ✅ 管理画面で保存済みの名前を優先（ID→名前の切り替えを防ぐ）
-    // ✅ まとめて表示時は正規化キーで名前を取得（GID と数値の混在でずれないようにする）
+    // ✅ まとめて表示時：targetProductGroupIds の表示順で名前を取得
+    // ✅ 商品グループごとに表示時：表示中の productGroupId に対応する名前を取得（count.productGroupName は先頭グループなど別グループの名前になっている場合があるため）
     const groupNameText = isMultipleMode
-      ? (Array.isArray(count?.productGroupNames) && count.productGroupNames.length > 0
-          ? count.productGroupNames.join(", ")
-          : targetProductGroupIds?.length > 0
-            ? targetProductGroupIds.map((id) => productGroupNames.get(normalizeIdForMatch(id)) || id).join(", ") || "商品グループ"
-            : Array.from(productGroupNames.values()).join(", ") || "商品グループ")
-      : count?.productGroupName || productGroupName || productGroupId || "商品グループ";
+      ? (targetProductGroupIds?.length > 0
+          ? targetProductGroupIds
+              .map((id) => {
+                const norm = normalizeIdForMatch(id);
+                const fromMap = productGroupNames.get(norm);
+                if (fromMap) return fromMap;
+                const idx = Array.isArray(count?.productGroupIds) ? count.productGroupIds.findIndex((pid) => normalizeIdForMatch(pid) === norm) : -1;
+                const fromCount = idx >= 0 && Array.isArray(count?.productGroupNames) ? count.productGroupNames[idx] : null;
+                return fromCount || id;
+              })
+              .join(", ") || "商品グループ"
+          : Array.from(productGroupNames.values()).join(", ") || "商品グループ")
+      : (() => {
+          const currentId = productGroupId || targetProductGroupIds?.[0];
+          if (!currentId) return count?.productGroupName || productGroupName || "商品グループ";
+          const norm = normalizeIdForMatch(currentId);
+          const fromMap = productGroupNames.get(norm);
+          if (fromMap) return fromMap;
+          const idx = Array.isArray(count?.productGroupIds) ? count.productGroupIds.findIndex((pid) => normalizeIdForMatch(pid) === norm) : -1;
+          const fromCount = idx >= 0 && Array.isArray(count?.productGroupNames) ? count.productGroupNames[idx] : null;
+          return fromCount || productGroupName || currentId || "商品グループ";
+        })();
     
     // デバッグ: countとloadingの状態を確認
     console.log("[InventoryCountList] Header useEffect", { 
@@ -2810,6 +2887,23 @@ export function InventoryCountList({
       </s-box>
     );
   };
+
+  if (count?.id && isMinimalCount(count)) {
+    if (countLoading) {
+      return (
+        <s-box padding="base">
+          <s-text tone="subdued">読み込み中...</s-text>
+        </s-box>
+      );
+    }
+    if (countError || !fullCount) {
+      return (
+        <s-box padding="base">
+          <s-text tone="critical">{countError || "棚卸の取得に失敗しました"}</s-text>
+        </s-box>
+      );
+    }
+  }
 
   return (
     <s-stack gap="base">

@@ -3,6 +3,7 @@ import {
   readOrderEntriesFirstPage,
   readOrderEntriesPage,
   readOrderEntriesFull,
+  readOrderEntryById,
   writeOrderEntries,
   fetchLocations,
   fetchVariantImage,
@@ -189,10 +190,11 @@ export function OrderHistoryList({
   const [detailId, setDetailId] = useState("");
   const [cancelling, setCancelling] = useState("");
   const [imageUrls, setImageUrls] = useState(new Map()); // ✅ 画像URLキャッシュ
+  const [detailLoading, setDetailLoading] = useState(false); // ✅ 一覧タップ後の詳細API取得中
   const locs = Array.isArray(locationsProp) ? locationsProp : [];
   const [chunkCount, setChunkCount] = useState(0);
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
-  /** タップ後に詳細表示する用（一覧は軽くし、詳細はここから取得・入庫・出庫と同様の操作感） */
+  /** タップ後に詳細表示する用（一覧タップでAPI取得） */
   const [detailEntry, setDetailEntry] = useState(null);
   const fullEntriesByIdRef = useRef(new Map());
 
@@ -340,19 +342,45 @@ export function OrderHistoryList({
     const id = entry?.id;
     if (!id) return;
     setDetailId(id);
-    setDetailEntry(fullEntriesByIdRef.current.get(id) ?? null);
+    setDetailEntry(null);
   }, []);
 
   useEffect(() => {
-    if (detailId) {
-      const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
-      if (!entry) {
-        setHeader?.(null);
-        return;
-      }
-      
-      // ✅ 出庫履歴詳細と同じヘッダーを追加
-      const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
+    if (!detailId) {
+      setDetailEntry(null);
+      setDetailLoading(false);
+      return;
+    }
+    let mounted = true;
+    setDetailLoading(true);
+    readOrderEntryById(detailId)
+      .then((entry) => {
+        if (mounted) setDetailEntry(entry ?? null);
+      })
+      .catch((e) => {
+        if (mounted) {
+          toast(`詳細の取得に失敗しました: ${String(e?.message ?? e)}`);
+          setDetailEntry(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) setDetailLoading(false);
+      });
+    return () => { mounted = false; };
+  }, [detailId]);
+
+  useEffect(() => {
+    if (!detailId) return;
+    if (detailLoading) {
+      setHeader?.(<s-box padding="base"><s-text tone="subdued">読み込み中...</s-text></s-box>);
+      return;
+    }
+    if (!detailEntry) {
+      setHeader?.(<s-box padding="base"><s-text tone="critical">詳細の取得に失敗しました</s-text></s-box>);
+      return;
+    }
+    const entry = detailEntry;
+    const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
       const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
       const currentFilteredByLoc = sessionNorm ? entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm) : [];
       const orderName = formatOrderDisplayName(entry);
@@ -467,6 +495,7 @@ export function OrderHistoryList({
     listToShow,
     hasMoreHistory,
     loadMoreHistory,
+    detailLoading,
     sessionLocationGid,
     normalizeLocationGidForCompare,
     getLocationName,
@@ -475,14 +504,10 @@ export function OrderHistoryList({
   ]);
 
   useEffect(() => {
-    if (!detailId) setDetailEntry(null);
-  }, [detailId]);
-
-  useEffect(() => {
     if (detailId) {
       const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
       if (!entry) {
-        setDetailId("");
+        if (!detailLoading) setDetailId("");
         return;
       }
       const locName = entry.locationName || getLocationName(entry.locationId);
@@ -535,6 +560,7 @@ export function OrderHistoryList({
   }, [
     detailId,
     detailEntry,
+    detailLoading,
     entries,
     historyMode,
     listToShow.length,
@@ -551,11 +577,18 @@ export function OrderHistoryList({
   ]); // setFooter, filteredByLocを依存配列から除外（無限ループ防止）
 
   if (detailId) {
+    if (detailLoading) {
+      return (
+        <s-box padding="base">
+          <s-text tone="subdued">読み込み中...</s-text>
+        </s-box>
+      );
+    }
     const e = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((x) => x.id === detailId);
     if (!e) {
       return (
         <s-box padding="base">
-          <s-text tone="subdued">読込中...</s-text>
+          <s-text tone="critical">詳細の取得に失敗しました</s-text>
         </s-box>
       );
     }

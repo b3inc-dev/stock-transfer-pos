@@ -3,6 +3,7 @@ import {
   readLossEntriesFirstPage,
   readLossEntriesPage,
   readLossEntriesFull,
+  readLossEntryById,
   writeLossEntries,
   adjustInventoryAtLocation,
   fetchLocations,
@@ -180,6 +181,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   const [detailId, setDetailId] = useState("");
   const [cancelling, setCancelling] = useState("");
   const [imageUrls, setImageUrls] = useState(new Map()); // ✅ 画像URLキャッシュ
+  const [detailLoading, setDetailLoading] = useState(false); // ✅ 一覧タップ後の詳細API取得中
   const locs = Array.isArray(locationsProp) ? locationsProp : [];
   // ✅ アプリ表示件数（初回読み込み）と履歴の表示件数。出庫・入庫と同様に読込ボタンで増やす
   const [chunkCount, setChunkCount] = useState(0);
@@ -338,23 +340,48 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     const id = entry?.id;
     if (!id) return;
     setDetailId(id);
-    setDetailEntry(fullEntriesByIdRef.current.get(id) ?? null);
+    setDetailEntry(null);
   }, []);
 
   useEffect(() => {
-    if (!detailId) setDetailEntry(null);
+    if (!detailId) {
+      setDetailEntry(null);
+      setDetailLoading(false);
+      return;
+    }
+    let mounted = true;
+    setDetailLoading(true);
+    readLossEntryById(detailId)
+      .then((entry) => {
+        if (mounted) {
+          setDetailEntry(entry ?? null);
+        }
+      })
+      .catch((e) => {
+        if (mounted) {
+          toast(`詳細の取得に失敗しました: ${String(e?.message ?? e)}`);
+          setDetailEntry(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) setDetailLoading(false);
+      });
+    return () => { mounted = false; };
   }, [detailId]);
 
   useEffect(() => {
-    if (detailId) {
-      const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
-      if (!entry) {
-        setHeader?.(null);
-        return;
-      }
-      
-      // ✅ 出庫履歴詳細と同じヘッダーを追加
-      const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
+    if (!detailId) return;
+    if (detailLoading) {
+      setHeader?.(<s-box padding="base"><s-text tone="subdued">読み込み中...</s-text></s-box>);
+      return;
+    }
+    if (!detailEntry) {
+      setHeader?.(<s-box padding="base"><s-text tone="critical">詳細の取得に失敗しました</s-text></s-box>);
+      return;
+    }
+    const entry = detailEntry;
+    // ✅ 一覧タップ後にAPIで取得した詳細を表示
+    const entryIndex = listToShow.findIndex((e) => e.id === entry.id);
       const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
       const currentFilteredByLoc = sessionNorm ? entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm) : [];
       const lossName = formatLossName(entry, currentFilteredByLoc, entryIndex >= 0 ? entryIndex : 0);
@@ -458,6 +485,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   }, [
     detailId,
     detailEntry,
+    detailLoading,
     entries,
     historyMode,
     activeCount,
@@ -475,7 +503,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     if (detailId) {
       const entry = detailEntry ?? fullEntriesByIdRef.current.get(detailId) ?? entries.find((e) => e.id === detailId);
       if (!entry) {
-        setDetailId("");
+        if (!detailLoading) setDetailId("");
         return;
       }
       const locName = entry.locationName || getLocationName(entry.locationId);
@@ -533,6 +561,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   }, [
     detailId,
     detailEntry,
+    detailLoading,
     entries,
     historyMode,
     listToShow.length,

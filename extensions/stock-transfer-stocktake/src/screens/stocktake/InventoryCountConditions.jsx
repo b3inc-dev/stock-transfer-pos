@@ -1,9 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "preact/hooks";
 import {
-  readInventoryCounts,
   readInventoryCountsFirstPage,
   readInventoryCountsPage,
-  writeInventoryCounts,
   getLocationName,
   getProductGroupName,
   fetchProductsByGroups,
@@ -36,6 +34,19 @@ const formatDate = (iso) => {
 const isCompleted = (c) => {
   return c?.status === "completed" || c?.status === "cancelled";
 };
+
+/** 一覧タップ時に渡す最小情報（商品グループ・商品リストは遷移先でAPI取得） */
+function toMinimalCount(c) {
+  if (!c) return null;
+  return {
+    id: c.id,
+    locationId: c.locationId,
+    productGroupIds: Array.isArray(c.productGroupIds) ? c.productGroupIds : c.productGroupId ? [c.productGroupId] : [],
+    status: c.status,
+    countName: c.countName,
+    createdAt: c.createdAt,
+  };
+}
 
 const readValue = (e) => String(e?.target?.value ?? "").trim();
 
@@ -166,20 +177,34 @@ export function InventoryCountConditions({
       const locMap = new Map();
       const groupMap = new Map();
       if (locationGid) {
-        const name = await getLocationName(locationGid);
-        if (name) locMap.set(locationGid, name);
+        try {
+          const name = await getLocationName(locationGid);
+          locMap.set(locationGid, name || "（取得できませんでした）");
+        } catch (e) {
+          console.warn("[InventoryCountConditions] getLocationName(locationGid) failed:", e);
+          locMap.set(locationGid, "（取得できませんでした）");
+        }
       }
       for (const count of counts) {
         if (count.locationId && !locMap.has(count.locationId)) {
-          const name = await getLocationName(count.locationId);
-          if (name) locMap.set(count.locationId, name);
+          try {
+            const name = await getLocationName(count.locationId);
+            locMap.set(count.locationId, name || "（取得できませんでした）");
+          } catch (e) {
+            console.warn("[InventoryCountConditions] getLocationName(count.locationId) failed:", e);
+            locMap.set(count.locationId, "（取得できませんでした）");
+          }
         }
         if (Array.isArray(count.productGroupIds)) {
           for (const groupId of count.productGroupIds) {
             const key = normalizeIdForMatch(groupId);
             if (!groupMap.has(key)) {
-              const name = await getProductGroupName(groupId);
-              if (name) groupMap.set(key, name);
+              try {
+                const name = await getProductGroupName(groupId);
+                if (name) groupMap.set(key, name);
+              } catch (e) {
+                console.warn("[InventoryCountConditions] getProductGroupName failed:", e);
+              }
             }
           }
         }
@@ -289,25 +314,12 @@ export function InventoryCountConditions({
       return;
     }
 
-    // ステータスをin_progressに更新（draftの場合のみ）
-    if (c.status === "draft") {
-      try {
-        const allCounts = await readInventoryCounts();
-        const updated = allCounts.map((count) =>
-          count.id === c.id ? { ...count, status: "in_progress" } : count
-        );
-        await writeInventoryCounts(updated);
-        c.status = "in_progress";
-      } catch (e) {
-        console.error("Failed to update count status:", e);
-      }
-    }
+    const minimalCount = toMinimalCount(c);
 
     if (productGroupCount === 1) {
-      // 商品グループが1つの場合：直接商品リストへ
       onNext?.({
         countId: c.id,
-        count: c,
+        count: minimalCount,
         productGroupId: productGroupIds[0],
         productGroupIds: productGroupIds,
         productGroupMode: "single",
@@ -315,8 +327,7 @@ export function InventoryCountConditions({
       return;
     }
 
-    // 商品グループが複数の場合：選択モーダルを表示
-    setPendingCountForModal(c);
+    setPendingCountForModal(minimalCount);
   };
 
   const handleSelectSingleProductGroup = useCallback(async () => {
@@ -333,20 +344,6 @@ export function InventoryCountConditions({
       return;
     }
 
-    // ステータスをin_progressに更新（draftの場合のみ）
-    if (c.status === "draft") {
-      try {
-        const allCounts = await readInventoryCounts();
-        const updated = allCounts.map((count) =>
-          count.id === c.id ? { ...count, status: "in_progress" } : count
-        );
-        await writeInventoryCounts(updated);
-        c.status = "in_progress";
-      } catch (e) {
-        console.error("Failed to update count status:", e);
-      }
-    }
-
     setPendingCountForModal(null);
     onOpenProductGroupSelection?.(c);
   }, [pendingCountForModal, onOpenProductGroupSelection]);
@@ -359,20 +356,6 @@ export function InventoryCountConditions({
     if (productGroupIds.length === 0) {
       toast("商品グループが見つかりません");
       return;
-    }
-
-    // ステータスをin_progressに更新（draftの場合のみ）
-    if (c.status === "draft") {
-      try {
-        const allCounts = await readInventoryCounts();
-        const updated = allCounts.map((count) =>
-          count.id === c.id ? { ...count, status: "in_progress" } : count
-        );
-        await writeInventoryCounts(updated);
-        c.status = "in_progress";
-      } catch (e) {
-        console.error("Failed to update count status:", e);
-      }
     }
 
     setPendingCountForModal(null);
