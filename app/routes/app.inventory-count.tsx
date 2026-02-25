@@ -69,6 +69,20 @@ function normalizeIdForMatch(id: string | number | undefined | null): string {
   const lastSegment = s.split("/").pop() || s;
   return lastSegment;
 }
+
+/** 同一ショップで複数ブラウザが重い棚卸モーダルを同時に開いた際の負荷軽減：get_incomplete_group_products のレスポンスをショップ・棚卸・グループ・offset 単位でキャッシュ（TTL 2 分）。棚卸更新時に無効化。 */
+const INCOMPLETE_GROUP_PRODUCTS_CACHE_TTL_MS = 2 * 60 * 1000;
+const incompleteGroupProductsCache = new Map<
+  string,
+  { data: { ok: true; countId: string; groupId: string; products: unknown[]; hasMore: boolean; offset: number }; expiresAt: number }
+>();
+function invalidateIncompleteGroupProductsCacheForCount(shop: string, countId: string) {
+  const norm = normalizeIdForMatch(countId);
+  const prefix = `incomplete:${shop}:${norm}:`;
+  for (const key of incompleteGroupProductsCache.keys()) {
+    if (key.startsWith(prefix)) incompleteGroupProductsCache.delete(key);
+  }
+}
 function getGroupItemsByKey(
   groupItemsMap: Record<string, unknown[]> | undefined,
   groupId: string
@@ -2078,6 +2092,12 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!groupId || !locationId) {
       return { ok: false, error: "グループIDまたはロケーションIDが指定されていません" as const };
     }
+    // ✅ 同一ショップ複数ブラウザ対策：キャッシュヒット時は Shopify API を叩かず即返す
+    const shop = session?.shop ?? "";
+    const cacheKey = `incomplete:${shop}:${normalizeIdForMatch(countId)}:${normalizeIdForMatch(groupId)}:${offset}`;
+    const cached = incompleteGroupProductsCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.data;
+
     const DELAY_BETWEEN_BATCHES_MS = 180; // レート制限を避ける（80→180ms：根本対策）
     const MAX_PRODUCTS_PER_GROUP = 600;   // 1リクエストあたりの取得上限（タイムアウト・500防止）
     const THROTTLE_RETRY_DELAY_MS = 1500; // Throttled 時に1回だけリトライするまでの待機（明細欠け対策）
@@ -2091,7 +2111,9 @@ export async function action({ request }: ActionFunctionArgs) {
     try {
       const productGroup = productGroups.find((g) => g.id === groupId);
       if (!productGroup) {
-        return { ok: true, countId, groupId, products: [], hasMore: false, offset: 0 };
+        const emptyRes = { ok: true as const, countId, groupId, products: [] as unknown[], hasMore: false, offset: 0 };
+        incompleteGroupProductsCache.set(cacheKey, { data: emptyRes, expiresAt: Date.now() + INCOMPLETE_GROUP_PRODUCTS_CACHE_TTL_MS });
+        return emptyRes;
       }
 
       const products: Array<{
@@ -2262,7 +2284,9 @@ export async function action({ request }: ActionFunctionArgs) {
           const valid = results.filter((r): r is NonNullable<typeof r> => r != null);
           allResults.push(...valid);
         }
-        return { ok: true, countId, groupId, products: allResults, hasMore, offset };
+        const res = { ok: true as const, countId, groupId, products: allResults, hasMore, offset };
+        incompleteGroupProductsCache.set(cacheKey, { data: res, expiresAt: Date.now() + INCOMPLETE_GROUP_PRODUCTS_CACHE_TTL_MS });
+        return res;
       }
 
       // パターン1b: skus のみ（CSV等で inventoryItemIds が未保存のグループ）→ SKU から ID 解決してから商品・在庫取得
@@ -2424,13 +2448,17 @@ export async function action({ request }: ActionFunctionArgs) {
             const valid = results.filter((r): r is NonNullable<typeof r> => r != null);
             allResults.push(...valid);
           }
-          return { ok: true, countId, groupId, products: allResults, hasMore: hasMore1b, offset };
+          const res1b = { ok: true as const, countId, groupId, products: allResults, hasMore: hasMore1b, offset };
+          incompleteGroupProductsCache.set(cacheKey, { data: res1b, expiresAt: Date.now() + INCOMPLETE_GROUP_PRODUCTS_CACHE_TTL_MS });
+          return res1b;
         }
       }
 
       // パターン2: コレクションから商品を取得
       if (!productGroup.collectionIds?.length) {
-        return { ok: true, countId, groupId, products: [], hasMore: false, offset: 0 };
+        const emptyRes2 = { ok: true as const, countId, groupId, products: [] as unknown[], hasMore: false, offset: 0 };
+        incompleteGroupProductsCache.set(cacheKey, { data: emptyRes2, expiresAt: Date.now() + INCOMPLETE_GROUP_PRODUCTS_CACHE_TTL_MS });
+        return emptyRes2;
       }
 
       let collectionIndex = 0;
@@ -2564,14 +2592,16 @@ export async function action({ request }: ActionFunctionArgs) {
         productsWithQuantity.push(...results);
       }
 
-      return {
-        ok: true,
+      const res2 = {
+        ok: true as const,
         countId,
         groupId,
         products: productsWithQuantity,
         hasMore: hasMoreCollection,
         offset,
       };
+      incompleteGroupProductsCache.set(cacheKey, { data: res2, expiresAt: Date.now() + INCOMPLETE_GROUP_PRODUCTS_CACHE_TTL_MS });
+      return res2;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       return { ok: false, error: `商品取得エラー: ${errorMessage}` as const };
@@ -2648,6 +2678,7 @@ export async function action({ request }: ActionFunctionArgs) {
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
   }
 
@@ -2772,6 +2803,7 @@ export async function action({ request }: ActionFunctionArgs) {
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
   }
 
@@ -2853,6 +2885,7 @@ export async function action({ request }: ActionFunctionArgs) {
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
   }
 
@@ -2899,6 +2932,7 @@ export async function action({ request }: ActionFunctionArgs) {
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
   }
 
@@ -2927,6 +2961,7 @@ export async function action({ request }: ActionFunctionArgs) {
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
   }
 
@@ -2947,6 +2982,7 @@ export async function action({ request }: ActionFunctionArgs) {
       );
       const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
       if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+      invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
       return { ok: true };
     }
     const incompleteIds = allIds.filter((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length === 0);
@@ -2966,6 +3002,7 @@ export async function action({ request }: ActionFunctionArgs) {
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
   }
 
@@ -3140,6 +3177,8 @@ export default function InventoryCountPage() {
   const incompleteGroupIdsRef = useRef<string[]>([]);
   // ✅ 直前に submit した groupId（エラー応答時に loading を解除するため）
   const lastSubmittedGroupIdRef = useRef<string | null>(null);
+  // ✅ モーダルを閉じて再度開いたときに fetcher.data の古いレスポンスを無視するため。「今回のオープンで submit した countId+groupId」と一致するレスポンスだけ処理する
+  const lastSubmittedForModalRef = useRef<{ countId: string; groupId: string } | null>(null);
   // ✅ incompleteGroupProducts のキーは常に文字列で統一（productGroupIds が number のときの照合漏れを防ぐ）
   const getIncompleteProductsForGroup = (groupId: string | number): Array<any> => {
     const sk = String(groupId);
@@ -3155,6 +3194,7 @@ export default function InventoryCountPage() {
     if (incompleteGroupProductsFetcher.state !== "idle") return;
     const currentProducts = getIncompleteProductsForGroup(groupId);
     setLoadingMoreIncompleteGroupId(groupId);
+    lastSubmittedForModalRef.current = { countId: String(modalCount.id), groupId };
     const formData = new FormData();
     formData.append("action", "get_incomplete_group_products");
     formData.append("countId", String(modalCount.id));
@@ -3258,10 +3298,14 @@ export default function InventoryCountPage() {
       setLoadingIncompleteGroupIds(new Set());
       incompleteGroupFetchIndexRef.current = 0;
       incompleteGroupIdsRef.current = [];
+      lastSubmittedForModalRef.current = null; // ✅ 閉じたときにリセットし、再度開いたときに古い fetcher.data を無視する
       setModalEditMode(false);
       setModalEditedQuantities({});
       return;
     }
+
+    // ✅ 今回のオープンで「どの submit のレスポンスを有効とするか」をリセット。閉じて再度開いたときの古い fetcher.data を処理しないようにする
+    lastSubmittedForModalRef.current = null;
 
     const allGroupIds = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
       ? modalCount.productGroupIds
@@ -3286,11 +3330,13 @@ export default function InventoryCountPage() {
 
     // ✅ 最初のグループを取得（countId を送信し、古いモーダル用のレスポンスを無視するため）
     if (incompleteGroupIdsStr.length > 0) {
-      lastSubmittedGroupIdRef.current = incompleteGroupIdsStr[0];
+      const firstGroupId = incompleteGroupIdsStr[0];
+      lastSubmittedGroupIdRef.current = firstGroupId;
+      lastSubmittedForModalRef.current = { countId: String(modalCount.id), groupId: firstGroupId };
       const formData = new FormData();
       formData.append("action", "get_incomplete_group_products");
       formData.append("countId", String(modalCount.id));
-      formData.append("groupId", incompleteGroupIdsStr[0]);
+      formData.append("groupId", firstGroupId);
       formData.append("locationId", modalCount.locationId);
       formData.append("offset", "0");
       incompleteGroupProductsFetcher.submit(formData, { method: "post" });
@@ -3331,16 +3377,21 @@ export default function InventoryCountPage() {
   }, [countFullFetcher.data, modalCount?.id]);
 
   // ✅ 未完了グループの商品リスト取得完了時の処理（成功時はデータ保存・loading 解除・次を submit、失敗時も loading を解除して「読み込み中」のままにならないようにする）
-  // ✅ モーダルを読み込み途中で閉じて別の棚卸を開いた場合、古いレスポンスは無視する（data.countId と modalCount?.id の一致を確認）
+  // ✅ モーダルを閉じて再度開いたときに fetcher.data に残る古いレスポンスを無視する（lastSubmittedForModalRef と一致する今回の submit のレスポンスだけ処理）
   useEffect(() => {
     const data = incompleteGroupProductsFetcher.data;
     if (!data) return;
 
     const responseCountId = data?.countId != null ? String(data.countId) : null;
+    const responseGroupId = data?.groupId != null ? String(data.groupId) : null;
     const currentCountId = modalCount?.id != null ? String(modalCount.id) : null;
     if (responseCountId !== "" && currentCountId != null && normalizeIdForMatch(responseCountId) !== normalizeIdForMatch(currentCountId)) return;
 
-    const groupKeyFromResponse = data?.groupId != null ? String(data.groupId) : null;
+    // ✅ 今回のモーダルオープンで submit したリクエストのレスポンスだけ処理する。閉じて再度開いたときの古い fetcher.data は無視
+    const last = lastSubmittedForModalRef.current;
+    if (!last || normalizeIdForMatch(responseCountId) !== normalizeIdForMatch(last.countId) || normalizeIdForMatch(responseGroupId ?? "") !== normalizeIdForMatch(last.groupId)) return;
+
+    const groupKeyFromResponse = responseGroupId;
 
     if (data?.ok && data?.products != null && data?.groupId != null) {
       const { groupId, products, hasMore, offset } = data;
@@ -3375,6 +3426,7 @@ export default function InventoryCountPage() {
         if (currentIndex < remainingGroupIds.length && modalCount) {
           const nextGroupId = remainingGroupIds[currentIndex];
           lastSubmittedGroupIdRef.current = nextGroupId;
+          lastSubmittedForModalRef.current = { countId: String(modalCount.id), groupId: nextGroupId };
           const formData = new FormData();
           formData.append("action", "get_incomplete_group_products");
           formData.append("countId", String(modalCount.id));
@@ -3385,6 +3437,7 @@ export default function InventoryCountPage() {
           incompleteGroupFetchIndexRef.current = currentIndex + 1;
         } else {
           lastSubmittedGroupIdRef.current = null;
+          lastSubmittedForModalRef.current = null;
         }
       }
       return;
