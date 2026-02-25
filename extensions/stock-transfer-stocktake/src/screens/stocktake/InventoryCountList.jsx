@@ -72,6 +72,12 @@ function getGroupItemsByKey(groupItemsMap, groupId) {
   return key && Array.isArray(groupItemsMap[key]) ? groupItemsMap[key] : [];
 }
 
+/** 管理画面でキャンセルしたグループIDの Set（正規化済み）。完了判定で「キャンセル済み＝完了」とする */
+function cancelledGroupIdSet(c) {
+  const arr = Array.isArray(c?.cancelledGroupIds) ? c.cancelledGroupIds : [];
+  return new Set(arr.map((id) => normalizeIdForMatch(id)));
+}
+
 // 複数商品グループ時のみ使用：商品グループごとに別キーで下書きを管理（入庫の inboundDraftKey と同様）
 function inventoryCountDraftKey({ countId, locationId, productGroupId }) {
   const c = String(countId || "").trim();
@@ -1690,10 +1696,13 @@ export function InventoryCountList({
             const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
               ? c.productGroupIds
               : c.productGroupId ? [c.productGroupId] : [];
+            const cancelledSet = cancelledGroupIdSet(c);
             const allDone = allIds.length > 0 && allIds.every((id) => {
+              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
               const items = getGroupItemsByKey(groupItems, id);
               return items.length > 0;
             });
+            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
             
             // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
             // ✅ 未完了グループの商品も含めるため、linesから全商品を取得（linesByGroupには編集可能な商品のみが含まれる）
@@ -1716,7 +1725,7 @@ export function InventoryCountList({
             return {
               ...c,
               groupItems,
-              status: allDone ? "completed" : "in_progress",
+              status: newStatus,
               completedAt: allDone ? new Date().toISOString() : undefined,
               items: mergedEntry,
             };
@@ -1839,10 +1848,13 @@ export function InventoryCountList({
           const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
             ? c.productGroupIds
             : c.productGroupId ? [c.productGroupId] : [];
+          const cancelledSet = cancelledGroupIdSet(c);
           const allDone = allIds.length > 0 && allIds.every((id) => {
+            if (cancelledSet.has(normalizeIdForMatch(id))) return true;
             const items = groupItems[id];
             return Array.isArray(items) && items.length > 0;
           });
+          const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
           
           // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
           // ✅ 未完了グループの商品も含めるため、linesから全商品を取得（linesByGroupには編集可能な商品のみが含まれる）
@@ -1868,7 +1880,7 @@ export function InventoryCountList({
           return {
             ...c,
             groupItems,
-            status: allDone ? "completed" : "in_progress",
+            status: newStatus,
             completedAt: allDone ? new Date().toISOString() : undefined,
             items: mergedEntry,
           };
@@ -1987,10 +1999,13 @@ export function InventoryCountList({
             const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
               ? c.productGroupIds
               : c.productGroupId ? [c.productGroupId] : [];
+            const cancelledSet = cancelledGroupIdSet(c);
             const allDone = allIds.length > 0 && allIds.every((id) => {
+              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
               const items = getGroupItemsByKey(groupItems, id);
               return items.length > 0;
             });
+            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
             
             // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
             // ✅ 未完了グループの商品も含めるため、linesから全商品を取得（linesByGroupには編集可能な商品のみが含まれる）
@@ -2013,7 +2028,7 @@ export function InventoryCountList({
             return {
               ...c,
               groupItems,
-              status: allDone ? "completed" : "in_progress",
+              status: newStatus,
               completedAt: allDone ? new Date().toISOString() : undefined,
               items: mergedEntry,
             };
@@ -2057,18 +2072,18 @@ export function InventoryCountList({
             const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
               ? c.productGroupIds
               : c.productGroupId ? [c.productGroupId] : [];
-            // ✅ 全グループが完了しているか判定：groupItems[id]が存在し、かつ配列の長さが0より大きい（入庫のシップメント完了判定と同じ実装）
-            // 未処理のグループが1つでもあれば未完了（全グループが処理済みの場合のみ完了）
+            const cancelledSet = cancelledGroupIdSet(c);
+            // ✅ 全グループが完了しているか判定。キャンセル済みグループは完了とみなす。
             const allDone = allIds.length > 0 && allIds.every((id) => {
+              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
               const items = getGroupItemsByKey(groupItems, id);
-              // ✅ 配列が存在し、かつ長さが0より大きい場合のみ完了と判定
               return Array.isArray(items) && items.length > 0;
             });
-            // ✅ 全グループが完了していない場合は必ず"in_progress"に設定（既存のstatusを保持しない）
+            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
             return {
               ...c,
               groupItems,
-              status: allDone ? "completed" : "in_progress",
+              status: newStatus,
               completedAt: allDone ? new Date().toISOString() : undefined,
               items: entry,
             };
@@ -2232,13 +2247,15 @@ export function InventoryCountList({
             const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
               ? c.productGroupIds
               : c.productGroupId ? [c.productGroupId] : [];
+            const cancelledSet = cancelledGroupIdSet(c);
             const allDone = allIds.length > 0 && allIds.every((id) => {
+              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
               const items = getGroupItemsByKey(groupItems, id);
               return items.length > 0;
             });
+            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
             
             // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
-            // ✅ 未完了グループの商品も含めるため、linesから全商品を取得（linesByGroupには編集可能な商品のみが含まれる）
             const allItems = lines.filter((l) => {
               const groupId = l.productGroupId || targetProductGroupIds[0];
               return groupId && targetProductGroupIds.includes(groupId);
@@ -2257,7 +2274,7 @@ export function InventoryCountList({
             return {
               ...c,
               groupItems,
-              status: allDone ? "completed" : "in_progress",
+              status: newStatus,
               completedAt: allDone ? new Date().toISOString() : undefined,
               items: mergedEntry,
             };
@@ -2278,18 +2295,17 @@ export function InventoryCountList({
             const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
               ? c.productGroupIds
               : c.productGroupId ? [c.productGroupId] : [];
-            // ✅ 全グループが完了しているか判定：groupItems[id]が存在し、かつ配列の長さが0より大きい（入庫のシップメント完了判定と同じ実装）
-            // 未処理のグループが1つでもあれば未完了（全グループが処理済みの場合のみ完了）
+            const cancelledSet = cancelledGroupIdSet(c);
             const allDone = allIds.length > 0 && allIds.every((id) => {
+              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
               const items = getGroupItemsByKey(groupItems, id);
-              // ✅ 配列が存在し、かつ長さが0より大きい場合のみ完了と判定
               return Array.isArray(items) && items.length > 0;
             });
-            // ✅ 全グループが完了していない場合は必ず"in_progress"に設定（既存のstatusを保持しない）
+            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
             return {
               ...c,
               groupItems,
-              status: allDone ? "completed" : "in_progress",
+              status: newStatus,
               completedAt: allDone ? new Date().toISOString() : undefined,
               items: entry,
             };

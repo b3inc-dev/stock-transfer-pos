@@ -326,6 +326,8 @@ function toMinimalCountForList(c: InventoryCount): Record<string, unknown> {
     countName: c.countName,
     createdAt: c.createdAt,
     productGroupIds: Array.isArray(c.productGroupIds) ? c.productGroupIds : c.productGroupId ? [c.productGroupId] : [],
+    productGroupNames: Array.isArray((c as any).productGroupNames) ? (c as any).productGroupNames : undefined,
+    cancelledGroupIds: Array.isArray((c as any).cancelledGroupIds) ? (c as any).cancelledGroupIds : undefined,
   };
 }
 
@@ -3097,6 +3099,9 @@ export default function InventoryCountPage() {
   };
   const getIncompleteGroupHasMore = (groupId: string | number): boolean =>
     incompleteGroupHasMore.get(String(groupId)) ?? false;
+  // ✅ 商品グループIDを名前で表示（list 由来で productGroupNames が無い場合に productGroups から解決）
+  const getGroupDisplayName = (groupId: string | number): string =>
+    productGroups.find((g) => String(g.id) === String(groupId) || normalizeIdForMatch(g.id) === normalizeIdForMatch(groupId))?.name ?? String(groupId);
   const handleLoadMoreIncompleteGroup = (groupId: string) => {
     if (!modalCount || loadingMoreIncompleteGroupId) return;
     if (incompleteGroupProductsFetcher.state !== "idle") return;
@@ -3244,7 +3249,7 @@ export default function InventoryCountPage() {
       incompleteGroupProductsFetcher.submit(formData, { method: "post" });
       incompleteGroupFetchIndexRef.current = 1;
     }
-  }, [modalOpen, modalCount]);
+  }, [modalOpen, modalCount?.id]);
 
   // ✅ 未完了グループの商品リスト取得完了時の処理（成功時はデータ保存・loading 解除・次を submit、失敗時も loading を解除して「読み込み中」のままにならないようにする）
   useEffect(() => {
@@ -3325,12 +3330,24 @@ export default function InventoryCountPage() {
   }, [historyActionFetcher.data, revalidator]);
 
   // ✅ モーダル表示中の棚卸を loader の最新データと同期（確定・キャンセル後に revalidate で一覧が更新されたらモーダル内のステータスも更新）
+  // list 由来の found には groupItems/items や cancelledGroupIds が無い場合があるため、ある項目はマージ。変更があるときだけ set してループ防止。
   useEffect(() => {
     if (!modalOpen || !modalCount || !Array.isArray(inventoryCounts) || inventoryCounts.length === 0) return;
     const found = inventoryCounts.find(
       (c) => String(c.id) === String(modalCount.id) || normalizeIdForMatch(c.id) === normalizeIdForMatch(modalCount.id)
     );
-    if (found) setModalCount(found);
+    if (!found) return;
+    const nextStatus = (found as any).status;
+    const nextCancelled = Array.isArray((found as any).cancelledGroupIds) ? (found as any).cancelledGroupIds : (modalCount as any).cancelledGroupIds;
+    if (nextStatus === (modalCount as any).status && JSON.stringify(nextCancelled ?? []) === JSON.stringify((modalCount as any).cancelledGroupIds ?? [])) return;
+    const merged = {
+      ...found,
+      productGroupNames: Array.isArray((found as any).productGroupNames) && (found as any).productGroupNames.length > 0 ? (found as any).productGroupNames : (modalCount as any).productGroupNames,
+      cancelledGroupIds: nextCancelled,
+      groupItems: (found as any).groupItems && typeof (found as any).groupItems === "object" && Object.keys((found as any).groupItems || {}).length > 0 ? (found as any).groupItems : (modalCount as any).groupItems,
+      items: Array.isArray((found as any).items) && (found as any).items.length > 0 ? (found as any).items : (modalCount as any).items,
+    };
+    setModalCount(merged);
   }, [modalOpen, modalCount?.id, inventoryCounts]);
 
   const ITEMS_PER_PAGE = 1000;
@@ -5638,11 +5655,15 @@ export default function InventoryCountPage() {
                     </div>
                     <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                       <strong>商品グループ:</strong> {
-                        Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
-                          ? modalCount.productGroupNames.join(", ")
-                          : Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
-                          ? modalCount.productGroupIds.join(", ")
-                          : modalCount.productGroupName || modalCount.productGroupId || "-"
+                        (() => {
+                          const ids = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
+                            ? modalCount.productGroupIds
+                            : modalCount.productGroupId ? [modalCount.productGroupId] : [];
+                          if (ids.length === 0) return modalCount.productGroupName || modalCount.productGroupId || "-";
+                          if (Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0)
+                            return modalCount.productGroupNames.map((n, i) => n || getGroupDisplayName(ids[i])).join(", ");
+                          return ids.map((id) => getGroupDisplayName(id)).join(", ");
+                        })()
                       }
                     </div>
                     <div style={{ fontSize: "14px", marginBottom: "4px" }}>
@@ -5665,9 +5686,13 @@ export default function InventoryCountPage() {
                       const groupItemsMap = (modalCount as any)?.groupItems && typeof (modalCount as any).groupItems === "object" ? (modalCount as any).groupItems : {};
                       
                       if (allGroupIds.length > 0) {
+                        const cancelledSetForProgress = new Set(
+                          (Array.isArray((modalCount as any)?.cancelledGroupIds) ? (modalCount as any).cancelledGroupIds : []).map((id: string) => normalizeIdForMatch(id))
+                        );
                         // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
                         const countItemsLegacy = Array.isArray(modalCount.items) ? modalCount.items : [];
                         const progressInfo = allGroupIds.map((groupId) => {
+                          const isCancelled = cancelledSetForProgress.has(normalizeIdForMatch(groupId));
                           let groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
                           // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
                           if (groupItems.length === 0 && countItemsLegacy.length > 0) {
@@ -5696,12 +5721,12 @@ export default function InventoryCountPage() {
                           const displayItems = isCompleted ? groupItems : incompleteProducts;
                           
                           const groupName = Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
-                            ? modalCount.productGroupNames[allGroupIds.indexOf(groupId)] || groupId
-                            : productGroups.find((g) => g.id === groupId)?.name || groupId;
+                            ? modalCount.productGroupNames[allGroupIds.indexOf(groupId)] || getGroupDisplayName(groupId)
+                            : getGroupDisplayName(groupId);
                           // ✅ グループごとの進捗数を計算
                           const groupTotalQty = displayItems.reduce((sum, it) => sum + (Number(it?.currentQuantity || 0)), 0);
                           const groupActualQty = displayItems.reduce((sum, it) => sum + (Number(it?.actualQuantity || 0)), 0);
-                          return { groupId, groupName, isCompleted, totalQty: groupTotalQty, actualQty: groupActualQty };
+                          return { groupId, groupName, isCompleted, isCancelled, totalQty: groupTotalQty, actualQty: groupActualQty };
                         });
                         const extraCount = allGroupIds.reduce((sum, id) => {
                           const arr = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(id));
@@ -5713,8 +5738,8 @@ export default function InventoryCountPage() {
                             <strong>進捗状況:</strong>
                             <div style={{ marginTop: "4px", marginLeft: "16px" }}>
                               {progressInfo.map((info) => (
-                                <div key={info.groupId} style={{ fontSize: "13px", color: info.isCompleted ? "#28a745" : "#ffc107" }}>
-                                  {info.groupName}: {info.isCompleted ? "完了済み" : "未完了"}
+                                <div key={info.groupId} style={{ fontSize: "13px", color: info.isCancelled ? "#666" : info.isCompleted ? "#28a745" : "#ffc107" }}>
+                                  {info.groupName}: {info.isCancelled ? "キャンセル済み" : info.isCompleted ? "完了済み" : "未完了"}
                                   {info.totalQty > 0 || info.actualQty > 0 ? (
                                     <span style={{ marginLeft: "8px", color: "#666" }}>
                                       （{info.actualQty}/{info.totalQty > 0 ? info.totalQty : "-"}）
@@ -5880,8 +5905,8 @@ export default function InventoryCountPage() {
                                 : (wasCompletedInItemsByGroup ? true : (hasGroupItems && incompleteProductsForGroup.length === 0));
                               const isGroupCancelled = cancelledGroupIdsSet.has(normalizeIdForMatch(groupId));
                               const groupName = Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
-                                ? modalCount.productGroupNames[allGroupIds.indexOf(groupId)] || groupId
-                                : productGroups.find((g) => g.id === groupId)?.name || groupId;
+                                ? modalCount.productGroupNames[allGroupIds.indexOf(groupId)] || getGroupDisplayName(groupId)
+                                : getGroupDisplayName(groupId);
                               
                               // ✅ グループ内は通常商品のみ表示（予定外は別ブロックで表示・入出庫と同様）
                               const normalItems = groupItems.filter((it) => !(it as any).isExtra);
@@ -5983,6 +6008,7 @@ export default function InventoryCountPage() {
                                         type="button"
                                         disabled={historyActionFetcher.state !== "idle" || normalItems.length === 0}
                                         onClick={() => {
+                                          if (!confirm("このグループを確定しますか？在庫数が実数に更新されます。")) return;
                                           const items = normalItems.map((it: any) => ({
                                             inventoryItemId: it.inventoryItemId,
                                             currentQuantity: Number(it?.currentQuantity ?? 0),
@@ -6038,7 +6064,7 @@ export default function InventoryCountPage() {
                                       </button>
                                     </div>
                                   )}
-                                  {!isGroupCompleted && getIncompleteGroupHasMore(groupId) && (
+                                  {!isGroupCompleted && !isGroupCancelled && getIncompleteGroupHasMore(groupId) && (
                                     <div style={{ marginTop: "8px" }}>
                                       <button
                                         type="button"
@@ -6128,7 +6154,7 @@ export default function InventoryCountPage() {
                             const groupName = Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
                               ? modalCount.productGroupNames[0]
                               : singleGroupId
-                              ? (productGroups.find((g) => g.id === singleGroupId)?.name || singleGroupId)
+                              ? getGroupDisplayName(singleGroupId)
                               : (modalCount.productGroupName || modalCount.productGroupId || "-");
                             const groupTotalQty = normalItems.reduce((sum, it) => sum + (Number((it as any)?.currentQuantity || 0)), 0);
                             const groupActualQty = normalItems.reduce((sum, it) => sum + (Number(modalEditMode ? (modalEditedQuantities[singleGroupId]?.[it.inventoryItemId] ?? (it as any)?.actualQuantity) : (it as any)?.actualQuantity) ?? 0), 0);
@@ -6223,6 +6249,7 @@ export default function InventoryCountPage() {
                                         type="button"
                                         disabled={historyActionFetcher.state !== "idle" || normalItems.length === 0}
                                         onClick={() => {
+                                          if (!confirm("このグループを確定しますか？在庫数が実数に更新されます。")) return;
                                           const items = normalItems.map((it: any) => ({
                                             inventoryItemId: it.inventoryItemId,
                                             currentQuantity: Number(it?.currentQuantity ?? 0),
@@ -6278,7 +6305,7 @@ export default function InventoryCountPage() {
                                       </button>
                                     </div>
                                   )}
-                                  {!isGroupCompleted && singleGroupId && getIncompleteGroupHasMore(singleGroupId) && (
+                                  {!isGroupCompleted && !isGroupCancelledSingle && singleGroupId && getIncompleteGroupHasMore(singleGroupId) && (
                                     <div style={{ marginTop: "8px" }}>
                                       <button
                                         type="button"
@@ -6424,6 +6451,7 @@ export default function InventoryCountPage() {
                           type="button"
                           disabled={historyActionFetcher.state !== "idle" || !canConfirmAll}
                           onClick={() => {
+                            if (!confirm("未完了のグループを一括で確定しますか？在庫数が実数に更新されます。")) return;
                             const incompletePayload: Record<string, Array<{ inventoryItemId: string; currentQuantity: number; actualQuantity: number; variantId?: string; sku?: string; title?: string }>> = {};
                             for (const groupId of allGroupIds) {
                               const existing = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, groupId);

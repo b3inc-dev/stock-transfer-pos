@@ -272,23 +272,32 @@ function groupExists(productGroupsOrGroupIds, groupId) {
   return false;
 }
 
-/** ステータスだけ補正（countNameは付けない。部分取得時は全件ソートできないため） */
+/** キャンセル済みグループIDの Set（正規化済み）。管理画面でキャンセルしたグループを「完了」とみなす */
+function getCancelledGroupIdSet(c) {
+  const arr = Array.isArray(c?.cancelledGroupIds) ? c.cancelledGroupIds : [];
+  return new Set(arr.map((id) => normalizeIdForMatch(id)));
+}
+
+/** ステータスだけ補正（countNameは付けない。部分取得時は全件ソートできないため）。キャンセル済みグループは「完了」とみなす。 */
 function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
   if (!Array.isArray(counts)) return [];
   return counts.map((c) => {
+    if (c?.status === "cancelled") return c;
     const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
       ? c.productGroupIds
       : c.productGroupId ? [c.productGroupId] : [];
     if (allIds.length === 0) return c;
+    const cancelledSet = getCancelledGroupIdSet(c);
     const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
     const hasGroupItems = groupItemsMap && Object.keys(groupItemsMap).length > 0;
     const allDone = allIds.every((id) => {
+      if (cancelledSet.has(normalizeIdForMatch(id))) return true;
       if (!groupExists(productGroupsOrGroupIds, id)) return true;
       const items = getGroupItemsByKey(groupItemsMap, id);
       return items.length > 0;
     });
     if (!hasGroupItems) {
-      if (allIds.every((id) => !groupExists(productGroupsOrGroupIds, id))) {
+      if (allIds.every((id) => cancelledSet.has(normalizeIdForMatch(id)) || !groupExists(productGroupsOrGroupIds, id))) {
         return { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
       }
       return c;
@@ -309,7 +318,7 @@ export async function getStocktakeListLimit() {
   return Math.max(1, Math.min(250, n));
 }
 
-/** 一覧用ミニマムオブジェクト（groupItems/items なし） */
+/** 一覧用ミニマムオブジェクト（groupItems/items なし）。管理画面のキャンセルと同期するため cancelledGroupIds と productGroupNames を含める */
 function toMinimalCountForList(c) {
   if (!c || typeof c !== "object") return null;
   return {
@@ -319,6 +328,8 @@ function toMinimalCountForList(c) {
     countName: c.countName,
     createdAt: c.createdAt,
     productGroupIds: Array.isArray(c.productGroupIds) ? c.productGroupIds : c.productGroupId ? [c.productGroupId] : [],
+    productGroupNames: Array.isArray(c.productGroupNames) ? c.productGroupNames : undefined,
+    cancelledGroupIds: Array.isArray(c.cancelledGroupIds) ? c.cancelledGroupIds : undefined,
   };
 }
 
@@ -597,9 +608,10 @@ export async function readInventoryCounts() {
     // ✅ 現在の商品グループ一覧（棚卸ID発行後に削除されたグループを「完了」とみなすため）
     const productGroups = await readProductGroups();
     
-    // ✅ 完了判定：全グループが完了している場合のみ完了。管理画面と統一（後方互換は廃止）。削除済みグループは完了とみなす。
+    // ✅ 完了判定：全グループが完了している場合のみ完了。管理画面と統一。削除済み・キャンセル済みグループは完了とみなす。
     let needsUpdate = false;
     const countsFixed = counts.map((c) => {
+      if (c?.status === "cancelled") return c;
       const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
         ? c.productGroupIds
         : c.productGroupId ? [c.productGroupId] : [];
@@ -608,8 +620,10 @@ export async function readInventoryCounts() {
         return c;
       }
       
+      const cancelledSet = getCancelledGroupIdSet(c);
       const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
       const allDone = allIds.every((id) => {
+        if (cancelledSet.has(normalizeIdForMatch(id))) return true;
         const groupExists = productGroups.some((g) => String(g.id) === String(id));
         if (!groupExists) return true; // 削除済みグループは完了とみなす
         const items = getGroupItemsByKey(groupItemsMap, id);
