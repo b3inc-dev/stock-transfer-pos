@@ -441,7 +441,11 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
 
   const [lines, setLines] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
-  
+  const linesRef = useRef(lines);
+  useEffect(() => {
+    linesRef.current = lines;
+  }, [lines]);
+
   // スキャンキュー処理用のref
   const scanWorkingRef = useRef(false);
 
@@ -656,28 +660,18 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
     };
   }, [debouncedQuery, showImages, liteMode, settings]);
 
-  const upsertLineByResolvedVariant = useCallback(async (resolved, { incBy = 1, closeSearch = true }) => {
+  const upsertLineByResolvedVariant = useCallback((resolved, { incBy = 1, closeSearch = true }) => {
     if (!resolved?.inventoryItemId || !resolved?.variantId) return;
-    
-    // 在庫数を取得
-    let available = null;
-    let stockLoading = false;
-    if (locationGid && resolved.variantId) {
-      stockLoading = true;
-      try {
-        const r = await fetchVariantAvailable({ variantGid: resolved.variantId, locationGid });
-        available = r?.available ?? null;
-        stockLoading = false;
-      } catch (e) {
-        stockLoading = false;
-      }
-    }
-    
+    // ✅ 既存行の数量追加のときは在庫取得しない。新規行のみバックグラウンドで在庫取得
+    const isNewLine = !linesRef.current.some(
+      (l) => l.inventoryItemId === resolved.inventoryItemId || l.variantId === resolved.variantId
+    );
+    const stockLoading = isNewLine && !!(locationGid && resolved.variantId);
     setLines((prev) => {
       const hit = prev.find((l) => l.inventoryItemId === resolved.inventoryItemId || l.variantId === resolved.variantId);
       if (hit) {
         return prev.map((l) =>
-          l.id === hit.id ? { ...l, qty: Math.max(1, (l.qty || 1) + incBy), available, stockLoading } : l
+          l.id === hit.id ? { ...l, qty: Math.max(1, (l.qty || 1) + incBy) } : l
         );
       }
       return [
@@ -691,7 +685,7 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
           barcode: resolved.barcode ?? "",
           imageUrl: resolved.imageUrl ?? "",
           qty: Math.max(1, incBy),
-          available,
+          available: null,
           stockLoading,
         },
         ...prev,
@@ -700,6 +694,28 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
     if (closeSearch) {
       setQuery("");
       setCandidates([]);
+    }
+    if (isNewLine && locationGid && resolved.variantId) {
+      fetchVariantAvailable({ variantGid: resolved.variantId, locationGid })
+        .then((r) => {
+          const available = r?.available ?? null;
+          setLines((prev) =>
+            prev.map((l) =>
+              l.variantId === resolved.variantId || l.inventoryItemId === resolved.inventoryItemId
+                ? { ...l, available, stockLoading: false }
+                : l
+            )
+          );
+        })
+        .catch(() => {
+          setLines((prev) =>
+            prev.map((l) =>
+              l.variantId === resolved.variantId || l.inventoryItemId === resolved.inventoryItemId
+                ? { ...l, stockLoading: false }
+                : l
+            )
+          );
+        });
     }
   }, [locationGid]);
 
@@ -746,7 +762,8 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
         return;
       }
 
-      await upsertLineByResolvedVariant(resolved, { incBy: 1, closeSearch: false });
+      upsertLineByResolvedVariant(resolved, { incBy: 1, closeSearch: false });
+      toast(`${resolved.productTitle || resolved.sku || "(no title)"} を追加しました（+1）`);
     } catch (e) {
       console.error("processScanQueueOnce error:", e);
     } finally {
@@ -1073,14 +1090,14 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
     };
 
     const addOne = async () => {
-      await upsertLineByResolvedVariant(resolved, { incBy: 1, closeSearch: false });
+      upsertLineByResolvedVariant(resolved, { incBy: 1, closeSearch: false });
       setCandidateQty(key, shownQty + 1);
       toast(`${productTitle || "(no title)"} を追加しました（+1）`);
     };
 
     const commitAddByQty = async () => {
       const n = clampAdd(String(text || "").trim());
-      await upsertLineByResolvedVariant(resolved, { incBy: n, closeSearch: false });
+      upsertLineByResolvedVariant(resolved, { incBy: n, closeSearch: false });
       setCandidateQty(key, n);
       toast(`${productTitle || "(no title)"} を追加しました（+${n}）`);
     };

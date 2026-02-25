@@ -1934,16 +1934,18 @@ export async function fetchSettings() {
     const data = await graphql(gql);
     const raw = data?.currentAppInstallation?.metafield?.value ?? null;
     const parsed = safeParseJson(raw, null);
+    const fallbackShape = {
+      version: 1,
+      carriers: [],
+      outbound: { historyInitialLimit: 100 },
+      productList: { initialLimit: 250 },
+      searchList: { initialLimit: 50 },
+      inventoryCount: { allowExtraCount: true },
+    };
     const result =
       parsed && parsed.version === 1
-        ? parsed
-        : {
-            version: 1,
-            carriers: [],
-            outbound: { historyInitialLimit: 100 },
-            productList: { initialLimit: 250 },
-            searchList: { initialLimit: 50 },
-          };
+        ? { ...fallbackShape, ...parsed, inventoryCount: { allowExtraCount: true, ...(parsed.inventoryCount || {}) } }
+        : fallbackShape;
     settingsCache = { data: result, expiresAt: now + SETTINGS_CACHE_TTL_MS };
     return result;
   } catch (e) {
@@ -1954,6 +1956,7 @@ export async function fetchSettings() {
       outbound: { historyInitialLimit: 100 },
       productList: { initialLimit: 250 },
       searchList: { initialLimit: 50 },
+      inventoryCount: { allowExtraCount: false },
     };
     settingsCache = { data: fallback, expiresAt: now + SETTINGS_CACHE_TTL_MS };
     return fallback;

@@ -1513,23 +1513,15 @@ export function InventoryCountList({
         return;
       }
 
-      // 新規追加時のみ在庫取得（入庫は在庫不要のため取得しない）
-      let currentQty = 0;
-      try {
-        const qty = await getCurrentQuantity(inventoryItemId, count.locationId);
-        currentQty = qty !== null ? qty : 0;
-      } catch (e) {
-        console.error("Failed to get current quantity:", e);
-        currentQty = 0;
-      }
       const normalizedId = normalizeInventoryItemIdForExtra(inventoryItemId);
       const isExtra = !initialInventoryItemIdsRef.current.has(normalizedId);
-      // ✅ 予定外棚卸許可が不許可の場合は予定外商品の追加をブロック（入庫の予定外入庫許可と同様）
-      if (isExtra && (settings?.inventoryCount?.allowExtraCount === false)) {
+      // ✅ 予定外棚卸許可が不許可の場合は予定外商品の追加をブロック（明示的に true のときのみ許可。未読込・キーなしは不許可扱い）
+      if (isExtra && settings?.inventoryCount?.allowExtraCount !== true) {
         toast("予定外棚卸は許可されていません。設定で「予定外棚卸許可」を許可に変更してください。");
         return;
       }
       const assignedGroupId = isMultipleMode ? (targetProductGroupIds[0] || null) : (productGroupId || targetProductGroupIds[0] || null);
+      // ✅ 在庫数は都度取得しない。表示・確定は「在庫更新」ボタンや確定時の処理で行う（入庫と同様に追加時はAPIを呼ばない）
       const newLine = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         variantId: resolved.variantId,
@@ -1539,12 +1531,15 @@ export function InventoryCountList({
         sku: resolved.sku ?? "",
         barcode: resolved.barcode ?? "",
         imageUrl: resolved.imageUrl ?? "",
-        currentQuantity: currentQty,
+        currentQuantity: 0,
         actualQuantity: deltaNum,
         isExtra,
         productGroupId: assignedGroupId,
+        stockLoading: false,
+        stockError: null,
       };
       setLines((prev) => [newLine, ...prev]);
+      toast(`${resolved.productTitle || resolved.sku || "(no title)"} を追加しました（+1）`);
       // ✅ 入庫と同様：追加後も検索はクリアしない
     },
     [count, denyEdit, isMultipleMode, targetProductGroupIds, productGroupId, settings]
@@ -1592,7 +1587,7 @@ export function InventoryCountList({
             imageUrl: resolvedFromScan.imageUrl ?? "",
           };
           await addLine(resolved, 1);
-          toast(`${resolved.productTitle || resolved.sku || "(no title)"} を追加しました（+1）`);
+          // トーストは addLine 内で表示（入庫と同様に即時フィードバック）
         } catch (e) {
           toast(`スキャン処理エラー: ${e?.message || e}`);
         }
