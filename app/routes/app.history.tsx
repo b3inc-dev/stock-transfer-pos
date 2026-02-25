@@ -344,6 +344,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 }
 
+// 履歴詳細モーダル用：同一 transferId の再表示を高速化するサーバー側キャッシュ（TTL 5分）
+const lineItemsCache = new Map<
+  string,
+  {
+    data: {
+      transferId: string;
+      lineItems: TransferLineItem[];
+      groupedLineItems: GroupedLineItemsEntry[];
+      transferTracking: { company: string; trackingNumber: string; arrivesAt: string } | null;
+    };
+    expiresAt: number;
+  }
+>();
+const LINE_ITEMS_CACHE_TTL_MS = 5 * 60 * 1000;
+
 export async function action({ request }: ActionFunctionArgs) {
   try {
     const { admin } = await authenticate.admin(request);
@@ -352,6 +367,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (!transferId) {
       return { error: "transferId is required" };
+    }
+
+    // キャッシュがあれば即返す（同一履歴を再度開いたときの体感速度向上）
+    const cached = lineItemsCache.get(transferId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data;
     }
 
     // Transfer IDから商品明細を取得
@@ -620,8 +641,14 @@ export async function action({ request }: ActionFunctionArgs) {
         }
       : null;
 
+    const result = { transferId, lineItems, groupedLineItems, transferTracking };
+    lineItemsCache.set(transferId, {
+      data: result,
+      expiresAt: Date.now() + LINE_ITEMS_CACHE_TTL_MS,
+    });
+
     // React Router v7では、オブジェクトを直接返すと自動的にJSONレスポンスに変換される
-    return { transferId, lineItems, groupedLineItems, transferTracking };
+    return result;
   } catch (error) {
     console.error("Line items action error:", error);
     const errorMessage = error instanceof Error ? error.message : String(error);
