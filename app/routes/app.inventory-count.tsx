@@ -778,6 +778,26 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   let inventoryCounts: InventoryCount[] = Array.isArray(inventoryCountsRaw) ? inventoryCountsRaw : [];
+  if (inventoryCounts.length > 0 && usedListMetafield) {
+    try {
+      // ✅ list 由来データ用：過去にキャンセルしたが当時のバグで status が "in_progress" のまま保存されている件を表示時補正（全グループが cancelledGroupIds に含まれるなら status を "cancelled" に）
+      inventoryCounts = inventoryCounts.map((c) => {
+        const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
+          ? c.productGroupIds
+          : c.productGroupId ? [c.productGroupId] : [];
+        if (allIds.length === 0) return c;
+        const cancelledArr = Array.isArray((c as any).cancelledGroupIds) ? (c as any).cancelledGroupIds : [];
+        const cancelledSet = new Set(cancelledArr.map((id: string) => normalizeIdForMatch(id)));
+        const allCancelled = allIds.every((id) => cancelledSet.has(normalizeIdForMatch(id)));
+        if (allCancelled && c.status !== "cancelled") {
+          return { ...c, status: "cancelled" as const, completedAt: undefined };
+        }
+        return c;
+      });
+    } catch {
+      // 補正失敗時はそのまま
+    }
+  }
   if (inventoryCounts.length > 0 && !usedListMetafield) {
     try {
       // ✅ 完了判定を修正：全グループが完了している場合のみ完了ステータスにする（フルデータ時のみ。list 一覧用のときは groupItems がないためスキップ）
