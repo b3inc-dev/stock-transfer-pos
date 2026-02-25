@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useEffect, useRef } from "preact/hooks"
 import {
   readInventoryCountsFirstPage,
   readInventoryCountsPage,
+  readInventoryCountById,
   getStocktakeListLimit,
   getLocationName,
   getProductGroupName,
@@ -123,6 +124,10 @@ export function InventoryCountConditions({
   const [chunkCount, setChunkCount] = useState(0);
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
   const firstPageOptsRef = useRef({ productGroups: null, totalChunks: 0, useListMetafield: false });
+  /** 一覧の「N件 N/N」をバックグラウンド取得した countId のセット（二重リクエスト防止） */
+  const countDetailRequestedRef = useRef(new Set());
+  /** バックグラウンド取得中の countId（「…」表示用） */
+  const [loadingDetailIds, setLoadingDetailIds] = useState(new Set());
 
   const filterByLocation = useCallback((list, locGid) => {
     if (!locGid) return list;
@@ -233,6 +238,8 @@ export function InventoryCountConditions({
     setError("");
     setChunkCount(0);
     setLoadedChunkCount(0);
+    countDetailRequestedRef.current = new Set(); // バックグラウンド取得の二重防止用をリセット
+    setLoadingDetailIds(new Set()); // 取得中表示をリセット
     await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       let result = await readInventoryCountsFirstPage();
@@ -290,6 +297,56 @@ export function InventoryCountConditions({
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // ✅ 一覧表示後に各行の「N件 N/N」をバックグラウンドで取得（先に描画し数値は後から流し込む）
+  useEffect(() => {
+    const list = Array.isArray(counts) ? counts : [];
+    const idsToRequest = [];
+    for (const c of list) {
+      const id = c?.id;
+      if (!id) continue;
+      const hasDetail = (c?.groupItems && typeof c.groupItems === "object") || (Array.isArray(c?.items) && c.items.length > 0);
+      if (hasDetail) continue;
+      if (countDetailRequestedRef.current.has(id)) continue;
+      countDetailRequestedRef.current.add(id);
+      idsToRequest.push(id);
+    }
+    if (idsToRequest.length > 0) {
+      setLoadingDetailIds((prev) => new Set([...prev, ...idsToRequest]));
+    }
+    for (const id of idsToRequest) {
+      readInventoryCountById(id)
+        .then((full) => {
+          if (!full || full.id !== id) return;
+          setCounts((prev) =>
+            prev.map((x) =>
+              x.id === id
+                ? {
+                    ...x,
+                    groupItems: full.groupItems,
+                    items: full.items,
+                    inventoryItemIdsByGroup: full.inventoryItemIdsByGroup,
+                  }
+                : x
+            )
+          );
+          setLoadingDetailIds((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        })
+        .catch((e) => {
+          console.error("[InventoryCountConditions] background count detail failed:", id, e);
+          countDetailRequestedRef.current.delete(id);
+          setLoadingDetailIds((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        });
+    }
+  }, [counts]);
 
   const onTapCount = async (c) => {
     const productGroupIds = Array.isArray(c?.productGroupIds) ? c.productGroupIds : [];
@@ -485,8 +542,13 @@ export function InventoryCountConditions({
                               </s-text>
                               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small" style={{ width: "100%" }}>
                                 <s-badge tone={statusBadgeTone}>{statusJa}</s-badge>
-                                {/* ✅ SKU数と数量カウント（右寄せ） */}
+                                {/* ✅ SKU数と数量カウント（右寄せ）。バックグラウンド取得中は「…」表示 */}
                                 {(() => {
+                                  if (loadingDetailIds.has(c.id)) {
+                                    return (
+                                      <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>…</s-text>
+                                    );
+                                  }
                                   const itemsFromItems = Array.isArray(c.items) && c.items.length > 0 ? c.items : null;
                                   const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
                                   const itemsFromGroup = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
@@ -557,8 +619,13 @@ export function InventoryCountConditions({
                             </s-text>
                             <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
                               <s-badge tone={statusBadgeTone}>{statusJa}</s-badge>
-                              {/* ✅ SKU数と数量カウント（右寄せ） */}
+                              {/* ✅ SKU数と数量カウント（右寄せ）。バックグラウンド取得中は「…」表示 */}
                               {(() => {
+                                if (loadingDetailIds.has(c.id)) {
+                                  return (
+                                    <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>…</s-text>
+                                  );
+                                }
                                 const itemsFromItems = Array.isArray(c.items) && c.items.length > 0 ? c.items : null;
                                 const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
                                 const itemsFromGroup = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0

@@ -955,6 +955,8 @@ function generateId(prefix: string): string {
 
 const SKU_BATCH_SIZE = 25;
 const SKU_BATCH_CONCURRENCY = 10;
+/** Shopify GraphQL nodes(ids) の最大件数（250を超えるとエラーになるため編集時の商品リスト取得でチャンクに分割） */
+const NODES_IDS_MAX = 250;
 
 /**
  * SKU一覧をShopify APIで検索し、対応するinventoryItemIdの配列を返す。
@@ -1298,7 +1300,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  // 棚卸: 編集時・選択済み表示用に inventoryItemId からバリアント情報を取得
+  // 棚卸: 編集時・選択済み表示用に inventoryItemId からバリアント情報を取得（nodes(ids) は250件までなのでチャンク分割）
   if (actionType === "getVariantsByInventoryItemIds") {
     const idsStr = formData.get("ids") as string;
     let ids: string[] = [];
@@ -1325,28 +1327,34 @@ export async function action({ request }: ActionFunctionArgs) {
             }
           }
         }`;
-      const resp = await admin.graphql(gql, { variables: { ids } });
-      const json = await resp.json();
-      const nodes = json?.data?.nodes ?? [];
       const variants: SkuSearchVariant[] = [];
-      for (const n of nodes) {
-        const v = n?.variant;
-        if (!v?.inventoryItem?.id) continue;
-        const opts = v.selectedOptions ?? [];
-        const productTitle = v.product?.title ?? "";
-        const variantTitle = v.title ?? "";
-        variants.push({
-          variantId: v.id,
-          inventoryItemId: v.inventoryItem.id,
-          sku: v.sku ?? "",
-          barcode: v.barcode ?? "",
-          variantTitle,
-          productTitle,
-          title: productTitle + (variantTitle && variantTitle !== "Default Title" ? ` / ${variantTitle}` : ""),
-          option1: opts[0]?.value?.trim() || undefined,
-          option2: opts[1]?.value?.trim() || undefined,
-          option3: opts[2]?.value?.trim() || undefined,
-        });
+      const seenIds = new Set<string>();
+      for (let i = 0; i < ids.length; i += NODES_IDS_MAX) {
+        const chunk = ids.slice(i, i + NODES_IDS_MAX);
+        const resp = await admin.graphql(gql, { variables: { ids: chunk } });
+        const json = await resp.json();
+        const nodes = json?.data?.nodes ?? [];
+        for (const n of nodes) {
+          const v = n?.variant;
+          if (!v?.inventoryItem?.id) continue;
+          if (seenIds.has(v.inventoryItem.id)) continue;
+          seenIds.add(v.inventoryItem.id);
+          const opts = v.selectedOptions ?? [];
+          const productTitle = v.product?.title ?? "";
+          const variantTitle = v.title ?? "";
+          variants.push({
+            variantId: v.id,
+            inventoryItemId: v.inventoryItem.id,
+            sku: v.sku ?? "",
+            barcode: v.barcode ?? "",
+            variantTitle,
+            productTitle,
+            title: productTitle + (variantTitle && variantTitle !== "Default Title" ? ` / ${variantTitle}` : ""),
+            option1: opts[0]?.value?.trim() || undefined,
+            option2: opts[1]?.value?.trim() || undefined,
+            option3: opts[2]?.value?.trim() || undefined,
+          });
+        }
       }
       return { ok: true, variants };
     } catch {
@@ -1354,7 +1362,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  // 棚卸: 編集時・CSV由来など「skus はあるが inventoryItemIds が空」のグループ用に SKU からバリアント情報を取得
+  // 棚卸: 編集時・CSV由来など「skus はあるが inventoryItemIds が空」のグループ用に SKU からバリアント情報を取得（nodes(ids) は250件までなのでチャンク分割）
   if (actionType === "getVariantsBySkus") {
     const skusStr = formData.get("skus") as string;
     let skus: string[] = [];
@@ -1383,28 +1391,34 @@ export async function action({ request }: ActionFunctionArgs) {
             }
           }
         }`;
-      const resp = await admin.graphql(gql, { variables: { ids } });
-      const json = await resp.json();
-      const nodes = json?.data?.nodes ?? [];
       const variants: SkuSearchVariant[] = [];
-      for (const n of nodes) {
-        const v = n?.variant;
-        if (!v?.inventoryItem?.id) continue;
-        const opts = v.selectedOptions ?? [];
-        const productTitle = v.product?.title ?? "";
-        const variantTitle = v.title ?? "";
-        variants.push({
-          variantId: v.id,
-          inventoryItemId: v.inventoryItem.id,
-          sku: v.sku ?? "",
-          barcode: v.barcode ?? "",
-          variantTitle,
-          productTitle,
-          title: productTitle + (variantTitle && variantTitle !== "Default Title" ? ` / ${variantTitle}` : ""),
-          option1: opts[0]?.value?.trim() || undefined,
-          option2: opts[1]?.value?.trim() || undefined,
-          option3: opts[2]?.value?.trim() || undefined,
-        });
+      const seenIds = new Set<string>();
+      for (let i = 0; i < ids.length; i += NODES_IDS_MAX) {
+        const chunk = ids.slice(i, i + NODES_IDS_MAX);
+        const resp = await admin.graphql(gql, { variables: { ids: chunk } });
+        const json = await resp.json();
+        const nodes = json?.data?.nodes ?? [];
+        for (const n of nodes) {
+          const v = n?.variant;
+          if (!v?.inventoryItem?.id) continue;
+          if (seenIds.has(v.inventoryItem.id)) continue;
+          seenIds.add(v.inventoryItem.id);
+          const opts = v.selectedOptions ?? [];
+          const productTitle = v.product?.title ?? "";
+          const variantTitle = v.title ?? "";
+          variants.push({
+            variantId: v.id,
+            inventoryItemId: v.inventoryItem.id,
+            sku: v.sku ?? "",
+            barcode: v.barcode ?? "",
+            variantTitle,
+            productTitle,
+            title: productTitle + (variantTitle && variantTitle !== "Default Title" ? ` / ${variantTitle}` : ""),
+            option1: opts[0]?.value?.trim() || undefined,
+            option2: opts[1]?.value?.trim() || undefined,
+            option3: opts[2]?.value?.trim() || undefined,
+          });
+        }
       }
       return { ok: true, variants };
     } catch {
@@ -3166,6 +3180,11 @@ export default function InventoryCountPage() {
   const revalidator = useRevalidator();
   // ✅ list 由来で groupItems がない棚卸のフルデータ取得（モーダルでステータス・完了/未完了を正しく表示するため）
   const countFullFetcher = useFetcher<typeof action>();
+  // ✅ 履歴一覧：各行の「N件 N/N」をバックグラウンドで取得（先に描画し数値は後から流し込む）
+  const listRowDetailFetcher = useFetcher<typeof action>();
+  const [listCountDetails, setListCountDetails] = useState<Record<string, InventoryCount>>({});
+  const [loadingListDetailIds, setLoadingListDetailIds] = useState<Set<string>>(new Set());
+  const listDetailQueueRef = useRef<string[]>([]);
   // ✅ 未完了グループの商品リストを取得するためのfetcherとstate（モーダル用）
   const incompleteGroupProductsFetcher = useFetcher<typeof action>();
   const [incompleteGroupProducts, setIncompleteGroupProducts] = useState<Map<string, Array<any>>>(new Map());
@@ -3375,6 +3394,49 @@ export default function InventoryCountPage() {
       return { ...prev, ...fullCount };
     });
   }, [countFullFetcher.data, modalCount?.id]);
+
+  // ✅ 履歴一覧：list 由来で groupItems がない行をキューに追加
+  useEffect(() => {
+    const list = Array.isArray(inventoryCounts) ? inventoryCounts : [];
+    const queue = listDetailQueueRef.current;
+    const details = listCountDetails;
+    for (const c of list) {
+      const id = c?.id;
+      if (!id || details[id]) continue;
+      const hasDetail = (c as any)?.groupItems && typeof (c as any).groupItems === "object" && Object.keys((c as any).groupItems || {}).length > 0;
+      if (hasDetail) continue;
+      if (Array.isArray(c.items) && c.items.length > 0) continue;
+      if (queue.includes(id)) continue;
+      queue.push(id);
+    }
+  }, [inventoryCounts, listCountDetails]);
+
+  // ✅ 履歴一覧：キューから1件ずつ get_count_full を送信
+  useEffect(() => {
+    if (listRowDetailFetcher.state !== "idle") return;
+    const queue = listDetailQueueRef.current;
+    if (queue.length === 0) return;
+    const id = queue.shift()!;
+    setLoadingListDetailIds((prev) => new Set(prev).add(id));
+    const fd = new FormData();
+    fd.set("action", "get_count_full");
+    fd.set("countId", id);
+    listRowDetailFetcher.submit(fd, { method: "post" });
+  }, [inventoryCounts, listCountDetails, listRowDetailFetcher.state]);
+
+  // ✅ 履歴一覧：get_count_full レスポンスを listCountDetails にマージ
+  useEffect(() => {
+    const data = listRowDetailFetcher.data;
+    if (!data || !(data as { ok?: boolean }).ok || !(data as { count?: InventoryCount }).count) return;
+    const fullCount = (data as { count: InventoryCount }).count;
+    const id = String(fullCount.id);
+    setListCountDetails((prev) => ({ ...prev, [id]: fullCount }));
+    setLoadingListDetailIds((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, [listRowDetailFetcher.data]);
 
   // ✅ 未完了グループの商品リスト取得完了時の処理（成功時はデータ保存・loading 解除・次を submit、失敗時も loading を解除して「読み込み中」のままにならないようにする）
   // ✅ モーダルを閉じて再度開いたときに fetcher.data に残る古いレスポンスを無視する（lastSubmittedForModalRef と一致する今回の submit のレスポンスだけ処理）
@@ -5563,17 +5625,20 @@ export default function InventoryCountPage() {
                       ) : (
                         <s-stack gap="none">
                   {filteredCounts.map((c) => {
+                    // ✅ バックグラウンドで取得したフルデータがあればそれを使用（N件 N/N を表示）
+                    const displayCount = listCountDetails[c.id] ?? c;
+                    const isDetailLoading = loadingListDetailIds.has(c.id);
                     const isSelected = selectedIds.has(c.id);
-                    const locName = getLocationName(c.locationId);
-                    const statusLabel = getStatusLabel(c.status);
-                    const countName = c.countName || c.id;
-                    const date = extractDateFromISO(c.createdAt, shopTimezone);
+                    const locName = getLocationName(displayCount.locationId);
+                    const statusLabel = getStatusLabel(displayCount.status);
+                    const countName = displayCount.countName || displayCount.id;
+                    const date = extractDateFromISO(displayCount.createdAt, shopTimezone);
                     // ✅ 複数商品グループがある場合はgroupItemsを優先、単一グループの場合はitemsフィールドを後方互換性として使用
-                    const groupItemsMap = (c as any)?.groupItems && typeof (c as any).groupItems === "object" ? (c as any).groupItems : {};
-                    const hasMultipleGroups = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 1;
-                    const allGroupIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-                      ? c.productGroupIds
-                      : c.productGroupId ? [c.productGroupId] : [];
+                    const groupItemsMap = (displayCount as any)?.groupItems && typeof (displayCount as any).groupItems === "object" ? (displayCount as any).groupItems : {};
+                    const hasMultipleGroups = Array.isArray(displayCount.productGroupIds) && displayCount.productGroupIds.length > 1;
+                    const allGroupIds = Array.isArray(displayCount.productGroupIds) && displayCount.productGroupIds.length > 0
+                      ? displayCount.productGroupIds
+                      : displayCount.productGroupId ? [displayCount.productGroupId] : [];
                     
                     // ✅ 完了済みグループの商品を取得（getGroupItemsByKey で POS と同一の正規化キー照合）
                     const itemsFromGroup = allGroupIds.flatMap((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(id)));
@@ -5585,10 +5650,10 @@ export default function InventoryCountPage() {
                     // ✅ 複数グループの場合、未完了グループの商品も含めるため、itemsフィールドから取得（後方互換性）
                     // ✅ itemsフィールドには全グループの商品が含まれている（確定処理で修正済み）
                     // ✅ ただし、groupItemsMapに含まれているグループの商品は重複を避けるため、itemsから除外
-                    const completedGroupInventoryItemIds = new Set(itemsFromGroup.map((it) => it.inventoryItemId));
-                    const incompleteGroupInventoryItemIds = new Set(itemsFromIncompleteGroups.map((it) => it.inventoryItemId));
-                    const itemsFromItemsForIncomplete = hasMultipleGroups && Array.isArray(c.items) && c.items.length > 0
-                      ? c.items.filter((it) => !completedGroupInventoryItemIds.has(it.inventoryItemId) && !incompleteGroupInventoryItemIds.has(it.inventoryItemId))
+                    const completedGroupInventoryItemIds = new Set(itemsFromGroup.map((it: any) => it.inventoryItemId));
+                    const incompleteGroupInventoryItemIds = new Set(itemsFromIncompleteGroups.map((it: any) => it.inventoryItemId));
+                    const itemsFromItemsForIncomplete = hasMultipleGroups && Array.isArray(displayCount.items) && displayCount.items.length > 0
+                      ? displayCount.items.filter((it: any) => !completedGroupInventoryItemIds.has(it.inventoryItemId) && !incompleteGroupInventoryItemIds.has(it.inventoryItemId))
                       : [];
                     
                     // ✅ 完了済みグループの商品 + 未完了分（一覧では未取得のため空）+ items 後方互換
@@ -5599,20 +5664,20 @@ export default function InventoryCountPage() {
                           ? itemsFromGroup 
                           : (itemsFromIncompleteGroups.length > 0 
                               ? itemsFromIncompleteGroups 
-                              : (Array.isArray(c.items) && c.items.length > 0 ? c.items : [])));
+                              : (Array.isArray(displayCount.items) && displayCount.items.length > 0 ? displayCount.items : [])));
                     
                     const itemCount = allGroupItems.length;
-                    const totalQty = allGroupItems.reduce((s, it) => s + (it.actualQuantity || 0), 0);
-                    const currentQty = allGroupItems.reduce((s, it) => s + (it.currentQuantity || 0), 0);
+                    const totalQty = allGroupItems.reduce((s: number, it: any) => s + (it.actualQuantity || 0), 0);
+                    const currentQty = allGroupItems.reduce((s: number, it: any) => s + (it.currentQuantity || 0), 0);
                     // ✅ 合計数（在庫数）の表示：currentQtyが0より大きい場合は表示、そうでない場合は"-"を表示
                     // ✅ 進捗状況のグループ別表示と同じロジック（1997行目参照）
-                    const isCompleted = c.status === "completed";
+                    const isCompleted = displayCount.status === "completed";
 
-                    const groupNames = Array.isArray(c.productGroupNames) && c.productGroupNames.length > 0
-                      ? c.productGroupNames.join(", ")
-                      : Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-                      ? c.productGroupIds.join(", ")
-                      : c.productGroupName || c.productGroupId || "-";
+                    const groupNames = Array.isArray(displayCount.productGroupNames) && displayCount.productGroupNames.length > 0
+                      ? displayCount.productGroupNames.join(", ")
+                      : Array.isArray(displayCount.productGroupIds) && displayCount.productGroupIds.length > 0
+                      ? displayCount.productGroupIds.join(", ")
+                      : displayCount.productGroupName || displayCount.productGroupId || "-";
 
                     return (
                       <div key={c.id}>
@@ -5624,12 +5689,11 @@ export default function InventoryCountPage() {
                             cursor: "pointer",
                           }}
                           onClick={() => {
-                            // ✅ 最新のinventoryCountsから該当のデータを取得
-                            const latestCount = inventoryCounts.find((ic) => ic.id === c.id);
-                            // ✅ countNameが設定されていない場合、cのcountNameを使用
-                            const countToShow = latestCount || c;
+                            // ✅ バックグラウンド取得済みのフルデータまたは最新のinventoryCountsから該当のデータを取得
+                            const withDetail = listCountDetails[c.id] ?? inventoryCounts.find((ic) => ic.id === c.id) ?? c;
+                            const countToShow = withDetail;
                             if (!countToShow.countName && c.countName) {
-                              countToShow.countName = c.countName;
+                              (countToShow as any).countName = c.countName;
                             }
                             setModalCount(countToShow);
                             setModalOpen(true);
@@ -5714,10 +5778,10 @@ export default function InventoryCountPage() {
                               }}
                             >
                               <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
-                                <span style={getStatusBadgeStyle(c.status)}>{statusLabel}</span>
+                                <span style={getStatusBadgeStyle(displayCount.status)}>{statusLabel}</span>
                               </s-text>
                               <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
-                                {itemCount}件・実数{totalQty}{hasIncompleteGroup ? "/-" : currentQty > 0 ? `/${currentQty}` : "/-"}
+                                {isDetailLoading ? "…" : `${itemCount}件・実数${totalQty}${hasIncompleteGroup ? "/-" : currentQty > 0 ? `/${currentQty}` : "/-"}`}
                               </s-text>
                             </div>
                           </div>

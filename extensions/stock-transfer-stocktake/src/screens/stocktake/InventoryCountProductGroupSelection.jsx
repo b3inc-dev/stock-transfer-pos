@@ -36,6 +36,8 @@ export function InventoryCountProductGroupSelection({
   const [productGroupQuantities, setProductGroupQuantities] = useState(new Map()); // ✅ 各商品グループの数量情報（読込ボタンで取得。初回は自動読込しない）
   const [loadingQuantities, setLoadingQuantities] = useState(false); // ✅ 在庫数読込中の表示用（ヘッダーで「読込中...」表示）
   const loadingQuantitiesRef = useRef(false); // ✅ 二重発火防止（onClick/onPress両方で呼ばれる場合）
+  /** バックグラウンド自動読込を開始した countId（二重実行防止） */
+  const quantitiesAutoLoadStartedRef = useRef(new Set());
 
   const effectiveCount = fullCount ?? (count?.groupItems ? count : null);
 
@@ -87,6 +89,16 @@ export function InventoryCountProductGroupSelection({
       });
     return () => { mounted = false; };
   }, [count?.id]);
+
+  // ✅ 商品グループ一覧表示後に、各行の「N件 N/N」をバックグラウンドで自動取得（先に描画し数値は後から流し込む）
+  useEffect(() => {
+    const c = effectiveCount;
+    if (!c?.productGroupIds?.length) return;
+    const countId = c.id;
+    if (!countId || quantitiesAutoLoadStartedRef.current.has(countId)) return;
+    quantitiesAutoLoadStartedRef.current.add(countId);
+    loadProductGroupQuantities();
+  }, [effectiveCount, loadProductGroupQuantities]);
 
   // 商品グループ名を取得（Map のキーは正規化キーで統一し、GID と数値の混在でずれないようにする）
   useEffect(() => {

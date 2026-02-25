@@ -1256,8 +1256,9 @@ export function InventoryCountList({
             includeImages: false,
             ...fetchOptsBase,
           });
+          const productList = Array.isArray(products) ? products : (products?.products ?? []);
           const productInventoryItemIds = new Set(
-            products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
+            productList.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
           );
           groupItemsForGroup = countItemsLegacy.filter((item) => {
             const itemId = String(item?.inventoryItemId || "").trim();
@@ -1272,14 +1273,15 @@ export function InventoryCountList({
 
       if (completedItems) {
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-        const products = await fetchProductsByGroups([groupId], count.locationId, {
+        let productsForCompleted = await fetchProductsByGroups([groupId], count.locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
           ...fetchOptsBase,
         });
+        productsForCompleted = Array.isArray(productsForCompleted) ? productsForCompleted : (productsForCompleted?.products ?? []);
         const productMap = new Map();
-        products.forEach((p) => {
+        productsForCompleted.forEach((p) => {
           if (p.inventoryItemId) productMap.set(String(p.inventoryItemId).trim(), p);
         });
         newLines = await Promise.all(
@@ -1315,20 +1317,22 @@ export function InventoryCountList({
         );
       } else {
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-        let products = await fetchProductsByGroups([groupId], count.locationId, {
+        let productsRaw = await fetchProductsByGroups([groupId], count.locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
           ...fetchOptsBase,
         });
+        let products = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.products ?? []);
         if (products.length === 0) {
           await new Promise((r) => setTimeout(r, 1000));
-          products = await fetchProductsByGroups([groupId], count.locationId, {
+          productsRaw = await fetchProductsByGroups([groupId], count.locationId, {
             productFirst,
             filterByInventoryLevel: false,
             includeImages: showImages && !liteMode,
             ...fetchOptsBase,
           });
+          products = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.products ?? []);
         }
         const linesWithCurrent = await Promise.all(
           products.map(async (p) => {
