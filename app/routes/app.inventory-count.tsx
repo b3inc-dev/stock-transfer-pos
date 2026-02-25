@@ -4909,8 +4909,8 @@ export default function InventoryCountPage() {
                                   </button>
                                 </div>
                               </div>
-                              <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
-                                {(csvShowOnlySelected ? csvPreviewRows.map((row, i) => ({ row, i })).filter(({ i }) => csvPreviewSelected.has(i)) : csvPreviewRows.map((row, i) => ({ row, i }))).map(({ row, i: realIndex }) => {
+                              <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
+                                {(csvShowOnlySelected ? csvPreviewRows.map((row, i) => ({ row, i })).filter(({ i }) => csvPreviewSelected.has(i)) : csvPreviewRows.map((row, i) => ({ row, i }))).map(({ row, i: realIndex }, listIndex) => {
                                   const isSelected = csvPreviewSelected.has(realIndex);
                                   return (
                                     <div
@@ -4940,9 +4940,9 @@ export default function InventoryCountPage() {
                                         padding: "10px 12px",
                                         borderRadius: "6px",
                                         cursor: "pointer",
+                                        marginTop: listIndex === 0 ? 0 : "4px",
                                         backgroundColor: isSelected ? "#eff6ff" : "transparent",
                                         border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
-                                        borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
                                         display: "flex",
                                         alignItems: "center",
                                         gap: "8px",
