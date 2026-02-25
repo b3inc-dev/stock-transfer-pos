@@ -1,10 +1,11 @@
 // app/routes/app.inventory-count.tsx
 // 棚卸（商品グループ設定・棚卸ID発行・履歴管理）画面
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
+import db from "../db.server";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -573,6 +574,145 @@ export type InventoryCount = {
   }>;
 };
 
+/** 管理画面から棚卸確定・リセット時に在庫を反映するためのヘルパー。IDをGIDに正規化 */
+function toRawIdForCount(id: string | number | null | undefined): string {
+  if (id == null) return "";
+  const s = String(id).trim();
+  if (s.startsWith("gid://")) {
+    const last = s.split("/").pop();
+    return last || s;
+  }
+  return s;
+}
+function toLocationGidForCount(locationId: string): string {
+  const s = String(locationId || "").trim();
+  if (s.startsWith("gid://")) return s;
+  const raw = toRawIdForCount(locationId);
+  return raw ? `gid://shopify/Location/${raw}` : s;
+}
+function toInventoryItemGidForCount(inventoryItemId: string): string | null {
+  const str = String(inventoryItemId || "").trim();
+  if (!str) return null;
+  if (/^\d+$/.test(str)) return `gid://shopify/InventoryItem/${str}`;
+  if (str.includes("gid://")) return str;
+  return null;
+}
+
+/** 管理画面から inventorySetQuantities で在庫を設定（POS の adjustInventoryToActual と同様） */
+async function adjustInventoryQuantitiesServer(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  locationId: string,
+  items: Array<{ inventoryItemId: string; quantity: number }>,
+  referenceDocumentUri?: string | null
+): Promise<{ ok: boolean; invalidCount?: number; error?: string }> {
+  const locationGid = toLocationGidForCount(locationId);
+  const quantities = (items ?? [])
+    .filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.quantity)))
+    .map((x) => {
+      const gid = toInventoryItemGidForCount(x.inventoryItemId);
+      const quantity = Math.floor(Number(x.quantity) ?? 0);
+      return gid ? { valid: true as const, inventoryItemId: gid, quantity, compareQuantity: 0 } : { valid: false as const };
+    });
+  const validQuantities = quantities.filter((q) => q.valid);
+  const invalidCount = quantities.filter((q) => !q.valid).length;
+  if (validQuantities.length === 0) {
+    return { ok: false, invalidCount, error: "有効な在庫アイテムがありません" };
+  }
+  const input: Record<string, unknown> = {
+    name: "available",
+    reason: "correction",
+    ignoreCompareQuantity: true,
+    quantities: validQuantities.map((q) => ({
+      inventoryItemId: q.inventoryItemId,
+      locationId: locationGid,
+      quantity: q.quantity,
+      compareQuantity: q.compareQuantity,
+    })),
+  };
+  if (referenceDocumentUri) {
+    input.referenceDocumentUri = `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`;
+  }
+  try {
+    const resp = await admin.graphql(
+      `#graphql
+        mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+          inventorySetQuantities(input: $input) {
+            inventoryAdjustmentGroup { id }
+            userErrors { field message }
+          }
+        }
+      `,
+      { variables: { input } }
+    );
+    const json = await resp.json();
+    const data = json?.data?.inventorySetQuantities;
+    const errs = data?.userErrors ?? [];
+    if (errs.length) {
+      return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") };
+    }
+    return { ok: true, invalidCount: invalidCount > 0 ? invalidCount : undefined };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: msg };
+  }
+}
+
+/** 管理画面から棚卸確定・リセット時の変動ログを DB に記録（api/log-inventory-change と同様のロジック） */
+async function logInventoryChangeServer(
+  dbInstance: typeof db,
+  shop: string,
+  dateUtc: string,
+  entries: Array<{
+    inventoryItemId: string;
+    variantId?: string | null;
+    sku?: string;
+    locationId: string;
+    locationName: string;
+    delta: number;
+    quantityAfter: number | null;
+    sourceId: string | null;
+    timestamp: Date;
+  }>,
+  activity: string
+): Promise<void> {
+  for (const e of entries) {
+    const rawItemId = toRawIdForCount(e.inventoryItemId);
+    const rawLocId = toRawIdForCount(e.locationId);
+    const ts = e.timestamp;
+    const tsRounded = new Date(Math.floor(ts.getTime() / 1000) * 1000);
+    const idempotencyKey = e.sourceId
+      ? `${shop}_${activity}_${e.inventoryItemId}_${e.locationId}_${e.sourceId}`
+      : `${shop}_${activity}_${rawItemId}_${rawLocId}_${tsRounded.toISOString()}`;
+    await dbInstance.inventoryChangeLog.upsert({
+      where: { shop_idempotencyKey: { shop, idempotencyKey } },
+      create: {
+        shop,
+        timestamp: ts,
+        date: dateUtc,
+        inventoryItemId: rawItemId,
+        variantId: e.variantId ?? null,
+        sku: e.sku ?? "",
+        locationId: rawLocId,
+        locationName: e.locationName,
+        activity,
+        delta: e.delta,
+        quantityAfter: e.quantityAfter,
+        sourceType: activity,
+        sourceId: e.sourceId,
+        idempotencyKey,
+        note: null,
+      },
+      update: {
+        delta: e.delta,
+        quantityAfter: e.quantityAfter,
+        locationName: e.locationName,
+        sourceId: e.sourceId,
+        note: null,
+      },
+    });
+  }
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
   const { admin } = await authenticate.admin(request);
@@ -962,7 +1102,7 @@ async function getInventoryItemIdsForGroup(
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const actionType = formData.get("action") as string;
 
@@ -1250,8 +1390,16 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
   }
 
-  // 現在のデータを取得（商品グループは常に取得。棚卸フルデータは create_inventory_count のときだけ取得）
-  const needInventoryCounts = actionType === "create_inventory_count";
+  // 現在のデータを取得（商品グループは常に取得。棚卸フルデータは create_inventory_count および履歴編集・確定・キャンセル時に取得）
+  const needInventoryCounts =
+    actionType === "create_inventory_count" ||
+    actionType === "update_stocktake_quantity" ||
+    actionType === "confirm_stocktake_group" ||
+    actionType === "reset_stocktake_group" ||
+    actionType === "confirm_stocktake_all" ||
+    actionType === "reset_stocktake_all" ||
+    actionType === "cancel_stocktake_group" ||
+    actionType === "cancel_stocktake";
   const [currentResp, inventoryCountsFromChunked] = await Promise.all([
     admin.graphql(
       `#graphql
@@ -2404,6 +2552,375 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
+  // ---------- 履歴モーダル：数量編集・確定・リセット・キャンセル ----------
+  if (actionType === "update_stocktake_quantity") {
+    const countId = formData.get("countId") as string;
+    const groupId = formData.get("groupId") as string | null;
+    const itemsJson = formData.get("items") as string | null;
+    const groupsJson = formData.get("groups") as string | null; // optional: { [groupId]: items[] } で複数グループ一括
+    if (!countId) return { ok: false, error: "countId は必須です" as const };
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
+    const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? { ...(count as any).groupItems } : {};
+    const applyGroup = (gId: string, items: Array<{ inventoryItemId: string; actualQuantity: number; currentQuantity?: number; variantId?: string; sku?: string; title?: string }>) => {
+      const existingGroup = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, gId);
+      const byItemId = new Map(items.map((i) => [String(i.inventoryItemId).trim(), i]));
+      const merged =
+        existingGroup.length > 0
+          ? existingGroup.map((it: any) => {
+              const id = String(it?.inventoryItemId ?? "").trim();
+              const edited = byItemId.get(id);
+              if (edited != null && Number.isFinite(Number(edited.actualQuantity))) {
+                const actual = Number(edited.actualQuantity);
+                const current = Number(it?.currentQuantity ?? 0);
+                return { ...it, actualQuantity: actual, delta: actual - current };
+              }
+              return it;
+            })
+          : items.map((i) => {
+              const current = Number(i.currentQuantity ?? 0);
+              const actual = Number(i.actualQuantity ?? 0);
+              return { ...i, currentQuantity: current, actualQuantity: actual, delta: actual - current };
+            });
+      const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(gId)) ?? gId;
+      (groupItemsMap as Record<string, unknown[]>)[key] = merged;
+    };
+    if (groupsJson) {
+      try {
+        const groups = JSON.parse(groupsJson) as Record<string, Array<{ inventoryItemId: string; actualQuantity: number; currentQuantity?: number; variantId?: string; sku?: string; title?: string }>>;
+        for (const [gId, items] of Object.entries(groups)) {
+          if (Array.isArray(items) && items.length > 0) applyGroup(gId, items);
+        }
+      } catch {
+        return { ok: false, error: "groups の形式が不正です" as const };
+      }
+    } else if (groupId && itemsJson) {
+      let items: Array<{ inventoryItemId: string; actualQuantity: number; currentQuantity?: number; variantId?: string; sku?: string; title?: string }>;
+      try {
+        items = JSON.parse(itemsJson);
+      } catch {
+        return { ok: false, error: "items の形式が不正です" as const };
+      }
+      applyGroup(groupId, items);
+    } else {
+      return { ok: false, error: "groupId と items、または groups は必須です" as const };
+    }
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
+        ? { ...c, groupItems: groupItemsMap }
+        : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    return { ok: true };
+  }
+
+  if (actionType === "confirm_stocktake_group") {
+    const countId = formData.get("countId") as string;
+    const groupId = formData.get("groupId") as string;
+    const itemsJson = formData.get("items") as string;
+    if (!countId || !groupId || !itemsJson) {
+      return { ok: false, error: "countId, groupId, items は必須です" as const };
+    }
+    let items: Array<{ inventoryItemId: string; currentQuantity: number; actualQuantity: number; variantId?: string; sku?: string; title?: string }>;
+    try {
+      items = JSON.parse(itemsJson);
+    } catch {
+      return { ok: false, error: "items の形式が不正です" as const };
+    }
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
+    const toAdjust = items.filter((i) => Number(i.actualQuantity) !== Number(i.currentQuantity));
+    const shop = session?.shop ?? "";
+    const shopTimezone = await getShopTimezone(admin);
+    const dateUtc = getDateInShopTimezone(new Date(), shopTimezone);
+    if (toAdjust.length > 0) {
+      const adjustResult = await adjustInventoryQuantitiesServer(
+        admin,
+        count.locationId,
+        toAdjust.map((i) => ({ inventoryItemId: i.inventoryItemId, quantity: Number(i.actualQuantity) })),
+        countId
+      );
+      if (!adjustResult.ok) return { ok: false, error: (adjustResult.error ?? "在庫調整に失敗しました") as const };
+      await logInventoryChangeServer(
+        db,
+        shop,
+        dateUtc,
+        toAdjust.map((i) => ({
+          inventoryItemId: i.inventoryItemId,
+          variantId: i.variantId ?? null,
+          sku: i.sku ?? "",
+          locationId: count.locationId,
+          locationName: count.locationName ?? count.locationId,
+          delta: Number(i.actualQuantity) - Number(i.currentQuantity),
+          quantityAfter: Number(i.actualQuantity),
+          sourceId: countId,
+          timestamp: new Date(),
+        })),
+        "inventory_count"
+      );
+    }
+    const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? { ...(count as any).groupItems } : {};
+    const entry = items.map((i) => ({
+      inventoryItemId: i.inventoryItemId,
+      variantId: i.variantId,
+      sku: i.sku ?? "",
+      title: i.title ?? "",
+      currentQuantity: Number(i.currentQuantity),
+      actualQuantity: Number(i.actualQuantity),
+      delta: Number(i.actualQuantity) - Number(i.currentQuantity),
+    }));
+    const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(groupId)) ?? groupId;
+    (groupItemsMap as Record<string, unknown[]>)[key] = entry;
+    const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : count.productGroupId ? [count.productGroupId] : [];
+    const allDone = allIds.length > 0 && allIds.every((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0);
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
+        ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
+        : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    return { ok: true };
+  }
+
+  if (actionType === "reset_stocktake_group") {
+    const countId = formData.get("countId") as string;
+    const groupId = formData.get("groupId") as string;
+    if (!countId || !groupId) return { ok: false, error: "countId, groupId は必須です" as const };
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
+    const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? { ...(count as any).groupItems } : {};
+    const groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, groupId);
+    if (groupItems.length === 0) return { ok: false, error: "このグループは確定されていません" as const };
+    const toRevert = groupItems
+      .map((it: any) => ({ ...it, currentQuantity: Number(it?.currentQuantity ?? 0), actualQuantity: Number(it?.actualQuantity ?? 0) }))
+      .filter((it: any) => it.currentQuantity !== it.actualQuantity);
+    const shop = session?.shop ?? "";
+    const shopTimezone = await getShopTimezone(admin);
+    const dateUtc = getDateInShopTimezone(new Date(), shopTimezone);
+    if (toRevert.length > 0) {
+      const revertResult = await adjustInventoryQuantitiesServer(
+        admin,
+        count.locationId,
+        toRevert.map((it: any) => ({ inventoryItemId: it.inventoryItemId, quantity: it.currentQuantity })),
+        null
+      );
+      if (!revertResult.ok) return { ok: false, error: (revertResult.error ?? "在庫の取り消しに失敗しました") as const };
+      await logInventoryChangeServer(
+        db,
+        shop,
+        dateUtc,
+        toRevert.map((it: any) => ({
+          inventoryItemId: it.inventoryItemId,
+          variantId: it.variantId ?? null,
+          sku: it.sku ?? "",
+          locationId: count.locationId,
+          locationName: count.locationName ?? count.locationId,
+          delta: it.currentQuantity - it.actualQuantity,
+          quantityAfter: it.currentQuantity,
+          sourceId: countId,
+          timestamp: new Date(),
+        })),
+        "inventory_count"
+      );
+    }
+    const keyToDelete = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(groupId));
+    if (keyToDelete) delete (groupItemsMap as Record<string, unknown>)[keyToDelete];
+    const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : count.productGroupId ? [count.productGroupId] : [];
+    const allDone = allIds.every((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0);
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
+        ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
+        : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    return { ok: true };
+  }
+
+  if (actionType === "confirm_stocktake_all") {
+    const countId = formData.get("countId") as string;
+    const incompleteGroupsJson = formData.get("incompleteGroupsItems") as string | null; // optional: { [groupId]: items[] }
+    if (!countId) return { ok: false, error: "countId は必須です" as const };
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
+    const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? { ...(count as any).groupItems } : {};
+    const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : count.productGroupId ? [count.productGroupId] : [];
+    let incompletePayload: Record<string, Array<{ inventoryItemId: string; currentQuantity: number; actualQuantity: number; variantId?: string; sku?: string; title?: string }>> = {};
+    if (incompleteGroupsJson) {
+      try {
+        incompletePayload = JSON.parse(incompleteGroupsJson);
+      } catch {}
+    }
+    const shop = session?.shop ?? "";
+    const shopTimezone = await getShopTimezone(admin);
+    const dateUtc = getDateInShopTimezone(new Date(), shopTimezone);
+    const allEntries: Array<{ inventoryItemId: string; currentQuantity: number; actualQuantity: number; variantId?: string; sku?: string; title?: string; groupId: string }> = [];
+    for (const groupId of allIds) {
+      const existing = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, groupId);
+      const items = existing.length > 0 ? existing : (incompletePayload[groupId] ?? []);
+      for (const it of items) {
+        const cur = Number((it as any)?.currentQuantity ?? 0);
+        const act = Number((it as any)?.actualQuantity ?? 0);
+        if (cur !== act) allEntries.push({ ...(it as any), currentQuantity: cur, actualQuantity: act, groupId });
+      }
+    }
+    if (allEntries.length > 0) {
+      const adjustResult = await adjustInventoryQuantitiesServer(
+        admin,
+        count.locationId,
+        allEntries.map((e) => ({ inventoryItemId: e.inventoryItemId, quantity: e.actualQuantity })),
+        countId
+      );
+      if (!adjustResult.ok) return { ok: false, error: (adjustResult.error ?? "在庫調整に失敗しました") as const };
+      await logInventoryChangeServer(
+        db,
+        shop,
+        dateUtc,
+        allEntries.map((e) => ({
+          inventoryItemId: e.inventoryItemId,
+          variantId: e.variantId ?? null,
+          sku: e.sku ?? "",
+          locationId: count.locationId,
+          locationName: count.locationName ?? count.locationId,
+          delta: e.actualQuantity - e.currentQuantity,
+          quantityAfter: e.actualQuantity,
+          sourceId: countId,
+          timestamp: new Date(),
+        })),
+        "inventory_count"
+      );
+    }
+    for (const groupId of allIds) {
+      const existing = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, groupId);
+      const items = existing.length > 0 ? existing : (incompletePayload[groupId] ?? []);
+      if (items.length > 0) {
+        const entry = items.map((it: any) => ({
+          inventoryItemId: it.inventoryItemId,
+          variantId: it.variantId,
+          sku: it.sku ?? "",
+          title: it.title ?? "",
+          currentQuantity: Number(it?.currentQuantity ?? 0),
+          actualQuantity: Number(it?.actualQuantity ?? 0),
+          delta: Number(it?.actualQuantity ?? 0) - Number(it?.currentQuantity ?? 0),
+        }));
+        const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(groupId)) ?? groupId;
+        (groupItemsMap as Record<string, unknown[]>)[key] = entry;
+      }
+    }
+    const allDone = allIds.every((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0);
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
+        ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
+        : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    return { ok: true };
+  }
+
+  if (actionType === "reset_stocktake_all") {
+    const countId = formData.get("countId") as string;
+    if (!countId) return { ok: false, error: "countId は必須です" as const };
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
+    const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? { ...(count as any).groupItems } : {};
+    const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : count.productGroupId ? [count.productGroupId] : [];
+    const shop = session?.shop ?? "";
+    const shopTimezone = await getShopTimezone(admin);
+    const dateUtc = getDateInShopTimezone(new Date(), shopTimezone);
+    for (const groupId of allIds) {
+      const groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, groupId);
+      const toRevert = groupItems
+        .map((it: any) => ({ ...it, currentQuantity: Number(it?.currentQuantity ?? 0), actualQuantity: Number(it?.actualQuantity ?? 0) }))
+        .filter((it: any) => it.currentQuantity !== it.actualQuantity);
+      if (toRevert.length > 0) {
+        await adjustInventoryQuantitiesServer(admin, count.locationId, toRevert.map((it: any) => ({ inventoryItemId: it.inventoryItemId, quantity: it.currentQuantity })), null);
+        await logInventoryChangeServer(
+          db,
+          shop,
+          dateUtc,
+          toRevert.map((it: any) => ({
+            inventoryItemId: it.inventoryItemId,
+            variantId: it.variantId ?? null,
+            sku: it.sku ?? "",
+            locationId: count.locationId,
+            locationName: count.locationName ?? count.locationId,
+            delta: it.currentQuantity - it.actualQuantity,
+            quantityAfter: it.currentQuantity,
+            sourceId: countId,
+            timestamp: new Date(),
+          })),
+          "inventory_count"
+        );
+      }
+    }
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
+        ? { ...c, groupItems: {}, status: "in_progress" as const, completedAt: undefined }
+        : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    return { ok: true };
+  }
+
+  if (actionType === "cancel_stocktake_group") {
+    const countId = formData.get("countId") as string;
+    const groupId = formData.get("groupId") as string;
+    if (!countId || !groupId) return { ok: false, error: "countId, groupId は必須です" as const };
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
+    const cancelledGroupIds: string[] = Array.isArray((count as any).cancelledGroupIds) ? [...(count as any).cancelledGroupIds] : [];
+    if (!cancelledGroupIds.includes(groupId)) {
+      const n = normalizeIdForMatch(groupId);
+      if (!cancelledGroupIds.some((id) => normalizeIdForMatch(id) === n)) cancelledGroupIds.push(groupId);
+    }
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
+        ? { ...c, cancelledGroupIds }
+        : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    return { ok: true };
+  }
+
+  if (actionType === "cancel_stocktake") {
+    const countId = formData.get("countId") as string;
+    if (!countId) return { ok: false, error: "countId は必須です" as const };
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
+    const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? (count as any).groupItems : {};
+    const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : count.productGroupId ? [count.productGroupId] : [];
+    const completedIds = allIds.filter((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0);
+    const cancelledGroupIds: string[] = Array.isArray((count as any).cancelledGroupIds) ? [...(count as any).cancelledGroupIds] : [];
+    if (completedIds.length === 0) {
+      const updatedCounts = inventoryCounts.map((c) =>
+        String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
+          ? { ...c, status: "cancelled" as const, completedAt: undefined }
+          : c
+      );
+      const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+      if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+      return { ok: true };
+    }
+    const incompleteIds = allIds.filter((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length === 0);
+    for (const id of incompleteIds) {
+      const n = normalizeIdForMatch(id);
+      if (!cancelledGroupIds.some((cid) => normalizeIdForMatch(cid) === n)) cancelledGroupIds.push(id);
+    }
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
+        ? { ...c, cancelledGroupIds }
+        : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    return { ok: true };
+  }
+
   return { ok: false, error: "不明なアクション" as const };
   } catch (e) {
     const err = e as { message?: string; errors?: { graphQLErrors?: unknown[] }; body?: { errors?: { graphQLErrors?: unknown[] } } };
@@ -2558,6 +3075,10 @@ export default function InventoryCountPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [modalOpen, setModalOpen] = useState(false);
   const [modalCount, setModalCount] = useState<InventoryCount | null>(null);
+  const [modalEditMode, setModalEditMode] = useState(false);
+  const [modalEditedQuantities, setModalEditedQuantities] = useState<Record<string, Record<string, number>>>({});
+  const historyActionFetcher = useFetcher<typeof action>();
+  const revalidator = useRevalidator();
   // ✅ 未完了グループの商品リストを取得するためのfetcherとstate（モーダル用）
   const incompleteGroupProductsFetcher = useFetcher<typeof action>();
   const [incompleteGroupProducts, setIncompleteGroupProducts] = useState<Map<string, Array<any>>>(new Map());
@@ -2676,15 +3197,20 @@ export default function InventoryCountPage() {
     }
   }, [skuResolveFetcher.data]);
 
-  // ✅ モーダルが開いたときに未完了グループの商品リストを取得
+  // ✅ モーダルが開いたときに未完了グループの商品リストを取得／編集状態をリセット
   useEffect(() => {
     if (!modalOpen || !modalCount) {
       setIncompleteGroupProducts(new Map());
       setLoadingIncompleteGroupIds(new Set());
       incompleteGroupFetchIndexRef.current = 0;
       incompleteGroupIdsRef.current = [];
+      setModalEditMode(false);
+      setModalEditedQuantities({});
       return;
     }
+
+    setModalEditMode(false);
+    setModalEditedQuantities({});
 
     const allGroupIds = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
       ? modalCount.productGroupIds
@@ -2785,6 +3311,15 @@ export default function InventoryCountPage() {
       lastSubmittedGroupIdRef.current = null;
     }
   }, [incompleteGroupProductsFetcher.data, modalCount]);
+
+  // ✅ 履歴モーダルでの確定・リセット・キャンセル・数量保存成功時に一覧を再取得
+  useEffect(() => {
+    if (historyActionFetcher.data && (historyActionFetcher.data as { ok?: boolean }).ok) {
+      revalidator.revalidate();
+      setModalEditMode(false);
+      setModalEditedQuantities({});
+    }
+  }, [historyActionFetcher.data, revalidator]);
 
   const ITEMS_PER_PAGE = 1000;
   const [collectionPage, setCollectionPage] = useState(1);
@@ -5196,7 +5731,9 @@ export default function InventoryCountPage() {
                     : modalCount.productGroupId ? [modalCount.productGroupId] : [];
                   const groupItemsMap = (modalCount as any)?.groupItems && typeof (modalCount as any).groupItems === "object" ? (modalCount as any).groupItems : {};
                   const hasMultipleGroups = allGroupIds.length > 1;
-                  
+                  const cancelledGroupIdsSet = new Set(
+                    (Array.isArray((modalCount as any)?.cancelledGroupIds) ? (modalCount as any).cancelledGroupIds : []).map((id: string) => normalizeIdForMatch(id))
+                  );
                   // ✅ 商品グループごとのデータを取得
                   // ✅ CSV出力と同じロジックを使用
                   const itemsByGroup = new Map<string, typeof modalCount.items>();
@@ -5329,6 +5866,7 @@ export default function InventoryCountPage() {
                               const isGroupCompleted = hasGroupItemsFromMap 
                                 ? true 
                                 : (wasCompletedInItemsByGroup ? true : (hasGroupItems && incompleteProductsForGroup.length === 0));
+                              const isGroupCancelled = cancelledGroupIdsSet.has(normalizeIdForMatch(groupId));
                               const groupName = Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
                                 ? modalCount.productGroupNames[allGroupIds.indexOf(groupId)] || groupId
                                 : productGroups.find((g) => g.id === groupId)?.name || groupId;
@@ -5336,12 +5874,12 @@ export default function InventoryCountPage() {
                               // ✅ グループ内は通常商品のみ表示（予定外は別ブロックで表示・入出庫と同様）
                               const normalItems = groupItems.filter((it) => !(it as any).isExtra);
                               const groupTotalQty = normalItems.reduce((sum, it) => sum + (Number(it?.currentQuantity || 0)), 0);
-                              const groupActualQty = normalItems.reduce((sum, it) => sum + (Number(it?.actualQuantity || 0)), 0);
+                              const groupActualQty = normalItems.reduce((sum, it) => sum + (Number(modalEditMode ? (modalEditedQuantities[groupId]?.[it.inventoryItemId] ?? it?.actualQuantity) : it?.actualQuantity) ?? 0), 0);
                               
                               return (
-                                <div key={groupId} style={{ marginBottom: "24px", padding: "12px", backgroundColor: isGroupCompleted ? "#f0f8f0" : "#fff8f0", borderRadius: "4px" }}>
-                                  <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: isGroupCompleted ? "#28a745" : "#ffc107" }}>
-                                    {groupName} {isGroupCompleted ? "（完了済み）" : "（未完了）"}
+                                <div key={groupId} style={{ marginBottom: "24px", padding: "12px", backgroundColor: isGroupCancelled ? "#f5f5f5" : isGroupCompleted ? "#f0f8f0" : "#fff8f0", borderRadius: "4px" }}>
+                                  <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: isGroupCancelled ? "#666" : isGroupCompleted ? "#28a745" : "#ffc107" }}>
+                                    {groupName} {isGroupCancelled ? "（キャンセル済み）" : isGroupCompleted ? "（完了済み）" : "（未完了）"}
                                     {normalItems.length > 0 && (
                                       <span style={{ fontSize: "12px", fontWeight: "normal", marginLeft: "8px", color: "#666" }}>
                                         （{groupActualQty}/{groupTotalQty > 0 ? groupTotalQty : "-"}）
@@ -5378,10 +5916,10 @@ export default function InventoryCountPage() {
                                           const cellStyle: React.CSSProperties = { padding: "8px", borderRight: "1px solid #eee" };
                                           return (
                                             <tr key={`${groupId}-${it.inventoryItemId}-${idx}`} style={{ borderBottom: "1px solid #eee" }}>
-                                              <td style={{ ...cellStyle, fontWeight: "bold", color: isGroupCompleted ? "#28a745" : "#ffc107" }}>
+                                              <td style={{ ...cellStyle, fontWeight: "bold", color: isGroupCancelled ? "#666" : isGroupCompleted ? "#28a745" : "#ffc107" }}>
                                                 {groupName}
                                                 <div style={{ fontSize: "11px", color: "#666", marginTop: "2px" }}>
-                                                  {isGroupCompleted ? "✓ 完了" : "未完了"}
+                                                  {isGroupCancelled ? "キャンセル" : isGroupCompleted ? "✓ 完了" : "未完了"}
                                                 </div>
                                               </td>
                                               <td style={cellStyle}>{productName}</td>
@@ -5391,8 +5929,30 @@ export default function InventoryCountPage() {
                                               <td style={cellStyle}>{option2 || "-"}</td>
                                               <td style={cellStyle}>{option3 || "-"}</td>
                                               <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>{it.delta ?? "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>
+                                                {modalEditMode && !isGroupCompleted && !isGroupCancelled ? (
+                                                  <input
+                                                    type="number"
+                                                    value={modalEditedQuantities[groupId]?.[it.inventoryItemId] ?? it.actualQuantity ?? ""}
+                                                    onChange={(e) => {
+                                                      const v = e.target.value === "" ? 0 : parseInt(e.target.value, 10);
+                                                      if (!Number.isFinite(v)) return;
+                                                      setModalEditedQuantities((prev) => ({
+                                                        ...prev,
+                                                        [groupId]: { ...(prev[groupId] ?? {}), [it.inventoryItemId]: v },
+                                                      }));
+                                                    }}
+                                                    style={{ width: "64px", padding: "4px" }}
+                                                  />
+                                                ) : (
+                                                  it.actualQuantity ?? "-"
+                                                )}
+                                              </td>
+                                              <td style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>
+                                                {modalEditMode && !isGroupCompleted && !isGroupCancelled
+                                                  ? (Number(modalEditedQuantities[groupId]?.[it.inventoryItemId] ?? it.actualQuantity) ?? 0) - Number(it.currentQuantity ?? 0)
+                                                  : it.delta ?? "-"}
+                                              </td>
                                             </tr>
                                           );
                                         })}
@@ -5403,6 +5963,67 @@ export default function InventoryCountPage() {
                                       {loadingIncompleteGroupIds.has(String(groupId))
                                         ? "読み込み中..."
                                         : "この商品グループはまだ処理されていません"}
+                                    </div>
+                                  )}
+                                  {!isGroupCompleted && !isGroupCancelled && (
+                                    <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                                      <button
+                                        type="button"
+                                        disabled={historyActionFetcher.state !== "idle" || normalItems.length === 0}
+                                        onClick={() => {
+                                          const items = normalItems.map((it: any) => ({
+                                            inventoryItemId: it.inventoryItemId,
+                                            currentQuantity: Number(it?.currentQuantity ?? 0),
+                                            actualQuantity: Number(modalEditedQuantities[groupId]?.[it.inventoryItemId] ?? it?.actualQuantity ?? 0),
+                                            variantId: it.variantId,
+                                            sku: it.sku,
+                                            title: it.title,
+                                          }));
+                                          const fd = new FormData();
+                                          fd.set("action", "confirm_stocktake_group");
+                                          fd.set("countId", modalCount.id);
+                                          fd.set("groupId", groupId);
+                                          fd.set("items", JSON.stringify(items));
+                                          historyActionFetcher.submit(fd, { method: "post" });
+                                        }}
+                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                                      >
+                                        このグループを確定
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={historyActionFetcher.state !== "idle"}
+                                        onClick={() => {
+                                          if (!confirm("このグループをキャンセルしますか？在庫は変更されません。")) return;
+                                          const fd = new FormData();
+                                          fd.set("action", "cancel_stocktake_group");
+                                          fd.set("countId", modalCount.id);
+                                          fd.set("groupId", groupId);
+                                          historyActionFetcher.submit(fd, { method: "post" });
+                                        }}
+                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #6d7175", background: "#fff", color: "#202223", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                                      >
+                                        このグループをキャンセル
+                                      </button>
+                                    </div>
+                                  )}
+                                  {isGroupCompleted && (
+                                    <div style={{ marginTop: "8px" }}>
+                                      <button
+                                        type="button"
+                                        disabled={historyActionFetcher.state !== "idle"}
+                                        onClick={() => {
+                                          if (!confirm("このグループの確定を取り消し、在庫を元に戻します。よろしいですか？")) return;
+                                          const fd = new FormData();
+                                          fd.set("action", "reset_stocktake_group");
+                                          fd.set("countId", modalCount.id);
+                                          fd.set("groupId", groupId);
+                                          historyActionFetcher.submit(fd, { method: "post" });
+                                        }}
+                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                                      >
+                                        リセット
+                                      </button>
                                     </div>
                                   )}
                                   {!isGroupCompleted && getIncompleteGroupHasMore(groupId) && (
@@ -5489,20 +6110,22 @@ export default function InventoryCountPage() {
                             const singleGroupItems = singleGroupId ? (itemsByGroup.get(singleGroupId) || []) : displayItems;
                             const normalItems = singleGroupItems.filter((it) => !(it as any).isExtra);
                             const extraItems = singleGroupItems.filter((it) => !!(it as any).isExtra);
-                            const isGroupCompleted = normalItems.length > 0;
+                            const groupItemsFromMapSingle = singleGroupId ? getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(singleGroupId)) : [];
+                            const isGroupCompleted = groupItemsFromMapSingle.length > 0;
+                            const isGroupCancelledSingle = singleGroupId ? cancelledGroupIdsSet.has(normalizeIdForMatch(singleGroupId)) : false;
                             const groupName = Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0
                               ? modalCount.productGroupNames[0]
                               : singleGroupId
                               ? (productGroups.find((g) => g.id === singleGroupId)?.name || singleGroupId)
                               : (modalCount.productGroupName || modalCount.productGroupId || "-");
                             const groupTotalQty = normalItems.reduce((sum, it) => sum + (Number((it as any)?.currentQuantity || 0)), 0);
-                            const groupActualQty = normalItems.reduce((sum, it) => sum + (Number((it as any)?.actualQuantity || 0)), 0);
+                            const groupActualQty = normalItems.reduce((sum, it) => sum + (Number(modalEditMode ? (modalEditedQuantities[singleGroupId]?.[it.inventoryItemId] ?? (it as any)?.actualQuantity) : (it as any)?.actualQuantity) ?? 0), 0);
                             const cellStyle: React.CSSProperties = { padding: "8px", borderRight: "1px solid #eee" };
                             return (
                               <>
-                                <div style={{ marginBottom: "24px", padding: "12px", backgroundColor: isGroupCompleted ? "#f0f8f0" : "#fff8f0", borderRadius: "4px" }}>
-                                  <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: isGroupCompleted ? "#28a745" : "#ffc107" }}>
-                                    {groupName} {isGroupCompleted ? "（完了済み）" : "（未完了）"}
+                                <div style={{ marginBottom: "24px", padding: "12px", backgroundColor: isGroupCancelledSingle ? "#f5f5f5" : isGroupCompleted ? "#f0f8f0" : "#fff8f0", borderRadius: "4px" }}>
+                                  <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: isGroupCancelledSingle ? "#666" : isGroupCompleted ? "#28a745" : "#ffc107" }}>
+                                    {groupName} {isGroupCancelledSingle ? "（キャンセル済み）" : isGroupCompleted ? "（完了済み）" : "（未完了）"}
                                     {normalItems.length > 0 && (
                                       <span style={{ fontSize: "12px", fontWeight: "normal", marginLeft: "8px", color: "#666" }}>
                                         （{groupActualQty}/{groupTotalQty > 0 ? groupTotalQty : "-"}）
@@ -5546,8 +6169,30 @@ export default function InventoryCountPage() {
                                               <td style={cellStyle}>{option2 || "-"}</td>
                                               <td style={cellStyle}>{option3 || "-"}</td>
                                               <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.delta ?? "-"}</td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>
+                                                {modalEditMode && !isGroupCompleted && !isGroupCancelledSingle ? (
+                                                  <input
+                                                    type="number"
+                                                    value={modalEditedQuantities[singleGroupId]?.[it.inventoryItemId] ?? it.actualQuantity ?? ""}
+                                                    onChange={(e) => {
+                                                      const v = e.target.value === "" ? 0 : parseInt(e.target.value, 10);
+                                                      if (!Number.isFinite(v)) return;
+                                                      setModalEditedQuantities((prev) => ({
+                                                        ...prev,
+                                                        [singleGroupId]: { ...(prev[singleGroupId] ?? {}), [it.inventoryItemId]: v },
+                                                      }));
+                                                    }}
+                                                    style={{ width: "64px", padding: "4px" }}
+                                                  />
+                                                ) : (
+                                                  it.actualQuantity ?? "-"
+                                                )}
+                                              </td>
+                                              <td style={{ ...cellStyle, textAlign: "right" }}>
+                                                {modalEditMode && !isGroupCompleted && !isGroupCancelledSingle
+                                                  ? (Number(modalEditedQuantities[singleGroupId]?.[it.inventoryItemId] ?? it.actualQuantity) ?? 0) - Number(it.currentQuantity ?? 0)
+                                                  : it.delta ?? "-"}
+                                              </td>
                                             </tr>
                                           );
                                         })}
@@ -5558,6 +6203,67 @@ export default function InventoryCountPage() {
                                       {loadingIncompleteGroupIds.has(String(singleGroupId))
                                         ? "読み込み中..."
                                         : "この商品グループはまだ処理されていません"}
+                                    </div>
+                                  )}
+                                  {!isGroupCompleted && !isGroupCancelledSingle && singleGroupId && (
+                                    <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                                      <button
+                                        type="button"
+                                        disabled={historyActionFetcher.state !== "idle" || normalItems.length === 0}
+                                        onClick={() => {
+                                          const items = normalItems.map((it: any) => ({
+                                            inventoryItemId: it.inventoryItemId,
+                                            currentQuantity: Number(it?.currentQuantity ?? 0),
+                                            actualQuantity: Number(modalEditedQuantities[singleGroupId]?.[it.inventoryItemId] ?? it?.actualQuantity ?? 0),
+                                            variantId: it.variantId,
+                                            sku: it.sku,
+                                            title: it.title,
+                                          }));
+                                          const fd = new FormData();
+                                          fd.set("action", "confirm_stocktake_group");
+                                          fd.set("countId", modalCount.id);
+                                          fd.set("groupId", singleGroupId);
+                                          fd.set("items", JSON.stringify(items));
+                                          historyActionFetcher.submit(fd, { method: "post" });
+                                        }}
+                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                                      >
+                                        このグループを確定
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={historyActionFetcher.state !== "idle"}
+                                        onClick={() => {
+                                          if (!confirm("このグループをキャンセルしますか？在庫は変更されません。")) return;
+                                          const fd = new FormData();
+                                          fd.set("action", "cancel_stocktake_group");
+                                          fd.set("countId", modalCount.id);
+                                          fd.set("groupId", singleGroupId);
+                                          historyActionFetcher.submit(fd, { method: "post" });
+                                        }}
+                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #6d7175", background: "#fff", color: "#202223", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                                      >
+                                        このグループをキャンセル
+                                      </button>
+                                    </div>
+                                  )}
+                                  {isGroupCompleted && singleGroupId && (
+                                    <div style={{ marginTop: "8px" }}>
+                                      <button
+                                        type="button"
+                                        disabled={historyActionFetcher.state !== "idle"}
+                                        onClick={() => {
+                                          if (!confirm("このグループの確定を取り消し、在庫を元に戻します。よろしいですか？")) return;
+                                          const fd = new FormData();
+                                          fd.set("action", "reset_stocktake_group");
+                                          fd.set("countId", modalCount.id);
+                                          fd.set("groupId", singleGroupId);
+                                          historyActionFetcher.submit(fd, { method: "post" });
+                                        }}
+                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                                      >
+                                        リセット
+                                      </button>
                                     </div>
                                   )}
                                   {!isGroupCompleted && singleGroupId && getIncompleteGroupHasMore(singleGroupId) && (
@@ -5637,7 +6343,133 @@ export default function InventoryCountPage() {
                   );
                 })()}
 
-                <div style={{ marginTop: "24px", display: "flex", justifyContent: "flex-end", gap: "12px" }}>
+                <div style={{ marginTop: "24px", display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: "12px", alignItems: "center" }}>
+                  {!modalEditMode ? (
+                    <button
+                      type="button"
+                      onClick={() => setModalEditMode(true)}
+                      style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#fff", color: "#2e7d32", cursor: "pointer" }}
+                    >
+                      編集
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        disabled={historyActionFetcher.state !== "idle"}
+                        onClick={() => {
+                          const allGroupIds = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0 ? modalCount.productGroupIds : modalCount.productGroupId ? [modalCount.productGroupId] : [];
+                          const groupItemsMap = (modalCount as any)?.groupItems && typeof (modalCount as any).groupItems === "object" ? (modalCount as any).groupItems : {};
+                          const groups: Record<string, Array<{ inventoryItemId: string; actualQuantity: number; currentQuantity?: number; variantId?: string; sku?: string; title?: string }>> = {};
+                          for (const groupId of allGroupIds) {
+                            const existing = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, groupId);
+                            const items = existing.length > 0 ? existing : getIncompleteProductsForGroup(groupId);
+                            if (items.length === 0) continue;
+                            groups[groupId] = items.map((it: any) => ({
+                              inventoryItemId: it.inventoryItemId,
+                              actualQuantity: Number(modalEditedQuantities[groupId]?.[it.inventoryItemId] ?? it?.actualQuantity ?? 0),
+                              currentQuantity: Number(it?.currentQuantity ?? 0),
+                              variantId: it.variantId,
+                              sku: it.sku,
+                              title: it.title,
+                            }));
+                          }
+                          if (Object.keys(groups).length === 0) return;
+                          const fd = new FormData();
+                          fd.set("action", "update_stocktake_quantity");
+                          fd.set("countId", modalCount.id);
+                          fd.set("groups", JSON.stringify(groups));
+                          historyActionFetcher.submit(fd, { method: "post" });
+                        }}
+                        style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                      >
+                        {historyActionFetcher.state !== "idle" ? "保存中..." : "保存"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setModalEditMode(false); setModalEditedQuantities({}); }}
+                        style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #6d7175", background: "#fff", color: "#202223", cursor: "pointer" }}
+                      >
+                        キャンセル
+                      </button>
+                    </>
+                  )}
+                  {(() => {
+                    const allGroupIds = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0 ? modalCount.productGroupIds : modalCount.productGroupId ? [modalCount.productGroupId] : [];
+                    const groupItemsMap = (modalCount as any)?.groupItems && typeof (modalCount as any).groupItems === "object" ? (modalCount as any).groupItems : {};
+                    const cancelledSet = new Set((Array.isArray((modalCount as any)?.cancelledGroupIds) ? (modalCount as any).cancelledGroupIds : []).map((id: string) => normalizeIdForMatch(id)));
+                    const completedCount = allGroupIds.filter((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0).length;
+                    const allCompleted = allGroupIds.length > 0 && completedCount === allGroupIds.length;
+                    const hasIncomplete = allGroupIds.some((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length === 0 && !cancelledSet.has(normalizeIdForMatch(id)));
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          disabled={historyActionFetcher.state !== "idle" || !hasIncomplete}
+                          onClick={() => {
+                            const incompletePayload: Record<string, Array<{ inventoryItemId: string; currentQuantity: number; actualQuantity: number; variantId?: string; sku?: string; title?: string }>> = {};
+                            for (const groupId of allGroupIds) {
+                              const existing = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, groupId);
+                              if (existing.length > 0) continue;
+                              if (cancelledSet.has(normalizeIdForMatch(groupId))) continue;
+                              const items = getIncompleteProductsForGroup(groupId);
+                              if (items.length === 0) continue;
+                              incompletePayload[groupId] = items.map((it: any) => ({
+                                inventoryItemId: it.inventoryItemId,
+                                currentQuantity: Number(it?.currentQuantity ?? 0),
+                                actualQuantity: Number(modalEditedQuantities[groupId]?.[it.inventoryItemId] ?? it?.actualQuantity ?? 0),
+                                variantId: it.variantId,
+                                sku: it.sku,
+                                title: it.title,
+                              }));
+                            }
+                            const fd = new FormData();
+                            fd.set("action", "confirm_stocktake_all");
+                            fd.set("countId", modalCount.id);
+                            fd.set("incompleteGroupsItems", JSON.stringify(incompletePayload));
+                            historyActionFetcher.submit(fd, { method: "post" });
+                          }}
+                          style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && hasIncomplete ? "pointer" : "not-allowed" }}
+                        >
+                          一括確定
+                        </button>
+                        {allCompleted && (
+                          <button
+                            type="button"
+                            disabled={historyActionFetcher.state !== "idle"}
+                            onClick={() => {
+                              if (!confirm("この棚卸の確定をすべて取り消し、在庫を元に戻します。よろしいですか？")) return;
+                              const fd = new FormData();
+                              fd.set("action", "reset_stocktake_all");
+                              fd.set("countId", modalCount.id);
+                              historyActionFetcher.submit(fd, { method: "post" });
+                            }}
+                            style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                          >
+                            一括リセット
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={historyActionFetcher.state !== "idle"}
+                          onClick={() => {
+                            const incompleteCount = allGroupIds.filter((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length === 0 && !cancelledSet.has(normalizeIdForMatch(id))).length;
+                            const msg = incompleteCount === allGroupIds.length
+                              ? "棚卸全体をキャンセルしますか？在庫は変更されません。"
+                              : "未完了のグループのみキャンセルします。よろしいですか？";
+                            if (!confirm(msg)) return;
+                            const fd = new FormData();
+                            fd.set("action", "cancel_stocktake");
+                            fd.set("countId", modalCount.id);
+                            historyActionFetcher.submit(fd, { method: "post" });
+                          }}
+                          style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #6d7175", background: "#fff", color: "#202223", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                        >
+                          一括キャンセル
+                        </button>
+                      </>
+                    );
+                  })()}
                   <button
                     onClick={() => {
                       // ✅ 複数商品グループがある場合：groupItemsから各グループのデータを取得

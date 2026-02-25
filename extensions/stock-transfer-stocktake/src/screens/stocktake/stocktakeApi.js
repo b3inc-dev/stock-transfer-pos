@@ -21,7 +21,8 @@ async function graphql(query, variables, opts = {}) {
   // #graphqlコメントを削除（GraphQLクエリから除外）
   const cleanQuery = String(query || "").replace(/^#graphql\s*/m, "").trim();
   
-  const timeoutMs = Number.isFinite(Number(opts?.timeoutMs)) ? Number(opts.timeoutMs) : 20000;
+  /** デフォルト60秒（大グループ・追加読み込みで20秒だと切れるため） */
+  const timeoutMs = Number.isFinite(Number(opts?.timeoutMs)) ? Number(opts.timeoutMs) : 60000;
   const controller = new AbortController();
   let done = false;
   let iv = null;
@@ -1006,8 +1007,8 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
   const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null, offset: optsOffset = 0, limit: optsLimit, collectionPageInfo: optsCollectionPageInfo = null, timeoutMs: optsTimeoutMs } = opts;
   const offset = Math.max(0, Number(optsOffset) || 0);
   const limit = optsLimit != null && optsLimit > 0 ? Math.max(1, Math.min(Number(optsLimit), 2000)) : null;
-  /** タイムアウト：初回は40秒・追加読み込みは60秒。初回20秒に根拠はなく、大グループや遅い回線で切れるため初回も40秒にしている */
-  const timeoutMs = Number.isFinite(Number(optsTimeoutMs)) ? Number(optsTimeoutMs) : (offset > 0 ? 60000 : 40000);
+  /** タイムアウト：初回60秒・追加読み込み90秒（39グループ・約5600SKU等で20秒だと切れるため） */
+  const timeoutMs = Number.isFinite(Number(optsTimeoutMs)) ? Number(optsTimeoutMs) : (offset > 0 ? 90000 : 60000);
   /** コレクション経路の「さらに読み込む」用。前回レスポンスの pageInfo を渡すと after で次ページを取得する */
   const collectionPageInfo = optsCollectionPageInfo && typeof optsCollectionPageInfo === "object" ? optsCollectionPageInfo : null;
   const groups = (Array.isArray(cachedProductGroups) && cachedProductGroups.length > 0)
@@ -1296,7 +1297,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
       const results = await Promise.all(
         batch.map(async (v) => {
           try {
-            const qty = await getCurrentQuantity(v.inventoryItemId, locationId);
+            const qty = await getCurrentQuantity(v.inventoryItemId, locationId, { timeoutMs });
             if (qty !== null && qty !== undefined) {
               return { ...v, currentQuantity: qty };
             }
@@ -1338,8 +1339,9 @@ export async function getCurrentQuantity(inventoryItemId, locationId, opts = {})
         }
       }
     }`;
+  const timeoutMs = Number.isFinite(Number(opts?.timeoutMs)) ? Number(opts.timeoutMs) : 60000;
   try {
-    const d = await graphql(gql, { id: inventoryItemId, loc: locationId });
+    const d = await graphql(gql, { id: inventoryItemId, loc: locationId }, { timeoutMs });
     const level = d?.inventoryItem?.inventoryLevel;
     if (!level) return null; // 在庫レベルが存在しない
     const qty = level.quantities?.find((x) => x.name === "available")?.quantity;

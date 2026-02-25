@@ -188,3 +188,31 @@
 3. **最上部ボタンの表示条件**: まとめて表示のときは、**既に 1 件以上表示されているときだけ**最上部の「未読み込みの商品があります。（要読込）」を表示するようにした（`hasMoreProducts && (!isMultipleMode || lines.length > 0)`）。0 件のときは各グループ横の「読込」のみ表示され、役割が分かりやすくなる。
 
 **変更ファイル**: `extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`
+
+---
+
+## 11. 追加読み込みの「timeout 20000ms」失敗とモーダル遅延（39グループ・約5600SKU）
+
+### 事象
+
+- 商品リストの「さらに読み込む」で **「追加読み込みに失敗しました: timeout 20000ms」** となる。
+- 39グループ・約5600SKU など大規模な棚卸では、棚卸モーダルの読み込み・表示・タップの反応が全体的に遅い。
+
+### 要因
+
+- **graphql()** のデフォルトタイムアウトが **20秒** だった。追加読み込み時は `fetchProductsByGroups` 内で **getCurrentQuantity** を多数呼ぶが、getCurrentQuantity は **timeoutMs を渡しておらず** graphql の 20秒に依存していた。
+- 追加読み込み（offset > 0）では 600 件ずつ取得し、在庫数取得を 15 件ずつバッチで実行するため、API が遅いと 20秒で打ち切られていた。
+- 初回・追加とも、大グループや遅い回線では 20秒では不足していた。
+
+### 対応
+
+1. **graphql() のデフォルトタイムアウトを 20秒 → 60秒** に変更（`stocktakeApi.js`）。
+2. **getCurrentQuantity** に **opts.timeoutMs** を追加し、graphql 呼び出しに **{ timeoutMs }** を渡す。未指定時は 60秒。
+3. **fetchProductsByGroups** のタイムアウトを **初回 60秒・追加読み込み 90秒** に変更。在庫フィルタ時に getCurrentQuantity へ **timeoutMs** を渡す。
+4. **handleLoadMoreProducts** から fetchProductsByGroups 呼び出し時に **timeoutMs: 90000** を明示指定。
+
+これにより追加読み込みが 20秒で切れず、大規模棚卸でも完了しやすくなる。モーダル全体の体感速度は、タイムアウトによる失敗が減ることで「途中で止まる」事象は解消される。表示行数が多い場合の描画負荷は別途の最適化（仮想リスト等）で対応可能。
+
+**変更ファイル**:  
+- `extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js`（graphql デフォルト・getCurrentQuantity・fetchProductsByGroups の timeoutMs）  
+- `extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`（handleLoadMoreProducts の timeoutMs: 90000）

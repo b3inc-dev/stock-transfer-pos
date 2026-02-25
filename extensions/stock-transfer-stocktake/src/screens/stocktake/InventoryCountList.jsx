@@ -1056,6 +1056,7 @@ export function InventoryCountList({
         collectionPageInfo: collectionPageInfoRef.current || undefined,
         offset: lines.length,
         limit: LOAD_PAGE_SIZE,
+        timeoutMs: 90000,
       });
       const products = Array.isArray(raw) ? raw : (raw?.products ?? []);
       const hasMore = raw?.hasMore ?? false;
