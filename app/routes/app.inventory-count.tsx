@@ -972,6 +972,7 @@ async function resolveSkusToInventoryItemIds(
 
   const escapeSku = (s: string) => `sku:${s.replace(/"/g, '\\"')}`;
 
+  // ✅ 戻り値は常に入力 skus の並び順（CSV登録順の表示に合わせる）
   if (trimmed.length <= 3) {
     const ids: string[] = [];
     for (const sku of trimmed) {
@@ -1005,18 +1006,18 @@ async function resolveSkusToInventoryItemIds(
     batches.push(trimmed.slice(i, i + SKU_BATCH_SIZE));
   }
 
-  const inventoryItemIds: string[] = [];
-  const seen = new Set<string>();
+  // SKU → inventoryItemId のマップを貯め、最後に trimmed の並びで返す（表示を skus 順に統一）
+  const skuToId = new Map<string, string>();
 
-  const runBatch = async (batch: string[]): Promise<string[]> => {
+  const runBatch = async (batch: string[]): Promise<Map<string, string>> => {
     const queryStr = batch.map(escapeSku).join(" OR ");
-    if (!queryStr) return [];
+    if (!queryStr) return new Map();
     try {
       const resp = await admin.graphql(
         `#graphql
           query VariantsBySkus($first: Int!, $query: String!) {
             productVariants(first: $first, query: $query) {
-              nodes { id inventoryItem { id } }
+              nodes { id sku inventoryItem { id } }
             }
           }
         `,
@@ -1024,20 +1025,21 @@ async function resolveSkusToInventoryItemIds(
       );
       const json = await resp.json();
       const nodes = json?.data?.productVariants?.nodes ?? [];
-      const ids: string[] = [];
+      const map = new Map<string, string>();
       for (const node of nodes) {
-        if (node?.inventoryItem?.id) ids.push(node.inventoryItem.id);
+        const sku = node?.sku != null ? String(node.sku).trim() : "";
+        if (sku && node?.inventoryItem?.id && !map.has(sku)) map.set(sku, node.inventoryItem.id);
       }
-      return ids;
+      return map;
     } catch {
-      const ids: string[] = [];
+      const map = new Map<string, string>();
       for (const sku of batch) {
         try {
           const resp = await admin.graphql(
             `#graphql
               query VariantBySku($first: Int!, $query: String!) {
                 productVariants(first: $first, query: $query) {
-                  nodes { id inventoryItem { id } }
+                  nodes { id sku inventoryItem { id } }
                 }
               }
             `,
@@ -1046,29 +1048,36 @@ async function resolveSkusToInventoryItemIds(
           const json = await resp.json();
           const nodes = json?.data?.productVariants?.nodes ?? [];
           for (const node of nodes) {
-            if (node?.inventoryItem?.id && !ids.includes(node.inventoryItem.id)) ids.push(node.inventoryItem.id);
+            const s = node?.sku != null ? String(node.sku).trim() : "";
+            if (s && node?.inventoryItem?.id && !map.has(s)) map.set(s, node.inventoryItem.id);
           }
         } catch {
           //
         }
       }
-      return ids;
+      return map;
     }
   };
 
   for (let i = 0; i < batches.length; i += SKU_BATCH_CONCURRENCY) {
     const chunk = batches.slice(i, i + SKU_BATCH_CONCURRENCY);
     const results = await Promise.all(chunk.map(runBatch));
-    for (const ids of results) {
-      for (const id of ids) {
-        if (!seen.has(id)) {
-          seen.add(id);
-          inventoryItemIds.push(id);
-        }
+    for (const map of results) {
+      for (const [sku, id] of map) {
+        if (!skuToId.has(sku)) skuToId.set(sku, id);
       }
     }
   }
 
+  const inventoryItemIds: string[] = [];
+  const seenIds = new Set<string>();
+  for (const sku of trimmed) {
+    const id = skuToId.get(sku);
+    if (id && !seenIds.has(id)) {
+      seenIds.add(id);
+      inventoryItemIds.push(id);
+    }
+  }
   return inventoryItemIds;
 }
 
@@ -1356,6 +1365,9 @@ export async function action({ request }: ActionFunctionArgs) {
           });
         }
       }
+      // 表示を skus（＝CSV登録順）に合わせて、要求した ids の並びでソート
+      const idToIndex = new Map(ids.map((id, idx) => [id, idx]));
+      variants.sort((a, b) => (idToIndex.get(a.inventoryItemId) ?? 999999) - (idToIndex.get(b.inventoryItemId) ?? 999999));
       return { ok: true, variants };
     } catch {
       return { ok: true, variants: [] };
@@ -1420,6 +1432,9 @@ export async function action({ request }: ActionFunctionArgs) {
           });
         }
       }
+      // 表示を skus（＝CSV登録順）に合わせて、resolve 済み ids（skus 順）でソート
+      const idToIndex = new Map(ids.map((id, idx) => [id, idx]));
+      variants.sort((a, b) => (idToIndex.get(a.inventoryItemId) ?? 999999) - (idToIndex.get(b.inventoryItemId) ?? 999999));
       return { ok: true, variants };
     } catch {
       return { ok: true, variants: [] };
@@ -2298,6 +2313,9 @@ export async function action({ request }: ActionFunctionArgs) {
           const valid = results.filter((r): r is NonNullable<typeof r> => r != null);
           allResults.push(...valid);
         }
+        // 表示を skus（＝CSV登録順）に合わせて、ids の並びでソート
+        const idToIndex = new Map(ids.map((id, idx) => [id, idx]));
+        allResults.sort((a, b) => (idToIndex.get(a.inventoryItemId) ?? 999999) - (idToIndex.get(b.inventoryItemId) ?? 999999));
         const res = { ok: true as const, countId, groupId, products: allResults, hasMore, offset };
         incompleteGroupProductsCache.set(cacheKey, { data: res, expiresAt: Date.now() + INCOMPLETE_GROUP_PRODUCTS_CACHE_TTL_MS });
         return res;
@@ -2462,6 +2480,9 @@ export async function action({ request }: ActionFunctionArgs) {
             const valid = results.filter((r): r is NonNullable<typeof r> => r != null);
             allResults.push(...valid);
           }
+          // 表示を skus（＝CSV登録順）に合わせて、ids（resolve 済み＝skus 順）でソート
+          const idToIndex1b = new Map(ids.map((id, idx) => [id, idx]));
+          allResults.sort((a, b) => (idToIndex1b.get(a.inventoryItemId) ?? 999999) - (idToIndex1b.get(b.inventoryItemId) ?? 999999));
           const res1b = { ok: true as const, countId, groupId, products: allResults, hasMore: hasMore1b, offset };
           incompleteGroupProductsCache.set(cacheKey, { data: res1b, expiresAt: Date.now() + INCOMPLETE_GROUP_PRODUCTS_CACHE_TTL_MS });
           return res1b;

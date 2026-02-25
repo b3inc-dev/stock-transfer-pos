@@ -1093,6 +1093,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
       if (idsToUse.length > offset + idsToFetch.length) hasMoreFromSavedIds = true;
       usedSavedIdsPath = true;
       const batchSize = 50;
+      const groupVariants = []; // このグループ分だけ貯め、skus順（idsToFetch順）でソートしてから allVariants に追加
       for (let i = 0; i < idsToFetch.length; i += batchSize) {
         const batch = idsToFetch.slice(i, i + batchSize);
         const gql = includeImages
@@ -1139,7 +1140,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
             if (node?.variant && node.id) {
               const v = node.variant;
               const p = v.product || {};
-              allVariants.push({
+              groupVariants.push({
                 variantId: v.id,
                 inventoryItemId: node.id,
                 productTitle: p.title ?? "",
@@ -1155,6 +1156,10 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
           // エラー時は通常の処理にフォールバック（コレクションから取得）
         }
       }
+      // ✅ 表示は常に skus の並び（idsToFetch＝inventoryItemIdsByGroup の順）に合わせる
+      const idToIndex = new Map(idsToFetch.map((id, idx) => [String(id).trim(), idx]));
+      groupVariants.sort((a, b) => (idToIndex.get(String(a.inventoryItemId).trim()) ?? 999999) - (idToIndex.get(String(b.inventoryItemId).trim()) ?? 999999));
+      allVariants.push(...groupVariants);
       continue; // ✅ 保存されたinventoryItemIdsを使用した場合は、通常のコレクション取得処理をスキップ
     }
     
