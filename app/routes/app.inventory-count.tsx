@@ -3319,7 +3319,19 @@ export default function InventoryCountPage() {
       setModalEditMode(false);
       setModalEditedQuantities({});
     }
+    if (historyActionFetcher.data && !(historyActionFetcher.data as { ok?: boolean }).ok && (historyActionFetcher.data as { error?: string }).error) {
+      alert((historyActionFetcher.data as { error?: string }).error);
+    }
   }, [historyActionFetcher.data, revalidator]);
+
+  // ✅ モーダル表示中の棚卸を loader の最新データと同期（確定・キャンセル後に revalidate で一覧が更新されたらモーダル内のステータスも更新）
+  useEffect(() => {
+    if (!modalOpen || !modalCount || !Array.isArray(inventoryCounts) || inventoryCounts.length === 0) return;
+    const found = inventoryCounts.find(
+      (c) => String(c.id) === String(modalCount.id) || normalizeIdForMatch(c.id) === normalizeIdForMatch(modalCount.id)
+    );
+    if (found) setModalCount(found);
+  }, [modalOpen, modalCount?.id, inventoryCounts]);
 
   const ITEMS_PER_PAGE = 1000;
   const [collectionPage, setCollectionPage] = useState(1);
@@ -6401,11 +6413,16 @@ export default function InventoryCountPage() {
                     const completedCount = allGroupIds.filter((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0).length;
                     const allCompleted = allGroupIds.length > 0 && completedCount === allGroupIds.length;
                     const hasIncomplete = allGroupIds.some((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length === 0 && !cancelledSet.has(normalizeIdForMatch(id)));
+                    // ✅ 未完了グループのうち、商品リスト未読込のものがあるときは一括確定を無効化（送信してもサーバーに渡すデータが空になるため）
+                    const incompleteGroupIds = allGroupIds.filter((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length === 0 && !cancelledSet.has(normalizeIdForMatch(id)));
+                    const hasIncompleteWithItems = incompleteGroupIds.some((id) => getIncompleteProductsForGroup(id).length > 0);
+                    const stillLoadingIncomplete = incompleteGroupIds.length > 0 && (incompleteGroupProductsFetcher.state !== "idle" || loadingIncompleteGroupIds.size > 0);
+                    const canConfirmAll = hasIncomplete && (stillLoadingIncomplete ? false : hasIncompleteWithItems);
                     return (
                       <>
                         <button
                           type="button"
-                          disabled={historyActionFetcher.state !== "idle" || !hasIncomplete}
+                          disabled={historyActionFetcher.state !== "idle" || !canConfirmAll}
                           onClick={() => {
                             const incompletePayload: Record<string, Array<{ inventoryItemId: string; currentQuantity: number; actualQuantity: number; variantId?: string; sku?: string; title?: string }>> = {};
                             for (const groupId of allGroupIds) {
@@ -6429,9 +6446,10 @@ export default function InventoryCountPage() {
                             fd.set("incompleteGroupsItems", JSON.stringify(incompletePayload));
                             historyActionFetcher.submit(fd, { method: "post" });
                           }}
-                          style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && hasIncomplete ? "pointer" : "not-allowed" }}
+                          title={hasIncomplete && !canConfirmAll && stillLoadingIncomplete ? "商品リストの読み込みが完了してから確定できます" : undefined}
+                          style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && canConfirmAll ? "pointer" : "not-allowed" }}
                         >
-                          一括確定
+                          {hasIncomplete && !canConfirmAll && stillLoadingIncomplete ? "一括確定（読込中）" : "一括確定"}
                         </button>
                         {allCompleted && (
                           <button

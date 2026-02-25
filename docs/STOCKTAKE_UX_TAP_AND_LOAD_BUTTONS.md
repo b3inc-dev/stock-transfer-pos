@@ -216,3 +216,39 @@
 **変更ファイル**:  
 - `extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js`（graphql デフォルト・getCurrentQuantity・fetchProductsByGroups の timeoutMs）  
 - `extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`（handleLoadMoreProducts の timeoutMs: 90000）
+
+---
+
+## 11. 管理画面：履歴モーダルの確定・キャンセルが効かない問題（2026-02-25）
+
+### 事象
+
+- **一括確定**ボタンをクリックしても見た目の変化がなく、ボタンが一時的に無効になるだけ。
+- **一括キャンセル**でブラウザの確認ダイアログで OK を選んでも、モーダル内のステータスが「キャンセル」に変わらない。
+- モーダルを一度閉じてから再度開くと、再表示前に読み込んでいた商品グループの商品リストがまだ読み込まれていない状態で処理が終わってしまう。
+
+### 要因
+
+1. **モーダル内のステータスが最新データと同期していない**  
+   確定・キャンセル後に `revalidator.revalidate()` で loader が再実行され一覧は更新されるが、モーダル表示用の `modalCount` は「開いた時点のオブジェクト」のまま。そのため、モーダルを開いたままにしていると、サーバー側の status や cancelledGroupIds の変更がモーダルに反映されず、キャンセル後もステータスが変わらないように見えていた。
+
+2. **action が ok: false を返してもエラーを表示していない**  
+   確定処理などでサーバーが `{ ok: false, error: "..." }` を返しても、フロントで alert 等しておらず、ユーザーには「何も起きていない」ように見えていた。
+
+3. **一括確定時に「未読込」の未完了グループがある**  
+   モーダルを閉じて再度開くと、未完了グループの商品リストは `get_incomplete_group_products` で再度取得される。読み込みが終わる前に一括確定を押すと、`incompleteGroupsItems` が空のまま送信され、サーバー側でマージする未完了分のデータがなく、実質的に変化のない保存になり「確定したように見えない」挙動になっていた。また、未読込の未完了グループがある状態でも一括確定ボタンが有効だった。
+
+### 対応
+
+1. **モーダル表示中の棚卸を loader の最新データと同期**  
+   `modalOpen && modalCount && inventoryCounts` のとき、`inventoryCounts` から同一 ID の棚卸を探し、見つかれば `setModalCount(found)` でモーダル用の state を更新。確定・キャンセル後に revalidate で一覧が更新されると、同じ effect で `modalCount` も最新の status・cancelledGroupIds に更新され、モーダル内のステータス表示が変わる。
+
+2. **action が ok: false のときにエラーを表示**  
+   `historyActionFetcher.data` を監視する effect 内で、`ok` が false かつ `error` がある場合に `alert(error)` を実行。サーバーエラーをユーザーに伝える。
+
+3. **一括確定ボタンの無効化条件の見直し**  
+   - 未完了グループの ID リスト `incompleteGroupIds` を算出。  
+   - それらのうち、`getIncompleteProductsForGroup(id)` で少なくとも1件以上ある、かつ「未完了グループの読込中」でないときだけ一括確定を有効にする（`canConfirmAll`）。  
+   - 未読込の未完了グループがある間はボタンを無効にし、必要に応じて「一括確定（読込中）」と title で「商品リストの読み込みが完了してから確定できます」を表示。
+
+**変更ファイル**: `app/routes/app.inventory-count.tsx`
