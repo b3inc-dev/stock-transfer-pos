@@ -4189,6 +4189,9 @@ export default function InventoryCountPage() {
                           <s-text tone="subdued" size="small">
                             グループ名を入力し、コレクションを検索して選択し、グループを作成します。検索結果のみ表示されるため、多数のコレクションがあるストアでも軽く使えます。
                           </s-text>
+                          <s-text tone="subdued" size="small">
+                            並び順：コレクション選択順＋コレクション表示順
+                          </s-text>
                           <s-text-field
                             label="グループ名"
                             value={groupName}
@@ -4514,12 +4517,15 @@ export default function InventoryCountPage() {
                           <s-text tone="subdued" size="small">
                             グループ名を入力し、SKU・商品名で検索して選択し、グループを作成します。検索結果のみ表示されるため、商品が多いストアでも軽く使えます。
                           </s-text>
+                          <s-text tone="subdued" size="small">
+                            並び順：選択順
+                          </s-text>
                           <s-text-field
                             label="グループ名"
                             value={groupName}
                             onInput={(e: any) => setGroupName(readValue(e))}
                             onChange={(e: any) => setGroupName(readValue(e))}
-                            placeholder="例: 食品グループ"
+                            placeholder="例: 雑貨グループ"
                           />
                           <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                             <input
@@ -4764,6 +4770,9 @@ export default function InventoryCountPage() {
                           <s-text emphasis="bold" size="small">CSVアップロード（グループ名＋SKU）</s-text>
                           <s-text tone="subdued" size="small">
                             テンプレートをダウンロードしてCSVを作成し、アップロードしてください。アップロード後にリストが表示されるので、チェックした行だけ「グループを追加」で追加します。
+                          </s-text>
+                          <s-text tone="subdued" size="small">
+                            並び順：グループ名行順＋CSV行順
                           </s-text>
                           <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                             <s-text tone="subdued" size="small">インポート時の動作</s-text>

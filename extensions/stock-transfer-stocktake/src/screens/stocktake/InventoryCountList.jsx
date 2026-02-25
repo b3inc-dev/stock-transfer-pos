@@ -492,12 +492,13 @@ export function InventoryCountList({
     if (groupItemsForCurrentGroup.length === 0 && countItemsLegacy.length > 0 && currentGroupId) {
       try {
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-        const products = await fetchProductsByGroups([currentGroupId], c.locationId, {
+        const productsRaw = await fetchProductsByGroups([currentGroupId], c.locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: false,
           inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
         });
+        const products = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.products ?? []);
         const productInventoryItemIds = new Set(
           products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
         );
@@ -543,12 +544,13 @@ export function InventoryCountList({
         // ✅ 完了済みの商品リスト：在庫は棚卸時の在庫数（currentQuantity）、実数は確定した在庫数（actualQuantity）を表示
         // ✅ 画像URLを取得するため、商品情報を取得
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-        const products = await fetchProductsByGroups([currentGroupId], c.locationId, {
+        const productsRaw = await fetchProductsByGroups([currentGroupId], c.locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
           inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
         });
+        const products = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.products ?? []);
         const productMap = new Map();
         products.forEach((p) => {
           if (p.inventoryItemId) {
@@ -757,12 +759,13 @@ export function InventoryCountList({
             // 商品グループの商品リストを取得してフィルタリング（inventoryItemIdsByGroupも渡してまとめて表示で全グループ取得できるようにする）
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-              const products = await fetchProductsByGroups([groupId], c.locationId, {
+              const productsRaw = await fetchProductsByGroups([groupId], c.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
                 includeImages: false,
                 ...fetchOptsBase,
               });
+              const products = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.products ?? []);
               const productInventoryItemIds = new Set(
                 products.map((p) => String(p.inventoryItemId || "").trim()).filter(Boolean)
               );
@@ -782,12 +785,13 @@ export function InventoryCountList({
             // ✅ 画像URLを取得するため、商品情報を取得
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-              const products = await fetchProductsByGroups([groupId], c.locationId, {
+              const productsRaw = await fetchProductsByGroups([groupId], c.locationId, {
                 productFirst,
                 filterByInventoryLevel: false,
                 includeImages: showImages && !liteMode,
                 ...fetchOptsBase,
               });
+              const products = Array.isArray(productsRaw) ? productsRaw : (productsRaw?.products ?? []);
               const productMap = new Map();
               products.forEach((p) => {
                 if (p.inventoryItemId) {
