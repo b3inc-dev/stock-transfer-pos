@@ -6178,7 +6178,7 @@ export default function InventoryCountPage() {
                                           fd.set("items", JSON.stringify(items));
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
-                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && !loadingIncompleteGroupIds.has(String(groupId)) && incompleteGroupProductsFetcher.state === "idle" ? "pointer" : "not-allowed" }}
                                       >
                                         このグループを確定
                                       </button>
@@ -6401,7 +6401,7 @@ export default function InventoryCountPage() {
                                     <div style={{ marginTop: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
                                       <button
                                         type="button"
-                                        disabled={historyActionFetcher.state !== "idle" || normalItems.length === 0}
+                                        disabled={historyActionFetcher.state !== "idle" || normalItems.length === 0 || loadingIncompleteGroupIds.has(String(singleGroupId)) || incompleteGroupProductsFetcher.state !== "idle"}
                                         onClick={() => {
                                           if (!confirm("このグループを確定しますか？在庫数が実数に更新されます。")) return;
                                           const items = normalItems.map((it: any) => ({
@@ -6419,7 +6419,7 @@ export default function InventoryCountPage() {
                                           fd.set("items", JSON.stringify(items));
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
-                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
+                                        style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && !loadingIncompleteGroupIds.has(String(singleGroupId)) && incompleteGroupProductsFetcher.state === "idle" ? "pointer" : "not-allowed" }}
                                       >
                                         このグループを確定
                                       </button>

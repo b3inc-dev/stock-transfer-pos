@@ -821,6 +821,15 @@ export function InboundListScreen({
     shortageQtyTotal > 0;
 
   // TDZ 対策: incRow/setRowQty/setExtraQty/incExtra はモジュールレベル（incRow_/setRowQty_/setExtraQty_/incExtra_）に移し、呼び出し時は ref/setter を渡す
+  // 行メモ化で数量操作を軽くするため、setRowQty を安定した参照にする
+  const setRowQtyStable = useCallback(
+    (key, qty) => setRowQty_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, key, qty),
+    []
+  );
+  const setRowQtyReadOnlyStable = useCallback(
+    (_key, _qty) => denyEdit_(toastReadOnlyOnceRef, toast),
+    []
+  );
 
   const bumpInbCandidateStock = useCallback(() => {
     setInbCandidateStockVersion((v) => v + 1);
@@ -856,7 +865,7 @@ export function InboundListScreen({
     if (readOnlyRef.current) return denyEdit_(toastReadOnlyOnceRef, toast);
     const inventoryItemId = resolved?.inventoryItemId;
     if (!inventoryItemId) { toast("inventoryItemId が取得できませんでした"); return; }
-    const titleForToast = String(resolved.productTitle || "").trim() || resolved.sku || "(no title)";
+    const titleForToast = String(resolved.barcode || "").trim() || String(resolved.sku || "").trim() || String(resolved.productTitle || "").trim() || "(no title)";
     const existing = (rowsRef.current || []).find((r) => String(r.inventoryItemId || "") === String(inventoryItemId));
     if (existing) {
       incRow_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, existing.key, delta);
@@ -1943,9 +1952,7 @@ export function InboundListScreen({
                               rows: group.rows,
                               showImages,
                               dialog,
-                              setRowQty: isGroupReadOnly
-                                ? () => denyEdit_(toastReadOnlyOnceRef, toast)
-                                : (key, qty) => setRowQty_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, key, qty),
+                              setRowQty: isGroupReadOnly ? setRowQtyReadOnlyStable : setRowQtyStable,
                               readOnly: isGroupReadOnly,
                             })}
                           </s-stack>
@@ -1957,7 +1964,7 @@ export function InboundListScreen({
                 );
               })()
             ) : (
-              renderInboundShipmentItems_({ rows: visibleRows, showImages, dialog, setRowQty: (key, qty) => setRowQty_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, key, qty), readOnly })
+              renderInboundShipmentItems_({ rows: visibleRows, showImages, dialog, setRowQty: setRowQtyStable, readOnly })
             )}
           </s-stack>
         </s-box>

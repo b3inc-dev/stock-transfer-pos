@@ -1340,27 +1340,17 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
     ? { ...collectionPageInfo, ...collectionPageInfoResult }
     : collectionPageInfoResult;
 
-  // 在庫レベルでフィルタリング（初期表示用）・入庫並みに1回の取得で currentQuantity 付きで返す
-  const QTY_BATCH_SIZE = 15;
+  // 在庫レベルでフィルタリング（初期表示用）・一括取得で currentQuantity 付きで返す
   if (filterByInventoryLevel && locationId && variantsToProcess.length > 0) {
-    const variantsWithInventory = [];
-    for (let i = 0; i < variantsToProcess.length; i += QTY_BATCH_SIZE) {
-      const batch = variantsToProcess.slice(i, i + QTY_BATCH_SIZE);
-      const results = await Promise.all(
-        batch.map(async (v) => {
-          try {
-            const qty = await getCurrentQuantity(v.inventoryItemId, locationId, { timeoutMs });
-            if (qty !== null && qty !== undefined) {
-              return { ...v, currentQuantity: qty };
-            }
-          } catch (e) {
-            console.error(`Failed to get inventory level for ${v.inventoryItemId}:`, e);
-          }
-          return null;
-        })
-      );
-      results.filter((r) => r != null).forEach((r) => variantsWithInventory.push(r));
-    }
+    const ids = variantsToProcess.map((v) => v.inventoryItemId).filter(Boolean);
+    const qtyMap = await getCurrentQuantitiesBulk(ids, locationId, { timeoutMs });
+    const variantsWithInventory = variantsToProcess
+      .map((v) => {
+        const qty = v.inventoryItemId != null ? qtyMap.get(v.inventoryItemId) : null;
+        if (qty !== null && qty !== undefined) return { ...v, currentQuantity: qty };
+        return null;
+      })
+      .filter((r) => r != null);
     if (limit != null) {
       const out = { products: variantsWithInventory, hasMore };
       if (Object.keys(mergedCollectionPageInfo).length > 0) out.collectionPageInfo = mergedCollectionPageInfo;
@@ -1402,6 +1392,49 @@ export async function getCurrentQuantity(inventoryItemId, locationId, opts = {})
     // エラー時はnullを返す（在庫レベルがない商品として扱う）
     return null;
   }
+}
+
+/** 複数商品の在庫数を1リクエストで取得（nodes クエリで高速化）。返却: Map<inventoryItemId, number> */
+const BULK_QTY_IDS_PER_REQUEST = 50;
+
+export async function getCurrentQuantitiesBulk(inventoryItemIds, locationId, opts = {}) {
+  const ids = (inventoryItemIds || []).filter((id) => id != null && String(id).trim() !== "");
+  if (ids.length === 0) return new Map();
+  const loc = toLocationGid(locationId);
+  if (!loc) return new Map();
+  const timeoutMs = Number.isFinite(Number(opts?.timeoutMs)) ? Number(opts.timeoutMs) : 60000;
+  const noCache = opts?.noCache === true;
+  const cacheBuster = noCache ? `_${Date.now()}` : "";
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += BULK_QTY_IDS_PER_REQUEST) {
+    const batch = ids.slice(i, i + BULK_QTY_IDS_PER_REQUEST);
+    const gql = `#graphql
+      query BulkCurrentQuantities${cacheBuster}($ids: [ID!]!, $loc: ID!) {
+        nodes(ids: $ids) {
+          ... on InventoryItem {
+            id
+            inventoryLevel(locationId: $loc) {
+              quantities(names: ["available"]) { name quantity }
+            }
+          }
+        }
+      }`;
+    try {
+      const d = await graphql(gql, { ids: batch, loc }, { timeoutMs });
+      const nodes = d?.nodes ?? [];
+      for (const node of nodes) {
+        if (!node?.id) continue;
+        const level = node.inventoryLevel;
+        const qty = level?.quantities?.find((x) => x.name === "available")?.quantity;
+        const num = qty !== null && qty !== undefined ? Number(qty) : 0;
+        out.set(node.id, num);
+      }
+    } catch (e) {
+      console.error(`getCurrentQuantitiesBulk batch error (${batch.length} ids):`, e);
+      for (const id of batch) out.set(id, 0);
+    }
+  }
+  return out;
 }
 
 // locationIdをGID形式に変換（ロスと同じ処理）

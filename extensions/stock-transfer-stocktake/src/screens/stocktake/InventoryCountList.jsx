@@ -1,7 +1,9 @@
+import { memo } from "preact/compat";
 import { useState, useMemo, useEffect, useCallback, useRef } from "preact/hooks";
 import {
   fetchProductsByGroups,
   getCurrentQuantity,
+  getCurrentQuantitiesBulk,
   adjustInventoryToActual,
   searchVariants,
   readInventoryCounts,
@@ -15,6 +17,7 @@ import {
 } from "./stocktakeApi.js";
 import { fetchSettings } from "./stocktakeApi.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
+import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
@@ -970,7 +973,8 @@ export function InventoryCountList({
         initialInventoryItemIdsRef.current = new Set(
           linesToSet.filter((l) => !l.isExtra).map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
         );
-        // ✅ 下書き復元時：「さらに読み込む」を有効化（未読込分がある場合）。復元後に残りを読めるようにする
+        // ✅ 下書き復元時：「未読込」「さらに読み込む」は「読み込み失敗時」または「全リスト読込前に保存した部分下書きを復元した時」のみ表示
+        // ＝ inventoryItemIdsByGroup があり且つ 総ID数 > 復元行数 のときだけ hasMore を true にする（それ以外は非表示）
         const idsByGroup = c?.inventoryItemIdsByGroup;
         let hasMoreRestored = false;
         if (idsByGroup && typeof idsByGroup === "object") {
@@ -981,9 +985,6 @@ export function InventoryCountList({
             if (key && Array.isArray(idsByGroup[key])) totalIds += idsByGroup[key].length;
           }
           hasMoreRestored = totalIds > linesToSet.length;
-        } else {
-          const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-          hasMoreRestored = linesToSet.length >= productFirst;
         }
         setHasMoreProducts(hasMoreRestored);
         hasMoreProductsRef.current = hasMoreRestored;
@@ -1097,40 +1098,39 @@ export function InventoryCountList({
       );
       console.log("[InventoryCountList] Products loaded, lines count:", linesWithCurrent.length);
 
-      // ✅ リスト表示後、在庫数をバックグラウンドで15件ずつ取得。スキャン・カウントは並行して可能。actualQuantity は更新しない
+      // ✅ リスト表示後、在庫数をバックグラウンドで一括取得（50件/リクエスト）。スキャン・カウントは並行して可能。actualQuantity は更新しない
       if (!c.locationId || linesWithCurrent.length === 0) return;
       const thisLoadId = ++backgroundInventoryLoadIdRef.current;
       const locationId = c.locationId;
-      const QTY_BATCH_SIZE = 15;
       (async () => {
-        for (let i = 0; i < linesWithCurrent.length; i += QTY_BATCH_SIZE) {
+        const ids = linesWithCurrent.map((l) => l.inventoryItemId).filter(Boolean);
+        if (ids.length === 0) return;
+        if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
+        try {
+          const qtyMap = await getCurrentQuantitiesBulk(ids, locationId, { noCache: false });
           if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
-          const batch = linesWithCurrent.slice(i, i + QTY_BATCH_SIZE);
-          const results = await Promise.all(
-            batch.map(async (l) => {
-              if (!l.inventoryItemId) return { id: l.id, ok: true, currentQuantity: 0 };
-              try {
-                const qty = await getCurrentQuantity(l.inventoryItemId, locationId, { noCache: false });
-                return { id: l.id, ok: true, currentQuantity: qty !== null ? qty : 0 };
-              } catch (e) {
-                return { id: l.id, ok: false, currentQuantity: l.currentQuantity };
-              }
-            })
+          const lineIdToQty = new Map(
+            linesWithCurrent.map((l) => [
+              l.id,
+              l.inventoryItemId != null ? (qtyMap.get(l.inventoryItemId) ?? 0) : 0,
+            ])
           );
-          if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
-          const resultMap = new Map(results.map((r) => [r.id, r]));
           setLines((prev) =>
             prev.map((l) => {
-              const r = resultMap.get(l.id);
-              if (!r) return l;
-              return { ...l, currentQuantity: r.currentQuantity, stockLoading: false, stockError: null };
+              const qty = lineIdToQty.get(l.id);
+              if (qty === undefined) return l;
+              return { ...l, currentQuantity: qty, stockLoading: false, stockError: null };
             })
           );
+        } catch (e) {
+          console.error("[InventoryCountList] background inventory load error:", e);
         }
       })();
     } catch (e) {
       toast(`商品の読み込みに失敗しました: ${e?.message || e}`);
       console.error("[InventoryCountList] loadProducts error:", e);
+      setHasMoreProducts(true); // ✅ 読み込み失敗時は「未読込」「読込」「さらに読み込む」を表示して再試行可能に
+      hasMoreProductsRef.current = true;
     } finally {
       setLoading(false);
       isLoadingProductsRef.current = false; // ✅ loadProducts完了時にフラグを下ろす
@@ -1182,35 +1182,32 @@ export function InventoryCountList({
         stockError: null,
       }));
       setLines((prev) => [...prev, ...newLines]);
-      // ✅ 追加した行の在庫もバックグラウンドで随時取得
+      // ✅ 追加した行の在庫もバックグラウンドで一括取得（50件/リクエスト）
       if (count.locationId && newLines.length > 0) {
         const thisLoadId = ++backgroundInventoryLoadIdRef.current;
         const locationId = count.locationId;
-        const QTY_BATCH_SIZE = 15;
+        const ids = newLines.map((l) => l.inventoryItemId).filter(Boolean);
         (async () => {
-          for (let i = 0; i < newLines.length; i += QTY_BATCH_SIZE) {
+          if (ids.length === 0) return;
+          if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
+          try {
+            const qtyMap = await getCurrentQuantitiesBulk(ids, locationId, { noCache: false });
             if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
-            const batch = newLines.slice(i, i + QTY_BATCH_SIZE);
-            const results = await Promise.all(
-              batch.map(async (l) => {
-                if (!l.inventoryItemId) return { id: l.id, ok: true, currentQuantity: 0 };
-                try {
-                  const qty = await getCurrentQuantity(l.inventoryItemId, locationId, { noCache: false });
-                  return { id: l.id, ok: true, currentQuantity: qty !== null ? qty : 0 };
-                } catch {
-                  return { id: l.id, ok: false, currentQuantity: l.currentQuantity };
-                }
-              })
+            const lineIdToQty = new Map(
+              newLines.map((l) => [
+                l.id,
+                l.inventoryItemId != null ? (qtyMap.get(l.inventoryItemId) ?? 0) : 0,
+              ])
             );
-            if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
-            const resultMap = new Map(results.map((r) => [r.id, r]));
             setLines((prev) =>
               prev.map((l) => {
-                const r = resultMap.get(l.id);
-                if (!r) return l;
-                return { ...l, currentQuantity: r.currentQuantity, stockLoading: false, stockError: null };
+                const qty = lineIdToQty.get(l.id);
+                if (qty === undefined) return l;
+                return { ...l, currentQuantity: qty, stockLoading: false, stockError: null };
               })
             );
+          } catch (e) {
+            console.error("[InventoryCountList] loadMore background inventory error:", e);
           }
         })();
       }
@@ -1484,7 +1481,7 @@ export function InventoryCountList({
   // resolved: { variantId, inventoryItemId, productTitle, variantTitle, sku, barcode, imageUrl }（候補から組み立てたオブジェクト）
   // delta: 加算数量（既存行は +delta、新規は actualQuantity: delta）。未指定時は 1
   const addLine = useCallback(
-    async (resolved, delta = 1) => {
+    (resolved, delta = 1) => {
       if (readOnlyRef.current) return denyEdit();
       const inventoryItemId = resolved?.inventoryItemId;
       if (!inventoryItemId || !count) {
@@ -1517,7 +1514,7 @@ export function InventoryCountList({
       const isExtra = !initialInventoryItemIdsRef.current.has(normalizedId);
       // ✅ 予定外棚卸許可が不許可の場合は予定外商品の追加をブロック（明示的に true のときのみ許可。未読込・キーなしは不許可扱い）
       if (isExtra && settings?.inventoryCount?.allowExtraCount !== true) {
-        toast("予定外棚卸は許可されていません。設定で「予定外棚卸許可」を許可に変更してください。");
+        toast("商品リストにない商品です。");
         return;
       }
       const assignedGroupId = isMultipleMode ? (targetProductGroupIds[0] || null) : (productGroupId || targetProductGroupIds[0] || null);
@@ -1539,7 +1536,7 @@ export function InventoryCountList({
         stockError: null,
       };
       setLines((prev) => [newLine, ...prev]);
-      toast(`${resolved.productTitle || resolved.sku || "(no title)"} を追加しました（+1）`);
+      toast(`${resolved.barcode || resolved.sku || resolved.productTitle || "(no title)"} を追加しました（+1）`);
       // ✅ 入庫と同様：追加後も検索はクリアしない
     },
     [count, denyEdit, isMultipleMode, targetProductGroupIds, productGroupId, settings]
@@ -1569,7 +1566,7 @@ export function InventoryCountList({
           updatedAt: Date.now(),
         });
 
-        // 商品を検索して追加（入庫と同一：resolved を addLine に渡す）
+        // 商品を検索して追加（入庫と同様：resolve のみ await、addLine は同期的に呼んで即リスト反映・次のスキャンへ）
         try {
           const includeImages = showImages && !liteMode;
           const resolvedFromScan = await resolveVariantByCode(code, { includeImages });
@@ -1586,8 +1583,7 @@ export function InventoryCountList({
             barcode: resolvedFromScan.barcode ?? "",
             imageUrl: resolvedFromScan.imageUrl ?? "",
           };
-          await addLine(resolved, 1);
-          // トーストは addLine 内で表示（入庫と同様に即時フィードバック）
+          addLine(resolved, 1);
         } catch (e) {
           toast(`スキャン処理エラー: ${e?.message || e}`);
         }
@@ -1596,7 +1592,7 @@ export function InventoryCountList({
       }
     };
 
-    const interval = setInterval(processScanQueue, 500);
+    const interval = setInterval(processScanQueue, 100); // ✅ 入庫と同じ100msでキューを消化（次のスキャンをすぐ取りにいく）
     return () => clearInterval(interval);
   }, [count, showImages, liteMode, denyEdit, addLine]);
 
@@ -2564,37 +2560,22 @@ export function InventoryCountList({
                   // ✅ 出庫リストと同じ方式：loadingではなくrefreshingを使う（商品リストが消えないように）
                   setRefreshing(true);
                   try {
-                    // ✅ 在庫数だけ更新、数量（actualQuantity）は保持。レート制限対策で15件ずつバッチ取得（stocktakeApi の QTY_BATCH_SIZE と同様）
-                    const QTY_BATCH_SIZE = 15;
-                    const results = [];
-                    for (let i = 0; i < currentLines.length; i += QTY_BATCH_SIZE) {
-                      const batch = currentLines.slice(i, i + QTY_BATCH_SIZE);
-                      const batchResults = await Promise.all(
-                        batch.map(async (l) => {
-                          if (!l.inventoryItemId) return { id: l.id, ok: true, currentQuantity: l.currentQuantity };
-                          try {
-                            const currentQty = await getCurrentQuantity(l.inventoryItemId, count.locationId, { noCache: true });
-                            return { id: l.id, ok: true, currentQuantity: currentQty !== null ? currentQty : 0 };
-                          } catch (e) {
-                            return { id: l.id, ok: false, error: e?.message || String(e), currentQuantity: l.currentQuantity };
-                          }
-                        })
-                      );
-                      results.push(...batchResults);
-                    }
-                    
-                    // ✅ 既存のlinesを保持しつつ、currentQuantityだけ更新（stockLoading: falseも設定）
+                    // ✅ 在庫数だけ更新、数量（actualQuantity）は保持。一括取得（50件/リクエスト）で高速化
+                    const ids = currentLines.map((l) => l.inventoryItemId).filter(Boolean);
+                    const qtyMap = await getCurrentQuantitiesBulk(ids, count.locationId, { noCache: true });
+                    const lineIdToQty = new Map(
+                      currentLines.map((l) => [
+                        l.id,
+                        l.inventoryItemId != null ? (qtyMap.get(l.inventoryItemId) ?? l.currentQuantity ?? 0) : (l.currentQuantity ?? 0),
+                      ])
+                    );
                     setLines((prev) =>
                       prev.map((l) => {
-                        const r = results.find((x) => x.id === l.id);
-                        if (!r) return { ...l, stockLoading: false };
-                        if (!r.ok) {
-                          console.warn(`在庫取得エラー (${l.id}): ${r.error}`);
-                          return { ...l, stockLoading: false, stockError: r.error }; // エラー時もstockLoading: false
-                        }
+                        const qty = lineIdToQty.get(l.id);
+                        if (qty === undefined) return { ...l, stockLoading: false };
                         return {
                           ...l,
-                          currentQuantity: r.currentQuantity,
+                          currentQuantity: qty,
                           stockLoading: false,
                           stockError: null,
                         };
@@ -2708,19 +2689,24 @@ export function InventoryCountList({
   }, [lines]);
 
   useEffect(() => {
+    const statusLabel = count?.status === "completed" ? "完了" : count?.status === "cancelled" ? "キャンセル" : "未完了";
+    const footerStatusTone = getStatusBadgeTone(statusLabel);
     const summaryCenter = (
-      <s-stack gap="extra-tight" alignItems="center">
-        <s-text size="small" tone="subdued">
-          明細 {lines.length} / 在庫 {currentTotal} / 実数 {actualTotal}
-        </s-text>
-        <s-text size="small" tone={overTotal > 0 || shortageTotal > 0 ? "critical" : "subdued"}>
-          超過 {overTotal} / 不足 {shortageTotal}
-        </s-text>
-        {extraCount > 0 ? (
-          <s-text size="small" tone="critical">
-            予定外 {extraCount}
+      <s-stack direction="inline" gap="base" alignItems="center">
+        <s-badge tone={footerStatusTone}>{statusLabel}</s-badge>
+        <s-stack gap="extra-tight" alignItems="center">
+          <s-text size="small" tone="subdued">
+            明細 {lines.length} / 在庫 {currentTotal} / 実数 {actualTotal}
           </s-text>
-        ) : null}
+          <s-text size="small" tone={overTotal > 0 || shortageTotal > 0 ? "critical" : "subdued"}>
+            超過 {overTotal} / 不足 {shortageTotal}
+          </s-text>
+          {extraCount > 0 ? (
+            <s-text size="small" tone="critical">
+              予定外 {extraCount}
+            </s-text>
+          ) : null}
+        </s-stack>
       </s-stack>
     );
 
@@ -2743,7 +2729,7 @@ export function InventoryCountList({
       />
     );
     return () => setFooter?.(null);
-  }, [setFooter, onBack, submitting, currentTotal, actualTotal, extraCount, overTotal, shortageTotal, lines.length, handleComplete, itemsToAdjust.length, isReadOnly]);
+  }, [setFooter, onBack, submitting, currentTotal, actualTotal, extraCount, overTotal, shortageTotal, lines.length, handleComplete, itemsToAdjust.length, isReadOnly, count?.status]);
 
   // 入庫と同じUI構造にするためのヘルパー関数とコンポーネント
   const toSafeId = (s) => String(s || "x").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60);
@@ -2975,7 +2961,7 @@ export function InventoryCountList({
     const commitAddByQty = () => {
       const next = clampAdd(text);
       addLine(resolved, next);
-      toast(`${productTitle || sku || "(no title)"} を追加しました（+${next}）`);
+      toast(`${barcode || sku || productTitle || "(no title)"} を追加しました（+${next}）`);
       setAddQtyById((prev) => {
         const cur = Number(prev?.[vid] || 0);
         return { ...prev, [vid]: cur + next };
@@ -2984,7 +2970,7 @@ export function InventoryCountList({
 
     const addOne = () => {
       addLine(resolved, 1);
-      toast(`${productTitle || sku || "(no title)"} を追加しました（+1）`);
+      toast(`${barcode || sku || productTitle || "(no title)"} を追加しました（+1）`);
       setAddQtyById((prev) => {
         const cur = Number(prev?.[vid] || 0);
         return { ...prev, [vid]: cur + 1 };
@@ -3063,65 +3049,75 @@ export function InventoryCountList({
     );
   };
 
-  // 商品リスト行（入庫のInboundAddedLineRow風）
-  const InventoryCountLineRow = ({ line, onRemove }) => {
-    const productTitle = String(line?.productTitle || "").trim();
-    const variantTitle = String(line?.variantTitle || "").trim();
-    const sku = String(line?.sku || "").trim();
-    const barcode = String(line?.barcode || "").trim();
-    const skuLine = `${sku ? `SKU:${sku}` : ""}${barcode ? `${sku ? " / " : ""}JAN:${barcode}` : ""}`.trim();
+  // 商品リスト行（入庫のInboundAddedLineRow風）。memo で変更のあった行だけ再描画し、数量ボタン操作時の体感を軽くする
+  const inventoryCountLineRowRef = useRef(null);
+  if (inventoryCountLineRowRef.current === null) {
+    inventoryCountLineRowRef.current = memo(function InventoryCountLineRow({
+      line,
+      onRemove,
+      updateActualQuantity,
+      setActualQuantity,
+      showImages,
+      liteMode,
+    }) {
+      const productTitle = String(line?.productTitle || "").trim();
+      const variantTitle = String(line?.variantTitle || "").trim();
+      const sku = String(line?.sku || "").trim();
+      const barcode = String(line?.barcode || "").trim();
+      const skuLine = `${sku ? `SKU:${sku}` : ""}${barcode ? `${sku ? " / " : ""}JAN:${barcode}` : ""}`.trim();
 
-    const currentQty = Number(line?.currentQuantity ?? 0);
-    const actualQty = Number(line?.actualQuantity ?? 0);
-    const delta = actualQty - currentQty;
-    // ✅ 出庫リストと同じ方式：stockLoadingがtrueの場合は「…」を表示
-    const stockText = line?.stockLoading ? "…" : String(currentQty);
-    const bottomLeft = `在庫 ${stockText} / 実数 ${actualQty}`;
-    const bottomLeftTone = delta !== 0 ? "critical" : "subdued";
+      const currentQty = Number(line?.currentQuantity ?? 0);
+      const actualQty = Number(line?.actualQuantity ?? 0);
+      const delta = actualQty - currentQty;
+      const stockText = line?.stockLoading ? "…" : String(currentQty);
+      const bottomLeft = `在庫 ${stockText} / 実数 ${actualQty}`;
+      const bottomLeftTone = delta !== 0 ? "critical" : "subdued";
 
-    const modalKey = line?.id || line?.inventoryItemId || "row";
-    const modalId = `qty-inv-${toSafeId(modalKey)}`;
+      const modalKey = line?.id || line?.inventoryItemId || "row";
+      const modalId = `qty-inv-${toSafeId(modalKey)}`;
 
-    return (
-      <s-box padding="none">
-        <StockyRowShell>
-          <s-stack gap="extra-tight" inlineSize="100%">
-            <s-box inlineSize="100%">
-              <ItemLeftCompact
-                showImages={showImages && !liteMode}
-                imageUrl={line?.imageUrl || ""}
-                productTitle={productTitle}
-                variantTitle={variantTitle}
-                line3={skuLine}
-              />
-            </s-box>
-            <s-box inlineSize="100%">
-              <s-stack direction="inline" gap="base" alignItems="center" justifyContent="space-between" style={{ width: "100%", flexWrap: "nowrap" }}>
-                <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
-                  <s-text tone={bottomLeftTone === "critical" ? "critical" : "subdued"} size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {bottomLeft}
-                  </s-text>
-                </s-box>
-                <s-box style={{ flex: "0 0 auto" }}>
-                  <QtyControlCompact_3Buttons
-                    value={actualQty}
-                    min={-999}
-                    modalId={modalId}
-                    onDec={() => updateActualQuantity(line.id, -1)}
-                    onInc={() => updateActualQuantity(line.id, 1)}
-                    onSetQty={(n) => setActualQuantity(line.id, n)}
-                    onRemove={onRemove && actualQty <= 1 ? () => onRemove(line.id) : undefined}
-                    disabled={line?.isReadOnly} // ✅ まとめて表示モードで完了済みの商品は編集不可
-                  />
-                </s-box>
-              </s-stack>
-            </s-box>
-          </s-stack>
-        </StockyRowShell>
-        <s-divider />
-      </s-box>
-    );
-  };
+      return (
+        <s-box padding="none">
+          <StockyRowShell>
+            <s-stack gap="extra-tight" inlineSize="100%">
+              <s-box inlineSize="100%">
+                <ItemLeftCompact
+                  showImages={showImages && !liteMode}
+                  imageUrl={line?.imageUrl || ""}
+                  productTitle={productTitle}
+                  variantTitle={variantTitle}
+                  line3={skuLine}
+                />
+              </s-box>
+              <s-box inlineSize="100%">
+                <s-stack direction="inline" gap="base" alignItems="center" justifyContent="space-between" style={{ width: "100%", flexWrap: "nowrap" }}>
+                  <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
+                    <s-text tone={bottomLeftTone === "critical" ? "critical" : "subdued"} size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {bottomLeft}
+                    </s-text>
+                  </s-box>
+                  <s-box style={{ flex: "0 0 auto" }}>
+                    <QtyControlCompact_3Buttons
+                      value={actualQty}
+                      min={-999}
+                      modalId={modalId}
+                      onDec={() => updateActualQuantity(line.id, -1)}
+                      onInc={() => updateActualQuantity(line.id, 1)}
+                      onSetQty={(n) => setActualQuantity(line.id, n)}
+                      onRemove={onRemove && actualQty <= 1 ? () => onRemove(line.id) : undefined}
+                      disabled={line?.isReadOnly}
+                    />
+                  </s-box>
+                </s-stack>
+              </s-box>
+            </s-stack>
+          </StockyRowShell>
+          <s-divider />
+        </s-box>
+      );
+    });
+  }
+  const InventoryCountLineRow = inventoryCountLineRowRef.current;
 
   if (count?.id && isMinimalCount(count)) {
     if (countLoading) {
@@ -3333,7 +3329,15 @@ export function InventoryCountList({
                           <s-stack gap="none">
                             {/* ✅ 予定外商品を除外して表示（予定外リストは最下部に別表示） */}
                             {groupLines.filter((l) => !l.isExtra).map((l) => (
-                              <InventoryCountLineRow key={l.id} line={l} onRemove={undefined} />
+                              <InventoryCountLineRow
+                                key={l.id}
+                                line={l}
+                                onRemove={undefined}
+                                updateActualQuantity={updateActualQuantity}
+                                setActualQuantity={setActualQuantity}
+                                showImages={showImages}
+                                liteMode={liteMode}
+                              />
                             ))}
                           </s-stack>
                         </s-stack>
@@ -3376,7 +3380,15 @@ export function InventoryCountList({
                     <s-text emphasis="bold">棚卸リスト</s-text>
                     <s-stack gap="none">
                       {normalLines.map((l) => (
-                        <InventoryCountLineRow key={l.id} line={l} onRemove={undefined} />
+                        <InventoryCountLineRow
+                          key={l.id}
+                          line={l}
+                          onRemove={undefined}
+                          updateActualQuantity={updateActualQuantity}
+                          setActualQuantity={setActualQuantity}
+                          showImages={showImages}
+                          liteMode={liteMode}
+                        />
                       ))}
                     </s-stack>
                     {hasMoreProducts && (
@@ -3408,7 +3420,15 @@ export function InventoryCountList({
                   <s-text emphasis="bold">予定外リスト（リストにない商品）</s-text>
                   <s-stack gap="none">
                     {extraLines.map((l) => (
-                      <InventoryCountLineRow key={l.id} line={l} onRemove={removeLine} />
+                      <InventoryCountLineRow
+                        key={l.id}
+                        line={l}
+                        onRemove={removeLine}
+                        updateActualQuantity={updateActualQuantity}
+                        setActualQuantity={setActualQuantity}
+                        showImages={showImages}
+                        liteMode={liteMode}
+                      />
                     ))}
                   </s-stack>
                 </s-stack>

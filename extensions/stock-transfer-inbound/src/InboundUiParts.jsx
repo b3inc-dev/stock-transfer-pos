@@ -4,6 +4,7 @@
  * - renderInboundShipmentItems_
  * - ユーティリティ: toSafeId, calcQtyWidthPx_, normalizeVariantOptions_, formatOptionsLine_
  */
+import { memo } from "preact/compat";
 import { useState, useEffect, useMemo } from "preact/hooks";
 
 // ----- ユーティリティ（REFERENCE 互換） -----
@@ -521,6 +522,44 @@ export function renderConfirmMemo_({ extrasHistoryLoading, confirmMemo }) {
   );
 }
 
+// ----- InboundAddedLineRowMemo（行だけ変えたときの再描画を防ぎ、数量操作を軽くする） -----
+const InboundAddedLineRowMemo = memo(function InboundAddedLineRowMemo({
+  row,
+  setRowQty,
+  showImages,
+  dialog,
+  readOnly = false,
+}) {
+  const planned = Number(row?.plannedQty ?? 0);
+  const received = Number(row?.receiveQty ?? 0);
+  const sku = String(row?.sku || "").trim();
+  const barcode = String(row?.barcode || "").trim();
+  const skuLine = sku
+    ? `SKU:${sku}${barcode ? ` / JAN:${barcode}` : ""}`
+    : barcode
+    ? `JAN:${barcode}`
+    : "";
+  const bottomLeft = `予定 ${planned} / 入庫 ${received}`;
+  const hasDiff = planned !== received;
+  const bottomLeftTone = hasDiff ? "critical" : "subdued";
+  return (
+    <InboundAddedLineRow
+      row={row}
+      showImages={showImages}
+      dialog={dialog}
+      qty={received}
+      modalKey={row.key}
+      skuLine={skuLine}
+      bottomLeft={bottomLeft}
+      bottomLeftTone={bottomLeftTone}
+      onDec={() => setRowQty(row.key, Math.max(0, received - 1))}
+      onInc={() => setRowQty(row.key, received + 1)}
+      onSetQty={(n) => setRowQty(row.key, n)}
+      readOnly={readOnly}
+    />
+  );
+});
+
 // ----- renderInboundShipmentItems_ -----
 export function renderInboundShipmentItems_({ rows, showImages, dialog, setRowQty, readOnly = false }) {
   if (!Array.isArray(rows) || rows.length === 0) {
@@ -528,37 +567,16 @@ export function renderInboundShipmentItems_({ rows, showImages, dialog, setRowQt
   }
   return (
     <s-stack gap="none">
-      {rows.map((r) => {
-        const planned = Number(r?.plannedQty ?? 0);
-        const received = Number(r?.receiveQty ?? 0);
-        const sku = String(r?.sku || "").trim();
-        const barcode = String(r?.barcode || "").trim();
-        const skuLine = sku
-          ? `SKU:${sku}${barcode ? ` / JAN:${barcode}` : ""}`
-          : barcode
-          ? `JAN:${barcode}`
-          : "";
-        const bottomLeft = `予定 ${planned} / 入庫 ${received}`;
-        const hasDiff = planned !== received;
-        const bottomLeftTone = hasDiff ? "critical" : "subdued";
-        return (
-          <InboundAddedLineRow
-            key={r.key}
-            row={r}
-            showImages={showImages}
-            dialog={dialog}
-            qty={received}
-            modalKey={r.key}
-            skuLine={skuLine}
-            bottomLeft={bottomLeft}
-            bottomLeftTone={bottomLeftTone}
-            onDec={() => setRowQty(r.key, Math.max(0, received - 1))}
-            onInc={() => setRowQty(r.key, received + 1)}
-            onSetQty={(n) => setRowQty(r.key, n)}
-            readOnly={readOnly}
-          />
-        );
-      })}
+      {rows.map((r) => (
+        <InboundAddedLineRowMemo
+          key={r.key}
+          row={r}
+          setRowQty={setRowQty}
+          showImages={showImages}
+          dialog={dialog}
+          readOnly={readOnly}
+        />
+      ))}
     </s-stack>
   );
 }

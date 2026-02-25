@@ -1,3 +1,4 @@
+import { memo } from "preact/compat";
 import { useState, useMemo, useEffect, useCallback, useRef } from "preact/hooks";
 import {
   searchVariants,
@@ -448,8 +449,9 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
     linesRef.current = lines;
   }, [lines]);
 
-  // スキャンキュー処理用のref
+  // スキャンキュー処理用のref（入庫と同様：ストレージ→メモリキュー→処理で連続スキャン可能に）
   const scanWorkingRef = useRef(false);
+  const scanQueueRef = useRef([]);
 
   // 下書き復元（マウント時のみ実行）
   useEffect(() => {
@@ -729,62 +731,62 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
   // ✅ スキャンイベントの購読はModal.jsxで行う（出庫/入庫と同じ実装）
   // ここでは削除（重複を避けるため）
   
-  // ✅ スキャンキューの処理（OutboundListと同じ）- locationGidとupsertLineByResolvedVariantの定義後に移動
-  const processScanQueueOnce = useCallback(async () => {
+  // ✅ スキャン処理：メモリキューから1件取り出して resolve → 追加（入庫と同様。連続スキャン時もキューが貯まる）
+  const processScanQueue = useCallback(async () => {
     if (scanWorkingRef.current) return;
+    if (scanQueueRef.current.length === 0) return;
+    if (!locationGid) return;
+    const head = scanQueueRef.current.shift();
+    if (!head) return;
     scanWorkingRef.current = true;
-
     try {
-      const hasStorage = !!SHOPIFY?.storage?.get && !!SHOPIFY?.storage?.set;
-      if (!hasStorage) return;
+      const includeImages = showImages && !liteMode;
+      const resolved = await resolveVariantByCode(head, { includeImages });
+      if (!resolved?.variantId) {
+        toast(`商品が見つかりません: ${head}`);
+        return;
+      }
+      upsertLineByResolvedVariant(resolved, { incBy: 1, closeSearch: false });
+      toast(`${resolved.barcode || resolved.sku || resolved.productTitle || "(no title)"} を追加しました（+1）`);
+    } catch (e) {
+      console.error("processScanQueue error:", e);
+    } finally {
+      scanWorkingRef.current = false;
+      if (scanQueueRef.current.length > 0) processScanQueue().catch(() => {});
+    }
+  }, [locationGid, showImages, upsertLineByResolvedVariant]);
 
+  const kickProcessScanQueue = useCallback(() => {
+    processScanQueue().catch(() => {});
+  }, [processScanQueue]);
+
+  // ✅ ストレージ→メモリキューを100ms間隔で取り出し（入庫と同様。resolveを待たず次を貯めるので連続スキャンが速い）
+  useEffect(() => {
+    const tick = async () => {
+      if (!SHOPIFY?.storage?.get || !SHOPIFY?.storage?.set) return;
       const q = (await SHOPIFY.storage.get(SCAN_QUEUE_KEY)) || {};
       const list = Array.isArray(q.items) ? q.items : [];
       if (list.length === 0) return;
-
       const headRaw = String(list[0] || "").trim();
       const rest = list.slice(1);
-
       const codes = splitScanInputToCodes_(headRaw);
       const head = String(codes[0] || "").trim();
       const remainingCodes = codes.slice(1);
-
       const nextItems = [...remainingCodes, ...rest];
-
       await SHOPIFY.storage.set(SCAN_QUEUE_KEY, {
         items: nextItems,
         lastV: q.lastV || "",
         lastT: Number(q.lastT || 0),
         updatedAt: Date.now(),
       });
-
-      if (!head) return;
-      if (!locationGid) return;
-
-      const includeImages = showImages && !liteMode;
-      const resolved = await resolveVariantByCode(head, { includeImages });
-
-      if (!resolved?.variantId) {
-        toast(`商品が見つかりません: ${head}`);
-        return;
+      if (head) {
+        scanQueueRef.current.push(head);
+        kickProcessScanQueue();
       }
-
-      upsertLineByResolvedVariant(resolved, { incBy: 1, closeSearch: false });
-      toast(`${resolved.productTitle || resolved.sku || "(no title)"} を追加しました（+1）`);
-    } catch (e) {
-      console.error("processScanQueueOnce error:", e);
-    } finally {
-      scanWorkingRef.current = false;
-    }
-  }, [locationGid, showImages, upsertLineByResolvedVariant]);
-
-  // ✅ スキャンキューの定期処理（100ms間隔）
-  useEffect(() => {
-    const t = setInterval(() => {
-      processScanQueueOnce().catch(() => {});
-    }, 100);
+    };
+    const t = setInterval(() => { tick().catch(() => {}); }, 100);
     return () => clearInterval(t);
-  }, [processScanQueueOnce]);
+  }, [kickProcessScanQueue]);
 
   const addLine = useCallback((c) => {
     if (!c?.inventoryItemId || !c?.variantId) return;
@@ -1148,14 +1150,14 @@ await SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY);
     const addOne = async () => {
       upsertLineByResolvedVariant(resolved, { incBy: 1, closeSearch: false });
       setCandidateQty(key, shownQty + 1);
-      toast(`${productTitle || "(no title)"} を追加しました（+1）`);
+      toast(`${resolved?.barcode || resolved?.sku || productTitle || "(no title)"} を追加しました（+1）`);
     };
 
     const commitAddByQty = async () => {
       const n = clampAdd(String(text || "").trim());
       upsertLineByResolvedVariant(resolved, { incBy: n, closeSearch: false });
       setCandidateQty(key, n);
-      toast(`${productTitle || "(no title)"} を追加しました（+${n}）`);
+      toast(`${resolved?.barcode || resolved?.sku || productTitle || "(no title)"} を追加しました（+${n}）`);
     };
 
     // ▼ 在庫（すべての候補に対して取得）
@@ -1301,6 +1303,22 @@ await SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY);
       </s-box>
     );
   };
+
+  const adjustmentAddedLineRowMemoRef = useRef(null);
+  if (adjustmentAddedLineRowMemoRef.current === null) {
+    adjustmentAddedLineRowMemoRef.current = memo(function AdjustmentAddedLineRowMemo({ line, inc, setQty, remove }) {
+      return (
+        <LossAddedLineRow
+          line={line}
+          onDec={() => inc(line.id, -1)}
+          onInc={() => inc(line.id, 1)}
+          onSetQty={(n) => setQty(line.id, n)}
+          onRemove={() => remove(line.id)}
+        />
+      );
+    });
+  }
+  const AdjustmentAddedLineRowMemo = adjustmentAddedLineRowMemoRef.current;
 
   const handleReset = useCallback(async () => {
     setLines([]);
@@ -1457,13 +1475,12 @@ await SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY);
             <s-text emphasis="bold">調整リスト</s-text>
             <s-box style={{ blockSize: "8px" }} />
             {lines.map((l) => (
-              <LossAddedLineRow
+              <AdjustmentAddedLineRowMemo
                 key={l.id}
                 line={l}
-                onDec={() => inc(l.id, -1)}
-                onInc={() => inc(l.id, 1)}
-                onSetQty={(n) => setQty(l.id, n)}
-                onRemove={() => remove(l.id)}
+                inc={inc}
+                setQty={setQty}
+                remove={remove}
               />
             ))}
           </s-stack>

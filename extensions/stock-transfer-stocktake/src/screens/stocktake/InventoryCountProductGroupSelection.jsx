@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "preact/hooks";
-import { getProductGroupName, getLocationName, readInventoryCountById, readInventoryCounts, writeInventoryCounts, fetchProductsByGroups, getCurrentQuantity, normalizeIdForMatch, getCancelledGroupIdSet } from "./stocktakeApi.js";
+import { getProductGroupName, getLocationName, readInventoryCountById, readInventoryCounts, writeInventoryCounts, fetchProductsByGroups, getCurrentQuantitiesBulk, normalizeIdForMatch, getCancelledGroupIdSet } from "./stocktakeApi.js";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
 
@@ -124,12 +124,10 @@ export function InventoryCountProductGroupSelection({
     const productGroupIds = Array.isArray(c.productGroupIds) ? c.productGroupIds : [];
     if (productGroupIds.length === 0) return;
 
-    const qtyMap = new Map();
     const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
     const countItemsLegacy = Array.isArray(c?.items) ? c.items : [];
 
-    // ✅ レート制限回避：グループを順次処理し、在庫数取得は15件ずつバッチで実行（stocktakeApi の QTY_BATCH_SIZE と同様）
-    const QTY_BATCH_SIZE = 15;
+    // ✅ グループを順次処理し、取得できたグループから順次UIに反映。在庫数は一括取得で高速化
     const toProducts = (raw) => (Array.isArray(raw) ? raw : (raw?.products ?? []));
 
     try {
@@ -172,16 +170,13 @@ export function InventoryCountProductGroupSelection({
               });
               const products = toProducts(raw);
               skuCount = products.length;
-              // ✅ 一括 Promise.all はレート制限で失敗しやすいため、15件ずつバッチで取得
-              for (let i = 0; i < products.length; i += QTY_BATCH_SIZE) {
-                const batch = products.slice(i, i + QTY_BATCH_SIZE);
-                const qtys = await Promise.all(
-                  batch.map(async (p) => {
-                    const qty = await getCurrentQuantity(p.inventoryItemId, c.locationId);
-                    return qty !== null ? qty : 0;
-                  })
+              const ids = products.map((p) => p.inventoryItemId).filter(Boolean);
+              if (ids.length > 0) {
+                const qtyMap = await getCurrentQuantitiesBulk(ids, c.locationId);
+                totalQty = products.reduce(
+                  (sum, p) => sum + (p.inventoryItemId ? (qtyMap.get(p.inventoryItemId) ?? 0) : 0),
+                  0
                 );
-                totalQty += qtys.reduce((sum, qty) => sum + qty, 0);
               }
               actualQty = 0;
             } else {
@@ -203,17 +198,16 @@ export function InventoryCountProductGroupSelection({
             status = "処理中";
           }
 
-          qtyMap.set(groupId, { total: totalQty, actual: actualQty, status, skuCount });
+          const entry = { total: totalQty, actual: actualQty, status, skuCount };
+          setProductGroupQuantities((prev) => new Map(prev).set(groupId, entry));
         } catch (e) {
           console.error(`Failed to get quantity for product group ${groupId}:`, e);
-          qtyMap.set(groupId, { total: 0, actual: 0, status: "未処理", skuCount: 0 });
+          setProductGroupQuantities((prev) => new Map(prev).set(groupId, { total: 0, actual: 0, status: "未処理", skuCount: 0 }));
         }
       }
     } catch (e) {
       console.error("Failed to load product group quantities:", e);
     }
-
-    setProductGroupQuantities(qtyMap);
   }, [effectiveCount]);
 
   // ✅ 初回は在庫数を自動読込しない。ヘッダー「在庫数読込」またはフッター「再読込」で取得（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）

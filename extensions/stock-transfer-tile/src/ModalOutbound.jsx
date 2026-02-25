@@ -1,5 +1,6 @@
 // ModalOutbound.jsx（出庫のみ）
 import { render, Component } from "preact";
+import { memo } from "preact/compat";
 import { useEffect, useMemo, useRef, useState, useCallback } from "preact/hooks";
 import {
   SETTINGS_NS,
@@ -6136,15 +6137,11 @@ function OutboundList({
     }
   };
 
-  const inc = (id, delta) => {
+  const inc = useCallback((id, delta) => {
     setLines((prev) => {
-      // 安全のため、配列でない場合は空配列を返す
       if (!Array.isArray(prev)) return [];
-      // idの型を統一して比較（null/undefined対策）
       const targetId = String(id || "").trim();
-      if (!targetId) return prev; // idが空の場合は何もしない
-      
-      // すべてのアイテムを保持しながら、一致するidのアイテムのみ更新
+      if (!targetId) return prev;
       const updated = prev.map((l) => {
         const lineId = String(l?.id || "").trim();
         if (lineId && lineId === targetId) {
@@ -6152,21 +6149,16 @@ function OutboundList({
         }
         return l;
       });
-      // qtyが0以下のアイテムをフィルタリング（削除）
       return updated.filter((l) => Number(l?.qty || 0) > 0);
     });
-  };
+  }, []);
 
-  const setQty = (id, qty) => {
+  const setQty = useCallback((id, qty) => {
     const n = Math.max(1, Number(qty || 1));
     setLines((prev) => {
-      // 安全のため、配列でない場合は空配列を返す
       if (!Array.isArray(prev)) return [];
-      // idの型を統一して比較（null/undefined対策）
       const targetId = String(id || "").trim();
-      if (!targetId) return prev; // idが空の場合は何もしない
-      
-      // すべてのアイテムを保持しながら、一致するidのアイテムのみ更新
+      if (!targetId) return prev;
       return prev.map((l) => {
         const lineId = String(l?.id || "").trim();
         if (lineId && lineId === targetId) {
@@ -6175,9 +6167,9 @@ function OutboundList({
         return l;
       });
     });
-  };
+  }, []);
 
-  const remove = (id) => setLines((prev) => prev.filter((l) => l.id !== id));
+  const remove = useCallback((id) => setLines((prev) => prev.filter((l) => l.id !== id)), []);
 
   const refreshStocks = useCallback(async () => {
     if (!originLocationGid) {
@@ -8290,15 +8282,14 @@ function OutboundList({
             <s-box style={{ blockSize: "8px" }} />
 
             {lines.map((l) => (
-              <OutboundAddedLineRow
+              <OutboundAddedLineRowMemo
                 key={l.id}
                 line={l}
+                inc={inc}
+                setQty={setQty}
+                remove={remove}
                 showImages={showImages}
                 dialog={dialog}
-                onDec={() => inc(l.id, -1)}
-                onInc={() => inc(l.id, +1)}
-                onSetQty={(n) => setQty(l.id, n)}
-                onRemove={() => remove(l.id)}
               />
             ))}
           </s-stack>
@@ -8311,6 +8302,28 @@ function OutboundList({
 function toSafeId(s) {
   return String(s || "x").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60);
 }
+
+/* OutboundAddedLineRowMemo（行だけ変えたときの再描画を防ぎ、数量操作を軽くする） */
+const OutboundAddedLineRowMemo = memo(function OutboundAddedLineRowMemo({
+  line,
+  inc,
+  setQty,
+  remove,
+  showImages,
+  dialog,
+}) {
+  return (
+    <OutboundAddedLineRow
+      line={line}
+      showImages={showImages}
+      dialog={dialog}
+      onDec={() => inc(line.id, -1)}
+      onInc={() => inc(line.id, 1)}
+      onSetQty={(n) => setQty(line.id, n)}
+      onRemove={() => remove(line.id)}
+    />
+  );
+});
 
 /* OutboundAddedLineRow */
 function OutboundAddedLineRow({
