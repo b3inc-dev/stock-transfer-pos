@@ -90,16 +90,6 @@ export function InventoryCountProductGroupSelection({
     return () => { mounted = false; };
   }, [count?.id]);
 
-  // ✅ 商品グループ一覧表示後に、各行の「N件 N/N」をバックグラウンドで自動取得（先に描画し数値は後から流し込む）
-  useEffect(() => {
-    const c = effectiveCount;
-    if (!c?.productGroupIds?.length) return;
-    const countId = c.id;
-    if (!countId || quantitiesAutoLoadStartedRef.current.has(countId)) return;
-    quantitiesAutoLoadStartedRef.current.add(countId);
-    loadProductGroupQuantities();
-  }, [effectiveCount, loadProductGroupQuantities]);
-
   // 商品グループ名を取得（Map のキーは正規化キーで統一し、GID と数値の混在でずれないようにする）
   useEffect(() => {
     const c = effectiveCount ?? count;
@@ -221,6 +211,16 @@ export function InventoryCountProductGroupSelection({
       console.error("Failed to load product group quantities:", e);
     }
   }, [effectiveCount]);
+
+  // ✅ 商品グループ一覧表示後に、各行の「N件 N/N」をバックグラウンドで自動取得（loadProductGroupQuantities 定義の後に配置し未初期化参照を防ぐ）
+  useEffect(() => {
+    const c = effectiveCount;
+    if (!c?.productGroupIds?.length) return;
+    const countId = c.id;
+    if (!countId || quantitiesAutoLoadStartedRef.current.has(countId)) return;
+    quantitiesAutoLoadStartedRef.current.add(countId);
+    loadProductGroupQuantities();
+  }, [effectiveCount, loadProductGroupQuantities]);
 
   // ✅ 初回は在庫数を自動読込しない。ヘッダー「在庫数読込」またはフッター「再読込」で取得（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
 
