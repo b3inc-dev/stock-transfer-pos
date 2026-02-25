@@ -5147,14 +5147,14 @@ export default function InventoryCountPage() {
             </s-box>
           )}
 
-          {/* 棚卸ID発行 */}
+          {/* 棚卸ID発行（商品グループ設定タブと同じUI：白カード＋グループを追加と同じボタンスタイル） */}
           {activeTab === "create" && (
             <s-box padding="base">
               <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
-                {/* 左側: タイトル＋説明 ＋ 発行フォーム（フォーム領域を白カードに） */}
+                {/* 左側: タイトル＋説明 ＋ 発行フォーム（商品グループ設定と同じ白カード構成） */}
                 <div style={{ flex: "1 1 320px", minWidth: 0 }}>
                   <s-stack gap="base">
-                    {/* タイトル＋説明 */}
+                    {/* タイトル＋説明（商品グループ設定タブと同様） */}
                     <div>
                       <div
                         style={{
@@ -5170,7 +5170,7 @@ export default function InventoryCountPage() {
                       </s-text>
                     </div>
 
-                    {/* 発行フォーム（白カード） */}
+                    {/* 発行フォーム（商品グループ「グループを追加」と同じ白カード） */}
                     <div
                       style={{
                         background: "#ffffff",
@@ -5180,6 +5180,8 @@ export default function InventoryCountPage() {
                       }}
                     >
                       <s-stack gap="base">
+                        <s-text emphasis="bold" size="large">棚卸ID発行</s-text>
+                        <s-divider />
                         {/* Step 1: ロケーション選択 */}
                         <s-stack gap="base">
                           <s-text emphasis="bold" size="small">1. ロケーション選択</s-text>
@@ -5283,13 +5285,27 @@ export default function InventoryCountPage() {
                         </s-stack>
                         <s-divider />
 
-                        <s-button
-                          onClick={handleCreateCount}
-                          disabled={fetcher.state !== "idle" || !createLocationId || createProductGroupIds.length === 0}
-                          tone="success"
-                        >
-                          棚卸IDを発行
-                        </s-button>
+                        {/* グループを追加と同じボタンスタイル */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                          <button
+                            type="button"
+                            onClick={handleCreateCount}
+                            disabled={fetcher.state !== "idle" || !createLocationId || createProductGroupIds.length === 0}
+                            style={{
+                              padding: "8px 16px",
+                              backgroundColor: fetcher.state !== "idle" || !createLocationId || createProductGroupIds.length === 0 ? "#d1d5db" : "#2563eb",
+                              color: "#ffffff",
+                              border: "none",
+                              borderRadius: "6px",
+                              fontSize: "14px",
+                              fontWeight: 600,
+                              cursor: fetcher.state !== "idle" || !createLocationId || createProductGroupIds.length === 0 ? "not-allowed" : "pointer",
+                              width: "100%",
+                            }}
+                          >
+                            棚卸IDを発行
+                          </button>
+                        </div>
                         {fetcher.data?.ok && fetcher.data.inventoryCountId && (
                           <s-box padding="base" background="subdued">
                             <s-text emphasis="bold" tone="success">

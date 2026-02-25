@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "preact/hooks";
-import { getProductGroupName, getLocationName, readInventoryCountById, readInventoryCounts, writeInventoryCounts, fetchProductsByGroups, getCurrentQuantity, normalizeIdForMatch } from "./stocktakeApi.js";
+import { getProductGroupName, getLocationName, readInventoryCountById, readInventoryCounts, writeInventoryCounts, fetchProductsByGroups, getCurrentQuantity, normalizeIdForMatch, getCancelledGroupIdSet } from "./stocktakeApi.js";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
 
@@ -361,20 +361,30 @@ export function InventoryCountProductGroupSelection({
     );
   }
 
+  const c = effectiveCount ?? count;
+  const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
+  const cancelledSet = getCancelledGroupIdSet(c);
+
   return (
     <s-box padding="base">
       <s-stack gap="none">
         {productGroups.map((group, index) => {
           const groupId = String(group?.id || "").trim();
           const groupName = group?.name || groupId;
-          
-          // ✅ 数量情報を取得（入庫のシップメント選択画面と同じ方式）
+
+          // ✅ ステータスは count から即時表示（在庫数読込ボタン不要）。完了・キャンセル・未処理を groupItems / cancelledGroupIds で判定
+          const groupItemsForStatus = getGroupItemsByKey(groupItemsMap, groupId);
+          const isGroupCompleted = groupItemsForStatus.length > 0;
+          const isGroupCancelled = cancelledSet.has(normalizeIdForMatch(groupId));
+          let statusJa = "未処理";
+          if (isGroupCancelled) statusJa = "キャンセル";
+          else if (isGroupCompleted) statusJa = "処理済み";
+
+          // ✅ 数量（件数・在庫数）は読込ボタンで取得した productGroupQuantities を使用
           const qtyInfo = productGroupQuantities.get(groupId) || { total: 0, actual: 0, status: "未処理", skuCount: 0 };
           const skuCount = qtyInfo.skuCount ?? 0;
-          // ✅ 未処理グループでも在庫数を表示（totalが0の場合は「-」を表示）
           const qtyText = qtyInfo.total > 0 ? `${qtyInfo.actual}/${qtyInfo.total}` : (qtyInfo.actual > 0 ? `${qtyInfo.actual}/-` : "-/-");
           const displayText = `${skuCount}件 ${qtyText}`;
-          const statusJa = qtyInfo.status || "未処理";
           const statusBadgeTone = getStatusBadgeTone(statusJa);
 
           return (

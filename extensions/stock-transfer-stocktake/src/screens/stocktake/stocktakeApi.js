@@ -272,8 +272,8 @@ function groupExists(productGroupsOrGroupIds, groupId) {
   return false;
 }
 
-/** キャンセル済みグループIDの Set（正規化済み）。管理画面でキャンセルしたグループを「完了」とみなす */
-function getCancelledGroupIdSet(c) {
+/** キャンセル済みグループIDの Set（正規化済み）。管理画面でキャンセルしたグループを「完了」とみなす。POS商品グループ一覧のステータス表示でも使用 */
+export function getCancelledGroupIdSet(c) {
   const arr = Array.isArray(c?.cancelledGroupIds) ? c.cancelledGroupIds : [];
   return new Set(arr.map((id) => normalizeIdForMatch(id)));
 }
