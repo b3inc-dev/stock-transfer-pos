@@ -1059,9 +1059,11 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
   const timeoutMs = Number.isFinite(Number(optsTimeoutMs)) ? Number(optsTimeoutMs) : (offset > 0 ? 90000 : 60000);
   /** コレクション経路の「さらに読み込む」用。前回レスポンスの pageInfo を渡すと after で次ページを取得する */
   const collectionPageInfo = optsCollectionPageInfo && typeof optsCollectionPageInfo === "object" ? optsCollectionPageInfo : null;
-  const groups = (Array.isArray(cachedProductGroups) && cachedProductGroups.length > 0)
+  const rawGroups = (Array.isArray(cachedProductGroups) && cachedProductGroups.length > 0)
     ? cachedProductGroups
     : await readProductGroups();
+  // ✅ null/undefined 対策：readProductGroups や cachedProductGroups が null の場合でも .filter で落ちないようにする
+  const groups = Array.isArray(rawGroups) ? rawGroups : [];
   // ✅ まとめて表示で2つ目以降のグループが取れない対策：IDの正規化で照合（GIDと数値の差を吸収）
   const normalizedIds = new Set((productGroupIds || []).map(normalizeIdForMatch));
   const targetGroups = groups.filter(

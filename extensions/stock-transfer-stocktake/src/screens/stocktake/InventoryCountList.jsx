@@ -800,8 +800,9 @@ export function InventoryCountList({
               });
               
               // ✅ 予定外商品の画像URLを取得するため、Promise.allで並列処理
+              // ✅ キャンセル済みで商品0件のとき completedItems が null なので .map で落ちないよう配列に正規化
               const completedLines = await Promise.all(
-                completedItems.map(async (it, i) => {
+                (completedItems || []).map(async (it, i) => {
                   const t = (it?.title || it?.sku || "-").split(" / ");
                   const productTitle = t[0] || "";
                   const variantTitle = t[1] || "";
