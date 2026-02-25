@@ -164,3 +164,27 @@
   - `extensions/stock-transfer-order/src/screens/order/OrderHistoryList.jsx`
   - `extensions/stock-transfer-adjustment/src/screens/loss/AdjustmentHistoryList.jsx`
   - `extensions/stock-transfer-purchase/src/screens/purchase/PurchaseHistoryList.jsx`
+
+---
+
+## 10. まとめて表示の不具合修正（2026-02-25）
+
+### 事象
+
+- **まとめて表示**で「商品がありません」と表示され、グループリストや各グループの「読込」ボタンが出ず、一度も商品グループごとに表示で開いていない場合はリストを読み込めない。
+- グループ横の「読込」ボタン押下時に **Can't find variable c** が表示される。
+- 最上部の「読込」ボタンが、1グループだけ読み込んだあとに消えてしまう。どのグループの読込になっているか分かりにくい。
+
+### 要因
+
+1. **グループリスト非表示**: まとめて表示モードで `lines.length === 0` のときに「商品がありません」で早期 return しており、`targetProductGroupIds` からグループ一覧と各「読込」ボタンを描画する処理に到達していなかった。
+2. **Can't find variable c**: `loadGroupProducts` 内の `setIsReadOnlyState(c?.status === ...)` で、コールバックの引数は `count` であり `c` は未定義だった。
+3. **最上部の読込ボタン**: 最上部の「読込」は **「さらに読み込む」用（ページネーション）** であり、まとめて表示で 0 件のときも表示されていた。1グループだけ読んだあと `hasMoreProducts` が false になるとボタンが消え、未読込の他グループ用と誤解されていた。
+
+### 対応
+
+1. **グループリストを常に表示**: `lines.length === 0` でも `targetProductGroupIds.length > 0` のときは早期 return しないようにし、グループごとのセクション（未読込時は「読込」ボタン）を描画するように変更。
+2. **変数名の修正**: `loadGroupProducts` 内の `c?.status` を `count?.status` に変更。
+3. **最上部ボタンの表示条件**: まとめて表示のときは、**既に 1 件以上表示されているときだけ**最上部の「未読み込みの商品があります。（要読込）」を表示するようにした（`hasMoreProducts && (!isMultipleMode || lines.length > 0)`）。0 件のときは各グループ横の「読込」のみ表示され、役割が分かりやすくなる。
+
+**変更ファイル**: `extensions/stock-transfer-stocktake/src/screens/stocktake/InventoryCountList.jsx`

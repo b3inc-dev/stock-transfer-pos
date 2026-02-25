@@ -124,6 +124,7 @@ export function InventoryCountConditions({
   const [incompleteGroupQuantities, setIncompleteGroupQuantities] = useState(new Map());
   const [chunkCount, setChunkCount] = useState(0);
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
+  const firstPageOptsRef = useRef({ productGroups: null, totalChunks: 0, useListMetafield: false });
 
   const filterByLocation = useCallback((list, locGid) => {
     if (!locGid) return list;
@@ -144,18 +145,23 @@ export function InventoryCountConditions({
   }, [counts, viewMode]);
 
   const hasMoreHistory = loadedChunkCount < chunkCount;
-  // ✅ さらに読み込み：新しい順で読むため「次のチャンク」は chunkCount - 1 - loadedChunkCount。設定の履歴一覧数（listLimit）ずつ読むまで複数チャンク取得
+  // ✅ さらに読み込み：productGroups/totalChunks/useListMetafield を渡してチャンク1本だけ取得（軽量化）
   const loadMoreHistory = useCallback(async () => {
     if (loadedChunkCount >= chunkCount) return;
     setLoading(true);
     await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
-      const listLimit = await getStocktakeListLimit();
+      const opts = firstPageOptsRef.current;
+      const listLimit = opts.listLimit ?? (await getStocktakeListLimit());
       const accumulated = [];
       let nextLoaded = loadedChunkCount;
       while (nextLoaded < chunkCount && accumulated.length < listLimit) {
         const chunkIndex = chunkCount - 1 - nextLoaded;
-        const result = await readInventoryCountsPage(chunkIndex);
+        const pageOpts =
+          opts.productGroups != null && opts.totalChunks > 0
+            ? { productGroups: opts.productGroups, totalChunks: chunkCount, useListMetafield: opts.useListMetafield }
+            : undefined;
+        const result = await readInventoryCountsPage(chunkIndex, pageOpts);
         const raw = Array.isArray(result.counts) ? result.counts : [];
         const filtered = locationGid ? filterByLocation(raw, locationGid) : raw;
         accumulated.push(...filtered);
@@ -288,14 +294,28 @@ export function InventoryCountConditions({
     await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
       let result = await readInventoryCountsFirstPage();
+      firstPageOptsRef.current = {
+        productGroups: result.productGroups ?? null,
+        listLimit: result.listLimit,
+        totalChunks: result.chunkCount ?? 0,
+        useListMetafield: result.useListMetafield === true,
+      };
       let allFetched = Array.isArray(result.counts) ? [...result.counts] : [];
       let loadedChunks = 1;
       const totalChunks = result.chunkCount ?? 0;
+      const pageOpts =
+        firstPageOptsRef.current.productGroups != null && totalChunks > 0
+          ? {
+              productGroups: firstPageOptsRef.current.productGroups,
+              totalChunks,
+              useListMetafield: firstPageOptsRef.current.useListMetafield,
+            }
+          : undefined;
       if (locationGid) {
         let filtered = filterByLocation(allFetched, locationGid);
         while (filtered.length === 0 && allFetched.length > 0 && loadedChunks < totalChunks) {
           const chunkIndex = totalChunks - 1 - loadedChunks;
-          const next = await readInventoryCountsPage(chunkIndex);
+          const next = await readInventoryCountsPage(chunkIndex, pageOpts);
           const nextCounts = Array.isArray(next.counts) ? next.counts : [];
           allFetched = [...allFetched, ...nextCounts];
           loadedChunks += 1;

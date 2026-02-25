@@ -10,6 +10,11 @@ const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
 const INVENTORY_COUNTS_KEY = "inventory_counts_v1";
 const SETTINGS_KEY = "settings_v1";
+const INVENTORY_COUNTS_LIST_KEY = "inventory_counts_list_v1";
+const INVENTORY_COUNTS_LIST_CHUNK_PREFIX = "inventory_counts_list_v1_c";
+const INVENTORY_COUNT_INDEX_KEY = "inventory_count_index_v1";
+const PRODUCT_GROUP_IDS_KEY = "product_group_ids_v1";
+const PRODUCT_GROUP_NAMES_KEY = "product_group_names_v1";
 
 /**
  * 管理画面・POS で全明細を確実に読むため：1チャンクあたりの最大バイト数。
@@ -19,6 +24,18 @@ const SETTINGS_KEY = "settings_v1";
 const INVENTORY_COUNTS_CHUNK_BYTES = 32_000;
 const INVENTORY_COUNTS_CHUNK_KEY_PREFIX = "inventory_counts_v1_c";
 const METAFIELDS_SET_MAX = 25;
+
+/** 商品グループ保存用メタフィールド（本體・ID一覧・ID→名前）。POS の一覧で軽量読取用 */
+function productGroupsMetafields(
+  ownerId: string,
+  productGroups: Array<{ id: string; name?: string | null }>
+): Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> {
+  return [
+    { ownerId, namespace: NS, key: PRODUCT_GROUPS_KEY, type: "json", value: JSON.stringify(productGroups) },
+    { ownerId, namespace: NS, key: PRODUCT_GROUP_IDS_KEY, type: "json", value: JSON.stringify(productGroups.map((g) => g.id)) },
+    { ownerId, namespace: NS, key: PRODUCT_GROUP_NAMES_KEY, type: "json", value: JSON.stringify(Object.fromEntries(productGroups.map((g) => [g.id, g.name ?? ""]))) },
+  ];
+}
 
 /** 1件の棚卸が CHUNK_BYTES を超える場合の「パート」形式（読込時に結合する） */
 type CountPart = {
@@ -85,9 +102,86 @@ function mergeCountParts(parts: CountPart[]): InventoryCount {
   return base as InventoryCount;
 }
 
+const CHUNK_FETCH_CONCURRENCY = 8; // チャンク並列取得数（502/タイムアウト・レート制限のバランス）
+const CHUNK_FETCH_RETRY = 1; // 1回リトライ（502/499の一時的失敗対策）
+
+async function fetchOneChunk(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  key: string,
+  chunkIndex: number
+): Promise<string | null> {
+  const gql = `#graphql
+    query InventoryCountChunk($key: String!) {
+      currentAppInstallation {
+        metafield(namespace: "${NS}", key: $key) { value }
+      }
+    }
+  `;
+  for (let attempt = 0; attempt <= CHUNK_FETCH_RETRY; attempt++) {
+    try {
+      const resp = await admin.graphql(gql, { variables: { key } });
+      const json = await resp.json();
+      const chunkRaw = json?.data?.currentAppInstallation?.metafield?.value;
+      if (chunkRaw != null && chunkRaw !== "") return chunkRaw;
+    } catch (e) {
+      if (attempt === CHUNK_FETCH_RETRY) {
+        console.warn(`[inventory-count] chunk ${chunkIndex} fetch failed after retry:`, (e as Error)?.message ?? e);
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 一覧用メタフィールド（list）をチャンク並列で読み込む。list が無い場合は空配列を返す。
+ */
+async function readInventoryCountsListChunked(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
+  const listResp = await admin.graphql(
+    `#graphql
+      query InventoryCountListMain {
+        currentAppInstallation {
+          metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_LIST_KEY}") { value }
+        }
+      }
+    `
+  );
+  const listJson = await listResp.json();
+  const listRaw = listJson?.data?.currentAppInstallation?.metafield?.value;
+  if (listRaw == null || listRaw === "") return [];
+  let listParsed: { _chunked?: boolean; totalChunks?: number };
+  try {
+    listParsed = JSON.parse(listRaw);
+  } catch {
+    return [];
+  }
+  if (!listParsed?._chunked || typeof listParsed.totalChunks !== "number" || listParsed.totalChunks < 1) return [];
+  const totalChunks = listParsed.totalChunks;
+  const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i);
+  const chunks: (string | null)[] = [];
+  for (let start = 0; start < chunkIndices.length; start += CHUNK_FETCH_CONCURRENCY) {
+    const batch = chunkIndices.slice(start, start + CHUNK_FETCH_CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map((i) => fetchOneChunk(admin, `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${i}`, i))
+    );
+    chunks.push(...batchResults);
+  }
+  const counts: InventoryCount[] = [];
+  for (const chunkRaw of chunks) {
+    if (chunkRaw == null) continue;
+    try {
+      const chunk = JSON.parse(chunkRaw);
+      if (Array.isArray(chunk)) counts.push(...(chunk as InventoryCount[]));
+    } catch {
+      // skip invalid chunk
+    }
+  }
+  return counts;
+}
+
 /**
  * 棚卸メタフィールドをチャンク対応で読み込む（管理画面・応答サイズ制限で明細が欠ける問題を解消）。
- * 単一 key の場合は従来どおり。_chunked の場合は複数 key を個別取得して結合する。
+ * 単一 key の場合は従来どおり。_chunked の場合は複数 key を並列取得して結合する（502/タイムアウト対策）。
  * チャンク内に「パート」形式（_part: true）が含まれる場合は countId ごとに結合してから返す。
  */
 async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
@@ -114,20 +208,17 @@ async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: {
   if (!desc._chunked || typeof desc.totalChunks !== "number" || desc.totalChunks < 1) return [];
   const fullCounts: InventoryCount[] = [];
   const partsByCountId = new Map<string, CountPart[]>();
-  for (let i = 0; i < desc.totalChunks; i++) {
-    const key = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`;
-    const resp = await admin.graphql(
-      `#graphql
-        query InventoryCountChunk($key: String!) {
-          currentAppInstallation {
-            metafield(namespace: "${NS}", key: $key) { value }
-          }
-        }
-      `,
-      { variables: { key } }
+  const totalChunks = desc.totalChunks;
+  const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i);
+  const chunkRaws: (string | null)[] = [];
+  for (let start = 0; start < chunkIndices.length; start += CHUNK_FETCH_CONCURRENCY) {
+    const batch = chunkIndices.slice(start, start + CHUNK_FETCH_CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map((i) => fetchOneChunk(admin, `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`, i))
     );
-    const json = await resp.json();
-    const chunkRaw = json?.data?.currentAppInstallation?.metafield?.value;
+    chunkRaws.push(...batchResults);
+  }
+  for (const chunkRaw of chunkRaws) {
     if (chunkRaw == null) continue;
     try {
       const chunk = JSON.parse(chunkRaw);
@@ -226,8 +317,20 @@ function splitCountIntoParts(count: InventoryCount): CountPart[] {
   return parts;
 }
 
+function toMinimalCountForList(c: InventoryCount): Record<string, unknown> {
+  return {
+    id: c.id,
+    locationId: c.locationId,
+    status: c.status,
+    countName: c.countName,
+    createdAt: c.createdAt,
+    productGroupIds: Array.isArray(c.productGroupIds) ? c.productGroupIds : c.productGroupId ? [c.productGroupId] : [],
+  };
+}
+
 /**
  * 棚卸メタフィールドをチャンク対応で保存（単体が CHUNK_BYTES を超える場合は groupItems/items をパート分割）。
+ * 一覧用軽量メタフィールド（list）と棚卸ID→チャンク番号インデックスも同時に保存。
  */
 async function writeInventoryCountsChunked(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
@@ -236,14 +339,27 @@ async function writeInventoryCountsChunked(
 ): Promise<{ userErrors: Array<{ message?: string }> }> {
   const arr = Array.isArray(counts) ? counts : [];
   const payloads: (InventoryCount | CountPart)[][] = [];
+  const countIdToChunkIndices = new Map<string, Set<number>>();
   let current: (InventoryCount | CountPart)[] = [];
   let currentSize = 2;
+
+  function recordChunk(chunkIndex: number, items: (InventoryCount | CountPart)[]) {
+    for (const it of items) {
+      const cid = (it as InventoryCount).id ?? (it as CountPart).countId;
+      if (cid) {
+        if (!countIdToChunkIndices.has(cid)) countIdToChunkIndices.set(cid, new Set());
+        countIdToChunkIndices.get(cid)!.add(chunkIndex);
+      }
+    }
+  }
 
   for (const count of arr) {
     const countStr = JSON.stringify(count);
     if (countStr.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
       if (currentSize + countStr.length + 1 > INVENTORY_COUNTS_CHUNK_BYTES && current.length > 0) {
+        const chunkIndex = payloads.length;
         payloads.push(current);
+        recordChunk(chunkIndex, current);
         current = [];
         currentSize = 2;
       }
@@ -251,7 +367,9 @@ async function writeInventoryCountsChunked(
       currentSize += countStr.length + 1;
     } else {
       if (current.length > 0) {
+        const chunkIndex = payloads.length;
         payloads.push(current);
+        recordChunk(chunkIndex, current);
         current = [];
         currentSize = 2;
       }
@@ -259,7 +377,9 @@ async function writeInventoryCountsChunked(
       for (const part of parts) {
         const partStr = JSON.stringify(part);
         if (currentSize + partStr.length + 1 > INVENTORY_COUNTS_CHUNK_BYTES && current.length > 0) {
+          const chunkIndex = payloads.length;
           payloads.push(current);
+          recordChunk(chunkIndex, current);
           current = [];
           currentSize = 2;
         }
@@ -268,9 +388,18 @@ async function writeInventoryCountsChunked(
       }
     }
   }
-  if (current.length > 0) payloads.push(current);
+  if (current.length > 0) {
+    const chunkIndex = payloads.length;
+    payloads.push(current);
+    recordChunk(chunkIndex, current);
+  }
 
   if (payloads.length === 0) {
+    const metafields = [
+      { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" },
+      { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: "[]" },
+      { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: "{}" },
+    ];
     const resp = await admin.graphql(
       `#graphql
         mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) {
@@ -279,7 +408,7 @@ async function writeInventoryCountsChunked(
           }
         }
       `,
-      { variables: { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" }] } }
+      { variables: { metafields } }
     );
     const data = (await resp.json())?.data?.metafieldsSet;
     return { userErrors: data?.userErrors ?? [] };
@@ -320,6 +449,53 @@ async function writeInventoryCountsChunked(
     const resp = await admin.graphql(
       `#graphql
         mutation SetInventoryCountsChunk($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            userErrors { field message }
+          }
+        }
+      `,
+      { variables: { metafields: batch } }
+    );
+    const data = (await resp.json())?.data?.metafieldsSet;
+    if (data?.userErrors?.length) return { userErrors: data.userErrors };
+  }
+
+  const listItems = arr.map(toMinimalCountForList);
+  const listPayloads: string[] = [];
+  let listCurrent: Record<string, unknown>[] = [];
+  let listCurrentSize = 2;
+  for (const item of listItems) {
+    const itemStr = JSON.stringify(item);
+    if (listCurrentSize + itemStr.length + 1 > INVENTORY_COUNTS_CHUNK_BYTES && listCurrent.length > 0) {
+      listPayloads.push(JSON.stringify(listCurrent));
+      listCurrent = [];
+      listCurrentSize = 2;
+    }
+    listCurrent.push(item);
+    listCurrentSize += itemStr.length + 1;
+  }
+  if (listCurrent.length > 0) listPayloads.push(JSON.stringify(listCurrent));
+
+  const listDescriptor = JSON.stringify({ _chunked: true, totalChunks: listPayloads.length });
+  const indexValue = JSON.stringify(
+    Object.fromEntries([...countIdToChunkIndices].map(([id, set]) => [id, [...set].sort((a, b) => a - b)]))
+  );
+  const listMetafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> = [
+    { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: listDescriptor },
+    ...listPayloads.map((value, i) => ({
+      ownerId,
+      namespace: NS,
+      key: `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${i}`,
+      type: "json" as const,
+      value,
+    })),
+    { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: indexValue },
+  ];
+  for (let i = 0; i < listMetafields.length; i += METAFIELDS_SET_MAX) {
+    const batch = listMetafields.slice(i, i + METAFIELDS_SET_MAX);
+    const resp = await admin.graphql(
+      `#graphql
+        mutation SetInventoryCountsListChunk($metafields: [MetafieldsSetInput!]!) {
           metafieldsSet(metafields: $metafields) {
             userErrors { field message }
           }
@@ -404,8 +580,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // ショップのタイムゾーンを取得
   const shopTimezone = await getShopTimezone(admin);
 
-  // ロケーション・メタフィールド・設定は単発取得。棚卸はチャンク対応で全明細を確実に取得
-  const [locResp, appResp, settingsResp, inventoryCountsRaw] = await Promise.all([
+  // ロケーション・メタフィールド・設定・棚卸一覧（list 優先）を並列取得。list が無い場合のみフルチャンク取得
+  const [locResp, appResp, settingsResp, inventoryCountsFromList] = await Promise.all([
     admin.graphql(
       `#graphql
         query Locations($first: Int!) {
@@ -432,8 +608,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
       `
     ),
-    readInventoryCountsChunked(admin),
+    readInventoryCountsListChunked(admin),
   ]);
+  const usedListMetafield = inventoryCountsFromList.length > 0;
+  const inventoryCountsRaw = usedListMetafield
+    ? inventoryCountsFromList
+    : await readInventoryCountsChunked(admin);
 
   const locData = await locResp.json();
   const appData = await appResp.json();
@@ -456,29 +636,24 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   let inventoryCounts: InventoryCount[] = Array.isArray(inventoryCountsRaw) ? inventoryCountsRaw : [];
-  if (inventoryCounts.length > 0) {
+  if (inventoryCounts.length > 0 && !usedListMetafield) {
     try {
-      
-      // ✅ 完了判定を修正：全グループが完了している場合のみ完了ステータスにする
+      // ✅ 完了判定を修正：全グループが完了している場合のみ完了ステータスにする（フルデータ時のみ。list 一覧用のときは groupItems がないためスキップ）
       inventoryCounts = inventoryCounts.map((c) => {
         const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
           ? c.productGroupIds
           : c.productGroupId ? [c.productGroupId] : [];
         
         if (allIds.length === 0) {
-          // 商品グループがない場合は既存のステータスを保持
           return c;
         }
         
         const groupItemsMap = (c as any)?.groupItems && typeof (c as any).groupItems === "object" ? (c as any).groupItems : {};
-        // ✅ 全グループが完了しているか判定：groupItems[groupId]が存在し、かつ配列の長さが0より大きい（POS と同一の正規化キーで照合）
-        // ✅ 棚卸ID発行後にグループを削除した場合：そのグループは「完了」とみなしてブロックしない（allDone で true を返す）
         const countItemsLegacy = Array.isArray(c.items) && c.items.length > 0 ? c.items : [];
         const allDone = allIds.every((id) => {
           const productGroup = productGroups.find((g) => String(g.id) === String(id));
-          if (!productGroup) return true; // 削除済みグループは完了とみなす
+          if (!productGroup) return true;
           let groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(id));
-          // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
           if (groupItems.length === 0 && countItemsLegacy.length > 0) {
             const groupInventoryItemIds = productGroup?.inventoryItemIds || [];
             if (groupInventoryItemIds.length > 0) {
@@ -494,27 +669,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
           return groupItems.length > 0;
         });
         
-        // ✅ 完了は「全グループで groupItems[groupId].length > 0」のみとする（管理画面とアプリの表示を一致させる）
         const isCompleted = allDone;
-        
-        // ✅ 全グループが完了していない場合は必ず"in_progress"に設定（既存のstatusを保持しない）
         if (!isCompleted && c.status === "completed") {
-          return {
-            ...c,
-            status: "in_progress",
-            completedAt: undefined,
-          };
+          return { ...c, status: "in_progress", completedAt: undefined };
         }
-        
-        // ✅ 全グループが完了している場合は"completed"に設定
         if (isCompleted && c.status !== "completed") {
-          return {
-            ...c,
-            status: "completed",
-            completedAt: c.completedAt || new Date().toISOString(),
-          };
+          return { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
         }
-        
         return c;
       });
     } catch {
@@ -1017,6 +1178,64 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
+  // 棚卸: 編集時・CSV由来など「skus はあるが inventoryItemIds が空」のグループ用に SKU からバリアント情報を取得
+  if (actionType === "getVariantsBySkus") {
+    const skusStr = formData.get("skus") as string;
+    let skus: string[] = [];
+    try {
+      if (skusStr) skus = JSON.parse(skusStr);
+      if (!Array.isArray(skus)) skus = [];
+    } catch {}
+    if (skus.length === 0) return { ok: true, variants: [] };
+    try {
+      const ids = await resolveSkusToInventoryItemIds(admin, skus);
+      if (ids.length === 0) return { ok: true, variants: [] };
+      const gql = `#graphql
+        query GetInventoryItemNodes($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on InventoryItem {
+              id
+              variant {
+                id
+                title
+                sku
+                barcode
+                inventoryItem { id }
+                product { title }
+                selectedOptions { name value }
+              }
+            }
+          }
+        }`;
+      const resp = await admin.graphql(gql, { variables: { ids } });
+      const json = await resp.json();
+      const nodes = json?.data?.nodes ?? [];
+      const variants: SkuSearchVariant[] = [];
+      for (const n of nodes) {
+        const v = n?.variant;
+        if (!v?.inventoryItem?.id) continue;
+        const opts = v.selectedOptions ?? [];
+        const productTitle = v.product?.title ?? "";
+        const variantTitle = v.title ?? "";
+        variants.push({
+          variantId: v.id,
+          inventoryItemId: v.inventoryItem.id,
+          sku: v.sku ?? "",
+          barcode: v.barcode ?? "",
+          variantTitle,
+          productTitle,
+          title: productTitle + (variantTitle && variantTitle !== "Default Title" ? ` / ${variantTitle}` : ""),
+          option1: opts[0]?.value?.trim() || undefined,
+          option2: opts[1]?.value?.trim() || undefined,
+          option3: opts[2]?.value?.trim() || undefined,
+        });
+      }
+      return { ok: true, variants };
+    } catch {
+      return { ok: true, variants: [] };
+    }
+  }
+
   const appInstResp = await admin.graphql(
     `#graphql
       query GetAppInstallation {
@@ -1031,7 +1250,8 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
   }
 
-  // 現在のデータを取得（棚卸はチャンク対応で全明細を取得）
+  // 現在のデータを取得（商品グループは常に取得。棚卸フルデータは create_inventory_count のときだけ取得）
+  const needInventoryCounts = actionType === "create_inventory_count";
   const [currentResp, inventoryCountsFromChunked] = await Promise.all([
     admin.graphql(
       `#graphql
@@ -1042,7 +1262,7 @@ export async function action({ request }: ActionFunctionArgs) {
         }
       `
     ),
-    readInventoryCountsChunked(admin),
+    needInventoryCounts ? readInventoryCountsChunked(admin) : Promise.resolve([]),
   ]);
   const currentJson = await currentResp.json();
   let productGroups: ProductGroup[] = [];
@@ -1130,15 +1350,7 @@ export async function action({ request }: ActionFunctionArgs) {
         `,
         {
           variables: {
-            metafields: [
-              {
-                ownerId,
-                namespace: NS,
-                key: PRODUCT_GROUPS_KEY,
-                type: "json",
-                value: JSON.stringify(productGroups),
-              },
-            ],
+            metafields: productGroupsMetafields(ownerId, productGroups),
           },
         }
       );
@@ -1258,15 +1470,7 @@ export async function action({ request }: ActionFunctionArgs) {
       `,
       {
         variables: {
-          metafields: [
-            {
-              ownerId,
-              namespace: NS,
-              key: PRODUCT_GROUPS_KEY,
-              type: "json",
-              value: JSON.stringify(productGroups),
-            },
-          ],
+          metafields: productGroupsMetafields(ownerId, productGroups),
         },
       }
     );
@@ -1295,15 +1499,7 @@ export async function action({ request }: ActionFunctionArgs) {
       `,
       {
         variables: {
-          metafields: [
-            {
-              ownerId,
-              namespace: NS,
-              key: PRODUCT_GROUPS_KEY,
-              type: "json",
-              value: JSON.stringify(productGroups),
-            },
-          ],
+          metafields: productGroupsMetafields(ownerId, productGroups),
         },
       }
     );
@@ -1481,15 +1677,7 @@ export async function action({ request }: ActionFunctionArgs) {
       `,
       {
         variables: {
-          metafields: [
-            {
-              ownerId,
-              namespace: NS,
-              key: PRODUCT_GROUPS_KEY,
-              type: "json",
-              value: JSON.stringify(productGroups),
-            },
-          ],
+          metafields: productGroupsMetafields(ownerId, productGroups),
         },
       }
     );
@@ -2413,19 +2601,21 @@ export default function InventoryCountPage() {
     : null;
 
   // 編集モードの初期化（editingGroupId が変わったときだけ実行）
-  // ✅ SKU/CSV由来の場合は getVariantsByInventoryItemIds で選択済み情報を取得。コレクション由来の場合は getCollectionsByIds で取得。
+  // ✅ SKU/CSV由来の場合は getVariantsByInventoryItemIds または getVariantsBySkus で選択済み情報を取得。コレクション由来の場合は getCollectionsByIds で取得。
   useEffect(() => {
     if (!editingGroupId) return;
     const g = productGroups.find((pg) => pg.id === editingGroupId);
     if (!g) return;
 
     setGroupName(g.name);
-    const skuCount = (g.inventoryItemIds ?? []).length;
-    const isSkuOnly = (g.collectionIds?.length ?? 0) === 0 && skuCount > 0;
+    const hasInventoryItemIds = (g.inventoryItemIds ?? []).length > 0;
+    const hasSkus = (g.skus ?? []).length > 0;
+    const isSkuOnly = (g.collectionIds?.length ?? 0) === 0 && (hasInventoryItemIds || hasSkus);
 
     if (isSkuOnly) {
       setGroupCreateMethod("sku");
       const ids = g.inventoryItemIds ?? [];
+      const skus = g.skus ?? [];
       setEditingSkuOnlyPreservedIds([]);
       setSelectedCollectionIds([]);
       setCollectionConfigs(new Map());
@@ -2433,6 +2623,12 @@ export default function InventoryCountPage() {
         const fd = new FormData();
         fd.set("action", "getVariantsByInventoryItemIds");
         fd.set("ids", JSON.stringify(ids));
+        skuResolveFetcher.submit(fd, { method: "post" });
+      } else if (skus.length > 0) {
+        // CSVアップロード等で inventoryItemIds が空・未保存の場合でも skus からバリアント一覧を取得
+        const fd = new FormData();
+        fd.set("action", "getVariantsBySkus");
+        fd.set("skus", JSON.stringify(skus));
         skuResolveFetcher.submit(fd, { method: "post" });
       } else {
         setSelectedSkuVariants([]);
@@ -5077,11 +5273,19 @@ export default function InventoryCountPage() {
                   // ✅ 合計の在庫数と実数を計算（未完了グループも含む）
                   const totalCurrentQty = displayItems.reduce((sum, it) => sum + (Number(it?.currentQuantity || 0)), 0);
                   const totalActualQty = displayItems.reduce((sum, it) => sum + (Number(it?.actualQuantity || 0)), 0);
-                  
+                  // ✅ list 由来の棚卸（groupItems/items なし）では商品は get_incomplete_group_products で取得。読込中は「読込中」表示
+                  const hasGroupItemsData = (modalCount as any)?.groupItems && typeof (modalCount as any).groupItems === "object" && Object.keys((modalCount as any).groupItems).length > 0;
+                  const hasItemsData = Array.isArray(modalCount.items) && modalCount.items.length > 0;
+                  const isListOnlyCount = !hasGroupItemsData && !hasItemsData;
+                  const isLoadingModalProducts = incompleteGroupProductsFetcher.state !== "idle" || (isListOnlyCount && allGroupIds.length > 0 && loadingIncompleteGroupIds.size > 0);
                   if (displayItems.length === 0) {
                     return (
                       <div style={{ padding: "24px", textAlign: "center" }}>
-                        <div>商品明細がありません</div>
+                        {isLoadingModalProducts ? (
+                          <div>商品リストを読込中...</div>
+                        ) : (
+                          <div>商品明細がありません</div>
+                        )}
                       </div>
                     );
                   }

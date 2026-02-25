@@ -8,6 +8,15 @@ const INVENTORY_COUNTS_CHUNK_BYTES = 32_000;
 const INVENTORY_COUNTS_CHUNK_KEY_PREFIX = "inventory_counts_v1_c";
 const METAFIELDS_SET_MAX = 25;
 
+/** 一覧用軽量メタフィールド（id, locationId, status, countName, createdAt, productGroupIds のみ） */
+const INVENTORY_COUNTS_LIST_KEY = "inventory_counts_list_v1";
+const INVENTORY_COUNTS_LIST_CHUNK_PREFIX = "inventory_counts_list_v1_c";
+/** 棚卸ID → チャンク番号のインデックス（readInventoryCountById で全チャンク読まないため） */
+const INVENTORY_COUNT_INDEX_KEY = "inventory_count_index_v1";
+/** 商品グループ軽量：ID一覧・ID→名前（一覧表示でフル取得を避ける） */
+const PRODUCT_GROUP_IDS_KEY = "product_group_ids_v1";
+const PRODUCT_GROUP_NAMES_KEY = "product_group_names_v1";
+
 async function graphql(query, variables, opts = {}) {
   // #graphqlコメントを削除（GraphQLクエリから除外）
   const cleanQuery = String(query || "").replace(/^#graphql\s*/m, "").trim();
@@ -249,8 +258,21 @@ function parseChunkAndMergeParts(chunk) {
   return fullCounts;
 }
 
+/** グループが存在するか（productGroups 配列または groupIds Set で判定） */
+function groupExists(productGroupsOrGroupIds, groupId) {
+  if (!groupId) return false;
+  const n = normalizeIdForMatch(groupId);
+  if (Array.isArray(productGroupsOrGroupIds)) {
+    return productGroupsOrGroupIds.some((g) => String(g.id) === String(groupId) || normalizeIdForMatch(g.id) === n);
+  }
+  if (productGroupsOrGroupIds instanceof Set) {
+    return productGroupsOrGroupIds.has(n) || productGroupsOrGroupIds.has(groupId);
+  }
+  return false;
+}
+
 /** ステータスだけ補正（countNameは付けない。部分取得時は全件ソートできないため） */
-function fixCountsStatusOnly(counts, productGroups) {
+function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
   if (!Array.isArray(counts)) return [];
   return counts.map((c) => {
     const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
@@ -258,12 +280,18 @@ function fixCountsStatusOnly(counts, productGroups) {
       : c.productGroupId ? [c.productGroupId] : [];
     if (allIds.length === 0) return c;
     const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
+    const hasGroupItems = groupItemsMap && Object.keys(groupItemsMap).length > 0;
     const allDone = allIds.every((id) => {
-      const groupExists = productGroups.some((g) => String(g.id) === String(id));
-      if (!groupExists) return true;
+      if (!groupExists(productGroupsOrGroupIds, id)) return true;
       const items = getGroupItemsByKey(groupItemsMap, id);
       return items.length > 0;
     });
+    if (!hasGroupItems) {
+      if (allIds.every((id) => !groupExists(productGroupsOrGroupIds, id))) {
+        return { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
+      }
+      return c;
+    }
     if (!allDone && c.status === "completed") {
       return { ...c, status: "in_progress", completedAt: undefined };
     }
@@ -280,29 +308,79 @@ export async function getStocktakeListLimit() {
   return Math.max(1, Math.min(250, n));
 }
 
+/** 一覧用ミニマムオブジェクト（groupItems/items なし） */
+function toMinimalCountForList(c) {
+  if (!c || typeof c !== "object") return null;
+  return {
+    id: c.id,
+    locationId: c.locationId,
+    status: c.status,
+    countName: c.countName,
+    createdAt: c.createdAt,
+    productGroupIds: Array.isArray(c.productGroupIds) ? c.productGroupIds : c.productGroupId ? [c.productGroupId] : [],
+  };
+}
+
 /**
- * 一覧用：先頭1チャンクだけ取得（読込スピード統一。バイトチャンクのため1チャンクの件数は可変）
+ * 一覧用：先頭1チャンクだけ取得（読込スピード統一）。
+ * ディスクリプタ・商品グループ・表示件数を Promise.all で並列取得し、一覧用メタフィールドがあればそれを使用。
  */
 export async function readInventoryCountsFirstPage() {
   const gqlMain = `#graphql
     query InventoryCountsMain {
       currentAppInstallation {
-        metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value }
+        main: metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value }
+        list: metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_LIST_KEY}") { value }
       }
     }`;
-  const d = await graphql(gqlMain);
-  const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
+  const [d, productGroups, listLimit] = await Promise.all([
+    graphql(gqlMain),
+    readProductGroups(),
+    getStocktakeListLimit(),
+  ]);
+  const raw = d?.currentAppInstallation?.main?.value ?? d?.currentAppInstallation?.metafield?.value ?? "[]";
+  const listRaw = d?.currentAppInstallation?.list?.value ?? null;
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { counts: [], hasMore: false, chunkCount: 0 };
+    return { counts: [], hasMore: false, chunkCount: 0, productGroups: productGroups || [], listLimit, useListMetafield: false };
   }
-  const productGroups = await readProductGroups();
-  const listLimit = await getStocktakeListLimit();
+  let listParsed = null;
+  if (listRaw) {
+    try {
+      listParsed = JSON.parse(listRaw);
+    } catch {}
+  }
+  const useListMetafield = listParsed?._chunked === true && typeof listParsed.totalChunks === "number" && listParsed.totalChunks > 0;
+
+  if (useListMetafield) {
+    const totalChunks = listParsed.totalChunks;
+    const firstChunkIndex = totalChunks - 1;
+    const keyFirst = `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${firstChunkIndex}`;
+    const gqlChunk = `#graphql
+      query InventoryCountListChunk($key: String!) {
+        currentAppInstallation {
+          metafield(namespace: "${NS}", key: $key) { value }
+        }
+      }`;
+    const dChunk = await graphql(gqlChunk, { key: keyFirst });
+    const chunkRaw = dChunk?.currentAppInstallation?.metafield?.value;
+    let counts = [];
+    if (chunkRaw) {
+      try {
+        const chunk = JSON.parse(chunkRaw);
+        counts = Array.isArray(chunk) ? chunk : [];
+      } catch {}
+    }
+    counts = fixCountsStatusOnly(counts, productGroups || []);
+    const limited = counts.slice(0, listLimit);
+    const hasMore = counts.length > listLimit || totalChunks > 1;
+    return { counts: limited, hasMore, chunkCount: totalChunks, productGroups: productGroups || [], listLimit, useListMetafield: true };
+  }
 
   if (Array.isArray(parsed)) {
-    if (parsed.length === 0) return { counts: [], hasMore: false, chunkCount: 0 };
+    if (parsed.length === 0) return { counts: [], hasMore: false, chunkCount: 0, productGroups: productGroups || [], listLimit, useListMetafield: false };
     await writeInventoryCounts(parsed);
     const key0 = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}0`;
     const gql0 = `#graphql
@@ -320,23 +398,17 @@ export async function readInventoryCountsFirstPage() {
         counts = parseChunkAndMergeParts(chunk);
       } catch {}
     }
-    const desc = await (async () => {
-      const g = await graphql(gqlMain);
-      const r = g?.currentAppInstallation?.metafield?.value ?? "{}";
-      try { return JSON.parse(r); } catch { return {}; }
-    })();
-    const totalChunks = desc?.totalChunks ?? 1;
-    counts = fixCountsStatusOnly(counts, productGroups);
+    const totalChunks = 1;
+    counts = fixCountsStatusOnly(counts, productGroups || []);
     const limited = counts.slice(0, listLimit);
     const hasMore = counts.length > listLimit || totalChunks > 1;
-    return { counts: limited, hasMore, chunkCount: totalChunks };
+    return { counts: limited, hasMore, chunkCount: totalChunks, productGroups: productGroups || [], listLimit, useListMetafield: false };
   }
 
   if (!parsed?._chunked || typeof parsed.totalChunks !== "number" || parsed.totalChunks < 1) {
-    return { counts: [], hasMore: false, chunkCount: 0 };
+    return { counts: [], hasMore: false, chunkCount: 0, productGroups: productGroups || [], listLimit, useListMetafield: false };
   }
   const totalChunks = parsed.totalChunks;
-  // ✅ 並びは新しい順で表示するため、保存順（古い→新しい）の逆で読む。初回は「最後のチャンク」を取得
   const firstChunkIndex = totalChunks - 1;
   const keyFirst = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${firstChunkIndex}`;
   const gqlFirst = `#graphql
@@ -354,16 +426,42 @@ export async function readInventoryCountsFirstPage() {
       counts = parseChunkAndMergeParts(chunk);
     } catch {}
   }
-  counts = fixCountsStatusOnly(counts, productGroups);
+  counts = fixCountsStatusOnly(counts, productGroups || []);
   const limited = counts.slice(0, listLimit);
   const hasMore = counts.length > listLimit || totalChunks > 1;
-  return { counts: limited, hasMore, chunkCount: totalChunks };
+  return { counts: limited, hasMore, chunkCount: totalChunks, productGroups: productGroups || [], listLimit, useListMetafield: false };
 }
 
 /**
- * 一覧用：指定インデックスのチャンクだけ取得
+ * 一覧用：指定インデックスのチャンクだけ取得。
+ * opts.productGroups, opts.totalChunks, opts.useListMetafield を渡すとディスクリプタ・readProductGroups をスキップしチャンク1本だけ取得（軽量化）。
  */
-export async function readInventoryCountsPage(pageIndex) {
+export async function readInventoryCountsPage(pageIndex, opts = {}) {
+  const { productGroups: optsProductGroups, totalChunks: optsTotalChunks, useListMetafield: optsUseListMetafield } = opts;
+  const hasLightOpts = optsProductGroups != null && typeof optsTotalChunks === "number" && optsTotalChunks > 0;
+
+  if (hasLightOpts && pageIndex >= 0 && pageIndex < optsTotalChunks) {
+    const prefix = optsUseListMetafield ? INVENTORY_COUNTS_LIST_CHUNK_PREFIX : INVENTORY_COUNTS_CHUNK_KEY_PREFIX;
+    const key = `${prefix}${pageIndex}`;
+    const gqlChunk = `#graphql
+      query InventoryCountChunk($key: String!) {
+        currentAppInstallation {
+          metafield(namespace: "${NS}", key: $key) { value }
+        }
+      }`;
+    const dChunk = await graphql(gqlChunk, { key });
+    const chunkRaw = dChunk?.currentAppInstallation?.metafield?.value;
+    let counts = [];
+    if (chunkRaw) {
+      try {
+        const chunk = JSON.parse(chunkRaw);
+        counts = optsUseListMetafield ? (Array.isArray(chunk) ? chunk : []) : parseChunkAndMergeParts(chunk);
+      } catch {}
+    }
+    counts = fixCountsStatusOnly(counts, optsProductGroups);
+    return { counts };
+  }
+
   const gqlMain = `#graphql
     query InventoryCountsMain {
       currentAppInstallation {
@@ -412,13 +510,76 @@ export async function readInventoryCountsPage(pageIndex) {
 }
 
 /**
- * 棚卸IDで1件だけ取得（一覧タップ後の商品グループ読み込み用）
+ * 棚卸IDで1件だけ取得（一覧タップ後の商品グループ読み込み用）。
+ * インデックスメタフィールドがあれば該当チャンクのみ取得（全チャンク読まない）。
  */
 export async function readInventoryCountById(countId) {
   if (!countId) return null;
   const id = String(countId).trim();
+  const n = normalizeIdForMatch(id);
+
+  const gqlIndex = `#graphql
+    query InventoryCountIndex {
+      currentAppInstallation {
+        metafield(namespace: "${NS}", key: "${INVENTORY_COUNT_INDEX_KEY}") { value }
+      }
+    }`;
+  try {
+    const d = await graphql(gqlIndex);
+    const raw = d?.currentAppInstallation?.metafield?.value;
+    if (raw) {
+      const index = JSON.parse(raw);
+      if (index && typeof index === "object") {
+        const chunkIndices =
+          index[id] ??
+          index[n] ??
+          (() => {
+            const k = Object.keys(index).find((key) => normalizeIdForMatch(key) === n);
+            return k != null ? index[k] : undefined;
+          })();
+        const indices = Array.isArray(chunkIndices) ? chunkIndices : chunkIndices != null ? [chunkIndices] : null;
+        if (indices && indices.length > 0) {
+          const chunkPromises = indices.map((chunkIndex) => {
+            const key = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${chunkIndex}`;
+            return graphql(
+              `#graphql query InventoryCountChunkByKey($key: String!) {
+                currentAppInstallation { metafield(namespace: "${NS}", key: $key) { value } }
+              }`,
+              { key }
+            );
+          });
+          const chunkResults = await Promise.all(chunkPromises);
+          const parts = [];
+          for (const res of chunkResults) {
+            const chunkRaw = res?.currentAppInstallation?.metafield?.value;
+            if (!chunkRaw) continue;
+            try {
+              const chunk = JSON.parse(chunkRaw);
+              if (!Array.isArray(chunk)) continue;
+              for (const el of chunk) {
+                if (el && typeof el === "object" && (String(el.countId) === id || normalizeIdForMatch(el.countId) === n)) {
+                  parts.push(el);
+                } else if (el && typeof el === "object" && el.id && (String(el.id) === id || normalizeIdForMatch(el.id) === n)) {
+                  const productGroups = await readProductGroups();
+                  const fixed = fixCountsStatusOnly([el], productGroups);
+                  return fixed[0] ?? null;
+                }
+              }
+            } catch {}
+          }
+          if (parts.length > 0) {
+            const merged = mergeCountParts(parts);
+            const productGroups = await readProductGroups();
+            const fixed = fixCountsStatusOnly([merged], productGroups);
+            return fixed[0] ?? null;
+          }
+        }
+      }
+    }
+  } catch {}
+
   const counts = await readInventoryCountsRaw();
-  const found = counts.find((c) => String(c?.id) === id);
+  const found = counts.find((c) => String(c?.id) === id || normalizeIdForMatch(c?.id) === n);
   if (!found) return null;
   const productGroups = await readProductGroups();
   const fixed = fixCountsStatusOnly([found], productGroups);
@@ -587,6 +748,7 @@ export async function writeInventoryCounts(counts) {
 
   const arr = Array.isArray(counts) ? counts : [];
   const payloads = [];
+  const countIdToChunkIndices = new Map();
   let current = [];
   let currentSize = 2;
 
@@ -594,7 +756,15 @@ export async function writeInventoryCounts(counts) {
     const countStr = JSON.stringify(count);
     if (countStr.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
       if (currentSize + countStr.length + 1 > INVENTORY_COUNTS_CHUNK_BYTES && current.length > 0) {
+        const chunkIndex = payloads.length;
         payloads.push(current);
+        for (const it of current) {
+          const cid = it?.id ?? it?.countId;
+          if (cid) {
+            if (!countIdToChunkIndices.has(cid)) countIdToChunkIndices.set(cid, new Set());
+            countIdToChunkIndices.get(cid).add(chunkIndex);
+          }
+        }
         current = [];
         currentSize = 2;
       }
@@ -602,7 +772,15 @@ export async function writeInventoryCounts(counts) {
       currentSize += countStr.length + 1;
     } else {
       if (current.length > 0) {
+        const chunkIndex = payloads.length;
         payloads.push(current);
+        for (const it of current) {
+          const cid = it?.id ?? it?.countId;
+          if (cid) {
+            if (!countIdToChunkIndices.has(cid)) countIdToChunkIndices.set(cid, new Set());
+            countIdToChunkIndices.get(cid).add(chunkIndex);
+          }
+        }
         current = [];
         currentSize = 2;
       }
@@ -610,7 +788,15 @@ export async function writeInventoryCounts(counts) {
       for (const part of parts) {
         const partStr = JSON.stringify(part);
         if (currentSize + partStr.length + 1 > INVENTORY_COUNTS_CHUNK_BYTES && current.length > 0) {
+          const chunkIndex = payloads.length;
           payloads.push(current);
+          for (const it of current) {
+            const cid = it?.id ?? it?.countId;
+            if (cid) {
+              if (!countIdToChunkIndices.has(cid)) countIdToChunkIndices.set(cid, new Set());
+              countIdToChunkIndices.get(cid).add(chunkIndex);
+            }
+          }
           current = [];
           currentSize = 2;
         }
@@ -619,7 +805,17 @@ export async function writeInventoryCounts(counts) {
       }
     }
   }
-  if (current.length > 0) payloads.push(current);
+  if (current.length > 0) {
+    const chunkIndex = payloads.length;
+    payloads.push(current);
+    for (const it of current) {
+      const cid = it?.id ?? it?.countId;
+      if (cid) {
+        if (!countIdToChunkIndices.has(cid)) countIdToChunkIndices.set(cid, new Set());
+        countIdToChunkIndices.get(cid).add(chunkIndex);
+      }
+    }
+  }
 
   const mutation = `#graphql
     mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) {
@@ -630,9 +826,12 @@ export async function writeInventoryCounts(counts) {
     }`;
 
   if (payloads.length === 0) {
-    const res = await graphql(mutation, {
-      metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" }],
-    });
+    const metafields = [
+      { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" },
+      { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: "[]" },
+      { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: "{}" },
+    ];
+    const res = await graphql(mutation, { metafields });
     const errs = res?.metafieldsSet?.userErrors ?? [];
     if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
     return;
@@ -668,6 +867,44 @@ export async function writeInventoryCounts(counts) {
     const errs = res?.metafieldsSet?.userErrors ?? [];
     if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
   }
+
+  const listItems = arr.map(toMinimalCountForList).filter(Boolean);
+  const listPayloads = [];
+  let listCurrent = [];
+  let listCurrentSize = 2;
+  for (const item of listItems) {
+    const itemStr = JSON.stringify(item);
+    if (listCurrentSize + itemStr.length + 1 > INVENTORY_COUNTS_CHUNK_BYTES && listCurrent.length > 0) {
+      listPayloads.push(JSON.stringify(listCurrent));
+      listCurrent = [];
+      listCurrentSize = 2;
+    }
+    listCurrent.push(item);
+    listCurrentSize += itemStr.length + 1;
+  }
+  if (listCurrent.length > 0) listPayloads.push(JSON.stringify(listCurrent));
+
+  const listDescriptor = JSON.stringify({ _chunked: true, totalChunks: listPayloads.length });
+  const indexValue = JSON.stringify(
+    Object.fromEntries([...countIdToChunkIndices].map(([id, set]) => [id, [...set].sort((a, b) => a - b)]))
+  );
+  const listMetafields = [
+    { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: listDescriptor },
+    ...listPayloads.map((value, i) => ({
+      ownerId,
+      namespace: NS,
+      key: `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${i}`,
+      type: "json",
+      value,
+    })),
+    { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: indexValue },
+  ];
+  for (let i = 0; i < listMetafields.length; i += METAFIELDS_SET_MAX) {
+    const batch = listMetafields.slice(i, i + METAFIELDS_SET_MAX);
+    const res = await graphql(mutation, { metafields: batch });
+    const errs = res?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+  }
 }
 
 export async function readProductGroups() {
@@ -686,6 +923,46 @@ export async function readProductGroups() {
   } catch {
     return [];
   }
+}
+
+/** 一覧用：商品グループID一覧のみ（軽量。未設定時は readProductGroups から導出） */
+export async function readProductGroupIds() {
+  const gql = `#graphql
+    query ProductGroupIds {
+      currentAppInstallation {
+        metafield(namespace: "${NS}", key: "${PRODUCT_GROUP_IDS_KEY}") { value }
+      }
+    }`;
+  try {
+    const d = await graphql(gql);
+    const raw = d?.currentAppInstallation?.metafield?.value ?? null;
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr) && arr.length > 0) return new Set(arr.map(String));
+    }
+  } catch {}
+  const groups = await readProductGroups();
+  return new Set((groups || []).map((g) => String(g.id)));
+}
+
+/** 一覧用：商品グループID→名前のみ（軽量。未設定時は readProductGroups から導出） */
+export async function readProductGroupNames() {
+  const gql = `#graphql
+    query ProductGroupNames {
+      currentAppInstallation {
+        metafield(namespace: "${NS}", key: "${PRODUCT_GROUP_NAMES_KEY}") { value }
+      }
+    }`;
+  try {
+    const d = await graphql(gql);
+    const raw = d?.currentAppInstallation?.metafield?.value ?? null;
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object") return obj;
+    }
+  } catch {}
+  const groups = await readProductGroups();
+  return Object.fromEntries((groups || []).map((g) => [String(g.id), g.name ?? ""]));
 }
 
 // 商品グループに含まれる商品を取得（コレクションから）
@@ -1265,14 +1542,25 @@ export async function getLocationName(locationId) {
 // 商品グループ名取得用キャッシュ（一覧の名前表示で readProductGroups を繰り返し呼ばないように入庫並みに軽く）
 const PRODUCT_GROUPS_CACHE_TTL_MS = 60000;
 let productGroupsCache = { groups: null, at: 0 };
+let productGroupNamesCache = { names: null, at: 0 };
 
 export async function getProductGroupName(productGroupId) {
+  if (!productGroupId) return null;
   const now = Date.now();
+  if (!productGroupNamesCache.names || now - productGroupNamesCache.at > PRODUCT_GROUPS_CACHE_TTL_MS) {
+    productGroupNamesCache = { names: await readProductGroupNames(), at: now };
+  }
+  const names = productGroupNamesCache.names || {};
+  const n = normalizeIdForMatch(productGroupId);
+  let name = names[productGroupId] ?? names[n];
+  if (name != null) return name;
+  const k = Object.keys(names).find((id) => normalizeIdForMatch(id) === n);
+  if (k != null) return names[k];
   if (!productGroupsCache.groups || now - productGroupsCache.at > PRODUCT_GROUPS_CACHE_TTL_MS) {
     productGroupsCache = { groups: await readProductGroups(), at: now };
   }
-  const group = productGroupsCache.groups.find((g) => g.id === productGroupId);
-  return group?.name || null;
+  const group = productGroupsCache.groups?.find((g) => g.id === productGroupId || normalizeIdForMatch(g.id) === n);
+  return group?.name ?? null;
 }
 
 // =========================

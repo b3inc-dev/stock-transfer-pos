@@ -1244,7 +1244,7 @@ export function InventoryCountList({
         initialInventoryItemIdsRef.current = new Set([...prevSet, ...addIds]);
       }
       const hasIncomplete = newLines.some((l) => !l.isReadOnly);
-      setIsReadOnlyState(c?.status === "completed" || !hasIncomplete);
+      setIsReadOnlyState(count?.status === "completed" || !hasIncomplete);
     } catch (e) {
       toast(`グループ「${groupName}」の読み込みに失敗しました: ${e?.message || e}`);
     } finally {
@@ -3044,8 +3044,8 @@ export function InventoryCountList({
         </s-box>
       ) : (
         <>
-          {/* ✅ 未読み込み商品がある場合は最上部に表示（入庫・出庫の読込ボタンと同様） */}
-          {hasMoreProducts ? (
+          {/* ✅ 未読み込み商品がある場合は最上部に表示（入庫・出庫の読込ボタンと同様）。まとめて表示では「さらに読み込む」用のため、既に1件以上表示されているときのみ表示（0件のときは各グループ横の「読込」を使う） */}
+          {hasMoreProducts && (!isMultipleMode || lines.length > 0) ? (
             <s-box padding="base">
               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                 <s-text tone="subdued" size="small">
@@ -3066,7 +3066,8 @@ export function InventoryCountList({
           {/* ✅ まとめて表示モード：商品グループごとにセクションを分けて表示 */}
           {isMultipleMode ? (() => {
             const normalLines = lines.filter((l) => !l.isExtra);
-            if (normalLines.length === 0 && lines.length === 0) {
+            // ✅ 一度も商品グループごとに表示で開いていなくても、グループリストと各グループの「読込」ボタンは表示する（lines=0 のときは早期 return しない）
+            if (normalLines.length === 0 && lines.length === 0 && targetProductGroupIds.length === 0) {
               return (
                 <s-box key="inventory_count_list" padding="small">
                   <s-stack gap="small">
