@@ -130,7 +130,7 @@ export function InventoryCountConditions({
     const sessionGid = toLocationGid(locGid) || locGid;
     return list.filter((c) => {
       const cid = c.locationId;
-      if (cid == null || cid === "") return true;
+      if (cid == null || cid === "") return false;
       if (sessionNum && toLocationNumericId(cid) === sessionNum) return true;
       if (toLocationGid(cid) === sessionGid || cid === locGid || cid === sessionGid) return true;
       return false;
@@ -243,7 +243,7 @@ export function InventoryCountConditions({
         useListMetafield: result.useListMetafield === true,
       };
       let allFetched = Array.isArray(result.counts) ? [...result.counts] : [];
-      let loadedChunks = 1;
+      let loadedChunks = Math.max(1, result.loadedChunkCount ?? 1);
       const totalChunks = result.chunkCount ?? 0;
       const pageOpts =
         firstPageOptsRef.current.productGroups != null && totalChunks > 0
