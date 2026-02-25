@@ -391,8 +391,10 @@ export function InventoryCountList({
       groupItemsForCurrentGroupReadOnlyInitial = countItemsLegacyForReadOnlyInitial;
     }
   }
-  const isCurrentGroupCompletedInitial = groupItemsForCurrentGroupReadOnlyInitial.length > 0;
-  const isReadOnlyInitial = readOnlyProp || count?.status === "completed" || isCurrentGroupCompletedInitial;
+  const cancelledSetInitial = cancelledGroupIdSet(count);
+  const isCurrentGroupCancelledInitial = currentGroupIdInitial && cancelledSetInitial.has(normalizeIdForMatch(currentGroupIdInitial));
+  const isCurrentGroupCompletedInitial = groupItemsForCurrentGroupReadOnlyInitial.length > 0 || isCurrentGroupCancelledInitial;
+  const isReadOnlyInitial = readOnlyProp || count?.status === "completed" || count?.status === "cancelled" || isCurrentGroupCompletedInitial;
   
   // ✅ 初期値を設定
   useEffect(() => {
@@ -516,11 +518,12 @@ export function InventoryCountList({
     // ✅ グループごとに表示する場合：選択したグループのデータのみを表示（storedItemsFromGroupを優先）
     const storedItems = storedItemsFromGroup || storedItemsFromItems;
 
-    // ✅ readOnly判定：readOnlyPropがtrue、または選択したグループが完了している、または全体が完了している
-    // ✅ 完了判定：groupItemsMap[currentGroupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
-    // ✅ InventoryCountProductGroupSelectionと同じロジック：groupItemsが存在し、かつ配列の長さが0より大きい場合に完了と判定
+    // ✅ readOnly判定：readOnlyPropがtrue、または選択したグループが完了/キャンセル、または棚卸全体が完了/キャンセル（管理画面と連動）
+    // ✅ 完了判定：groupItemsMap[currentGroupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定。キャンセル済みグループは cancelledGroupIds で判定
     const isGroupCompleted = storedItemsFromGroup !== null && groupItemsForCurrentGroup.length > 0;
-    const isReadOnlyCalculated = readOnlyProp || isGroupCompleted || c?.status === "completed";
+    const cancelledSetForReadOnly = cancelledGroupIdSet(c);
+    const isGroupCancelled = currentGroupId && cancelledSetForReadOnly.has(normalizeIdForMatch(currentGroupId));
+    const isReadOnlyCalculated = readOnlyProp || isGroupCompleted || isGroupCancelled || c?.status === "completed" || c?.status === "cancelled";
     
     // ✅ まとめて表示モードの場合は、最初の処理ブロックをスキップしてまとめて表示モードの処理に進む
     // ✅ まとめて表示モードの場合は、isReadOnlyStateをまとめて表示モードの処理内で設定する
@@ -883,9 +886,9 @@ export function InventoryCountList({
         }
         
         // ✅ まとめて表示モードの場合、isReadOnlyStateを適切に設定
-        // ✅ 未完了グループ（isReadOnly: falseの商品）がある場合は編集可能、全て完了している場合は読み取り専用
+        // ✅ 未完了グループ（isReadOnly: falseの商品）がある場合は編集可能、全て完了/キャンセルの場合は読み取り専用（管理画面と連動）
         const hasIncompleteGroups = allLines.some((l) => !l.isReadOnly);
-        const isAllCompleted = count?.status === "completed" || !hasIncompleteGroups;
+        const isAllCompleted = count?.status === "completed" || count?.status === "cancelled" || !hasIncompleteGroups;
         setIsReadOnlyState(isAllCompleted);
         
         isLoadingProductsRef.current = false; // ✅ 商品読み込み完了前にフラグを下ろす（自動保存を有効化）
@@ -1251,7 +1254,7 @@ export function InventoryCountList({
         initialInventoryItemIdsRef.current = new Set([...prevSet, ...addIds]);
       }
       const hasIncomplete = newLines.some((l) => !l.isReadOnly);
-      setIsReadOnlyState(count?.status === "completed" || !hasIncomplete);
+      setIsReadOnlyState(count?.status === "completed" || count?.status === "cancelled" || !hasIncomplete);
     } catch (e) {
       toast(`グループ「${groupName}」の読み込みに失敗しました: ${e?.message || e}`);
     } finally {

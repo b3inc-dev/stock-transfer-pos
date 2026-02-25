@@ -560,7 +560,7 @@ export function InventoryCountConditions({
                                   }
                                   const totalQty = allGroupItems.reduce((s, it) => s + (it.actualQuantity || 0), 0);
                                   let currentQty = allGroupItems.reduce((s, it) => s + (it.currentQuantity || 0), 0);
-                                  const completed = c.status === "completed";
+                                  const completed = c.status === "completed" || c.status === "cancelled";
                                   if (!completed && Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0) {
                                     const countQuantities = incompleteGroupQuantities.get(c.id);
                                     if (countQuantities) {
@@ -631,7 +631,7 @@ export function InventoryCountConditions({
                                 }
                                 const totalQty = allGroupItems.reduce((s, it) => s + (it.actualQuantity || 0), 0);
                                 let currentQty = allGroupItems.reduce((s, it) => s + (it.currentQuantity || 0), 0);
-                                const completed = c.status === "completed";
+                                const completed = c.status === "completed" || c.status === "cancelled";
                                 if (!completed && Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0) {
                                   const countQuantities = incompleteGroupQuantities.get(c.id);
                                   if (countQuantities) {

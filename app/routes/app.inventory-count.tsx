@@ -2897,7 +2897,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : count.productGroupId ? [count.productGroupId] : [];
     const cancelledSet = new Set(cancelledGroupIds.map((id) => normalizeIdForMatch(id)));
     const allDone = allIds.length > 0 && allIds.every((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0 || cancelledSet.has(normalizeIdForMatch(id)));
-    const allCancelled = allIds.length > 0 && cancelledSet.size >= allIds.length;
+    const allCancelled = allIds.length > 0 && allIds.every((id) => cancelledSet.has(normalizeIdForMatch(id)));
     const nextStatus = allDone ? (allCancelled ? "cancelled" as const : "completed" as const) : (count as any).status;
     const nextCompletedAt = allDone && nextStatus === "completed" ? (count.completedAt || new Date().toISOString()) : (nextStatus === "cancelled" ? undefined : (count as any).completedAt);
     const updatedCounts = inventoryCounts.map((c) =>
@@ -2936,7 +2936,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
     const cancelledSet = new Set(cancelledGroupIds.map((id) => normalizeIdForMatch(id)));
     const allDone = allIds.length > 0 && allIds.every((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0 || cancelledSet.has(normalizeIdForMatch(id)));
-    const allCancelled = allIds.length > 0 && cancelledSet.size >= allIds.length;
+    const allCancelled = allIds.length > 0 && allIds.every((id) => cancelledSet.has(normalizeIdForMatch(id)));
     const nextStatus = allDone ? (allCancelled ? "cancelled" as const : "completed" as const) : "in_progress";
     const nextCompletedAt = allDone && nextStatus === "completed" ? (count.completedAt || new Date().toISOString()) : undefined;
     const updatedCounts = inventoryCounts.map((c) =>

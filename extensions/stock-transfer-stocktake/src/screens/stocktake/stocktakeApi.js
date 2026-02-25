@@ -297,8 +297,12 @@ function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
       return items.length > 0;
     });
     if (!hasGroupItems) {
-      if (allIds.every((id) => cancelledSet.has(normalizeIdForMatch(id)) || !groupExists(productGroupsOrGroupIds, id))) {
-        return { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
+      const allCancelled = allIds.length > 0 && allIds.every((id) => cancelledSet.has(normalizeIdForMatch(id)));
+      const allDoneOrMissing = allIds.every((id) => cancelledSet.has(normalizeIdForMatch(id)) || !groupExists(productGroupsOrGroupIds, id));
+      if (allDoneOrMissing) {
+        return allCancelled
+          ? { ...c, status: "cancelled", completedAt: undefined }
+          : { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
       }
       return c;
     }
