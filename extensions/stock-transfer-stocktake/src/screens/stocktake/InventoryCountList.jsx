@@ -228,6 +228,7 @@ export function InventoryCountList({
   const loadingMoreRef = useRef(false); // ✅ さらに読み込むの二重発火防止（入庫・出庫と同様）
   const hasMoreProductsRef = useRef(false); // ✅ タップ時に最新の hasMoreProducts を参照（スタレ閉じ込め防止）
   const collectionPageInfoRef = useRef(null); // ✅ コレクション経路の「さらに読み込む」用（前回の pageInfo を after で渡す）
+  const backgroundInventoryLoadIdRef = useRef(0); // ✅ リスト表示後の在庫バックグラウンド読込で、同一ロードかどうか判定（画面遷移・再読込時は更新しない）
 
   const denyEdit = useCallback(() => {
     if (!toastReadOnlyOnceRef.current) {
@@ -655,11 +656,12 @@ export function InventoryCountList({
     try {
       // ✅ まとめて表示モードの場合：各商品グループごとに完了済み/未完了を区別して処理
       if (isMultipleMode) {
-        // ✅ 下書きを先に読み込む（まとめて表示モード：商品グループごとのキーから復元）
-        // ✅ 入庫の複数シップメントと同様、各グループごとに別キーで保存されている
+        // ✅ 完了/キャンセル済みの棚卸は下書きを復元しない（管理画面で確定・キャンセルされた場合はAPIの groupItems を表示する）
+        const isCountCompletedOrCancelled = c?.status === "completed" || c?.status === "cancelled";
         let draftLines = [];
-        try {
-          if (SHOPIFY?.storage?.get && targetProductGroupIds.length > 0) {
+        if (!isCountCompletedOrCancelled) {
+          try {
+            if (SHOPIFY?.storage?.get && targetProductGroupIds.length > 0) {
             const currentCountId = String(c.id || "").trim();
             const currentLocationId = String(c.locationId || "").trim();
             const allGroupDrafts = await Promise.all(
@@ -703,11 +705,12 @@ export function InventoryCountList({
               toast("下書きを復元しました");
             }
           }
-        } catch (e) {
-          console.error("Failed to load draft:", e);
+          } catch (e) {
+            console.error("Failed to load draft:", e);
+          }
         }
         
-        // ✅ 下書きがある場合はそれを返す（まとめて表示モードでも下書きを優先）
+        // ✅ 下書きがある場合はそれを返す（まとめて表示モードでも下書きを優先）。完了/キャンセル時は下書きを使わない
         if (draftLines.length > 0) {
           isLoadingProductsRef.current = false; // ✅ 下書き復元前にフラグを下ろす（自動保存を有効化）
           setLines(draftLines);
@@ -903,8 +906,10 @@ export function InventoryCountList({
 
       // ✅ 単一商品グループモード：棚卸IDが複数グループを持つ場合は per-group キー、それ以外はロス・出庫と同様の単一キー
       // ✅ 商品グループリストから「1つだけ選択して表示」している場合も countHasMultipleGroups が true なので per-group キーで正しくそのグループのみ復元される
+      // ✅ 完了/キャンセル済みの棚卸は下書きを復元しない（管理画面で確定・キャンセルされた場合はAPIの groupItems を表示する）
+      const isCountCompletedOrCancelledSingle = c?.status === "completed" || c?.status === "cancelled";
       let draftLines = [];
-      if (!draftLoadedRef.current) {
+      if (!draftLoadedRef.current && !isCountCompletedOrCancelledSingle) {
         try {
           if (SHOPIFY?.storage?.get) {
             const currentCountId = String(c.id || "").trim();
@@ -999,9 +1004,10 @@ export function InventoryCountList({
       collectionPageInfoRef.current = null; // ✅ 棚卸/グループ切り替え時は cursor をリセット
       // ✅ さらに読み込む用の1回あたり件数（管理画面と揃える）
       // ✅ 常に画像付きで取得（画像ON/OFFは表示切替のみ。ロス・入庫・出庫と同様にリスト再読込しない）
+      // ✅ 入庫並みの表示速度：初回は在庫クエリなしで商品リストのみ取得。在庫数は「在庫更新」ボタンで取得
       const rawProducts = await fetchProductsByGroups(targetProductGroupIds, c.locationId, {
         productFirst,
-        filterByInventoryLevel: true,
+        filterByInventoryLevel: false,
         includeImages: true,
         inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
         offset: 0,
@@ -1013,7 +1019,7 @@ export function InventoryCountList({
       collectionPageInfoRef.current = rawProducts?.collectionPageInfo ?? null; // ✅ コレクション経路のさらに読み込む用
       console.log("[InventoryCountList] fetchProductsByGroups result", { productCount: products.length, hasMore });
       
-      // fetchProductsByGroups が filterByInventoryLevel: true のとき currentQuantity を付与して返すため再取得不要
+      // filterByInventoryLevel: false のため currentQuantity は付与されない。在庫列は「…」表示にし、バックグラウンドで随時取得
       const currentGroupIdForSingle = !isMultipleMode && targetProductGroupIds?.length > 0 ? targetProductGroupIds[0] : null;
       const linesWithCurrent = products.map((p, idx) => ({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${idx}`,
@@ -1027,6 +1033,8 @@ export function InventoryCountList({
         currentQuantity: p.currentQuantity != null ? p.currentQuantity : 0,
         actualQuantity: 0, // ✅ 初期値は0（スキャンで積み上げる方式）
         productGroupId: currentGroupIdForSingle, // ✅ 単一グループモードで選択中のグループを付与
+        stockLoading: true, // ✅ 在庫はバックグラウンドで取得するため「…」表示
+        stockError: null,
       }));
       isLoadingProductsRef.current = false; // ✅ 商品読み込み完了前にフラグを下ろす（自動保存を有効化）
       setLines(linesWithCurrent);
@@ -1035,6 +1043,38 @@ export function InventoryCountList({
         linesWithCurrent.map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
       );
       console.log("[InventoryCountList] Products loaded, lines count:", linesWithCurrent.length);
+
+      // ✅ リスト表示後、在庫数をバックグラウンドで15件ずつ取得。スキャン・カウントは並行して可能。actualQuantity は更新しない
+      if (!c.locationId || linesWithCurrent.length === 0) return;
+      const thisLoadId = ++backgroundInventoryLoadIdRef.current;
+      const locationId = c.locationId;
+      const QTY_BATCH_SIZE = 15;
+      (async () => {
+        for (let i = 0; i < linesWithCurrent.length; i += QTY_BATCH_SIZE) {
+          if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
+          const batch = linesWithCurrent.slice(i, i + QTY_BATCH_SIZE);
+          const results = await Promise.all(
+            batch.map(async (l) => {
+              if (!l.inventoryItemId) return { id: l.id, ok: true, currentQuantity: 0 };
+              try {
+                const qty = await getCurrentQuantity(l.inventoryItemId, locationId, { noCache: false });
+                return { id: l.id, ok: true, currentQuantity: qty !== null ? qty : 0 };
+              } catch (e) {
+                return { id: l.id, ok: false, currentQuantity: l.currentQuantity };
+              }
+            })
+          );
+          if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
+          const resultMap = new Map(results.map((r) => [r.id, r]));
+          setLines((prev) =>
+            prev.map((l) => {
+              const r = resultMap.get(l.id);
+              if (!r) return l;
+              return { ...l, currentQuantity: r.currentQuantity, stockLoading: false, stockError: null };
+            })
+          );
+        }
+      })();
     } catch (e) {
       toast(`商品の読み込みに失敗しました: ${e?.message || e}`);
       console.error("[InventoryCountList] loadProducts error:", e);
@@ -1057,9 +1097,10 @@ export function InventoryCountList({
     await new Promise((r) => setTimeout(r, 0)); // ✅ 押した直後に「読込中...」を描画してから取得開始（反応が遅く見えるのを防ぐ）
     try {
       const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+      // ✅ 追加読み込みも在庫クエリなしで高速に。在庫数は「在庫更新」で一括取得可能
       const raw = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
         productFirst,
-        filterByInventoryLevel: true,
+        filterByInventoryLevel: false,
         includeImages: true,
         inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
         collectionPageInfo: collectionPageInfoRef.current || undefined,
@@ -1084,8 +1125,42 @@ export function InventoryCountList({
         currentQuantity: p.currentQuantity != null ? p.currentQuantity : 0,
         actualQuantity: 0,
         productGroupId: currentGroupIdForSingle,
+        stockLoading: true,
+        stockError: null,
       }));
       setLines((prev) => [...prev, ...newLines]);
+      // ✅ 追加した行の在庫もバックグラウンドで随時取得
+      if (count.locationId && newLines.length > 0) {
+        const thisLoadId = ++backgroundInventoryLoadIdRef.current;
+        const locationId = count.locationId;
+        const QTY_BATCH_SIZE = 15;
+        (async () => {
+          for (let i = 0; i < newLines.length; i += QTY_BATCH_SIZE) {
+            if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
+            const batch = newLines.slice(i, i + QTY_BATCH_SIZE);
+            const results = await Promise.all(
+              batch.map(async (l) => {
+                if (!l.inventoryItemId) return { id: l.id, ok: true, currentQuantity: 0 };
+                try {
+                  const qty = await getCurrentQuantity(l.inventoryItemId, locationId, { noCache: false });
+                  return { id: l.id, ok: true, currentQuantity: qty !== null ? qty : 0 };
+                } catch {
+                  return { id: l.id, ok: false, currentQuantity: l.currentQuantity };
+                }
+              })
+            );
+            if (backgroundInventoryLoadIdRef.current !== thisLoadId) return;
+            const resultMap = new Map(results.map((r) => [r.id, r]));
+            setLines((prev) =>
+              prev.map((l) => {
+                const r = resultMap.get(l.id);
+                if (!r) return l;
+                return { ...l, currentQuantity: r.currentQuantity, stockLoading: false, stockError: null };
+              })
+            );
+          }
+        })();
+      }
       if (newLines.length > 0) {
         const prevSet = initialInventoryItemIdsRef.current || new Set();
         const addIds = newLines.map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean);
@@ -2441,19 +2516,24 @@ export function InventoryCountList({
                   // ✅ 出庫リストと同じ方式：loadingではなくrefreshingを使う（商品リストが消えないように）
                   setRefreshing(true);
                   try {
-                    // ✅ 出庫リスト同様：在庫数だけ更新、数量（actualQuantity）は保持
-                    // ✅ キャッシュを無効化して最新の在庫数を取得
-                    const results = await Promise.all(
-                      currentLines.map(async (l) => {
-                        if (!l.inventoryItemId) return { id: l.id, ok: true, currentQuantity: l.currentQuantity };
-                        try {
-                          const currentQty = await getCurrentQuantity(l.inventoryItemId, count.locationId, { noCache: true });
-                          return { id: l.id, ok: true, currentQuantity: currentQty !== null ? currentQty : 0 };
-                        } catch (e) {
-                          return { id: l.id, ok: false, error: e?.message || String(e), currentQuantity: l.currentQuantity };
-                        }
-                      })
-                    );
+                    // ✅ 在庫数だけ更新、数量（actualQuantity）は保持。レート制限対策で15件ずつバッチ取得（stocktakeApi の QTY_BATCH_SIZE と同様）
+                    const QTY_BATCH_SIZE = 15;
+                    const results = [];
+                    for (let i = 0; i < currentLines.length; i += QTY_BATCH_SIZE) {
+                      const batch = currentLines.slice(i, i + QTY_BATCH_SIZE);
+                      const batchResults = await Promise.all(
+                        batch.map(async (l) => {
+                          if (!l.inventoryItemId) return { id: l.id, ok: true, currentQuantity: l.currentQuantity };
+                          try {
+                            const currentQty = await getCurrentQuantity(l.inventoryItemId, count.locationId, { noCache: true });
+                            return { id: l.id, ok: true, currentQuantity: currentQty !== null ? currentQty : 0 };
+                          } catch (e) {
+                            return { id: l.id, ok: false, error: e?.message || String(e), currentQuantity: l.currentQuantity };
+                          }
+                        })
+                      );
+                      results.push(...batchResults);
+                    }
                     
                     // ✅ 既存のlinesを保持しつつ、currentQuantityだけ更新（stockLoading: falseも設定）
                     setLines((prev) =>

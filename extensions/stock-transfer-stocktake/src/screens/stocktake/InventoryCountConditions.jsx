@@ -5,8 +5,6 @@ import {
   getStocktakeListLimit,
   getLocationName,
   getProductGroupName,
-  fetchProductsByGroups,
-  getCurrentQuantity,
   toLocationGid,
   toLocationNumericId,
   fetchLocations,
@@ -228,63 +226,7 @@ export function InventoryCountConditions({
     loadNames();
   }, [counts, locationGid]);
 
-  // ✅ 未完了グループの在庫数を取得（入庫並みに複数グループを並列で取得）
-  useEffect(() => {
-    const CONCURRENCY = 3; // 同時に処理するグループ数
-    const loadIncompleteGroupQuantities = async () => {
-      const quantitiesMap = new Map();
-      const tasks = [];
-
-      for (const count of counts) {
-        if (count.status === "completed") continue;
-        const allGroupIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0
-          ? count.productGroupIds
-          : count.productGroupId ? [count.productGroupId] : [];
-        const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-
-        for (const groupId of allGroupIds) {
-          const groupItems = getGroupItemsByKey(groupItemsMap, groupId);
-          if (groupItems.length === 0) {
-            tasks.push({ countId: count.id, groupId, locationId: count.locationId, inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null });
-          }
-        }
-      }
-
-      const runOne = async ({ countId, groupId, locationId, inventoryItemIdsByGroup }) => {
-        try {
-          const products = await fetchProductsByGroups([groupId], locationId, {
-            filterByInventoryLevel: false,
-            includeImages: false,
-            inventoryItemIdsByGroup,
-          });
-          const inventoryQuantities = await Promise.all(
-            products.map((p) => getCurrentQuantity(p.inventoryItemId, locationId).then((qty) => (qty !== null ? qty : 0)))
-          );
-          const totalQty = inventoryQuantities.reduce((sum, qty) => sum + qty, 0);
-          return { countId, groupId, totalQty };
-        } catch (e) {
-          console.error(`Failed to get quantity for incomplete group ${groupId} in count ${countId}:`, e);
-          return null;
-        }
-      };
-
-      for (let i = 0; i < tasks.length; i += CONCURRENCY) {
-        const chunk = tasks.slice(i, i + CONCURRENCY);
-        const results = await Promise.all(chunk.map(runOne));
-        for (const r of results) {
-          if (!r) continue;
-          if (!quantitiesMap.has(r.countId)) quantitiesMap.set(r.countId, new Map());
-          quantitiesMap.get(r.countId).set(r.groupId, r.totalQty);
-        }
-      }
-
-      setIncompleteGroupQuantities(quantitiesMap);
-    };
-
-    if (counts.length > 0) {
-      loadIncompleteGroupQuantities();
-    }
-  }, [counts]);
+  // ✅ 履歴一覧は入庫と同様に軽量表示のみ。未完了グループの在庫数は自動取得しない（入庫の履歴一覧は追加クエリなしで totalQuantity/receivedQuantity を表示するため、棚卸も一覧表示時は在庫クエリを発生させない）。数量は groupItems がある場合のみ表示し、未取得時は「—」表示。
 
   const refresh = useCallback(async () => {
     setLoading(true);
