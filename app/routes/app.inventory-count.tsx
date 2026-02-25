@@ -3251,7 +3251,7 @@ export default function InventoryCountPage() {
     }
   }, [skuResolveFetcher.data]);
 
-  // ✅ モーダルが開いたときに未完了グループの商品リストを取得／編集状態をリセット
+  // ✅ モーダルが開いたときに未完了グループの商品リストを取得。編集状態のリセットはモーダルを閉じたときのみ行う（開いたまま modalCount が get_count_full 等で更新されると modalCount?.id の参照が変わり effect が再実行されて編集モードが戻ってしまうため）
   useEffect(() => {
     if (!modalOpen || !modalCount) {
       setIncompleteGroupProducts(new Map());
@@ -3262,9 +3262,6 @@ export default function InventoryCountPage() {
       setModalEditedQuantities({});
       return;
     }
-
-    setModalEditMode(false);
-    setModalEditedQuantities({});
 
     const allGroupIds = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
       ? modalCount.productGroupIds

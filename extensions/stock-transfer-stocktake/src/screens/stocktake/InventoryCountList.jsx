@@ -710,41 +710,24 @@ export function InventoryCountList({
           }
         }
         
-        // ✅ 下書きがある場合はそれを返す（まとめて表示モードでも下書きを優先）。完了/キャンセル時は下書きを使わない
+        // ✅ まとめて表示：完了/キャンセル済みグループはAPIの groupItems を優先し、未完了グループのみ下書きを使う（キャンセル・完了が正しく反映されるようにする）
+        const draftLinesByGroup = new Map();
         if (draftLines.length > 0) {
-          isLoadingProductsRef.current = false; // ✅ 下書き復元前にフラグを下ろす（自動保存を有効化）
-          setLines(draftLines);
-          // ✅ 下書き復元時も初期表示の商品IDを記録（予定外リスト判定用）
-          initialInventoryItemIdsRef.current = new Set(
-            draftLines.filter((l) => !l.isExtra).map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
-          );
-          // ✅ 下書き復元時：「さらに読み込む」を有効化（未読込分がある場合）。復元後に残りを読めるようにする
-          const idsByGroup = c?.inventoryItemIdsByGroup;
-          let hasMoreRestored = false;
-          if (idsByGroup && typeof idsByGroup === "object") {
-            let totalIds = 0;
-            for (const gid of targetProductGroupIds) {
-              const key = Object.keys(idsByGroup).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(gid));
-              if (key && Array.isArray(idsByGroup[key])) totalIds += idsByGroup[key].length;
-            }
-            hasMoreRestored = totalIds > draftLines.length;
-          } else {
-            const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-            hasMoreRestored = draftLines.length >= productFirst;
+          for (const line of draftLines) {
+            const gid = line?.productGroupId;
+            if (!gid) continue;
+            const norm = normalizeIdForMatch(gid);
+            if (!draftLinesByGroup.has(norm)) draftLinesByGroup.set(norm, []);
+            draftLinesByGroup.get(norm).push(line);
           }
-          setHasMoreProducts(hasMoreRestored);
-          hasMoreProductsRef.current = hasMoreRestored;
-          // ✅ まとめて表示モードの場合、isReadOnlyStateを適切に設定
-          const hasIncompleteGroups = draftLines.some((l) => !l.isReadOnly);
-          const isAllCompleted = c?.status === "completed" || !hasIncompleteGroups;
-          setIsReadOnlyState(isAllCompleted);
-          setLoading(false);
-          console.log("[InventoryCountList] Draft loaded (multiple mode), lines count:", draftLines.length, "hasMoreProducts:", hasMoreRestored);
-          return;
+          lastDraftCountIdRef.current = String(c.id || "").trim();
+          lastDraftLocationIdRef.current = String(c.locationId || "").trim();
+          toast("下書きを復元しました");
         }
         
         const allLines = [];
         const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
+        const cancelledSet = cancelledGroupIdSet(c);
         // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
         const countItemsLegacy = Array.isArray(c?.items) ? c.items : [];
         // ✅ まとめて表示で全グループが同じスナップショットを参照するよう、先に1回だけ取得して渡す（初回の readProductGroups 失敗・遅延で一部グループが0件になるのを防ぐ）
@@ -789,9 +772,10 @@ export function InventoryCountList({
             }
           }
           const completedItems = groupItemsForGroup.length > 0 ? groupItemsForGroup : null;
+          const isGroupCancelled = cancelledSet.has(normalizeIdForMatch(groupId));
           
-          if (completedItems) {
-            // ✅ 完了済みのグループ：groupItemsから読み込んで読み取り専用で表示
+          if (completedItems || isGroupCancelled) {
+            // ✅ 完了済みまたはキャンセル済みのグループ：APIの groupItems から読み込んで読み取り専用で表示（下書きで上書きしない）
             // ✅ 画像URLを取得するため、商品情報を取得
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
@@ -883,8 +867,11 @@ export function InventoryCountList({
               allLines.push(...completedLines);
             }
           } else {
-            // ✅ 未完了のグループ：初期表示では読まない。グループごと「読込」ボタンで読み込む（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
-            // ここでは何も追加しない。UIで「読込」が押されたときに loadGroupProducts(groupId) が呼ばれる
+            // ✅ 未完了のグループ：下書きがあればそのグループ分だけ復元。なければ「読込」ボタンで読み込む
+            const draftForGroup = draftLinesByGroup.get(normalizeIdForMatch(groupId)) || [];
+            if (draftForGroup.length > 0) {
+              allLines.push(...draftForGroup);
+            }
           }
         }
         
@@ -906,10 +893,16 @@ export function InventoryCountList({
 
       // ✅ 単一商品グループモード：棚卸IDが複数グループを持つ場合は per-group キー、それ以外はロス・出庫と同様の単一キー
       // ✅ 商品グループリストから「1つだけ選択して表示」している場合も countHasMultipleGroups が true なので per-group キーで正しくそのグループのみ復元される
-      // ✅ 完了/キャンセル済みの棚卸は下書きを復元しない（管理画面で確定・キャンセルされた場合はAPIの groupItems を表示する）
+      // ✅ 完了/キャンセル済みの棚卸は下書きを復元しない。現在表示中のグループが完了/キャンセル済みの場合も下書きを使わずAPIの groupItems を表示する
+      const currentGroupIdSingle = productGroupId || (targetProductGroupIds && targetProductGroupIds[0]) || null;
+      const groupItemsMapSingle = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
+      const groupItemsForCurrentSingle = currentGroupIdSingle ? getGroupItemsByKey(groupItemsMapSingle, currentGroupIdSingle) : [];
+      const isCurrentGroupCompletedSingle = groupItemsForCurrentSingle.length > 0;
+      const isCurrentGroupCancelledSingle = currentGroupIdSingle && cancelledGroupIdSet(c).has(normalizeIdForMatch(currentGroupIdSingle));
+      const isCurrentGroupCompletedOrCancelledSingle = isCurrentGroupCompletedSingle || isCurrentGroupCancelledSingle;
       const isCountCompletedOrCancelledSingle = c?.status === "completed" || c?.status === "cancelled";
       let draftLines = [];
-      if (!draftLoadedRef.current && !isCountCompletedOrCancelledSingle) {
+      if (!draftLoadedRef.current && !isCountCompletedOrCancelledSingle && !isCurrentGroupCompletedOrCancelledSingle) {
         try {
           if (SHOPIFY?.storage?.get) {
             const currentCountId = String(c.id || "").trim();
@@ -996,6 +989,66 @@ export function InventoryCountList({
         hasMoreProductsRef.current = hasMoreRestored;
         setLoading(false);
         console.log("[InventoryCountList] Draft loaded, lines count:", linesToSet.length, isMultipleMode ? "(all groups)" : `(group: ${currentGroupId})`, "hasMoreProducts:", hasMoreRestored);
+        return;
+      }
+
+      // ✅ 現在のグループが完了/キャンセル済みのときは下書きを使わずAPIの groupItems から表示する
+      if (isCurrentGroupCompletedOrCancelledSingle && groupItemsForCurrentSingle.length > 0) {
+        try {
+          const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+          const productsForCompleted = await fetchProductsByGroups(
+            [currentGroupIdSingle],
+            c.locationId,
+            { productFirst, filterByInventoryLevel: false, includeImages: showImages && !liteMode, inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null }
+          );
+          const productMap = new Map();
+          (Array.isArray(productsForCompleted) ? productsForCompleted : (productsForCompleted?.products ?? [])).forEach((p) => {
+            if (p?.inventoryItemId) productMap.set(String(p.inventoryItemId).trim(), p);
+          });
+          const completedLines = await Promise.all(
+            groupItemsForCurrentSingle.map(async (it, i) => {
+              const t = (it?.title || it?.sku || "-").split(" / ");
+              const productTitle = t[0] || "";
+              const variantTitle = t[1] || "";
+              const inventoryItemIdStr = String(it?.inventoryItemId || "").trim();
+              const product = productMap.get(inventoryItemIdStr);
+              let imageUrl = product?.imageUrl ?? "";
+              const isExtra = Boolean(it?.isExtra);
+              if (isExtra && !imageUrl && it?.imageUrl) imageUrl = String(it.imageUrl);
+              return {
+                id: String(it?.id ?? `ro-${currentGroupIdSingle}-${Date.now()}-${i}`),
+                variantId: it?.variantId ?? null,
+                inventoryItemId: it?.inventoryItemId ?? null,
+                productTitle,
+                variantTitle,
+                sku: String(it?.sku ?? ""),
+                barcode: String(it?.barcode ?? ""),
+                imageUrl,
+                currentQuantity: Number(it?.currentQuantity ?? 0),
+                actualQuantity: Number(it?.actualQuantity ?? 0),
+                isReadOnly: true,
+                isExtra,
+                productGroupId: currentGroupIdSingle,
+              };
+            })
+          );
+          isLoadingProductsRef.current = false;
+          setLines(completedLines);
+          initialInventoryItemIdsRef.current = new Set(
+            completedLines.filter((l) => !l.isExtra).map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
+          );
+          setIsReadOnlyState(true);
+          setLoading(false);
+          return;
+        } catch (e) {
+          console.error("[InventoryCountList] Failed to load completed/cancelled group items:", e);
+        }
+      }
+      if (isCurrentGroupCompletedOrCancelledSingle && groupItemsForCurrentSingle.length === 0) {
+        setLines([]);
+        initialInventoryItemIdsRef.current = new Set();
+        setIsReadOnlyState(true);
+        setLoading(false);
         return;
       }
 
