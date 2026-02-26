@@ -232,6 +232,7 @@ export function InventoryCountList({
   const hasMoreProductsRef = useRef(false); // ✅ タップ時に最新の hasMoreProducts を参照（スタレ閉じ込め防止）
   const collectionPageInfoRef = useRef(null); // ✅ コレクション経路の「さらに読み込む」用（前回の pageInfo を after で渡す）
   const backgroundInventoryLoadIdRef = useRef(0); // ✅ リスト表示後の在庫バックグラウンド読込で、同一ロードかどうか判定（画面遷移・再読込時は更新しない）
+  const loadCompletedRef = useRef(false); // ✅ 初回ロード完了まで「商品がありません」を出さない（コレクション→CSV の順で0件になる瞬間のチラつき防止）
 
   const denyEdit = useCallback(() => {
     if (!toastReadOnlyOnceRef.current) {
@@ -468,6 +469,7 @@ export function InventoryCountList({
       return;
     }
     setHasMoreProducts(false); // ✅ 初回読み込み時はリセット（メイン経路で上書き）
+    loadCompletedRef.current = false; // ✅ このロードが終わるまで「商品がありません」を出さない
 
     // ✅ count.id / locationId / productGroupId（単一モード）が変わった場合は、draftLoadedRefをリセット
     const currentCountId = String(c.id || "").trim();
@@ -993,6 +995,7 @@ export function InventoryCountList({
         }
         setHasMoreProducts(hasMoreRestored);
         hasMoreProductsRef.current = hasMoreRestored;
+        loadCompletedRef.current = true; // ✅ 下書き復元完了後は「商品がありません」を表示してよい
         setLoading(false);
         console.log("[InventoryCountList] Draft loaded, lines count:", linesToSet.length, isMultipleMode ? "(all groups)" : `(group: ${currentGroupId})`, "hasMoreProducts:", hasMoreRestored);
         return;
@@ -1040,6 +1043,7 @@ export function InventoryCountList({
           );
           isLoadingProductsRef.current = false;
           setLines(completedLines);
+          loadCompletedRef.current = true;
           initialInventoryItemIdsRef.current = new Set(
             completedLines.filter((l) => !l.isExtra).map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
           );
@@ -1052,6 +1056,7 @@ export function InventoryCountList({
       }
       if (isCurrentGroupCompletedOrCancelledSingle && groupItemsForCurrentSingle.length === 0) {
         setLines([]);
+        loadCompletedRef.current = true;
         initialInventoryItemIdsRef.current = new Set();
         setIsReadOnlyState(true);
         setLoading(false);
@@ -1097,6 +1102,7 @@ export function InventoryCountList({
       }));
       isLoadingProductsRef.current = false; // ✅ 商品読み込み完了前にフラグを下ろす（自動保存を有効化）
       setLines(linesWithCurrent);
+      if (linesWithCurrent.length > 0) loadCompletedRef.current = true; // ✅ 1件以上読めたときだけ「商品がありません」を許可（0件のままコレクション→CSV で再読込する間のチラつき防止）
       // ✅ 初期表示の商品IDを記録（予定外リスト判定用）
       initialInventoryItemIdsRef.current = new Set(
         linesWithCurrent.map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
@@ -3208,7 +3214,7 @@ export function InventoryCountList({
           {isMultipleMode ? (() => {
             const normalLines = lines.filter((l) => !l.isExtra);
             // ✅ 一度も商品グループごとに表示で開いていなくても、グループリストと各グループの「読込」ボタンは表示する（lines=0 のときは早期 return しない）
-            if (normalLines.length === 0 && lines.length === 0 && targetProductGroupIds.length === 0) {
+            if (normalLines.length === 0 && lines.length === 0 && targetProductGroupIds.length === 0 && loadCompletedRef.current) {
               return (
                 <s-box key="inventory_count_list" padding="small">
                   <s-stack gap="small">
@@ -3360,7 +3366,7 @@ export function InventoryCountList({
             // ✅ 単一商品グループモード：既存の表示を維持
             (() => {
               const normalLines = lines.filter((l) => !l.isExtra);
-              if (normalLines.length === 0 && lines.length === 0) {
+              if (normalLines.length === 0 && lines.length === 0 && loadCompletedRef.current) {
                 return (
                   <s-box key="inventory_count_list" padding="small">
                     <s-stack gap="small">

@@ -686,22 +686,24 @@ export async function readInventoryCounts() {
       return c;
     });
     
-    // 作成日時順にソートして連番を振る
+    // 作成日時順にソートして連番を振る（同順時は id で安定化し、#C0034 の後に作ったものが #C0028 になる事象を防ぐ）
     const sortedCounts = [...countsFixed].sort((a, b) => {
       const aTime = new Date(a.createdAt || 0).getTime();
       const bTime = new Date(b.createdAt || 0).getTime();
-      return aTime - bTime;
+      if (aTime !== bTime) return aTime - bTime;
+      return String(a.id || "").localeCompare(String(b.id || ""), undefined, { numeric: true });
     });
     
+    // ✅ 常に作成順で countName を再計算（誤って #C0028 等で発行したものを次回読み込み時に正しい番号に直す）
     const countsWithName = countsFixed.map((c) => {
-      if (c.countName) return c; // 既にcountNameがある場合はそのまま
       const sortedIndex = sortedCounts.findIndex((x) => x.id === c.id);
       const countName = `#C${String((sortedIndex >= 0 ? sortedIndex : 0) + 1).padStart(4, "0")}`;
       return { ...c, countName };
     });
-    
-    // ✅ countNameが追加された場合、またはステータスが修正された場合は保存（次回から反映される）
-    if (hasMissingCountName || needsUpdate) {
+    const anyCountNameChanged = countsFixed.some((c, i) => c.countName !== countsWithName[i]?.countName);
+
+    // ✅ countNameが追加・変更された場合、またはステータスが修正された場合は保存（次回から反映される）
+    if (hasMissingCountName || needsUpdate || anyCountNameChanged) {
       try {
         await writeInventoryCounts(countsWithName);
       } catch (e) {
@@ -1340,9 +1342,13 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
     : usedCollectionCursorPath
       ? (limit != null ? uniqueVariants.slice(0, limit) : uniqueVariants)
       : (limit != null ? uniqueVariants.slice(offset, offset + limit) : uniqueVariants);
-  const hasMore = limit != null
+  // ✅ 初回(offset=0)で「1ページ分(effectiveFirst)以上」返している場合は hasMore を true にし、上限数以上あるのにさらに読み込みが出ない事態を防ぐ
+  let hasMore = limit != null
     ? (uniqueVariants.length > offset + limit || hasMoreFromSavedIds || hasMoreFromCollection)
     : false;
+  if (limit != null && offset === 0 && uniqueVariants.length >= effectiveFirst && !hasMore) {
+    hasMore = true;
+  }
   const mergedCollectionPageInfo = collectionPageInfo
     ? { ...collectionPageInfo, ...collectionPageInfoResult }
     : collectionPageInfoResult;
