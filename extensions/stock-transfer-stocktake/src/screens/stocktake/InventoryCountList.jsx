@@ -1761,7 +1761,7 @@ export function InventoryCountList({
         .filter((l) => l.currentQuantity !== l.actualQuantity);
       
       if (allItemsToAdjust.length === 0) {
-        toast("在庫数の変更がないため、調整は不要です");
+        toast("在庫数に変更はありませんが、このまま確定して完了できます");
         // 在庫調整なしでもgroupItemsに保存する
         try {
           const counts = await readInventoryCounts();
@@ -1867,7 +1867,7 @@ export function InventoryCountList({
           if (groupStatusMessages.length > 0) {
             groupStatusMessages.forEach((msg) => toast(msg));
           }
-          toast("棚卸を完了しました（在庫調整なし）");
+          toast("棚卸を完了しました");
           onAfterConfirm?.();
           return true;
         } catch (e) {
@@ -2055,7 +2055,7 @@ export function InventoryCountList({
     }
 
     if (itemsToAdjust.length === 0) {
-      toast("在庫数の変更がないため、調整は不要です");
+      toast("在庫数に変更はありませんが、このまま確定して完了できます");
       try {
         const counts = await readInventoryCounts();
         // ✅ まとめて表示モードの場合：各商品グループごとにgroupItemsに保存
@@ -2077,28 +2077,16 @@ export function InventoryCountList({
             const groupItems = { ...(c.groupItems || {}) };
             
             // 各商品グループごとにgroupItemsに保存
-            // ✅ カウントした商品があるグループのみ確定（actualQuantity > 0 または currentQuantity !== actualQuantity の商品がある場合のみ）
+            // ✅ 在庫＝実数で差分がなくても、リストに載っているグループは groupItems に保存して「完了」扱いにする（確定できるようにする）
             const groupStatusMessagesForNoAdjust = [];
             for (const [groupId, groupLines] of linesByGroup.entries()) {
               const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              // ✅ グループ内にカウントした商品があるかチェック
-              // ✅ actualQuantity > 0 の場合：実数が0より大きい（カウントした）
-              // ✅ actualQuantity !== 0 && currentQuantity !== actualQuantity の場合：実数が0でなく、在庫数と実数が異なる（カウントした）
-              // ✅ グループ内にカウントした商品があるかチェック
-              // ✅ 在庫数と実数が異なる場合はカウントしたと判断（在庫10→実数0も含む）
-              // ✅ actualQuantity > 0 の場合もカウントしたと判断
               const hasCountedItems = groupLines.some((l) => {
                 const actualQty = Number(l.actualQuantity ?? 0);
                 const currentQty = Number(l.currentQuantity ?? 0);
                 return actualQty > 0 || currentQty !== actualQty;
               });
-              
-              // ✅ カウントした商品がないグループはスキップ（確定しない）
-              if (!hasCountedItems) {
-                groupStatusMessagesForNoAdjust.push(`「${groupName}」は未カウントのためスキップ`);
-                continue;
-              }
-              
+              // ✅ 差分なし（在庫＝実数）でも groupItems に保存し、確定・完了できるようにする
               const entry = groupLines.map((l) => ({
                 inventoryItemId: l.inventoryItemId,
                 variantId: l.variantId,
@@ -2111,7 +2099,7 @@ export function InventoryCountList({
                 isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
               }));
               groupItems[groupId] = entry;
-              groupStatusMessagesForNoAdjust.push(`「${groupName}」を確定しました`);
+              groupStatusMessagesForNoAdjust.push(hasCountedItems ? `「${groupName}」を確定しました` : `「${groupName}」は差分なしで確定しました`);
             }
             
             // ✅ 確定済みグループの確認
@@ -2230,7 +2218,7 @@ export function InventoryCountList({
         } catch (e) {
           console.error("Failed to clear inventory count draft:", e);
         }
-        toast("棚卸を完了しました（在庫調整なし）");
+        toast("棚卸を完了しました");
         onAfterConfirm?.();
         return true;
       } catch (e) {
@@ -3493,7 +3481,7 @@ export function InventoryCountList({
               </s-stack>
             ) : (
               <s-text size="small" tone="subdued">
-                在庫数の変更がないため、調整は不要です。
+                在庫数に変更はありませんが、「確定する」で棚卸を完了できます。
               </s-text>
             )}
 
