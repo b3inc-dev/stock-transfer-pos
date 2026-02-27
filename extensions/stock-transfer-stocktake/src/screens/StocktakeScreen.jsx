@@ -141,18 +141,14 @@ export function StocktakeScreen({ onBack, setHeader, setFooter, onViewChange, li
     setView(VIEW.CONDITIONS);
   }, []);
 
-  // 棚卸完了後の処理。updatedCount が渡された場合はその count で画面を更新しフッターを「完了」表示に。渡されない場合は一覧へ戻る。
+  // 棚卸完了後の処理。updatedCount が渡された場合はその count で画面を更新しフッターを「完了」表示に。
+  // バックグラウンド保存失敗などで null が渡された場合は何もしない（リストを消さない）。
   const handleAfterConfirm = useCallback((updatedCount) => {
     if (updatedCount) {
       setCount(updatedCount);
       return;
     }
-    setCount(null);
-    setSelectedProductGroupId(null);
-    setSelectedProductGroupIds([]);
-    setProductGroupMode("single");
-    setListReadOnly(false);
-    setView(VIEW.CONDITIONS);
+    // null/undefined のときはリスト・棚卸IDをクリアしない（保存失敗時も現在の画面を維持）
   }, []);
 
   // コンディション画面

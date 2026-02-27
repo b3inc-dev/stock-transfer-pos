@@ -288,7 +288,7 @@ export function InventoryCountConditions({
       setLoadedChunkCount(loadedChunks);
     } catch (e) {
       setError(String(e?.message ?? e));
-      setCounts([]);
+      // エラー時も既存の一覧は消さない（棚卸ID・リストを維持）
     } finally {
       setLoading(false);
     }
