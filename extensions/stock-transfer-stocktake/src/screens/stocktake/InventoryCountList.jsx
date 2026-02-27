@@ -83,6 +83,43 @@ function cancelledGroupIdSet(c) {
 }
 
 /**
+ * ストレージから読んだ count とローカルで組み立てた count をマージする。
+ * 親の count が一覧由来で groupItems が無い場合に、ストレージの他グループを上書きで消さないため。
+ * 戻り値: マージ済みの count（groupItems = ストレージをベースに locallyBuilt で上書き、status/completedAt は再計算）。
+ */
+function mergeCountWithStorage(fromStorage, locallyBuilt) {
+  if (!fromStorage || !locallyBuilt) return locallyBuilt || fromStorage;
+  const mergedGroupItems = {
+    ...(fromStorage?.groupItems && typeof fromStorage.groupItems === "object" ? fromStorage.groupItems : {}),
+    ...(locallyBuilt?.groupItems && typeof locallyBuilt.groupItems === "object" ? locallyBuilt.groupItems : {}),
+  };
+  const allIds =
+    Array.isArray(locallyBuilt.productGroupIds) && locallyBuilt.productGroupIds.length > 0
+      ? locallyBuilt.productGroupIds
+      : locallyBuilt.productGroupId
+        ? [locallyBuilt.productGroupId]
+        : [];
+  const cancelledSet = cancelledGroupIdSet(locallyBuilt);
+  const allDone =
+    allIds.length > 0 &&
+    allIds.every((id) => {
+      if (cancelledSet.has(normalizeIdForMatch(id))) return true;
+      const items = getGroupItemsByKey(mergedGroupItems, id);
+      return Array.isArray(items) && items.length > 0;
+    });
+  const status =
+    locallyBuilt.status === "cancelled" ? (allDone ? "completed" : "cancelled") : allDone ? "completed" : "in_progress";
+  const completedAt = allDone ? new Date().toISOString() : undefined;
+  return {
+    ...fromStorage,
+    ...locallyBuilt,
+    groupItems: mergedGroupItems,
+    status,
+    completedAt,
+  };
+}
+
+/**
  * 確定時の「更新後 count」をローカル状態のみから組み立てる（readInventoryCountsRaw をブロックせずに完了表示するため）。
  * 戻り値は write 用の full counts 配列には使わず、当該 count の更新後オブジェクトとして onAfterConfirm と merge に使用する。
  * 整合性: ...count で id, locationId, productGroupIds, cancelledGroupIds 等を維持。バックグラウンドで read → merge(id 一致で差し替え) → write するため他棚卸は上書きされない。
@@ -227,7 +264,11 @@ async function clearAllInventoryCountDraftsForCount({ countId, locationId, produ
     for (const key of keys) {
       await SHOPIFY.storage.delete(key);
     }
-    await SHOPIFY.storage.delete(INVENTORY_COUNT_DRAFT_LEGACY_KEY);
+    // ✅ 単一グループの棚卸のみ LEGACY_KEY を使用するため、複数グループ確定時に LEGACY_KEY を削除すると
+    // 別の棚卸（単一グループ）の下書きが消える不具合になる。確定対象が単一グループのときだけ削除する。
+    if (ids.length <= 1) {
+      await SHOPIFY.storage.delete(INVENTORY_COUNT_DRAFT_LEGACY_KEY);
+    }
   } catch (e) {
     console.error("Failed to clear inventory count drafts:", e);
   }
@@ -1909,9 +1950,11 @@ export function InventoryCountList({
               .then((counts) => {
                 const idStr = String(count?.id ?? "");
                 const list = Array.isArray(counts) ? counts : [];
+                const fromStorage = list.find((c) => String(c?.id ?? "") === idStr);
+                const toWrite = mergeCountWithStorage(fromStorage, locallyBuilt);
                 const merged = list.some((c) => String(c?.id ?? "") === idStr)
-                  ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuilt : c))
-                  : [...list, locallyBuilt];
+                  ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
+                  : [...list, toWrite];
                 return writeInventoryCounts(merged);
               })
               .catch((e) => {
@@ -1982,9 +2025,11 @@ export function InventoryCountList({
           readInventoryCountsRaw().then((counts) => {
             const idStr = String(count?.id ?? "");
             const list = Array.isArray(counts) ? counts : [];
+            const fromStorage = list.find((c) => String(c?.id ?? "") === idStr);
+            const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltAdjust);
             const merged = list.some((c) => String(c?.id ?? "") === idStr)
-              ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuiltAdjust : c))
-              : [...list, locallyBuiltAdjust];
+              ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
+              : [...list, toWrite];
             return writeInventoryCounts(merged);
           }),
           clearAllInventoryCountDraftsForCount({
@@ -2029,9 +2074,11 @@ export function InventoryCountList({
             .then((counts) => {
               const idStr = String(count?.id ?? "");
               const list = Array.isArray(counts) ? counts : [];
+              const fromStorage = list.find((c) => String(c?.id ?? "") === idStr);
+              const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltNoAdjust);
               const merged = list.some((c) => String(c?.id ?? "") === idStr)
-                ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuiltNoAdjust : c))
-                : [...list, locallyBuiltNoAdjust];
+                ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
+                : [...list, toWrite];
               return Promise.all([
                 writeInventoryCounts(merged),
                 clearAllInventoryCountDraftsForCount({
@@ -2140,9 +2187,11 @@ export function InventoryCountList({
           readInventoryCountsRaw().then((counts) => {
             const idStr = String(count?.id ?? "");
             const list = Array.isArray(counts) ? counts : [];
+            const fromStorage = list.find((c) => String(c?.id ?? "") === idStr);
+            const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltResult);
             const merged = list.some((c) => String(c?.id ?? "") === idStr)
-              ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuiltResult : c))
-              : [...list, locallyBuiltResult];
+              ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
+              : [...list, toWrite];
             return writeInventoryCounts(merged);
           }),
           clearAllInventoryCountDraftsForCount({

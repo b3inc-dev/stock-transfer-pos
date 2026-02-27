@@ -106,10 +106,11 @@ export function StocktakeScreen({ onBack, setHeader, setFooter, onViewChange, li
     []
   );
 
-  // 商品グループ選択画面から商品リストへ
+  // 商品グループ選択画面から商品リストへ（fullCount を渡されていれば親の count を更新し、確定時の他グループ上書きを防ぐ）
   const handleSelectProductGroup = useCallback(
     (params) => {
       if (params?.productGroupId) {
+        if (params?.count) setCount(params.count);
         setSelectedProductGroupId(params.productGroupId);
         setSelectedProductGroupIds([params.productGroupId]);
         setProductGroupMode("single");
