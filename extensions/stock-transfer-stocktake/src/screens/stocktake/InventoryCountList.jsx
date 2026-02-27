@@ -7,6 +7,7 @@ import {
   adjustInventoryToActual,
   searchVariants,
   readInventoryCounts,
+  readInventoryCountsRaw,
   readInventoryCountById,
   writeInventoryCounts,
   getLocationName,
