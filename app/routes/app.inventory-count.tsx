@@ -1477,7 +1477,8 @@ export async function action({ request }: ActionFunctionArgs) {
     actionType === "reset_stocktake_all" ||
     actionType === "cancel_stocktake_group" ||
     actionType === "cancel_stocktake" ||
-    actionType === "get_count_full";
+    actionType === "get_count_full" ||
+    actionType === "remove_blank_inventory_counts";
   const [currentResp, inventoryCountsFromChunked] = await Promise.all([
     admin.graphql(
       `#graphql
@@ -3060,6 +3061,21 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true };
   }
 
+  // ---------- 管理画面のみ：空白の棚卸IDを削除（ロケーション・商品グループが欠けている不正レコードを除去） ----------
+  if (actionType === "remove_blank_inventory_counts") {
+    const isBlank = (c: InventoryCount) => {
+      const hasLocation = Boolean((c as any).locationId && String((c as any).locationId).trim());
+      const groupIds = Array.isArray((c as any).productGroupIds) ? (c as any).productGroupIds : (c as any).productGroupId ? [(c as any).productGroupId] : [];
+      const hasGroups = groupIds.length > 0;
+      return !hasLocation || !hasGroups;
+    };
+    const kept = inventoryCounts.filter((c) => !isBlank(c));
+    const removed = inventoryCounts.length - kept.length;
+    const { userErrors } = await writeInventoryCountsChunked(admin, kept, ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    return { ok: true, removed };
+  }
+
   return { ok: false, error: "不明なアクション" as const };
   } catch (e) {
     const err = e as { message?: string; errors?: { graphQLErrors?: unknown[] }; body?: { errors?: { graphQLErrors?: unknown[] } } };
@@ -3217,6 +3233,7 @@ export default function InventoryCountPage() {
   const [modalEditMode, setModalEditMode] = useState(false);
   const [modalEditedQuantities, setModalEditedQuantities] = useState<Record<string, Record<string, number>>>({});
   const historyActionFetcher = useFetcher<typeof action>();
+  const removeBlankCountsFetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
   // ✅ list 由来で groupItems がない棚卸のフルデータ取得（モーダルでステータス・完了/未完了を正しく表示するため）
   const countFullFetcher = useFetcher<typeof action>();
@@ -3556,6 +3573,20 @@ export default function InventoryCountPage() {
       lastSubmittedGroupIdRef.current = null;
     }
   }, [incompleteGroupProductsFetcher.data, modalCount]);
+
+  // ✅ 空白棚卸ID削除完了時に一覧を再取得
+  useEffect(() => {
+    const d = removeBlankCountsFetcher.data;
+    if (d && (d as { ok?: boolean }).ok) {
+      const removed = (d as { removed?: number }).removed ?? 0;
+      revalidator.revalidate();
+      if (removed > 0) alert(`${removed}件の空白の棚卸IDを削除しました。`);
+      else alert("削除対象の空白棚卸IDはありませんでした。");
+    }
+    if (d && !(d as { ok?: boolean }).ok && (d as { error?: string }).error) {
+      alert((d as { error?: string }).error);
+    }
+  }, [removeBlankCountsFetcher.data]);
 
   // ✅ 履歴モーダルでの確定・リセット・キャンセル・数量保存成功時に一覧を再取得
   useEffect(() => {
@@ -5648,6 +5679,37 @@ export default function InventoryCountPage() {
                             );
                           })}
                         </div>
+                      </s-stack>
+                    </div>
+
+                    {/* 管理画面のみ：空白の棚卸IDを削除 */}
+                    <div
+                      style={{
+                        background: "#ffffff",
+                        borderRadius: 12,
+                        boxShadow: "0 0 0 1px #e1e3e5",
+                        padding: 16,
+                      }}
+                    >
+                      <s-stack gap="base">
+                        <s-text emphasis="bold" size="large">データ整備</s-text>
+                        <s-text tone="subdued" size="small">
+                          ロケーションや商品グループが欠けている不正な棚卸ID（空白レコード）を削除します。管理画面でのみ表示されます。
+                        </s-text>
+                        <s-button
+                          variant="secondary"
+                          tone="critical"
+                          loading={removeBlankCountsFetcher.state !== "idle"}
+                          onClick={() => {
+                            if (removeBlankCountsFetcher.state !== "idle") return;
+                            if (!confirm("空白の棚卸IDを削除しますか？\n（ロケーション・商品グループが無いレコードのみ削除され、正常な棚卸は残ります）")) return;
+                            const formData = new FormData();
+                            formData.append("action", "remove_blank_inventory_counts");
+                            removeBlankCountsFetcher.submit(formData, { method: "post" });
+                          }}
+                        >
+                          空白の棚卸IDを削除
+                        </s-button>
                       </s-stack>
                     </div>
                   </s-stack>
