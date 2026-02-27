@@ -1893,36 +1893,40 @@ export function InventoryCountList({
         .filter((l) => l.currentQuantity !== l.actualQuantity);
       
       if (allItemsToAdjust.length === 0) {
-        // ✅ ローカル状態のみで更新後 count を組み立て、read をブロックせず即「完了」表示（アプリタイルの待機時間削減）
+        // ✅ 在庫差異なし：アプリタイル上で待たせずモーダルを即閉じ、組み立て・保存はバックグラウンドで実行
         setSubmitting(true);
-        try {
-          const locallyBuilt = buildUpdatedCountFromLocalState(count, lines, {
-            isMultipleMode: true,
-            targetProductGroupIds,
-            productGroupId,
-          });
-          toast("棚卸を完了しました");
-          onAfterConfirm?.(locallyBuilt);
-          setSubmitting(false);
-          readInventoryCountsRaw()
-            .then((counts) => {
-              const idStr = String(count?.id ?? "");
-              const list = Array.isArray(counts) ? counts : [];
-              const merged = list.some((c) => String(c?.id ?? "") === idStr)
-                ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuilt : c))
-                : [...list, locallyBuilt];
-              return writeInventoryCounts(merged);
-            })
-            .catch((e) => {
-              toast(`保存に失敗しました: ${e?.message ?? e}`);
-              onAfterConfirm?.(null);
+        setTimeout(() => {
+          try {
+            const locallyBuilt = buildUpdatedCountFromLocalState(count, lines, {
+              isMultipleMode: true,
+              targetProductGroupIds,
+              productGroupId,
             });
-          return true;
-        } catch (e) {
-          toast(`エラー: ${e?.message ?? e}`);
-          setSubmitting(false);
-          return false;
-        }
+            toast("棚卸を完了しました");
+            onAfterConfirm?.(locallyBuilt);
+            setSubmitting(false);
+            readInventoryCountsRaw()
+              .then((counts) => {
+                const idStr = String(count?.id ?? "");
+                const list = Array.isArray(counts) ? counts : [];
+                const merged = list.some((c) => String(c?.id ?? "") === idStr)
+                  ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuilt : c))
+                  : [...list, locallyBuilt];
+                return writeInventoryCounts(merged);
+              })
+              .catch((e) => {
+                toast(`保存に失敗しました: ${e?.message ?? e}`);
+                onAfterConfirm?.(null);
+              });
+          } catch (e) {
+            toast(`エラー: ${e?.message ?? e}`);
+            onAfterConfirm?.(null);
+          } finally {
+            setSubmitting(false);
+          }
+        }, 0);
+        setSubmitting(false);
+        return true;
       }
       
       // 在庫調整が必要な場合：全グループの編集可能な商品を一度に調整
@@ -2009,43 +2013,47 @@ export function InventoryCountList({
     }
 
     if (itemsToAdjust.length === 0) {
-      // ✅ ローカル状態のみで更新後 count を組み立て、read をブロックせず即「完了」表示（アプリタイルの待機時間削減）
+      // ✅ 在庫差異なし：アプリタイル上で待たせずモーダルを即閉じ、組み立て・保存はバックグラウンドで実行
       setSubmitting(true);
-      try {
-        const locallyBuiltNoAdjust = buildUpdatedCountFromLocalState(count, lines, {
-          isMultipleMode,
-          targetProductGroupIds,
-          productGroupId,
-        });
-        toast("棚卸を完了しました");
-        onAfterConfirm?.(locallyBuiltNoAdjust);
-        setSubmitting(false);
-        readInventoryCountsRaw()
-          .then((counts) => {
-            const idStr = String(count?.id ?? "");
-            const list = Array.isArray(counts) ? counts : [];
-            const merged = list.some((c) => String(c?.id ?? "") === idStr)
-              ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuiltNoAdjust : c))
-              : [...list, locallyBuiltNoAdjust];
-            return Promise.all([
-              writeInventoryCounts(merged),
-              clearAllInventoryCountDraftsForCount({
-                countId: count.id,
-                locationId: count.locationId,
-                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-              }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
-            ]);
-          })
-          .catch((e) => {
-            toast(`保存に失敗しました: ${e?.message ?? e}`);
-            onAfterConfirm?.(null);
+      setTimeout(() => {
+        try {
+          const locallyBuiltNoAdjust = buildUpdatedCountFromLocalState(count, lines, {
+            isMultipleMode,
+            targetProductGroupIds,
+            productGroupId,
           });
-        return true;
-      } catch (e) {
-        toast(`エラー: ${e?.message ?? e}`);
-        setSubmitting(false);
-        return false;
-      }
+          toast("棚卸を完了しました");
+          onAfterConfirm?.(locallyBuiltNoAdjust);
+          setSubmitting(false);
+          readInventoryCountsRaw()
+            .then((counts) => {
+              const idStr = String(count?.id ?? "");
+              const list = Array.isArray(counts) ? counts : [];
+              const merged = list.some((c) => String(c?.id ?? "") === idStr)
+                ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuiltNoAdjust : c))
+                : [...list, locallyBuiltNoAdjust];
+              return Promise.all([
+                writeInventoryCounts(merged),
+                clearAllInventoryCountDraftsForCount({
+                  countId: count.id,
+                  locationId: count.locationId,
+                  productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+                }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
+              ]);
+            })
+            .catch((e) => {
+              toast(`保存に失敗しました: ${e?.message ?? e}`);
+              onAfterConfirm?.(null);
+            });
+        } catch (e) {
+          toast(`エラー: ${e?.message ?? e}`);
+          onAfterConfirm?.(null);
+        } finally {
+          setSubmitting(false);
+        }
+      }, 0);
+      setSubmitting(false);
+      return true;
     }
 
     setSubmitting(true);

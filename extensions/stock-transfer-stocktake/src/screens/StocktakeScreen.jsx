@@ -141,11 +141,17 @@ export function StocktakeScreen({ onBack, setHeader, setFooter, onViewChange, li
     setView(VIEW.CONDITIONS);
   }, []);
 
-  // 棚卸完了後の処理。updatedCount が渡された場合はその count で画面を更新しフッターを「完了」表示に。
+  // 棚卸完了後の処理。updatedCount が渡された場合はその count で画面を更新し、未完了グループの有無で遷移する。
+  // 全グループ完了 → コンディション画面、未完了あり → 商品グループリスト（戻った際に更新済みステータスを表示して問題2も解消）。
   // バックグラウンド保存失敗などで null が渡された場合は何もしない（リストを消さない）。
   const handleAfterConfirm = useCallback((updatedCount) => {
     if (updatedCount) {
       setCount(updatedCount);
+      if (updatedCount.status === "completed") {
+        setView(VIEW.CONDITIONS);
+      } else {
+        setView(VIEW.PRODUCT_GROUP_SELECTION);
+      }
       return;
     }
     // null/undefined のときはリスト・棚卸IDをクリアしない（保存失敗時も現在の画面を維持）
