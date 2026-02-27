@@ -427,7 +427,6 @@ export async function readInventoryCountsFirstPage() {
     if (parsed.length === 0) {
       return { counts: [], hasMore: false, chunkCount: 0, loadedChunkCount: 0, productGroups: productGroups || [], listLimit, useListMetafield: false };
     }
-    await writeInventoryCounts(parsed);
     const key0 = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}0`;
     const gql0 = `#graphql
       query InventoryCountChunk0 {
@@ -437,8 +436,14 @@ export async function readInventoryCountsFirstPage() {
       }`;
     const d0 = await graphql(gql0);
     const chunkRaw = d0?.currentAppInstallation?.metafield?.value;
+    const chunk0Exists = chunkRaw != null;
+    if (!chunk0Exists) {
+      await writeInventoryCounts(parsed);
+    }
     let counts = [];
-    if (chunkRaw) {
+    if (chunk0Exists) {
+      counts = await readInventoryCountsRaw();
+    } else if (chunkRaw) {
       try {
         const chunk = JSON.parse(chunkRaw);
         counts = parseChunkAndMergeParts(chunk);
@@ -805,6 +810,10 @@ function splitCountIntoParts(count) {
   return parts;
 }
 
+/**
+ * 棚卸一覧をメタフィールドに保存する。必ず「全件」の配列を渡すこと。
+ * 部分的な配列で呼ぶと他棚卸IDが消えるため、呼び出し元は read で取得した全件を更新してから渡すこと。
+ */
 export async function writeInventoryCounts(counts) {
   const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
   const d = await graphql(gqlApp);
@@ -812,6 +821,22 @@ export async function writeInventoryCounts(counts) {
   if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
 
   const arr = Array.isArray(counts) ? counts : [];
+  if (arr.length === 0) {
+    const gqlCheck = `#graphql query MainKey { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
+    const check = await graphql(gqlCheck);
+    const raw = check?.currentAppInstallation?.metafield?.value;
+    if (raw && raw !== "[]") {
+      try {
+        const parsed = JSON.parse(raw);
+        const hasData = Array.isArray(parsed) ? parsed.length > 0 : (parsed?._chunked && parsed?.totalChunks > 0);
+        if (hasData) {
+          throw new Error("棚卸データを空にすることはできません。既存の棚卸IDが消えるため、空配列での上書きをブロックしました。");
+        }
+      } catch (e) {
+        if (e?.message?.includes("ブロックしました")) throw e;
+      }
+    }
+  }
   const payloads = [];
   const countIdToChunkIndices = new Map();
   let current = [];
