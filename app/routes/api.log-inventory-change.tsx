@@ -235,9 +235,10 @@ export async function action({ request }: ActionFunctionArgs) {
         : `${shop}_${activity}_${inventoryItemId}_${locationId}_${tsRounded.toISOString()}`;
 
       // 入庫・出庫・仕入・ロス・棚卸で変動があったロケーション名を確実に保存する。
-      // 未設定またはラベル（出庫元）のときは GraphQL で実ロケーション名を取得する。
+      // 未設定・ラベル（出庫元）・GID形式（gid://shopify/Location/...）のときは GraphQL で実ロケーション名を取得する。
       let resolvedLocationName = typeof locationName === "string" ? locationName.trim() : "";
-      if (admin && (!resolvedLocationName || resolvedLocationName === "出庫元")) {
+      const needsResolve = !resolvedLocationName || resolvedLocationName === "出庫元" || String(resolvedLocationName).startsWith("gid://");
+      if (admin && needsResolve) {
         resolvedLocationName = await resolveLocationName(admin, locationId, rawLocId);
       }
       if (!resolvedLocationName) resolvedLocationName = rawLocId || String(locationId || "");

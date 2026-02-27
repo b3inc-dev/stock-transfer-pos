@@ -2019,7 +2019,7 @@ export function InventoryCountList({
           Promise.all([
             logInventoryCountToApi({
               locationId: count.locationId,
-              locationName: count.locationName || "",
+              locationName: locationName || count.locationName || "",
               items: allItemsToAdjust,
               sourceId: count.id,
             }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
@@ -2443,7 +2443,7 @@ export function InventoryCountList({
         Promise.all([
           logInventoryCountToApi({
             locationId: count.locationId,
-            locationName: count.locationName || "",
+            locationName: locationName || count.locationName || "",
             items: itemsToAdjust,
             sourceId: count.id,
           }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),

@@ -794,6 +794,28 @@ export default function InventoryInfoPage() {
     : "";
   const chHasPagination = chPagination.hasNextPage || chPagination.hasPreviousPage;
 
+  // 在庫変動履歴のロケーション表示用：GIDや数値IDからロケーション名を解決（棚卸などで locationName が GID のまま保存されている場合に対応）
+  const locationNameByLocationId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const loc of locations || []) {
+      if (loc?.name != null) {
+        map.set(String(loc.id), loc.name);
+        const raw = String(loc.id).replace(/^gid:\/\/shopify\/Location\//i, "");
+        if (raw && raw !== String(loc.id)) map.set(raw, loc.name);
+      }
+    }
+    return map;
+  }, [locations]);
+  const getChangeHistoryLocationDisplayName = (log: { locationId?: string | null; locationName?: string | null }) => {
+    const locName = log?.locationName != null ? String(log.locationName).trim() : "";
+    if (!locName) return log?.locationId ? (locationNameByLocationId.get(String(log.locationId)) ?? String(log.locationId)) : "-";
+    if (locName.startsWith("gid://")) {
+      const raw = locName.replace(/^gid:\/\/shopify\/Location\//i, "");
+      return locationNameByLocationId.get(locName) ?? locationNameByLocationId.get(raw) ?? locName;
+    }
+    return locName;
+  };
+
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setDateValue(value);
@@ -2219,7 +2241,7 @@ export default function InventoryInfoPage() {
                                       <td style={{ padding: "12px 16px" }}>{log.option1 || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.option2 || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.option3 || "-"}</td>
-                                      <td style={{ padding: "12px 16px" }}>{log.locationName}</td>
+                                      <td style={{ padding: "12px 16px" }}>{getChangeHistoryLocationDisplayName(log)}</td>
                                       <td style={{ padding: "12px 16px" }}>{getActivityDisplayLabel(log.activity)}</td>
                                       <td style={{ padding: "12px 16px", textAlign: "right", color: log.delta != null && log.delta > 0 ? "#008060" : log.delta != null && log.delta < 0 ? "#d72c0d" : "#202223" }}>
                                         {log.delta !== null ? (log.delta > 0 ? `+${log.delta}` : String(log.delta)) : "-"}

@@ -18,6 +18,14 @@ const VARIANTS_FOR_CHANGE_HISTORY_QUERY = `#graphql
   }
 `;
 
+const LOCATIONS_QUERY = `#graphql
+  query LocationsForCsv($first: Int!) {
+    locations(first: $first) {
+      nodes { id name }
+    }
+  }
+`;
+
 const ACTIVITY_LABELS: Record<string, string> = {
   inbound_transfer: "入庫",
   outbound_transfer: "出庫",
@@ -123,7 +131,32 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
       where: whereClause,
       orderBy: { timestamp: sortOrder },
       take: MAX_EXPORT,
-    }) as Array<{ variantId?: string; sku?: string; timestamp?: string; locationName?: string; activity?: string; delta?: number | null; quantityAfter?: number | null; sourceId?: string; note?: string }>;
+    }) as Array<{ variantId?: string; sku?: string; timestamp?: string; locationId?: string; locationName?: string; activity?: string; delta?: number | null; quantityAfter?: number | null; sourceId?: string; note?: string }>;
+
+    const locationNameByLocationId = new Map<string, string>();
+    try {
+      const locResp = await admin.graphql(LOCATIONS_QUERY, { variables: { first: 250 } });
+      const locData = (await (locResp as { json?: () => Promise<unknown> }).json?.()) as { data?: { locations?: { nodes?: Array<{ id?: string; name?: string }> } }; errors?: unknown[] };
+      const locNodes = locData?.data?.locations?.nodes ?? [];
+      for (const loc of locNodes) {
+        if (loc?.id && loc?.name != null) {
+          locationNameByLocationId.set(String(loc.id), loc.name);
+          const raw = String(loc.id).replace(/^gid:\/\/shopify\/Location\//i, "");
+          if (raw && raw !== String(loc.id)) locationNameByLocationId.set(raw, loc.name);
+        }
+      }
+    } catch (e) {
+      console.warn("[export-change-history-csv] locations query failed (CSV may show GID for location):", e instanceof Error ? e.message : String(e));
+    }
+    const getLocationDisplayName = (log: { locationId?: string; locationName?: string }) => {
+      const locName = log?.locationName != null ? String(log.locationName).trim() : "";
+      if (!locName) return log?.locationId ? (locationNameByLocationId.get(String(log.locationId)) ?? String(log.locationId)) : "";
+      if (locName.startsWith("gid://")) {
+        const raw = locName.replace(/^gid:\/\/shopify\/Location\//i, "");
+        return locationNameByLocationId.get(locName) ?? locationNameByLocationId.get(raw) ?? locName;
+      }
+      return locName;
+    };
 
     const variantIds = [...new Set(allLogs.map((l) => l.variantId).filter(Boolean))] as string[];
     const MAX_VARIANTS_FOR_EXPORT = 5000;
@@ -208,7 +241,7 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
         info?.option1 ?? "",
         info?.option2 ?? "",
         info?.option3 ?? "",
-        log.locationName || "",
+        getLocationDisplayName(log) || "",
         getActivityDisplayLabel(log.activity),
         log.delta !== null ? String(log.delta) : "",
         log.quantityAfter !== null ? String(log.quantityAfter) : "",
