@@ -20,7 +20,7 @@
 // shopify.app.toml を使用する場合（自社用カスタムアプリ）: APP_MODE = "inhouse"
 // shopify.app.public.toml を使用する場合（公開アプリ）: APP_MODE = "public"
 // デプロイ前に、使用する設定ファイルに応じてこの値を変更してください
-const APP_MODE = "public"; // "public" または "inhouse"
+const APP_MODE = "inhouse"; // "public" または "inhouse"
 
 // ============================================
 // 以下は通常変更不要

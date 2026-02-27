@@ -1574,9 +1574,11 @@ async function ensureInventoryActivatedAtLocation({ locationGid, items }) {
         { ids: chunk, locationId: locationGid }
       );
       const nodes = Array.isArray(d?.nodes) ? d.nodes : [];
+      const processedIds = new Set();
       for (const node of nodes) {
         const inventoryItemId = String(node?.id || "").trim();
         if (!inventoryItemId) continue;
+        processedIds.add(inventoryItemId);
         const hasLevel = !!node?.inventoryLevel?.id;
         const tracked = node?.tracked === true;
         if (!hasLevel || !tracked) {
@@ -1587,6 +1589,16 @@ async function ensureInventoryActivatedAtLocation({ locationGid, items }) {
           });
         } else {
           activated.push({ inventoryItemId, locationId: locationGid });
+        }
+      }
+      // nodes に含まれなかった ID（存在しない or null）も有効化対象にする（漏れで「在庫がありません」エラーになるのを防ぐ）
+      for (const id of chunk) {
+        if (!processedIds.has(id)) {
+          toProcess.push({
+            inventoryItemId: id,
+            needsTrackedUpdate: true,
+            needsActivate: true,
+          });
         }
       }
     } catch (e) {
@@ -1600,80 +1612,127 @@ async function ensureInventoryActivatedAtLocation({ locationGid, items }) {
     }
   }
 
-  for (const item of toProcess) {
+  const maxAttempts = 4;
+  const delayAfterTrackedMs = 1000;
+  const delayBetweenItemsMs = 150;
+
+  for (let idx = 0; idx < toProcess.length; idx++) {
+    const item = toProcess[idx];
     const { inventoryItemId, needsTrackedUpdate, needsActivate } = item;
     const initialQty = quantityByItemId.get(inventoryItemId);
-    try {
-      if (needsTrackedUpdate) {
-        const updateRes = await graphql(
+    if (idx > 0) await new Promise((r) => setTimeout(r, delayBetweenItemsMs));
+    let lastError = null;
+    let succeeded = false;
+    for (let attempt = 1; attempt <= maxAttempts && !succeeded; attempt++) {
+      try {
+        if (needsTrackedUpdate) {
+          const updateRes = await graphql(
+            `#graphql
+              mutation UpdateInventoryItem($id: ID!, $input: InventoryItemInput!) {
+                inventoryItemUpdate(id: $id, input: $input) {
+                  inventoryItem { id tracked }
+                  userErrors { field message }
+                }
+              }`,
+            { id: inventoryItemId, input: { tracked: true } }
+          );
+          const updateErrs = updateRes?.inventoryItemUpdate?.userErrors ?? [];
+          if (updateErrs.length > 0) {
+            lastError = updateErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "在庫追跡の有効化に失敗しました";
+            if (attempt < maxAttempts) {
+              await new Promise((r) => setTimeout(r, 800 * attempt));
+              continue;
+            }
+            // 追跡ONに失敗しても activate を試す（既に追跡ONの場合は成功する）
+          } else {
+            await new Promise((r) => setTimeout(r, delayAfterTrackedMs));
+          }
+        }
+        if (!needsActivate) {
+          activated.push({ inventoryItemId, locationId: locationGid });
+          succeeded = true;
+          break;
+        }
+        const withQty = attempt === 1 && initialQty != null && Number.isFinite(Number(initialQty));
+        const vars = { inventoryItemId, locationId: locationGid };
+        if (withQty) {
+          const q = Math.floor(Number(initialQty));
+          vars.available = q;
+          vars.onHand = q;
+        }
+        const actRes = await graphql(
           `#graphql
-            mutation UpdateInventoryItem($id: ID!, $input: InventoryItemInput!) {
-              inventoryItemUpdate(id: $id, input: $input) {
-                inventoryItem { id tracked }
+            mutation ActivateInventoryItem(
+              $inventoryItemId: ID!
+              $locationId: ID!
+              $available: Int
+              $onHand: Int
+            ) {
+              inventoryActivate(
+                inventoryItemId: $inventoryItemId
+                locationId: $locationId
+                available: $available
+                onHand: $onHand
+              ) {
+                inventoryLevel { id }
                 userErrors { field message }
               }
             }`,
-          { id: inventoryItemId, input: { tracked: true } }
+          vars
         );
-        const updateErrs = updateRes?.inventoryItemUpdate?.userErrors ?? [];
-        if (updateErrs.length > 0) {
-          errors.push({
-            inventoryItemId,
-            message: updateErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "在庫追跡の有効化に失敗しました",
-          });
+        const payload = actRes?.inventoryActivate;
+        const userErrs = payload?.userErrors ?? [];
+        if (userErrs.length > 0) {
+          const errMsg = userErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "unknown";
+          const alreadyActivated = /already|既に|activated|在庫レベル|already has/i.test(errMsg);
+          if (alreadyActivated) {
+            const check = await graphql(
+              `#graphql
+                query CheckLevel($ids: [ID!]!, $locationId: ID!) {
+                  nodes(ids: $ids) {
+                    ... on InventoryItem {
+                      id
+                      inventoryLevel(locationId: $locationId) { id }
+                    }
+                  }
+                }`,
+              { ids: [inventoryItemId], locationId: locationGid }
+            );
+            const node = (check?.nodes ?? [])[0];
+            if (node?.inventoryLevel?.id) {
+              activated.push({ inventoryItemId, locationId: locationGid });
+              succeeded = true;
+              break;
+            }
+          }
+          lastError = errMsg;
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 800 * attempt));
+            continue;
+          }
+          if (!succeeded) errors.push({ inventoryItemId, message: lastError });
+          break;
+        }
+        if (payload?.inventoryLevel?.id) {
+          activated.push({ inventoryItemId, locationId: locationGid });
+          succeeded = true;
+        } else {
+          lastError = "inventoryLevel が返されませんでした";
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 800 * attempt));
+            continue;
+          }
+          if (!succeeded) errors.push({ inventoryItemId, message: lastError });
+        }
+        break;
+      } catch (e) {
+        lastError = String(e?.message ?? e);
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 800 * attempt));
           continue;
         }
-        await new Promise((r) => setTimeout(r, 300));
+        if (!succeeded) errors.push({ inventoryItemId, message: lastError });
       }
-      if (!needsActivate) {
-        activated.push({ inventoryItemId, locationId: locationGid });
-        continue;
-      }
-      const vars = { inventoryItemId, locationId: locationGid };
-      if (initialQty != null && Number.isFinite(Number(initialQty))) {
-        const q = Math.floor(Number(initialQty));
-        vars.available = q;
-        vars.onHand = q;
-      }
-      const actRes = await graphql(
-        `#graphql
-          mutation ActivateInventoryItem(
-            $inventoryItemId: ID!
-            $locationId: ID!
-            $available: Int
-            $onHand: Int
-          ) {
-            inventoryActivate(
-              inventoryItemId: $inventoryItemId
-              locationId: $locationId
-              available: $available
-              onHand: $onHand
-            ) {
-              inventoryLevel { id }
-              userErrors { field message }
-            }
-          }`,
-        vars
-      );
-      const payload = actRes?.inventoryActivate;
-      const userErrs = payload?.userErrors ?? [];
-      if (userErrs.length > 0) {
-        errors.push({
-          inventoryItemId,
-          message: userErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "unknown",
-        });
-        continue;
-      }
-      if (payload?.inventoryLevel?.id) {
-        activated.push({ inventoryItemId, locationId: locationGid });
-      } else {
-        errors.push({
-          inventoryItemId,
-          message: "inventoryLevel が返されませんでした（在庫追跡が無効な可能性があります）",
-        });
-      }
-    } catch (e) {
-      errors.push({ inventoryItemId, message: String(e?.message ?? e) });
     }
   }
   return { ok: errors.length === 0, activated, errors };
@@ -1718,13 +1777,24 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     return { adjustmentGroup: null, invalidCount, processedCount: 0 };
   }
 
-  // ロケーションに在庫レベルがないアイテムがあると inventorySetQuantities が失敗するため、先に在庫有効化する
-  const activateResult = await ensureInventoryActivatedAtLocation({
+  // ロケーションに在庫レベルがないアイテムがあると inventorySetQuantities が失敗するため、先に在庫有効化する（除外せず全件成功するまでリトライ）
+  let activateResult = await ensureInventoryActivatedAtLocation({
     locationGid,
     items: quantities.map((q) => ({ inventoryItemId: q.inventoryItemId, quantity: q.quantity })),
   });
-  if (!activateResult.ok && activateResult.errors?.length > 0) {
-    console.warn("[adjustInventoryToActual] 一部の在庫有効化に失敗しましたが、在庫設定は続行します", activateResult.errors);
+  const maxActivateRetries = 2;
+  for (let r = 0; r < maxActivateRetries && (activateResult.errors ?? []).length > 0; r++) {
+    const failedIds = new Set((activateResult.errors ?? []).map((e) => e.inventoryItemId));
+    const failedItems = quantities.filter((q) => failedIds.has(q.inventoryItemId));
+    if (failedItems.length === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 1000 * (r + 1)));
+    activateResult = await ensureInventoryActivatedAtLocation({
+      locationGid,
+      items: failedItems.map((q) => ({ inventoryItemId: q.inventoryItemId, quantity: q.quantity })),
+    });
+  }
+  if ((activateResult.errors ?? []).length > 0) {
+    throw new Error("在庫有効化に失敗しました");
   }
 
   // referenceDocumentUriを生成（棚卸IDが指定されている場合）
@@ -1772,7 +1842,7 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
       const errs = d?.inventorySetQuantities?.userErrors ?? [];
       if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
       
-      // ✅ 成功時は不正ID件数も返す
+      // ✅ 成功時は不正ID件数も返す（全件有効化済みのため除外なし）
       return { 
         adjustmentGroup: d.inventorySetQuantities.inventoryAdjustmentGroup ?? null,
         invalidCount,
