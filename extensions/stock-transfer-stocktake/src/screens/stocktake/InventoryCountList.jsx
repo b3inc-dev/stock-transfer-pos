@@ -1767,10 +1767,11 @@ export function InventoryCountList({
         .filter((l) => l.currentQuantity !== l.actualQuantity);
       
       if (allItemsToAdjust.length === 0) {
-        toast("在庫数に変更はありませんが、このまま確定して完了できます");
-        // 在庫調整なしでもgroupItemsに保存する
+        // ✅ 確認モーダルで「確定する」を押した後の処理。トーストは成功時の「棚卸を完了しました」のみ表示する
+        // ✅ 軽量化：readInventoryCountsRaw のみ使用（readProductGroups・内部writeを避けタイムアウト防止）
+        setSubmitting(true);
         try {
-          const counts = await readInventoryCounts();
+          const counts = await readInventoryCountsRaw();
           const updated = counts.map((c) => {
             if (c.id !== count.id) return c;
             const groupItems = { ...(c.groupItems || {}) };
@@ -2064,9 +2065,10 @@ export function InventoryCountList({
 
     if (itemsToAdjust.length === 0) {
       // ✅ 確認モーダルで「確定する」を押した後の処理。トーストは成功時の「棚卸を完了しました」のみ表示する
+      // ✅ 軽量化：readInventoryCountsRaw のみ使用（readProductGroups・内部writeを避けタイムアウト防止）
       setSubmitting(true);
       try {
-        const counts = await readInventoryCounts();
+        const counts = await readInventoryCountsRaw();
         // ✅ まとめて表示モードの場合：各商品グループごとにgroupItemsに保存
         if (isMultipleMode) {
           // 編集可能な商品を商品グループごとにグループ化

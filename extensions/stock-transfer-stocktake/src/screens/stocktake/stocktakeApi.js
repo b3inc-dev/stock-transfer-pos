@@ -187,8 +187,9 @@ function mergeCountParts(parts) {
 
 /**
  * 棚卸メタフィールドをチャンク対応で読み込む（管理画面と同一ロジック。パート形式にも対応）。
+ * 副作用なし（readProductGroups・countName補正・内部writeは行わない）。確定時の軽量読み取り用に export。
  */
-async function readInventoryCountsRaw() {
+export async function readInventoryCountsRaw() {
   const gql = `#graphql
     query InventoryCounts {
       currentAppInstallation {
