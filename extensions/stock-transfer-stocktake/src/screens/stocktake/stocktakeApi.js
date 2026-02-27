@@ -13,6 +13,13 @@ const INVENTORY_COUNTS_LIST_KEY = "inventory_counts_list_v1";
 const INVENTORY_COUNTS_LIST_CHUNK_PREFIX = "inventory_counts_list_v1_c";
 /** 棚卸ID → チャンク番号のインデックス（readInventoryCountById で全チャンク読まないため） */
 const INVENTORY_COUNT_INDEX_KEY = "inventory_count_index_v1";
+
+/** #C0001 形式の countName から数値（1）を取得。パースできない場合は 0 */
+function parseCountNameNumber(countName) {
+  if (!countName || typeof countName !== "string") return 0;
+  const m = countName.trim().match(/^#C0*(\d+)$/i);
+  return m ? Math.max(0, parseInt(m[1], 10)) : 0;
+}
 /** 商品グループ軽量：ID一覧・ID→名前（一覧表示でフル取得を避ける） */
 const PRODUCT_GROUP_IDS_KEY = "product_group_ids_v1";
 const PRODUCT_GROUP_NAMES_KEY = "product_group_names_v1";
@@ -705,24 +712,33 @@ export async function readInventoryCounts() {
       return c;
     });
     
-    // 作成日時順にソートして連番を振る（同順時は id で安定化し、#C0034 の後に作ったものが #C0028 になる事象を防ぐ）
-    const sortedCounts = [...countsFixed].sort((a, b) => {
+    // ✅ 一度振り分けた countName は固定（同じ棚卸IDには常に同じ番号名称）。既にある場合は変更しない。
+    // 欠けている場合のみ、既存の最大番号+1 から作成日時順に付与して重複を防ぐ。
+    const maxExistingNumber = countsFixed.reduce((max, c) => {
+      const n = parseCountNameNumber(c.countName);
+      return n > max ? n : max;
+    }, 0);
+    const missingCountNameCounts = [...countsFixed].filter((c) => !c.countName).sort((a, b) => {
       const aTime = new Date(a.createdAt || 0).getTime();
       const bTime = new Date(b.createdAt || 0).getTime();
       if (aTime !== bTime) return aTime - bTime;
       return String(a.id || "").localeCompare(String(b.id || ""), undefined, { numeric: true });
     });
-    
-    // ✅ 常に作成順で countName を再計算（誤って #C0028 等で発行したものを次回読み込み時に正しい番号に直す）
+    const assignedCountNameById = new Map();
+    let nextNumber = maxExistingNumber + 1;
+    for (const c of missingCountNameCounts) {
+      assignedCountNameById.set(c.id, `#C${String(nextNumber).padStart(4, "0")}`);
+      nextNumber += 1;
+    }
     const countsWithName = countsFixed.map((c) => {
-      const sortedIndex = sortedCounts.findIndex((x) => x.id === c.id);
-      const countName = `#C${String((sortedIndex >= 0 ? sortedIndex : 0) + 1).padStart(4, "0")}`;
-      return { ...c, countName };
+      if (c.countName) return c;
+      const countName = assignedCountNameById.get(c.id);
+      return countName ? { ...c, countName } : c;
     });
-    const anyCountNameChanged = countsFixed.some((c, i) => c.countName !== countsWithName[i]?.countName);
+    const addedAnyCountName = missingCountNameCounts.length > 0;
 
-    // ✅ countNameが追加・変更された場合、またはステータスが修正された場合は保存（次回から反映される）
-    if (hasMissingCountName || needsUpdate || anyCountNameChanged) {
+    // ✅ countNameを新規付与した場合、またはステータスが修正された場合のみ保存（既存の countName は上書きしない）
+    if (hasMissingCountName || needsUpdate || addedAnyCountName) {
       try {
         await writeInventoryCounts(countsWithName);
       } catch (e) {

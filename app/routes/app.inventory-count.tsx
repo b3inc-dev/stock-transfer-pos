@@ -965,6 +965,13 @@ function generateId(prefix: string): string {
   return `${prefix}_${timestamp}_${random}`;
 }
 
+/** #C0001 形式の countName から数値を取得。パースできない場合は 0 */
+function parseCountNameNumber(countName: string | null | undefined): number {
+  if (!countName || typeof countName !== "string") return 0;
+  const m = countName.trim().match(/^#C0*(\d+)$/i);
+  return m ? Math.max(0, parseInt(m[1], 10)) : 0;
+}
+
 const SKU_BATCH_SIZE = 25;
 const SKU_BATCH_CONCURRENCY = 10;
 /** Shopify GraphQL nodes(ids) の最大件数（250を超えるとエラーになるため編集時の商品リスト取得でチャンクに分割） */
@@ -1991,16 +1998,12 @@ export async function action({ request }: ActionFunctionArgs) {
       }
 
       const loc = locations.find((l) => l.id === locationId);
-      // 既存の棚卸を createdAt 昇順（同順は id）でソートし、その次の連番を付与（POS の fixCountsStatusOnly と同じ順序で重複・逆転を防ぐ）
-      const sorted = Array.isArray(inventoryCounts)
-        ? [...inventoryCounts].sort((a, b) => {
-            const aTime = new Date(a.createdAt || 0).getTime();
-            const bTime = new Date(b.createdAt || 0).getTime();
-            if (aTime !== bTime) return aTime - bTime;
-            return String(a.id ?? "").localeCompare(String(b.id ?? ""), undefined, { numeric: true });
-          })
-        : [];
-      const countName = `#C${String(sorted.length + 1).padStart(4, "0")}`;
+      // 既存の最大番号+1 を付与して重複を防ぎ、一度振った番号は固定される（ID に紐づく）
+      const maxExistingNumber = (inventoryCounts ?? []).reduce(
+        (max, c) => Math.max(max, parseCountNameNumber((c as { countName?: string }).countName)),
+        0
+      );
+      const countName = `#C${String(maxExistingNumber + 1).padStart(4, "0")}`;
 
       // メタフィールド値は 2MB 制限（API 2026-04 以降は 16KB の可能性あり）。大きすぎる場合は ID を保存せず POS でコレクションから読む
       const METAFIELD_VALUE_MAX_BYTES = 500_000; // 500KB に抑えてリクエストタイムアウト・保存失敗を防ぐ
