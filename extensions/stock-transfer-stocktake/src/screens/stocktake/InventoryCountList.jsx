@@ -2073,7 +2073,9 @@ export function InventoryCountList({
           
           const updated = counts.map((c) => {
             if (c.id !== count.id) return c;
-            const groupItems = { ...(c.groupItems || {}) };
+            // ✅ 親の count.groupItems を優先してマージ（既に確定済みの他グループを含める）。最後の1グループ確定時に allDone が正しく true になるようする。
+            const parentGroupItemsNoAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
+            const groupItems = { ...parentGroupItemsNoAdjust, ...(c.groupItems || {}) };
             
             // 各商品グループごとにgroupItemsに保存
             // ✅ 在庫＝実数で差分がなくても、リストに載っているグループは groupItems に保存して「完了」扱いにする（確定できるようにする）
@@ -2301,7 +2303,9 @@ export function InventoryCountList({
         if (isMultipleMode) {
           const updated = counts.map((c) => {
             if (c.id !== count.id) return c;
-            const groupItems = { ...(c.groupItems || {}) };
+            // ✅ 親の count.groupItems を優先してマージ（既に確定済みの他グループを含める）。最後の1グループ確定時に allDone が正しく true になるようする。
+            const parentGroupItems = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
+            const groupItems = { ...parentGroupItems, ...(c.groupItems || {}) };
             
             // 編集可能な商品を商品グループごとにグループ化
             const linesByGroup = new Map();
