@@ -82,6 +82,130 @@ function cancelledGroupIdSet(c) {
   return new Set(arr.map((id) => normalizeIdForMatch(id)));
 }
 
+/**
+ * 確定時の「更新後 count」をローカル状態のみから組み立てる（readInventoryCountsRaw をブロックせずに完了表示するため）。
+ * 戻り値は write 用の full counts 配列には使わず、当該 count の更新後オブジェクトとして onAfterConfirm と merge に使用する。
+ * 整合性: ...count で id, locationId, productGroupIds, cancelledGroupIds 等を維持。バックグラウンドで read → merge(id 一致で差し替え) → write するため他棚卸は上書きされない。
+ */
+function buildUpdatedCountFromLocalState(count, lines, opts) {
+  const { isMultipleMode, targetProductGroupIds, productGroupId } = opts || {};
+  const parentGroupItems = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
+  const groupItems = { ...parentGroupItems };
+  const currentGroupId = productGroupId || (Array.isArray(targetProductGroupIds) && targetProductGroupIds[0]) || null;
+
+  if (isMultipleMode && Array.isArray(targetProductGroupIds) && targetProductGroupIds.length > 0) {
+    const editableLines = lines.filter((l) => !l.isReadOnly);
+    const linesByGroup = new Map();
+    for (const l of editableLines) {
+      const gid = l.productGroupId || targetProductGroupIds[0];
+      if (!gid) continue;
+      if (!linesByGroup.has(gid)) linesByGroup.set(gid, []);
+      linesByGroup.get(gid).push(l);
+    }
+    for (const [groupId, groupLines] of linesByGroup.entries()) {
+      const entry = groupLines.map((l) => ({
+        inventoryItemId: l.inventoryItemId,
+        variantId: l.variantId,
+        sku: l.sku ?? "",
+        barcode: l.barcode ?? "",
+        title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
+        imageUrl: l.imageUrl ?? "",
+        currentQuantity: Number(l.currentQuantity ?? 0),
+        actualQuantity: Number(l.actualQuantity ?? 0),
+        delta: Number(l.actualQuantity ?? 0) - Number(l.currentQuantity ?? 0),
+        isExtra: Boolean(l.isExtra),
+      }));
+      groupItems[groupId] = entry;
+    }
+  } else if (currentGroupId) {
+    const linesSnapshot = lines.map((l) => ({
+      inventoryItemId: l.inventoryItemId,
+      variantId: l.variantId,
+      sku: l.sku ?? "",
+      barcode: l.barcode ?? "",
+      productTitle: l.productTitle ?? "",
+      variantTitle: l.variantTitle ?? "",
+      imageUrl: l.imageUrl ?? "",
+      currentQuantity: Number(l.currentQuantity ?? 0),
+      actualQuantity: Number(l.actualQuantity ?? 0),
+      isExtra: Boolean(l.isExtra),
+    }));
+    const entry = linesSnapshot.map((l) => ({
+      inventoryItemId: l.inventoryItemId,
+      variantId: l.variantId,
+      sku: l.sku,
+      barcode: l.barcode ?? "",
+      title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
+      imageUrl: l.imageUrl ?? "",
+      currentQuantity: l.currentQuantity,
+      actualQuantity: l.actualQuantity,
+      isExtra: l.isExtra,
+      delta: l.actualQuantity - l.currentQuantity,
+    }));
+    groupItems[currentGroupId] = entry;
+  }
+
+  const allIds =
+    Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0
+      ? count.productGroupIds
+      : count.productGroupId
+        ? [count.productGroupId]
+        : [];
+  const cancelledSet = cancelledGroupIdSet(count);
+  const allDone =
+    allIds.length > 0 &&
+    allIds.every((id) => {
+      if (cancelledSet.has(normalizeIdForMatch(id))) return true;
+      const items = getGroupItemsByKey(groupItems, id);
+      return Array.isArray(items) && items.length > 0;
+    });
+  const newStatus =
+    count.status === "cancelled" ? (allDone ? "completed" : "cancelled") : allDone ? "completed" : "in_progress";
+
+  let itemsForCount;
+  if (isMultipleMode && Array.isArray(targetProductGroupIds) && targetProductGroupIds.length > 0) {
+    const allItems = lines.filter((l) => {
+      const gid = l.productGroupId || targetProductGroupIds[0];
+      return gid && targetProductGroupIds.includes(gid);
+    });
+    itemsForCount = allItems.map((l) => ({
+      inventoryItemId: l.inventoryItemId,
+      variantId: l.variantId,
+      sku: l.sku ?? "",
+      barcode: l.barcode ?? "",
+      title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
+      currentQuantity: Number(l.currentQuantity ?? 0),
+      actualQuantity: Number(l.actualQuantity ?? 0),
+      delta: Number(l.actualQuantity ?? 0) - Number(l.currentQuantity ?? 0),
+      isExtra: Boolean(l.isExtra),
+    }));
+  } else {
+    const entry = getGroupItemsByKey(groupItems, currentGroupId);
+    itemsForCount =
+      entry.length > 0
+        ? entry
+        : lines.map((l) => ({
+            inventoryItemId: l.inventoryItemId,
+            variantId: l.variantId,
+            sku: l.sku ?? "",
+            barcode: l.barcode ?? "",
+            title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
+            currentQuantity: Number(l.currentQuantity ?? 0),
+            actualQuantity: Number(l.actualQuantity ?? 0),
+            delta: Number(l.actualQuantity ?? 0) - Number(l.currentQuantity ?? 0),
+            isExtra: Boolean(l.isExtra),
+          }));
+  }
+
+  return {
+    ...count,
+    groupItems,
+    status: newStatus,
+    completedAt: allDone ? new Date().toISOString() : undefined,
+    items: itemsForCount,
+  };
+}
+
 // 複数商品グループ時のみ使用：商品グループごとに別キーで下書きを管理（入庫の inboundDraftKey と同様）
 function inventoryCountDraftKey({ countId, locationId, productGroupId }) {
   const c = String(countId || "").trim();
@@ -319,8 +443,9 @@ export function InventoryCountList({
         if (fetched.status === "draft") {
           try {
             const allCounts = await readInventoryCounts();
-            const updated = allCounts.map((c) =>
-              c.id === count.id ? { ...c, status: "in_progress" } : c
+            const countIdStr = String(count?.id ?? "");
+            const updated = (Array.isArray(allCounts) ? allCounts : []).map((c) =>
+              String(c?.id ?? "") === countIdStr ? { ...c, status: "in_progress" } : c
             );
             await writeInventoryCounts(updated);
             fetched = { ...fetched, status: "in_progress" };
@@ -1768,116 +1893,30 @@ export function InventoryCountList({
         .filter((l) => l.currentQuantity !== l.actualQuantity);
       
       if (allItemsToAdjust.length === 0) {
-        // ✅ 確認モーダルで「確定する」を押した後の処理。トーストは成功時の「棚卸を完了しました」のみ表示する
-        // ✅ 軽量化：readInventoryCountsRaw のみ使用（readProductGroups・内部writeを避けタイムアウト防止）
+        // ✅ ローカル状態のみで更新後 count を組み立て、read をブロックせず即「完了」表示（アプリタイルの待機時間削減）
         setSubmitting(true);
         try {
-          const counts = await readInventoryCountsRaw();
-          const updated = counts.map((c) => {
-            if (c.id !== count.id) return c;
-            const groupItems = { ...(c.groupItems || {}) };
-            
-            // 各商品グループごとにgroupItemsに保存
-            // ✅ 確定操作したグループは全て groupItems に保存する（全て0・差分なしでも「完了」扱いにする）
-            for (const [groupId, groupLines] of linesByGroup.entries()) {
-              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              const hasCountedItems = groupLines.some((l) => {
-                const actualQty = Number(l.actualQuantity ?? 0);
-                const currentQty = Number(l.currentQuantity ?? 0);
-                return actualQty > 0 || currentQty !== actualQty;
-              });
-              if (!hasCountedItems) {
-                groupStatusMessages.push(`「${groupName}」は差分なしで確定しました`);
-              } else {
-                groupStatusMessages.push(`「${groupName}」を確定しました`);
-              }
-              
-              const linesSnapshot = groupLines.map((l) => ({
-                inventoryItemId: l.inventoryItemId,
-                variantId: l.variantId,
-                sku: l.sku ?? "",
-                barcode: l.barcode ?? "", // ✅ barcodeを追加
-                productTitle: l.productTitle ?? "",
-                variantTitle: l.variantTitle ?? "",
-                imageUrl: l.imageUrl ?? "", // ✅ 画像URLを追加（予定外商品の画像表示用）
-                currentQuantity: Number(l.currentQuantity ?? 0),
-                actualQuantity: Number(l.actualQuantity ?? 0),
-                isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-              }));
-              const entry = linesSnapshot.map((l) => ({
-                inventoryItemId: l.inventoryItemId,
-                variantId: l.variantId,
-                sku: l.sku,
-                barcode: l.barcode, // ✅ barcodeを追加
-                title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-                imageUrl: l.imageUrl, // ✅ 画像URLを追加（予定外商品の画像表示用）
-                currentQuantity: l.currentQuantity,
-                actualQuantity: l.actualQuantity,
-                delta: l.actualQuantity - l.currentQuantity,
-                isExtra: l.isExtra, // ✅ 予定外商品フラグを追加
-              }));
-              groupItems[groupId] = entry;
-            }
-            
-            // ✅ 確定済みグループの確認
-            const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-            for (const groupId of targetProductGroupIds) {
-              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）
-              if (!linesByGroup.has(groupId)) {
-                const groupItemsForGroup = getGroupItemsByKey(groupItemsMap, groupId);
-                if (groupItemsForGroup.length > 0) {
-                  groupStatusMessages.push(`「${groupName}」は確定済みのためスキップ`);
-                }
-              }
-            }
-            
-            const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-              ? c.productGroupIds
-              : c.productGroupId ? [c.productGroupId] : [];
-            const cancelledSet = cancelledGroupIdSet(c);
-            const allDone = allIds.length > 0 && allIds.every((id) => {
-              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
-              const items = getGroupItemsByKey(groupItems, id);
-              return items.length > 0;
-            });
-            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
-            
-            // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
-            // ✅ 未完了グループの商品も含めるため、linesから全商品を取得（linesByGroupには編集可能な商品のみが含まれる）
-            const allItems = lines.filter((l) => {
-              const groupId = l.productGroupId || targetProductGroupIds[0];
-              return groupId && targetProductGroupIds.includes(groupId);
-            });
-            const mergedEntry = allItems.map((l) => ({
-              inventoryItemId: l.inventoryItemId,
-              variantId: l.variantId,
-              sku: l.sku ?? "",
-              barcode: l.barcode ?? "", // ✅ barcodeを追加
-              title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-              currentQuantity: Number(l.currentQuantity ?? 0),
-              actualQuantity: Number(l.actualQuantity ?? 0),
-              delta: Number(l.actualQuantity ?? 0) - Number(l.currentQuantity ?? 0),
-              isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-            }));
-            
-            return {
-              ...c,
-              groupItems,
-              status: newStatus,
-              completedAt: allDone ? new Date().toISOString() : undefined,
-              items: mergedEntry,
-            };
+          const locallyBuilt = buildUpdatedCountFromLocalState(count, lines, {
+            isMultipleMode: true,
+            targetProductGroupIds,
+            productGroupId,
           });
-          const updatedCountAll = updated.find((c) => c.id === count.id);
           toast("棚卸を完了しました");
-          onAfterConfirm?.(updatedCountAll);
+          onAfterConfirm?.(locallyBuilt);
           setSubmitting(false);
-          // ✅ 残りはバックグラウンドで実行（メタフィールド保存）
-          writeInventoryCounts(updated).catch((e) => {
-            toast(`保存に失敗しました: ${e?.message ?? e}`);
-            onAfterConfirm?.(null);
-          });
+          readInventoryCountsRaw()
+            .then((counts) => {
+              const idStr = String(count?.id ?? "");
+              const list = Array.isArray(counts) ? counts : [];
+              const merged = list.some((c) => String(c?.id ?? "") === idStr)
+                ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuilt : c))
+                : [...list, locallyBuilt];
+              return writeInventoryCounts(merged);
+            })
+            .catch((e) => {
+              toast(`保存に失敗しました: ${e?.message ?? e}`);
+              onAfterConfirm?.(null);
+            });
           return true;
         } catch (e) {
           toast(`エラー: ${e?.message ?? e}`);
@@ -1920,120 +1959,40 @@ export function InventoryCountList({
           console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
           toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
         }
-        // ✅ 軽量読み取りで updated を組み立て、UI を先に「完了」にしてから残りをバックグラウンドで実行
-        const counts = await readInventoryCountsRaw();
-        const updated = counts.map((c) => {
-          if (c.id !== count.id) return c;
-          const groupItems = { ...(c.groupItems || {}) };
-          
-          // 各商品グループごとにgroupItemsに保存
-          // ✅ 確定操作したグループは全て groupItems に保存する（全て0・差分なしでも「完了」扱いにする・在庫調整ありパスも同様）
-          const groupStatusMessagesForAdjust = [];
-          for (const [groupId, groupLines] of linesByGroup.entries()) {
-            const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-            const groupLinesSnapshot = linesSnapshot.filter((l) => l.productGroupId === groupId);
-            
-            const hasCountedItems = groupLinesSnapshot.some((l) => {
-              const actualQty = Number(l.actualQuantity ?? 0);
-              const currentQty = Number(l.currentQuantity ?? 0);
-              return actualQty > 0 || currentQty !== actualQty;
-            });
-            if (!hasCountedItems) {
-              groupStatusMessagesForAdjust.push(`「${groupName}」は差分なしで確定しました`);
-            } else {
-              groupStatusMessagesForAdjust.push(`「${groupName}」を確定しました`);
-            }
-            
-            const entry = groupLinesSnapshot.map((l) => ({
-              inventoryItemId: l.inventoryItemId,
-              variantId: l.variantId,
-              sku: l.sku,
-              barcode: l.barcode ?? "", // ✅ barcodeを追加（linesSnapshotから取得）
-              title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-              currentQuantity: l.currentQuantity,
-              actualQuantity: l.actualQuantity,
-              delta: l.actualQuantity - l.currentQuantity,
-              isExtra: l.isExtra, // ✅ 予定外商品フラグを追加
-            }));
-            groupItems[groupId] = entry;
-          }
-          
-          // ✅ 確定済みグループの確認
-          const groupItemsMapForAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-          for (const groupId of targetProductGroupIds) {
-            const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-            // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）。getGroupItemsByKey で正規化キー照合
-            if (!linesByGroup.has(groupId)) {
-              const groupItemsForGroup = getGroupItemsByKey(groupItemsMapForAdjust, groupId);
-              if (groupItemsForGroup.length > 0) {
-                groupStatusMessagesForAdjust.push(`「${groupName}」は確定済みのためスキップ`);
-              }
-            }
-          }
-          
-          const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-            ? c.productGroupIds
-            : c.productGroupId ? [c.productGroupId] : [];
-          const cancelledSet = cancelledGroupIdSet(c);
-          const allDone = allIds.length > 0 && allIds.every((id) => {
-            if (cancelledSet.has(normalizeIdForMatch(id))) return true;
-            const items = groupItems[id];
-            return Array.isArray(items) && items.length > 0;
-          });
-          const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
-          
-          // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
-          // ✅ 未完了グループの商品も含めるため、linesから全商品を取得（linesByGroupには編集可能な商品のみが含まれる）
-          const allItems = lines.filter((l) => {
-            const groupId = l.productGroupId || targetProductGroupIds[0];
-            return groupId && targetProductGroupIds.includes(groupId);
-          });
-          const mergedEntry = allItems.map((l) => {
-            const snapshot = linesSnapshot.find((s) => s.inventoryItemId === l.inventoryItemId);
-            return {
-              inventoryItemId: snapshot?.inventoryItemId || l.inventoryItemId,
-              variantId: snapshot?.variantId || l.variantId,
-              sku: snapshot?.sku ?? l.sku ?? "",
-              barcode: snapshot?.barcode ?? l.barcode ?? "", // ✅ barcodeを追加
-              title: [snapshot?.productTitle || l.productTitle, snapshot?.variantTitle || l.variantTitle].filter(Boolean).join(" / ") || snapshot?.sku || l.sku || "-",
-              currentQuantity: snapshot?.currentQuantity ?? Number(l.currentQuantity ?? 0),
-              actualQuantity: snapshot?.actualQuantity ?? Number(l.actualQuantity ?? 0),
-              delta: (snapshot?.actualQuantity ?? Number(l.actualQuantity ?? 0)) - (snapshot?.currentQuantity ?? Number(l.currentQuantity ?? 0)),
-              isExtra: snapshot?.isExtra ?? Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-            };
-          });
-          
-          return {
-            ...c,
-            groupItems,
-            status: newStatus,
-            completedAt: allDone ? new Date().toISOString() : undefined,
-            items: mergedEntry,
-          };
-          });
-          const updatedCountAdjust = updated.find((c) => c.id === count.id);
-          toast("棚卸を完了しました");
-          onAfterConfirm?.(updatedCountAdjust);
-          setSubmitting(false);
-          // ✅ 残りはバックグラウンドで実行（変動記録・メタフィールド保存・下書き削除）
-          Promise.all([
-            logInventoryCountToApi({
-              locationId: count.locationId,
-              locationName: locationName || count.locationName || "",
-              items: allItemsToAdjust,
-              sourceId: count.id,
-            }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
-            writeInventoryCounts(updated),
-            clearAllInventoryCountDraftsForCount({
-              countId: count.id,
-              locationId: count.locationId,
-              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-            }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
-          ]).catch((e) => {
-            toast(`保存に失敗しました: ${e?.message ?? e}`);
-            onAfterConfirm?.(null);
-          });
-          return true;
+        // ✅ ローカル状態のみで更新後 count を組み立て、read をブロックせず即「完了」表示（アプリタイルの待機時間削減）
+        const locallyBuiltAdjust = buildUpdatedCountFromLocalState(count, lines, {
+          isMultipleMode: true,
+          targetProductGroupIds,
+          productGroupId,
+        });
+        toast("棚卸を完了しました");
+        onAfterConfirm?.(locallyBuiltAdjust);
+        setSubmitting(false);
+        Promise.all([
+          logInventoryCountToApi({
+            locationId: count.locationId,
+            locationName: locationName || count.locationName || "",
+            items: allItemsToAdjust,
+            sourceId: count.id,
+          }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
+          readInventoryCountsRaw().then((counts) => {
+            const idStr = String(count?.id ?? "");
+            const list = Array.isArray(counts) ? counts : [];
+            const merged = list.some((c) => String(c?.id ?? "") === idStr)
+              ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuiltAdjust : c))
+              : [...list, locallyBuiltAdjust];
+            return writeInventoryCounts(merged);
+          }),
+          clearAllInventoryCountDraftsForCount({
+            countId: count.id,
+            locationId: count.locationId,
+            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+          }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
+        ]).catch((e) => {
+          toast(`保存に失敗しました: ${e?.message ?? e}`);
+          onAfterConfirm?.(null);
+        });
+        return true;
         } catch (updateError) {
           const updateMsg = String(updateError?.message ?? updateError);
           console.error("[InventoryCountList] build updated error:", updateError);
@@ -2050,182 +2009,37 @@ export function InventoryCountList({
     }
 
     if (itemsToAdjust.length === 0) {
-      // ✅ 確認モーダルで「確定する」を押した後の処理。トーストは成功時の「棚卸を完了しました」のみ表示する
-      // ✅ 軽量化：readInventoryCountsRaw のみ使用（readProductGroups・内部writeを避けタイムアウト防止）
+      // ✅ ローカル状態のみで更新後 count を組み立て、read をブロックせず即「完了」表示（アプリタイルの待機時間削減）
       setSubmitting(true);
       try {
-        const counts = await readInventoryCountsRaw();
-        let updatedCountNoAdjust = null;
-        let updatedForWriteNoAdjust = null;
-        // ✅ まとめて表示モードの場合：各商品グループごとにgroupItemsに保存
-        if (isMultipleMode) {
-          // 編集可能な商品を商品グループごとにグループ化
-          const editableLines = lines.filter((l) => !l.isReadOnly);
-          const linesByGroup = new Map();
-          for (const l of editableLines) {
-            const groupId = l.productGroupId || targetProductGroupIds[0];
-            if (!groupId) continue;
-            if (!linesByGroup.has(groupId)) {
-              linesByGroup.set(groupId, []);
-            }
-            linesByGroup.get(groupId).push(l);
-          }
-          
-          const updated = counts.map((c) => {
-            if (c.id !== count.id) return c;
-            // ✅ 親の count.groupItems を優先してマージ（既に確定済みの他グループを含める）。最後の1グループ確定時に allDone が正しく true になるようする。
-            const parentGroupItemsNoAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-            const groupItems = { ...parentGroupItemsNoAdjust, ...(c.groupItems || {}) };
-            
-            // 各商品グループごとにgroupItemsに保存
-            // ✅ 在庫＝実数で差分がなくても、リストに載っているグループは groupItems に保存して「完了」扱いにする（確定できるようにする）
-            const groupStatusMessagesForNoAdjust = [];
-            for (const [groupId, groupLines] of linesByGroup.entries()) {
-              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              const hasCountedItems = groupLines.some((l) => {
-                const actualQty = Number(l.actualQuantity ?? 0);
-                const currentQty = Number(l.currentQuantity ?? 0);
-                return actualQty > 0 || currentQty !== actualQty;
-              });
-              // ✅ 差分なし（在庫＝実数）でも groupItems に保存し、確定・完了できるようにする
-              const entry = groupLines.map((l) => ({
-                inventoryItemId: l.inventoryItemId,
-                variantId: l.variantId,
-                sku: l.sku ?? "",
-                barcode: l.barcode ?? "", // ✅ barcodeを追加
-                title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-                currentQuantity: Number(l.currentQuantity ?? 0),
-                actualQuantity: Number(l.actualQuantity ?? 0),
-                delta: Number(l.actualQuantity ?? 0) - Number(l.currentQuantity ?? 0),
-                isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-              }));
-              groupItems[groupId] = entry;
-              groupStatusMessagesForNoAdjust.push(hasCountedItems ? `「${groupName}」を確定しました` : `「${groupName}」は差分なしで確定しました`);
-            }
-            
-            // ✅ 確定済みグループの確認
-            const groupItemsMapForNoAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-            for (const groupId of targetProductGroupIds) {
-              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）。getGroupItemsByKey で正規化キー照合
-              if (!linesByGroup.has(groupId)) {
-                const groupItemsForGroup = getGroupItemsByKey(groupItemsMapForNoAdjust, groupId);
-                if (groupItemsForGroup.length > 0) {
-                  groupStatusMessagesForNoAdjust.push(`「${groupName}」は確定済みのためスキップ`);
-                }
-              }
-            }
-            
-            const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-              ? c.productGroupIds
-              : c.productGroupId ? [c.productGroupId] : [];
-            const cancelledSet = cancelledGroupIdSet(c);
-            const allDone = allIds.length > 0 && allIds.every((id) => {
-              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
-              const items = getGroupItemsByKey(groupItems, id);
-              return items.length > 0;
-            });
-            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
-            
-            // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
-            // ✅ 未完了グループの商品も含めるため、linesから全商品を取得（linesByGroupには編集可能な商品のみが含まれる）
-            const allItems = lines.filter((l) => {
-              const groupId = l.productGroupId || targetProductGroupIds[0];
-              return groupId && targetProductGroupIds.includes(groupId);
-            });
-            const mergedEntry = allItems.map((l) => ({
-              inventoryItemId: l.inventoryItemId,
-              variantId: l.variantId,
-              sku: l.sku ?? "",
-              barcode: l.barcode ?? "", // ✅ barcodeを追加
-              title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-              currentQuantity: Number(l.currentQuantity ?? 0),
-              actualQuantity: Number(l.actualQuantity ?? 0),
-              delta: Number(l.actualQuantity ?? 0) - Number(l.currentQuantity ?? 0),
-              isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-            }));
-            
-            return {
-              ...c,
-              groupItems,
-              status: newStatus,
-              completedAt: allDone ? new Date().toISOString() : undefined,
-              items: mergedEntry,
-            };
-          });
-          updatedForWriteNoAdjust = updated;
-          updatedCountNoAdjust = updated.find((c) => c.id === count.id);
-        } else {
-          // ✅ 単一商品グループモード：既存の処理を維持
-          const linesSnapshot = lines.map((l) => ({
-            inventoryItemId: l.inventoryItemId,
-            variantId: l.variantId,
-            sku: l.sku ?? "",
-            barcode: l.barcode ?? "", // ✅ barcodeを追加
-            productTitle: l.productTitle ?? "",
-            variantTitle: l.variantTitle ?? "",
-            imageUrl: l.imageUrl ?? "", // ✅ 画像URLを追加（予定外商品の画像表示用）
-            currentQuantity: Number(l.currentQuantity ?? 0),
-            actualQuantity: Number(l.actualQuantity ?? 0),
-            isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-          }));
-          const entry = linesSnapshot.map((l) => ({
-            inventoryItemId: l.inventoryItemId,
-            variantId: l.variantId,
-            sku: l.sku,
-            barcode: l.barcode, // ✅ barcodeを追加
-            title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-            imageUrl: l.imageUrl, // ✅ 画像URLを追加（予定外商品の画像表示用）
-            currentQuantity: l.currentQuantity,
-            actualQuantity: l.actualQuantity,
-            isExtra: l.isExtra, // ✅ 予定外商品フラグを追加
-            delta: l.actualQuantity - l.currentQuantity,
-          }));
-          const updated = counts.map((c) => {
-            if (c.id !== count.id) return c;
-            const groupItems = { ...(c.groupItems || {}) };
-            groupItems[currentGroupId] = entry;
-            const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-              ? c.productGroupIds
-              : c.productGroupId ? [c.productGroupId] : [];
-            const cancelledSet = cancelledGroupIdSet(c);
-            // ✅ 全グループが完了しているか判定。キャンセル済みグループは完了とみなす。
-            const allDone = allIds.length > 0 && allIds.every((id) => {
-              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
-              const items = getGroupItemsByKey(groupItems, id);
-              return Array.isArray(items) && items.length > 0;
-            });
-            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
-            return {
-              ...c,
-              groupItems,
-              status: newStatus,
-              completedAt: allDone ? new Date().toISOString() : undefined,
-              items: entry,
-            };
-          });
-          updatedForWriteNoAdjust = updated;
-          updatedCountNoAdjust = updated.find((c) => c.id === count.id);
-        }
-        if (!updatedCountNoAdjust || !updatedForWriteNoAdjust) {
-          setSubmitting(false);
-          return false;
-        }
-        toast("棚卸を完了しました");
-        onAfterConfirm?.(updatedCountNoAdjust);
-        setSubmitting(false);
-        // ✅ 残りはバックグラウンドで実行（メタフィールド保存・下書き削除）
-        Promise.all([
-          writeInventoryCounts(updatedForWriteNoAdjust),
-          clearAllInventoryCountDraftsForCount({
-            countId: count.id,
-            locationId: count.locationId,
-            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-          }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
-        ]).catch((e) => {
-          toast(`保存に失敗しました: ${e?.message ?? e}`);
-          onAfterConfirm?.(null);
+        const locallyBuiltNoAdjust = buildUpdatedCountFromLocalState(count, lines, {
+          isMultipleMode,
+          targetProductGroupIds,
+          productGroupId,
         });
+        toast("棚卸を完了しました");
+        onAfterConfirm?.(locallyBuiltNoAdjust);
+        setSubmitting(false);
+        readInventoryCountsRaw()
+          .then((counts) => {
+            const idStr = String(count?.id ?? "");
+            const list = Array.isArray(counts) ? counts : [];
+            const merged = list.some((c) => String(c?.id ?? "") === idStr)
+              ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuiltNoAdjust : c))
+              : [...list, locallyBuiltNoAdjust];
+            return Promise.all([
+              writeInventoryCounts(merged),
+              clearAllInventoryCountDraftsForCount({
+                countId: count.id,
+                locationId: count.locationId,
+                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+              }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
+            ]);
+          })
+          .catch((e) => {
+            toast(`保存に失敗しました: ${e?.message ?? e}`);
+            onAfterConfirm?.(null);
+          });
         return true;
       } catch (e) {
         toast(`エラー: ${e?.message ?? e}`);
@@ -2295,155 +2109,19 @@ export function InventoryCountList({
           return false;
         }
 
-        let updatedCountResult = null;
-        let updatedForWrite = null;
-        // ✅ 軽量読み取りで updated を組み立て、UI を先に「完了」にしてから残りをバックグラウンドで実行
-        const counts = await readInventoryCountsRaw();
-        // ✅ まとめて表示モードの場合：各商品グループごとにgroupItemsに保存
-        if (isMultipleMode) {
-          const updated = counts.map((c) => {
-            if (c.id !== count.id) return c;
-            // ✅ 親の count.groupItems を優先してマージ（既に確定済みの他グループを含める）。最後の1グループ確定時に allDone が正しく true になるようする。
-            const parentGroupItems = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-            const groupItems = { ...parentGroupItems, ...(c.groupItems || {}) };
-            
-            // 編集可能な商品を商品グループごとにグループ化
-            const linesByGroup = new Map();
-            for (const l of linesSnapshot) {
-              const groupId = l.productGroupId || targetProductGroupIds[0];
-              if (!groupId) continue;
-              if (!linesByGroup.has(groupId)) {
-                linesByGroup.set(groupId, []);
-              }
-              linesByGroup.get(groupId).push(l);
-            }
-            
-            // 各商品グループごとにgroupItemsに保存
-            // ✅ カウントした商品があるグループのみ確定（actualQuantity > 0 または currentQuantity !== actualQuantity の商品がある場合のみ）
-            const groupStatusMessagesForSingleAdjust = [];
-            for (const [groupId, groupLines] of linesByGroup.entries()) {
-              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              // ✅ グループ内にカウントした商品があるかチェック
-              // ✅ actualQuantity > 0 の場合：実数が0より大きい（カウントした）
-              // ✅ actualQuantity !== 0 && currentQuantity !== actualQuantity の場合：実数が0でなく、在庫数と実数が異なる（カウントした）
-              // ✅ グループ内にカウントした商品があるかチェック
-              // ✅ 在庫数と実数が異なる場合はカウントしたと判断（在庫10→実数0も含む）
-              // ✅ actualQuantity > 0 の場合もカウントしたと判断
-              const hasCountedItems = groupLines.some((l) => {
-                const actualQty = Number(l.actualQuantity ?? 0);
-                const currentQty = Number(l.currentQuantity ?? 0);
-                return actualQty > 0 || currentQty !== actualQty;
-              });
-              
-              // ✅ カウントした商品がないグループはスキップ（確定しない）
-              if (!hasCountedItems) {
-                groupStatusMessagesForSingleAdjust.push(`「${groupName}」は未カウントのためスキップ`);
-                continue;
-              }
-              
-              const entry = groupLines.map((l) => ({
-                inventoryItemId: l.inventoryItemId,
-                variantId: l.variantId,
-                sku: l.sku,
-                barcode: l.barcode ?? "", // ✅ barcodeを追加（linesSnapshotから取得）
-                title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-                imageUrl: l.imageUrl ?? "", // ✅ 画像URLを追加（予定外商品の画像表示用）
-                currentQuantity: l.currentQuantity,
-                actualQuantity: l.actualQuantity,
-                delta: l.actualQuantity - l.currentQuantity,
-                isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-              }));
-              groupItems[groupId] = entry;
-              groupStatusMessagesForSingleAdjust.push(`「${groupName}」を確定しました`);
-            }
-            
-            // ✅ 確定済みグループの確認
-            const groupItemsMapForSingleAdjust = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
-            for (const groupId of targetProductGroupIds) {
-              const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-              // ✅ 既に確定済みのグループ（linesByGroupに含まれていない = isReadOnly: true）。getGroupItemsByKey で正規化キー照合
-              if (!linesByGroup.has(groupId)) {
-                const groupItemsForGroup = getGroupItemsByKey(groupItemsMapForSingleAdjust, groupId);
-                if (groupItemsForGroup.length > 0) {
-                  groupStatusMessagesForSingleAdjust.push(`「${groupName}」は確定済みのためスキップ`);
-                }
-              }
-            }
-            
-            const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-              ? c.productGroupIds
-              : c.productGroupId ? [c.productGroupId] : [];
-            const cancelledSet = cancelledGroupIdSet(c);
-            const allDone = allIds.length > 0 && allIds.every((id) => {
-              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
-              const items = getGroupItemsByKey(groupItems, id);
-              return items.length > 0;
-            });
-            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
-            
-            // ✅ 全商品グループのエントリをマージしてitemsに保存（後方互換性）
-            const allItems = lines.filter((l) => {
-              const groupId = l.productGroupId || targetProductGroupIds[0];
-              return groupId && targetProductGroupIds.includes(groupId);
-            });
-            const mergedEntry = allItems.map((l) => ({
-              inventoryItemId: l.inventoryItemId,
-              variantId: l.variantId,
-              sku: l.sku,
-              title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-              currentQuantity: l.currentQuantity,
-              actualQuantity: l.actualQuantity,
-              delta: l.actualQuantity - l.currentQuantity,
-              isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-            }));
-            
-            return {
-              ...c,
-              groupItems,
-              status: newStatus,
-              completedAt: allDone ? new Date().toISOString() : undefined,
-              items: mergedEntry,
-            };
-          });
-          updatedForWrite = updated;
-          updatedCountResult = updated.find((c) => c.id === count.id);
-        } else {
-          // ✅ 単一商品グループモード：既存の処理を維持
-          const entry = entryBeforeAdjustment;
-          const updated = counts.map((c) => {
-            if (c.id !== count.id) return c;
-            const groupItems = { ...(c.groupItems || {}) };
-            groupItems[currentGroupId] = entry;
-            const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
-              ? c.productGroupIds
-              : c.productGroupId ? [c.productGroupId] : [];
-            const cancelledSet = cancelledGroupIdSet(c);
-            const allDone = allIds.length > 0 && allIds.every((id) => {
-              if (cancelledSet.has(normalizeIdForMatch(id))) return true;
-              const items = getGroupItemsByKey(groupItems, id);
-              return Array.isArray(items) && items.length > 0;
-            });
-            const newStatus = c.status === "cancelled" ? (allDone ? "completed" : "cancelled") : (allDone ? "completed" : "in_progress");
-            return {
-              ...c,
-              groupItems,
-              status: newStatus,
-              completedAt: allDone ? new Date().toISOString() : undefined,
-              items: entry,
-            };
-          });
-          updatedForWrite = updated;
-          updatedCountResult = updated.find((c) => c.id === count.id);
-        }
-
-        if (!inventoryAdjustmentSuccess || !updatedCountResult || !updatedForWrite) {
+        // ✅ ローカル状態のみで更新後 count を組み立て、read をブロックせず即「完了」表示（アプリタイルの待機時間削減）
+        const locallyBuiltResult = buildUpdatedCountFromLocalState(count, lines, {
+          isMultipleMode,
+          targetProductGroupIds,
+          productGroupId,
+        });
+        if (!inventoryAdjustmentSuccess || !locallyBuiltResult) {
           setSubmitting(false);
           return false;
         }
         toast("棚卸を完了しました");
-        onAfterConfirm?.(updatedCountResult);
+        onAfterConfirm?.(locallyBuiltResult);
         setSubmitting(false);
-        // ✅ 残りはバックグラウンドで実行（変動記録・メタフィールド保存・下書き削除）。updatedForWrite は各分支で設定済み
         Promise.all([
           logInventoryCountToApi({
             locationId: count.locationId,
@@ -2451,7 +2129,14 @@ export function InventoryCountList({
             items: itemsToAdjust,
             sourceId: count.id,
           }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
-          writeInventoryCounts(updatedForWrite),
+          readInventoryCountsRaw().then((counts) => {
+            const idStr = String(count?.id ?? "");
+            const list = Array.isArray(counts) ? counts : [];
+            const merged = list.some((c) => String(c?.id ?? "") === idStr)
+              ? list.map((c) => (String(c?.id ?? "") === idStr ? locallyBuiltResult : c))
+              : [...list, locallyBuiltResult];
+            return writeInventoryCounts(merged);
+          }),
           clearAllInventoryCountDraftsForCount({
             countId: count.id,
             locationId: count.locationId,

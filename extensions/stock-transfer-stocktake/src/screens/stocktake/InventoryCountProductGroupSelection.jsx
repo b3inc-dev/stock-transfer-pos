@@ -67,8 +67,9 @@ export function InventoryCountProductGroupSelection({
         if (fetched.status === "draft") {
           try {
             const allCounts = await readInventoryCounts();
-            const updated = allCounts.map((c) =>
-              c.id === count.id ? { ...c, status: "in_progress" } : c
+            const countIdStr = String(count?.id ?? "");
+            const updated = (Array.isArray(allCounts) ? allCounts : []).map((c) =>
+              String(c?.id ?? "") === countIdStr ? { ...c, status: "in_progress" } : c
             );
             await writeInventoryCounts(updated);
             fetched = { ...fetched, status: "in_progress" };

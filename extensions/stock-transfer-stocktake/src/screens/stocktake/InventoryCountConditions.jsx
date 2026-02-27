@@ -317,10 +317,11 @@ export function InventoryCountConditions({
     for (const id of idsToRequest) {
       readInventoryCountById(id)
         .then((full) => {
-          if (!full || full.id !== id) return;
+          if (!full || String(full.id ?? "") !== String(id ?? "")) return;
+          const idStr = String(id ?? "");
           setCounts((prev) =>
             prev.map((x) =>
-              x.id === id
+              String(x?.id ?? "") === idStr
                 ? {
                     ...x,
                     groupItems: full.groupItems,

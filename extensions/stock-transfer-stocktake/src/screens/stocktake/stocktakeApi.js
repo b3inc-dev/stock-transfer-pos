@@ -299,11 +299,13 @@ export function getCancelledGroupIdSet(c) {
   return new Set(arr.map((id) => normalizeIdForMatch(id)));
 }
 
-/** ステータスだけ補正（countNameは付けない。部分取得時は全件ソートできないため）。キャンセル済みグループは「完了」とみなす。 */
+/** ステータスだけ補正（countNameは付けない。部分取得時は全件ソートできないため）。キャンセル済みグループは「完了」とみなす。
+ * 確定済み（completed）は groupItems が部分取得等で欠けていても「未処理」に戻さない（一覧・再読み込みで完了が消える不具合防止）。 */
 function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
   if (!Array.isArray(counts)) return [];
   return counts.map((c) => {
     if (c?.status === "cancelled") return c;
+    if (c?.status === "completed") return c;
     const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
       ? c.productGroupIds
       : c.productGroupId ? [c.productGroupId] : [];
@@ -327,9 +329,8 @@ function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
       }
       return c;
     }
-    if (!allDone && c.status === "completed") {
-      return { ...c, status: "in_progress", completedAt: undefined };
-    }
+    // completed は上書きしない（部分取得・list で groupItems が欠けていても「未処理」に戻さない）
+    if (!allDone && c.status === "completed") return c;
     if (allDone && c.status !== "completed") {
       return { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
     }
@@ -399,12 +400,17 @@ export async function readInventoryCountsFirstPage() {
           metafield(namespace: "${NS}", key: $key) { value }
         }
       }`;
-    let accumulated = [];
-    let loadedChunks = 0;
-    for (let i = 0; i < totalChunks && accumulated.length < listLimit; i++) {
+    // ✅ 全チャンクを並列取得して初回表示を高速化（アプリタイルの待機時間削減）
+    const chunkPromises = [];
+    for (let i = 0; i < totalChunks; i++) {
       const chunkIndex = totalChunks - 1 - i;
       const key = `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${chunkIndex}`;
-      const dChunk = await graphql(gqlChunk, { key });
+      chunkPromises.push(graphql(gqlChunk, { key }).then((dChunk) => ({ chunkIndex, dChunk })));
+    }
+    const chunkResults = await Promise.all(chunkPromises);
+    chunkResults.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    let accumulated = [];
+    for (const { dChunk } of chunkResults) {
       const chunkRaw = dChunk?.currentAppInstallation?.metafield?.value;
       let chunkCounts = [];
       if (chunkRaw) {
@@ -415,15 +421,14 @@ export async function readInventoryCountsFirstPage() {
       }
       chunkCounts = fixCountsStatusOnly(chunkCounts, productGroups || []);
       accumulated = accumulated.concat(chunkCounts);
-      loadedChunks += 1;
     }
     const limited = accumulated.slice(0, listLimit);
-    const hasMore = accumulated.length > listLimit || loadedChunks < totalChunks;
+    const hasMore = accumulated.length > listLimit || chunkResults.length < totalChunks;
     return {
       counts: limited,
       hasMore,
       chunkCount: totalChunks,
-      loadedChunkCount: loadedChunks,
+      loadedChunkCount: chunkResults.length,
       productGroups: productGroups || [],
       listLimit,
       useListMetafield: true,
@@ -473,12 +478,17 @@ export async function readInventoryCountsFirstPage() {
         metafield(namespace: "${NS}", key: $key) { value }
       }
     }`;
-  let accumulated = [];
-  let loadedChunks = 0;
-  for (let i = 0; i < totalChunks && accumulated.length < listLimit; i++) {
+  // ✅ 全チャンクを並列取得して初回表示を高速化（アプリタイルの待機時間削減）
+  const chunkPromises = [];
+  for (let i = 0; i < totalChunks; i++) {
     const chunkIndex = totalChunks - 1 - i;
     const key = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${chunkIndex}`;
-    const dChunk = await graphql(gqlChunkMain, { key });
+    chunkPromises.push(graphql(gqlChunkMain, { key }).then((dChunk) => ({ chunkIndex, dChunk })));
+  }
+  const chunkResults = await Promise.all(chunkPromises);
+  chunkResults.sort((a, b) => a.chunkIndex - b.chunkIndex);
+  let accumulated = [];
+  for (const { dChunk } of chunkResults) {
     const chunkRaw = dChunk?.currentAppInstallation?.metafield?.value;
     let chunkCounts = [];
     if (chunkRaw) {
@@ -489,15 +499,14 @@ export async function readInventoryCountsFirstPage() {
     }
     chunkCounts = fixCountsStatusOnly(chunkCounts, productGroups || []);
     accumulated = accumulated.concat(chunkCounts);
-    loadedChunks += 1;
   }
   const limited = accumulated.slice(0, listLimit);
-  const hasMore = accumulated.length > listLimit || loadedChunks < totalChunks;
+  const hasMore = accumulated.length > listLimit || chunkResults.length < totalChunks;
   return {
     counts: limited,
     hasMore,
     chunkCount: totalChunks,
-    loadedChunkCount: loadedChunks,
+    loadedChunkCount: chunkResults.length,
     productGroups: productGroups || [],
     listLimit,
     useListMetafield: false,
@@ -672,6 +681,7 @@ export async function readInventoryCounts() {
     let needsUpdate = false;
     const countsFixed = counts.map((c) => {
       if (c?.status === "cancelled") return c;
+      if (c?.status === "completed") return c;
       const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
         ? c.productGroupIds
         : c.productGroupId ? [c.productGroupId] : [];
@@ -691,14 +701,8 @@ export async function readInventoryCounts() {
       });
       const isCompleted = allDone;
       
-      if (!isCompleted && c.status === "completed") {
-        needsUpdate = true;
-        return {
-          ...c,
-          status: "in_progress",
-          completedAt: undefined,
-        };
-      }
+      // 確定済み（completed）は groupItems が欠けていても「未処理」に戻さない（再読み込みで完了が消える不具合防止）
+      if (!isCompleted && c.status === "completed") return c;
       
       if (isCompleted && c.status !== "completed") {
         needsUpdate = true;
