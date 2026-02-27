@@ -1875,9 +1875,11 @@ export function InventoryCountList({
           }
           toast("棚卸を完了しました");
           onAfterConfirm?.();
+          setSubmitting(false);
           return true;
         } catch (e) {
           toast(`エラー: ${e?.message ?? e}`);
+          setSubmitting(false);
           return false;
         }
       }
@@ -2061,7 +2063,8 @@ export function InventoryCountList({
     }
 
     if (itemsToAdjust.length === 0) {
-      toast("在庫数に変更はありませんが、このまま確定して完了できます");
+      // ✅ 確認モーダルで「確定する」を押した後の処理。トーストは成功時の「棚卸を完了しました」のみ表示する
+      setSubmitting(true);
       try {
         const counts = await readInventoryCounts();
         // ✅ まとめて表示モードの場合：各商品グループごとにgroupItemsに保存
@@ -2226,9 +2229,11 @@ export function InventoryCountList({
         }
         toast("棚卸を完了しました");
         onAfterConfirm?.();
+        setSubmitting(false);
         return true;
       } catch (e) {
         toast(`エラー: ${e?.message ?? e}`);
+        setSubmitting(false);
         return false;
       }
     }
@@ -3486,9 +3491,14 @@ export function InventoryCountList({
                 ) : null}
               </s-stack>
             ) : (
-              <s-text size="small" tone="subdued">
-                在庫数に変更はありませんが、「確定する」で棚卸を完了できます。
-              </s-text>
+              <s-stack gap="extra-tight">
+                <s-text size="small" tone="subdued">
+                  在庫数に差異はありません。
+                </s-text>
+                <s-text size="small" tone="subdued">
+                  「確定する」で棚卸を完了できます。
+                </s-text>
+              </s-stack>
             )}
 
             {/* ✅ 戻るボタン（入庫の確定モーダルと同じ実装） */}
