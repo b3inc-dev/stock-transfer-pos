@@ -162,11 +162,12 @@ export async function searchVariants(q, opts = {}) {
   }
 }
 
-/** パート配列を1件の棚卸に結合する（管理画面と同一ロジック） */
+/** パート配列を1件の棚卸に結合する（管理画面と同一ロジック）。countMeta が無いパートのみの場合は countId を id にフォールバック */
 function mergeCountParts(parts) {
   const sorted = [...parts].sort((a, b) => (a.partIndex || 0) - (b.partIndex || 0));
   const first = sorted[0];
-  const base = first?.countMeta ? { ...first.countMeta } : {};
+  const base = first?.countMeta && typeof first.countMeta === "object" ? { ...first.countMeta } : {};
+  if (!base.id && first?.countId) base.id = first.countId;
   const groupItems = {};
   const items = [];
   for (const p of sorted) {
@@ -217,22 +218,34 @@ export async function readInventoryCountsRaw() {
           metafield(namespace: "${NS}", key: $key) { value }
         }
       }`;
-    const chunkData = await graphql(gqlChunk, { key });
-    const chunkRaw = chunkData?.currentAppInstallation?.metafield?.value;
-    if (chunkRaw == null) continue;
+    let chunkRaw = null;
     try {
-      const chunk = JSON.parse(chunkRaw);
-      if (!Array.isArray(chunk)) continue;
-      for (const el of chunk) {
-        if (el && typeof el === "object" && el._part === true) {
-          const list = partsByCountId.get(el.countId) ?? [];
-          list.push(el);
-          partsByCountId.set(el.countId, list);
-        } else {
-          fullCounts.push(el);
-        }
+      const chunkData = await graphql(gqlChunk, { key });
+      chunkRaw = chunkData?.currentAppInstallation?.metafield?.value;
+    } catch (e) {
+      throw new Error(`棚卸チャンク${i}の読み取りに失敗しました（部分保存で他データが消えるのを防ぐため中断）: ${e?.message ?? e}`);
+    }
+    if (chunkRaw == null) {
+      throw new Error(`棚卸チャンク${i}が存在しません。メタフィールドが欠落している可能性があります（上書きで他データが消えるのを防ぐため読み取りを中断します）。`);
+    }
+    let chunk;
+    try {
+      chunk = JSON.parse(chunkRaw);
+    } catch (e) {
+      throw new Error(`棚卸チャンク${i}のパースに失敗しました: ${e?.message ?? e}`);
+    }
+    if (!Array.isArray(chunk)) {
+      throw new Error(`棚卸チャンク${i}が配列ではありません（上書きで他データが消えるのを防ぐため中断）`);
+    }
+    for (const el of chunk) {
+      if (el && typeof el === "object" && el._part === true) {
+        const list = partsByCountId.get(el.countId) ?? [];
+        list.push(el);
+        partsByCountId.set(el.countId, list);
+      } else {
+        fullCounts.push(el);
       }
-    } catch {}
+    }
   }
   for (const parts of partsByCountId.values()) {
     fullCounts.push(mergeCountParts(parts));

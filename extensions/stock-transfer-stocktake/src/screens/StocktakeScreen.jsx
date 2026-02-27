@@ -141,8 +141,12 @@ export function StocktakeScreen({ onBack, setHeader, setFooter, onViewChange, li
     setView(VIEW.CONDITIONS);
   }, []);
 
-  // 棚卸完了後の処理
-  const handleAfterConfirm = useCallback(() => {
+  // 棚卸完了後の処理。updatedCount が渡された場合はその count で画面を更新しフッターを「完了」表示に。渡されない場合は一覧へ戻る。
+  const handleAfterConfirm = useCallback((updatedCount) => {
+    if (updatedCount) {
+      setCount(updatedCount);
+      return;
+    }
     setCount(null);
     setSelectedProductGroupId(null);
     setSelectedProductGroupIds([]);

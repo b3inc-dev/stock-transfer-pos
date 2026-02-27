@@ -99,6 +99,7 @@ function mergeCountParts(parts: CountPart[]): InventoryCount {
   const sorted = [...parts].sort((a, b) => a.partIndex - b.partIndex);
   const first = sorted[0];
   const base = (first?.countMeta ? { ...first.countMeta } : {}) as Record<string, unknown>;
+  if (!base.id && first?.countId) base.id = first.countId;
   const groupItems: Record<string, unknown[]> = {};
   const items: unknown[] = [];
   for (const p of sorted) {
@@ -182,13 +183,16 @@ async function readInventoryCountsListChunked(admin: { graphql: (q: string, opts
     chunks.push(...batchResults);
   }
   const counts: InventoryCount[] = [];
-  for (const chunkRaw of chunks) {
-    if (chunkRaw == null) continue;
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkRaw = chunks[i];
+    if (chunkRaw == null) {
+      throw new Error(`棚卸一覧チャンク${i}が存在しません。メタフィールドが欠落している可能性があります。`);
+    }
     try {
       const chunk = JSON.parse(chunkRaw);
       if (Array.isArray(chunk)) counts.push(...(chunk as InventoryCount[]));
-    } catch {
-      // skip invalid chunk
+    } catch (e) {
+      throw new Error(`棚卸一覧チャンク${i}のパースに失敗しました: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
   return counts;
@@ -233,23 +237,31 @@ async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: {
     );
     chunkRaws.push(...batchResults);
   }
-  for (const chunkRaw of chunkRaws) {
-    if (chunkRaw == null) continue;
+  for (let i = 0; i < chunkRaws.length; i++) {
+    const chunkRaw = chunkRaws[i];
+    if (chunkRaw == null) {
+      throw new Error(
+        `棚卸チャンク${i}が存在しません。メタフィールドが欠落している可能性があります（上書きで他データが消えるのを防ぐため読み取りを中断します）。`
+      );
+    }
+    let chunk: unknown;
     try {
-      const chunk = JSON.parse(chunkRaw);
-      if (!Array.isArray(chunk)) continue;
-      for (const el of chunk) {
-        if (el && typeof el === "object" && (el as CountPart)._part === true) {
-          const part = el as CountPart;
-          const list = partsByCountId.get(part.countId) ?? [];
-          list.push(part);
-          partsByCountId.set(part.countId, list);
-        } else {
-          fullCounts.push(el as InventoryCount);
-        }
+      chunk = JSON.parse(chunkRaw);
+    } catch (e) {
+      throw new Error(`棚卸チャンク${i}のパースに失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (!Array.isArray(chunk)) {
+      throw new Error(`棚卸チャンク${i}が配列ではありません（上書きで他データが消えるのを防ぐため中断）`);
+    }
+    for (const el of chunk) {
+      if (el && typeof el === "object" && (el as CountPart)._part === true) {
+        const part = el as CountPart;
+        const list = partsByCountId.get(part.countId) ?? [];
+        list.push(part);
+        partsByCountId.set(part.countId, list);
+      } else {
+        fullCounts.push(el as InventoryCount);
       }
-    } catch {
-      // skip invalid chunk
     }
   }
   for (const parts of partsByCountId.values()) {

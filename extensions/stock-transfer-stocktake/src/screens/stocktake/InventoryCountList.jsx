@@ -1869,15 +1869,15 @@ export function InventoryCountList({
               items: mergedEntry,
             };
           });
-          await writeInventoryCounts(updated);
-          
-          // ✅ 各グループの処理状況をトーストで表示
-          if (groupStatusMessages.length > 0) {
-            groupStatusMessages.forEach((msg) => toast(msg));
-          }
+          const updatedCountAll = updated.find((c) => c.id === count.id);
           toast("棚卸を完了しました");
-          onAfterConfirm?.();
+          onAfterConfirm?.(updatedCountAll);
           setSubmitting(false);
+          // ✅ 残りはバックグラウンドで実行（メタフィールド保存）
+          writeInventoryCounts(updated).catch((e) => {
+            toast(`保存に失敗しました: ${e?.message ?? e}`);
+            onAfterConfirm?.(null);
+          });
           return true;
         } catch (e) {
           toast(`エラー: ${e?.message ?? e}`);
@@ -1905,7 +1905,7 @@ export function InventoryCountList({
       }));
       
       try {
-        // 在庫調整を実行（referenceDocumentUriに棚卸IDを設定）
+        // ✅ エラー要因を先に確認：在庫調整APIが失敗したらここで止める
         const result = await adjustInventoryToActual({
           locationId: count.locationId,
           items: allItemsToAdjust.map((l) => ({
@@ -1916,27 +1916,12 @@ export function InventoryCountList({
           referenceDocumentUri: count.id,
         });
         inventoryAdjustmentSuccess = true;
-        await logInventoryCountToApi({
-          locationId: count.locationId,
-          locationName: count.locationName || "",
-          items: allItemsToAdjust,
-          sourceId: count.id,
-        });
-        // ✅ 不正ID件数を通知
         if (result?.invalidCount > 0) {
           console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
           toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
         }
-      } catch (adjustError) {
-        const adjustMsg = String(adjustError?.message ?? adjustError);
-        console.error("[InventoryCountList] adjustInventoryToActual error:", adjustError);
-        toast(`在庫調整エラー: ${adjustMsg}`);
-        setSubmitting(false);
-        return false;
-      }
-      
-      try {
-        const counts = await readInventoryCounts();
+        // ✅ 軽量読み取りで updated を組み立て、UI を先に「完了」にしてから残りをバックグラウンドで実行
+        const counts = await readInventoryCountsRaw();
         const updated = counts.map((c) => {
           if (c.id !== count.id) return c;
           const groupItems = { ...(c.groupItems || {}) };
@@ -2026,33 +2011,33 @@ export function InventoryCountList({
             items: mergedEntry,
           };
           });
-          await writeInventoryCounts(updated);
-          
-          // ✅ 各グループの処理状況をトーストで表示
-          if (groupStatusMessagesForAdjust.length > 0) {
-            groupStatusMessagesForAdjust.forEach((msg) => toast(msg));
-          }
+          const updatedCountAdjust = updated.find((c) => c.id === count.id);
+          toast("棚卸を完了しました");
+          onAfterConfirm?.(updatedCountAdjust);
+          setSubmitting(false);
+          // ✅ 残りはバックグラウンドで実行（変動記録・メタフィールド保存・下書き削除）
+          Promise.all([
+            logInventoryCountToApi({
+              locationId: count.locationId,
+              locationName: count.locationName || "",
+              items: allItemsToAdjust,
+              sourceId: count.id,
+            }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
+            writeInventoryCounts(updated),
+            clearAllInventoryCountDraftsForCount({
+              countId: count.id,
+              locationId: count.locationId,
+              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+            }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
+          ]).catch((e) => {
+            toast(`保存に失敗しました: ${e?.message ?? e}`);
+            onAfterConfirm?.(null);
+          });
+          return true;
         } catch (updateError) {
           const updateMsg = String(updateError?.message ?? updateError);
-          console.error("[InventoryCountList] writeInventoryCounts error:", updateError);
-          toast(`警告: 在庫調整は完了しましたが、履歴の更新に失敗しました: ${updateMsg}`);
-        }
-        
-        try {
-          await clearAllInventoryCountDraftsForCount({
-            countId: count.id,
-            locationId: count.locationId,
-            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-          });
-        } catch (e) {
-          console.error("Failed to clear inventory count draft:", e);
-        }
-        
-        if (inventoryAdjustmentSuccess) {
-          toast("棚卸を完了しました");
-          onAfterConfirm?.();
-          setSubmitting(false);
-          return true;
+          console.error("[InventoryCountList] build updated error:", updateError);
+          toast(`エラー: ${updateMsg}`);
         }
       setSubmitting(false);
       return false;
@@ -2070,6 +2055,8 @@ export function InventoryCountList({
       setSubmitting(true);
       try {
         const counts = await readInventoryCountsRaw();
+        let updatedCountNoAdjust = null;
+        let updatedForWriteNoAdjust = null;
         // ✅ まとめて表示モードの場合：各商品グループごとにgroupItemsに保存
         if (isMultipleMode) {
           // 編集可能な商品を商品グループごとにグループ化
@@ -2164,12 +2151,8 @@ export function InventoryCountList({
               items: mergedEntry,
             };
           });
-          await writeInventoryCounts(updated);
-          
-          // ✅ 各グループの処理状況をトーストで表示
-          if (groupStatusMessagesForNoAdjust.length > 0) {
-            groupStatusMessagesForNoAdjust.forEach((msg) => toast(msg));
-          }
+          updatedForWriteNoAdjust = updated;
+          updatedCountNoAdjust = updated.find((c) => c.id === count.id);
         } else {
           // ✅ 単一商品グループモード：既存の処理を維持
           const linesSnapshot = lines.map((l) => ({
@@ -2219,20 +2202,28 @@ export function InventoryCountList({
               items: entry,
             };
           });
-          await writeInventoryCounts(updated);
+          updatedForWriteNoAdjust = updated;
+          updatedCountNoAdjust = updated.find((c) => c.id === count.id);
         }
-        try {
-          await clearAllInventoryCountDraftsForCount({
+        if (!updatedCountNoAdjust || !updatedForWriteNoAdjust) {
+          setSubmitting(false);
+          return false;
+        }
+        toast("棚卸を完了しました");
+        onAfterConfirm?.(updatedCountNoAdjust);
+        setSubmitting(false);
+        // ✅ 残りはバックグラウンドで実行（メタフィールド保存・下書き削除）
+        Promise.all([
+          writeInventoryCounts(updatedForWriteNoAdjust),
+          clearAllInventoryCountDraftsForCount({
             countId: count.id,
             locationId: count.locationId,
             productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-          });
-        } catch (e) {
-          console.error("Failed to clear inventory count draft:", e);
-        }
-        toast("棚卸を完了しました");
-        onAfterConfirm?.();
-        setSubmitting(false);
+          }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
+        ]).catch((e) => {
+          toast(`保存に失敗しました: ${e?.message ?? e}`);
+          onAfterConfirm?.(null);
+        });
         return true;
       } catch (e) {
         toast(`エラー: ${e?.message ?? e}`);
@@ -2278,36 +2269,34 @@ export function InventoryCountList({
     }));
     try {
       try {
-        const result = await adjustInventoryToActual({
-          locationId: count.locationId,
-          items: itemsToAdjust.map((l) => ({
-            inventoryItemId: l.inventoryItemId,
-            currentQuantity: l.currentQuantity,
-            actualQuantity: l.actualQuantity,
-          })),
-          referenceDocumentUri: count.id,
-        });
-        inventoryAdjustmentSuccess = true;
-        await logInventoryCountToApi({
-          locationId: count.locationId,
-          locationName: count.locationName || "",
-          items: itemsToAdjust,
-          sourceId: count.id,
-        });
-        // ✅ 不正ID件数を通知
-        if (result?.invalidCount > 0) {
-          console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
-          toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
+        // ✅ エラー要因を先に確認：在庫調整APIが失敗したらここで止める
+        try {
+          const result = await adjustInventoryToActual({
+            locationId: count.locationId,
+            items: itemsToAdjust.map((l) => ({
+              inventoryItemId: l.inventoryItemId,
+              currentQuantity: l.currentQuantity,
+              actualQuantity: l.actualQuantity,
+            })),
+            referenceDocumentUri: count.id,
+          });
+          inventoryAdjustmentSuccess = true;
+          if (result?.invalidCount > 0) {
+            console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
+            toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
+          }
+        } catch (adjustError) {
+          const adjustMsg = String(adjustError?.message ?? adjustError);
+          console.error("[InventoryCountList] adjustInventoryToActual error:", adjustError);
+          toast(`在庫調整エラー: ${adjustMsg}`);
+          setSubmitting(false);
+          return false;
         }
-      } catch (adjustError) {
-        const adjustMsg = String(adjustError?.message ?? adjustError);
-        console.error("[InventoryCountList] adjustInventoryToActual error:", adjustError);
-        toast(`在庫調整エラー: ${adjustMsg}`);
-        return false;
-      }
 
-      try {
-        const counts = await readInventoryCounts();
+        let updatedCountResult = null;
+        let updatedForWrite = null;
+        // ✅ 軽量読み取りで updated を組み立て、UI を先に「完了」にしてから残りをバックグラウンドで実行
+        const counts = await readInventoryCountsRaw();
         // ✅ まとめて表示モードの場合：各商品グループごとにgroupItemsに保存
         if (isMultipleMode) {
           const updated = counts.map((c) => {
@@ -2412,12 +2401,8 @@ export function InventoryCountList({
               items: mergedEntry,
             };
           });
-          await writeInventoryCounts(updated);
-          
-          // ✅ 各グループの処理状況をトーストで表示
-          if (groupStatusMessagesForSingleAdjust.length > 0) {
-            groupStatusMessagesForSingleAdjust.forEach((msg) => toast(msg));
-          }
+          updatedForWrite = updated;
+          updatedCountResult = updated.find((c) => c.id === count.id);
         } else {
           // ✅ 単一商品グループモード：既存の処理を維持
           const entry = entryBeforeAdjustment;
@@ -2443,30 +2428,43 @@ export function InventoryCountList({
               items: entry,
             };
           });
-          await writeInventoryCounts(updated);
+          updatedForWrite = updated;
+          updatedCountResult = updated.find((c) => c.id === count.id);
         }
+
+        if (!inventoryAdjustmentSuccess || !updatedCountResult || !updatedForWrite) {
+          setSubmitting(false);
+          return false;
+        }
+        toast("棚卸を完了しました");
+        onAfterConfirm?.(updatedCountResult);
+        setSubmitting(false);
+        // ✅ 残りはバックグラウンドで実行（変動記録・メタフィールド保存・下書き削除）。updatedForWrite は各分支で設定済み
+        Promise.all([
+          logInventoryCountToApi({
+            locationId: count.locationId,
+            locationName: count.locationName || "",
+            items: itemsToAdjust,
+            sourceId: count.id,
+          }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
+          writeInventoryCounts(updatedForWrite),
+          clearAllInventoryCountDraftsForCount({
+            countId: count.id,
+            locationId: count.locationId,
+            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+          }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
+        ]).catch((e) => {
+          toast(`保存に失敗しました: ${e?.message ?? e}`);
+          onAfterConfirm?.(null);
+        });
+        return true;
       } catch (updateError) {
         const updateMsg = String(updateError?.message ?? updateError);
-        console.error("[InventoryCountList] writeInventoryCounts error:", updateError);
-        toast(`警告: 在庫調整は完了しましたが、履歴の更新に失敗しました: ${updateMsg}`);
+        console.error("[InventoryCountList] handleComplete error:", updateError);
+        toast(`エラー: ${updateMsg}`);
+        setSubmitting(false);
+        return false;
       }
-
-      try {
-        await clearAllInventoryCountDraftsForCount({
-          countId: count.id,
-          locationId: count.locationId,
-          productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-        });
-      } catch (e) {
-        console.error("Failed to clear inventory count draft:", e);
-      }
-
-      if (inventoryAdjustmentSuccess) {
-        toast("棚卸を完了しました");
-        onAfterConfirm?.();
-        return true;
-      }
-      return false;
     } catch (e) {
       const msg = String(e?.message ?? e);
       toast(`エラー: ${msg}`);

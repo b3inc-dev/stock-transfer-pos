@@ -866,25 +866,6 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       });
       const adjustmentGroupId = result?.adjustmentGroup?.id || null;
 
-      const deltas = lines.map((l) => ({
-        inventoryItemId: l.inventoryItemId,
-        variantId: l.variantId,
-        sku: l.sku || "",
-        delta: act(l) - cur(l),
-        quantityAfter: act(l),
-      })).filter((d) => d.delta !== 0);
-
-      if (deltas.length > 0) {
-        await logInventoryChangeToApi({
-          activity: "adjustment",
-          locationId: conds.locationId,
-          locationName: conds.locationName || "",
-          deltas,
-          sourceId: adjustmentEntryId,
-          adjustmentGroupId,
-        });
-      }
-
       const items = lines.map((l) => {
         const pRaw = String(l.productTitle || "").trim() || "(unknown)";
         const vRaw = String(l.variantTitle || "").trim();
@@ -924,22 +905,37 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         createdAt: new Date().toISOString(),
         adjustmentGroupId,
       };
-      await writeAdjustmentEntries([entry, ...existing]);
-      
-      // 下書きをクリア（商品リストとコンディションの両方）
-      try {
-        if (SHOPIFY?.storage?.delete) {
-await SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY);
-        await SHOPIFY.storage.delete(ADJUSTMENT_CONDITIONS_DRAFT_KEY);
-        }
-      } catch (e) {
-        console.error("Failed to clear loss draft:", e);
-      }
-      
+
       toast("調整を確定しました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
+      setSubmitting(false);
+      // 残りはバックグラウンドで実行（変動ログ・履歴保存・下書き削除）
+      const deltas = lines.map((l) => ({
+        inventoryItemId: l.inventoryItemId,
+        variantId: l.variantId,
+        sku: l.sku || "",
+        delta: act(l) - cur(l),
+        quantityAfter: act(l),
+      })).filter((d) => d.delta !== 0);
+      Promise.all([
+        deltas.length > 0 ? logInventoryChangeToApi({
+          activity: "adjustment",
+          locationId: conds.locationId,
+          locationName: conds.locationName || "",
+          deltas,
+          sourceId: adjustmentEntryId,
+          adjustmentGroupId,
+        }) : Promise.resolve(),
+        writeAdjustmentEntries([entry, ...existing]),
+        SHOPIFY?.storage?.delete ? Promise.all([
+          SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY),
+          SHOPIFY.storage.delete(ADJUSTMENT_CONDITIONS_DRAFT_KEY),
+        ]).catch((e) => console.error("Failed to clear adjustment draft:", e)) : Promise.resolve(),
+      ]).catch((e) => {
+        toast(`保存に失敗しました: ${e?.message ?? e}`);
+      });
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
     } finally {

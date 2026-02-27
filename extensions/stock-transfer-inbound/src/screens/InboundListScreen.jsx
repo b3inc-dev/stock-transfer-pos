@@ -1498,34 +1498,33 @@ export function InboundListScreen({
         }
       }
 
-      // メモを1回だけ追記（予定外＋予定超過＋メモ＋在庫調整履歴。2回目追記の失敗で在庫調整履歴が残らない事象を防ぐ）
-      if (transferId && (hasSomething || adjustments.length > 0)) {
-        const fullNote = buildInboundNoteLine_({ shipmentId: shipment.id, locationId: locationGid, finalize, note: noteText, over: overForLog, extras: extrasForLog, inventoryAdjustments: adjustments });
-        if (String(fullNote || "").trim()) {
-          const addProcessLog = () => {};
-          const ok = await appendInventoryTransferNote_({ transferId, line: fullNote, processLogCallback: addProcessLog });
-          if (!ok) toast("管理画面メモへの追記に失敗しました（確定処理は続行します）");
-        }
-      }
+      // メモ追記・下書き削除・再読込はバックグラウンドで実行し、UIを先に完了させる
+      const fullNote = transferId && (hasSomething || adjustments.length > 0)
+        ? buildInboundNoteLine_({ shipmentId: shipment.id, locationId: locationGid, finalize, note: noteText, over: overForLog, extras: extrasForLog, inventoryAdjustments: adjustments })
+        : "";
+      const noteToAppend = String(fullNote || "").trim();
 
       toast(finalize ? "入庫を完了しました" : "一部入庫を確定しました");
-      try {
-        await clearInboundDraft({ locationGid, transferId, shipmentId: shipment.id });
-      } catch (_) {}
       setDraftSavedAt(null);
-      try {
-        await refreshPending();
-      } catch (_) {}
-      try {
-        if (!isMultipleMode) {
-          await loadShipmentById(shipment.id);
-        } else {
-          const idsToReload = Array.isArray(inbound?.selectedShipmentIds) ? inbound.selectedShipmentIds : [];
-          if (idsToReload.length > 0) await loadMultipleShipments(idsToReload);
-        }
-      } catch (_) {}
       if (!isMultipleMode && finalize && typeof onAfterReceive === "function") onAfterReceive(transferId).catch(() => {});
       if (finalize) onBack?.();
+
+      Promise.all([
+        noteToAppend
+          ? appendInventoryTransferNote_({ transferId, line: noteToAppend, processLogCallback: () => {} }).then((ok) => {
+              if (!ok) toast("管理画面メモへの追記に失敗しました");
+            })
+          : Promise.resolve(),
+        clearInboundDraft({ locationGid, transferId, shipmentId: shipment.id }).catch(() => {}),
+        refreshPending().catch(() => {}),
+        !isMultipleMode
+          ? loadShipmentById(shipment.id).catch(() => {})
+          : (Array.isArray(inbound?.selectedShipmentIds) && inbound.selectedShipmentIds.length > 0
+              ? loadMultipleShipments(inbound.selectedShipmentIds)
+              : Promise.resolve()
+            ).catch(() => {}),
+      ]).catch(() => {});
+
       return true;
     } catch (e) {
       toast(`入庫確定エラー: ${toUserMessage(e)}`);

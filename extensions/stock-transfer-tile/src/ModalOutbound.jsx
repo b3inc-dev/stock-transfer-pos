@@ -6838,7 +6838,14 @@ function OutboundList({
 
       toast("出庫を作成しました（進行中）");
 
-      // 在庫変動履歴に「出庫」で記録する（Webhook の「管理」を上書き）。失敗しても後処理は必ず実行する
+      // UIを先に更新してから、残りはバックグラウンドで実行
+      try { setLines([]); } catch (_) {}
+      try { setCandidateQtyMap?.({}); } catch (_) {}
+      setStateSlice(setAppState, "outbound", (prev) => ({
+        ...(prev || {}),
+        editingTransferId: "",
+      }));
+
       const transferIdStr = String(movementId || "").trim();
       const transferIdMatch = transferIdStr.match(/(\d+)$/);
       const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
@@ -6854,38 +6861,24 @@ function OutboundList({
           sku: line?.sku ?? "",
         };
       }).filter((d) => d.inventoryItemId && d.delta !== 0);
-      if (outboundDeltas.length > 0) {
-        try {
-          await logInventoryChangeToApi({
-            activity: "outbound_transfer",
-            locationId: originLocationGid,
-            locationName: originLocationName,
-            deltas: outboundDeltas,
-            sourceId: transferIdForUri,
-            lineItems: lines,
-          });
-        } catch (apiErr) {
-          console.warn("[ModalOutbound] logInventoryChangeToApi failed (outbound still created):", apiErr?.message || apiErr);
-        }
-      }
 
-      // 確定後は必ず実行：下書き削除・コンディション画面へ遷移（API失敗時も画面は戻す）
-      try { await clearOutboundDraft?.(); } catch (_) {}
-      try {
-        if (SHOPIFY?.storage?.delete) {
-          await SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY);
-        }
-        if (SHOPIFY?.storage?.set) {
-          await SHOPIFY.storage.set(OUTBOUND_CONDITIONS_DRAFT_KEY, {});
-        }
-      } catch (_) {}
-      try { setLines([]); } catch (_) {}
-      try { setCandidateQtyMap?.({}); } catch (_) {}
-
-      setStateSlice(setAppState, "outbound", (prev) => ({
-        ...(prev || {}),
-        editingTransferId: "",
-      }));
+      Promise.all([
+        outboundDeltas.length > 0
+          ? logInventoryChangeToApi({
+              activity: "outbound_transfer",
+              locationId: originLocationGid,
+              locationName: originLocationName,
+              deltas: outboundDeltas,
+              sourceId: transferIdForUri,
+              lineItems: lines,
+            }).catch((apiErr) => {
+              console.warn("[ModalOutbound] logInventoryChangeToApi failed (outbound still created):", apiErr?.message || apiErr);
+            })
+          : Promise.resolve(),
+        clearOutboundDraft?.().catch(() => {}),
+        SHOPIFY?.storage?.delete ? SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY).catch(() => {}) : Promise.resolve(),
+        SHOPIFY?.storage?.set ? SHOPIFY.storage.set(OUTBOUND_CONDITIONS_DRAFT_KEY, {}).catch(() => {}) : Promise.resolve(),
+      ]).catch(() => {});
 
       // コンディション画面への遷移は呼び出し側（確定ボタン）でモーダルを閉じたあとに実行
       return { transfer, shipment };

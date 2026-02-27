@@ -875,54 +875,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         deltas,
         referenceDocumentUri: purchaseEntryId,
       });
-      // 在庫変動ログを共通関数で記録（履歴で「仕入」と表示されるようにする）
-      try {
-        console.log(`[PurchaseProductList] Starting inventory change logging: lines.length=${lines.length}, locationId=${conds.locationId}`);
-        const purchaseDeltas = [];
-        for (const l of lines) {
-          const qty = Math.abs(Number(l.qty) || 0);
-          if (qty <= 0) {
-            console.log(`[PurchaseProductList] Skipping line with qty=0: inventoryItemId=${l.inventoryItemId}, qty=${l.qty}`);
-            continue;
-          }
-          let quantityAfter = null;
-          try {
-            const available = await fetchVariantAvailable({
-              variantGid: l.variantId,
-              locationGid: conds.locationId,
-            });
-            quantityAfter = available?.available ?? null;
-            console.log(`[PurchaseProductList] Fetched available quantity: inventoryItemId=${l.inventoryItemId}, quantityAfter=${quantityAfter}`);
-          } catch (e) {
-            console.warn("[PurchaseProductList] Failed to fetch available quantity:", e);
-          }
-          purchaseDeltas.push({
-            inventoryItemId: l.inventoryItemId,
-            variantId: l.variantId,
-            sku: l.sku || "",
-            delta: qty,
-            quantityAfter,
-          });
-          console.log(`[PurchaseProductList] Added to purchaseDeltas: inventoryItemId=${l.inventoryItemId}, delta=${qty}, purchaseDeltas.length=${purchaseDeltas.length}`);
-        }
-        console.log(`[PurchaseProductList] purchaseDeltas.length=${purchaseDeltas.length}, will call logInventoryChangeToApi=${purchaseDeltas.length > 0}`);
-        if (purchaseDeltas.length > 0) {
-          console.log(`[PurchaseProductList] Calling logInventoryChangeToApi: activity=purchase_entry, locationId=${conds.locationId}, deltas.length=${purchaseDeltas.length}, sourceId=${purchaseEntryId}`);
-          await logInventoryChangeToApi({
-            activity: "purchase_entry",
-            locationId: conds.locationId,
-            locationName: conds.locationName || "",
-            deltas: purchaseDeltas,
-            sourceId: purchaseEntryId,
-          });
-          console.log(`[PurchaseProductList] logInventoryChangeToApi call completed`);
-        } else {
-          console.warn(`[PurchaseProductList] purchaseDeltas.length is 0, skipping logInventoryChangeToApi call`);
-        }
-      } catch (e) {
-        console.error("[PurchaseProductList] Failed to log inventory change:", e);
-        console.error("[PurchaseProductList] Error details:", e?.message || String(e), e?.stack);
-      }
+
       const items = lines.map((l) => {
         // オプション情報を抽出
         const pRaw = String(l.productTitle || "").trim() || "(unknown)";
@@ -967,21 +920,54 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         status: "received",
         createdAt: new Date().toISOString(),
       };
-      await writePurchaseEntries([entry, ...existing]);
-      
-      // 下書きをクリア（商品リストとコンディションの両方）
-      try {
-        if (SHOPIFY?.storage?.delete) {
-          await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
-          await SHOPIFY.storage.delete(PURCHASE_CONDITIONS_DRAFT_KEY);
-        }
-      } catch (e) {
-        console.error("Failed to clear purchase draft:", e);
-      }
+
       toast("仕入を登録しました");
       confirmPurchaseModalRef?.current?.hideOverlay?.();
       confirmPurchaseModalRef?.current?.hide?.();
       onAfterConfirm?.();
+      setSubmitting(false);
+      // 残りはバックグラウンドで実行（変動ログ・履歴保存・下書き削除）
+      (async () => {
+        try {
+          const purchaseDeltas = [];
+          for (const l of lines) {
+            const qty = Math.abs(Number(l.qty) || 0);
+            if (qty <= 0) continue;
+            let quantityAfter = null;
+            try {
+              const available = await fetchVariantAvailable({
+                variantGid: l.variantId,
+                locationGid: conds.locationId,
+              });
+              quantityAfter = available?.available ?? null;
+            } catch (_) {}
+            purchaseDeltas.push({
+              inventoryItemId: l.inventoryItemId,
+              variantId: l.variantId,
+              sku: l.sku || "",
+              delta: qty,
+              quantityAfter,
+            });
+          }
+          if (purchaseDeltas.length > 0) {
+            await logInventoryChangeToApi({
+              activity: "purchase_entry",
+              locationId: conds.locationId,
+              locationName: conds.locationName || "",
+              deltas: purchaseDeltas,
+              sourceId: purchaseEntryId,
+            });
+          }
+          await writePurchaseEntries([entry, ...existing]);
+          if (SHOPIFY?.storage?.delete) {
+            await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
+            await SHOPIFY.storage.delete(PURCHASE_CONDITIONS_DRAFT_KEY);
+          }
+        } catch (e) {
+          console.error("[PurchaseProductList] Background save failed:", e);
+          toast(`保存に失敗しました: ${e?.message ?? e}`);
+        }
+      })();
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
