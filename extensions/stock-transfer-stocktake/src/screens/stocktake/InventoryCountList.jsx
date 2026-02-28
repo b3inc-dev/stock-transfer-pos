@@ -2060,7 +2060,6 @@ export function InventoryCountList({
           targetProductGroupIds,
           productGroupId,
         });
-        setSubmitting(false);
         Promise.all([
           logInventoryCountToApi({
             locationId: count.locationId,
@@ -2085,13 +2084,13 @@ export function InventoryCountList({
           }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
         ]).then((results) => {
           const writeResult = results[1];
-          if (writeResult) {
-            toast("棚卸を完了しました");
-            onAfterConfirm?.(writeResult);
-          }
+          toast("棚卸を完了しました");
+          if (writeResult) onAfterConfirm?.(writeResult);
+          setSubmitting(false);
         }).catch((e) => {
           toast(formatSaveError(e));
           onAfterConfirm?.(null);
+          setSubmitting(false);
         });
         return true;
         } catch (updateError) {
@@ -2229,7 +2228,6 @@ export function InventoryCountList({
           setSubmitting(false);
           return false;
         }
-        setSubmitting(false);
         Promise.all([
           logInventoryCountToApi({
             locationId: count.locationId,
@@ -2254,13 +2252,13 @@ export function InventoryCountList({
           }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
         ]).then((results) => {
           const writeResult = results[1];
-          if (writeResult) {
-            toast("棚卸を完了しました");
-            onAfterConfirm?.(writeResult);
-          }
+          toast("棚卸を完了しました");
+          if (writeResult) onAfterConfirm?.(writeResult);
+          setSubmitting(false);
         }).catch((e) => {
           toast(formatSaveError(e));
           onAfterConfirm?.(null);
+          setSubmitting(false);
         });
         return true;
       } catch (updateError) {
