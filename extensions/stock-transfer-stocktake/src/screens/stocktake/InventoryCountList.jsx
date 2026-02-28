@@ -1988,7 +1988,6 @@ export function InventoryCountList({
               targetProductGroupIds,
               productGroupId,
             });
-            toast("棚卸を完了しました");
             readInventoryCountsRaw()
               .then((counts) => {
                 const idStr = String(count?.id ?? "");
@@ -2001,7 +2000,10 @@ export function InventoryCountList({
                 return writeInventoryCounts(merged).then(() => toWrite);
               })
               .then((toWrite) => {
-                if (toWrite) onAfterConfirm?.(toWrite);
+                if (toWrite) {
+                  toast("棚卸を完了しました");
+                  onAfterConfirm?.(toWrite);
+                }
                 setSubmitting(false);
               })
               .catch((e) => {
@@ -2058,7 +2060,6 @@ export function InventoryCountList({
           targetProductGroupIds,
           productGroupId,
         });
-        toast("棚卸を完了しました");
         setSubmitting(false);
         Promise.all([
           logInventoryCountToApi({
@@ -2084,7 +2085,10 @@ export function InventoryCountList({
           }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
         ]).then((results) => {
           const writeResult = results[1];
-          if (writeResult) onAfterConfirm?.(writeResult);
+          if (writeResult) {
+            toast("棚卸を完了しました");
+            onAfterConfirm?.(writeResult);
+          }
         }).catch((e) => {
           toast(formatSaveError(e));
           onAfterConfirm?.(null);
@@ -2115,7 +2119,6 @@ export function InventoryCountList({
             targetProductGroupIds,
             productGroupId,
           });
-          toast("棚卸を完了しました");
           readInventoryCountsRaw()
             .then((counts) => {
               const idStr = String(count?.id ?? "");
@@ -2135,7 +2138,10 @@ export function InventoryCountList({
               ]).then(([toWriteResult]) => toWriteResult);
             })
             .then((toWrite) => {
-              if (toWrite) onAfterConfirm?.(toWrite);
+              if (toWrite) {
+                toast("棚卸を完了しました");
+                onAfterConfirm?.(toWrite);
+              }
               setSubmitting(false);
             })
             .catch((e) => {
@@ -2223,7 +2229,6 @@ export function InventoryCountList({
           setSubmitting(false);
           return false;
         }
-        toast("棚卸を完了しました");
         setSubmitting(false);
         Promise.all([
           logInventoryCountToApi({
@@ -2249,7 +2254,10 @@ export function InventoryCountList({
           }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
         ]).then((results) => {
           const writeResult = results[1];
-          if (writeResult) onAfterConfirm?.(writeResult);
+          if (writeResult) {
+            toast("棚卸を完了しました");
+            onAfterConfirm?.(writeResult);
+          }
         }).catch((e) => {
           toast(formatSaveError(e));
           onAfterConfirm?.(null);

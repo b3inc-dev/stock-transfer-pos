@@ -6273,7 +6273,6 @@ export default function InventoryCountPage() {
                           >
                             <input type="radio" checked={countNameSortOrder === "desc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                             <span style={{ fontWeight: countNameSortOrder === "desc" ? 600 : 500 }}>棚卸ID 降順（新しい順）</span>
-                            <span style={{ fontSize: "12px", color: "#6b7280" }}>#C0025 → #C0001</span>
                           </div>
                           <div
                             onClick={() => setCountNameSortOrder("asc")}
@@ -6290,7 +6289,6 @@ export default function InventoryCountPage() {
                           >
                             <input type="radio" checked={countNameSortOrder === "asc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                             <span style={{ fontWeight: countNameSortOrder === "asc" ? 600 : 500 }}>棚卸ID 昇順（古い順）</span>
-                            <span style={{ fontSize: "12px", color: "#6b7280" }}>#C0001 → #C0025</span>
                           </div>
                         </div>
                       </s-stack>

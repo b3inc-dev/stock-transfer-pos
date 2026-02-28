@@ -2772,12 +2772,10 @@ export default function PurchasePage() {
                         <div onClick={() => setIdSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "desc" ? "#eff6ff" : "transparent", border: idSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
                           <input type="radio" checked={idSortOrder === "desc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                           <span style={{ fontWeight: idSortOrder === "desc" ? 600 : 500 }}>仕入ID 降順（新しい順）</span>
-                          <span style={{ fontSize: "12px", color: "#6b7280" }}>#B0025 → #B0001</span>
                         </div>
                         <div onClick={() => setIdSortOrder("asc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "asc" ? "#eff6ff" : "transparent", border: idSortOrder === "asc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
                           <input type="radio" checked={idSortOrder === "asc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                           <span style={{ fontWeight: idSortOrder === "asc" ? 600 : 500 }}>仕入ID 昇順（古い順）</span>
-                          <span style={{ fontSize: "12px", color: "#6b7280" }}>#B0001 → #B0025</span>
                         </div>
                       </div>
                     </s-stack>
