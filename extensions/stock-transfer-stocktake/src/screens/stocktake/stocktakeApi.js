@@ -7,11 +7,13 @@ const SHOPIFY = globalThis?.shopify ?? {};
 const INVENTORY_COUNTS_CHUNK_BYTES = 32_000;
 const INVENTORY_COUNTS_CHUNK_KEY_PREFIX = "inventory_counts_v1_c";
 const METAFIELDS_SET_MAX = 25;
-/** Throttled 時リトライ待機（ms）。確定保存の連続メタフィールド書き込みでスロットリングされやすいため */
-const THROTTLE_RETRY_DELAY_MS = 2000;
-const THROTTLE_RETRY_MAX = 2;
+/** Throttled 時リトライ待機（ms）。商品グループごとの確定でも Throttled が出ないよう長めに待機 */
+const THROTTLE_RETRY_DELAY_MS = 3000;
+const THROTTLE_RETRY_MAX = 4;
 /** バッチ間の待機（ms）。連続書き込みで Throttled になりにくくする */
-const BATCH_WRITE_DELAY_MS = 150;
+const BATCH_WRITE_DELAY_MS = 350;
+/** write 開始前の待機（ms）。read 直後の連続呼び出しでスロットに当たりにくくする */
+const WRITE_START_DELAY_MS = 300;
 
 /** 一覧用軽量メタフィールド（id, locationId, status, countName, createdAt, productGroupIds のみ） */
 const INVENTORY_COUNTS_LIST_KEY = "inventory_counts_list_v1";
@@ -956,14 +958,17 @@ function ensureCountNamesBeforeWrite(counts) {
  * 書き込み前に (1) 既存データから locationId / productGroupIds / groupItems 等を補完（空白で上書きしない）、(2) countName が欠けている件には付与する。
  */
 export async function writeInventoryCounts(counts) {
+  if (WRITE_START_DELAY_MS > 0) {
+    await new Promise((r) => setTimeout(r, WRITE_START_DELAY_MS));
+  }
   const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
-  const d = await graphql(gqlApp);
+  const d = await runWithThrottleRetry(() => graphql(gqlApp));
   const ownerId = d?.currentAppInstallation?.id;
   if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
 
   let existing = [];
   try {
-    existing = await readInventoryCountsRaw();
+    existing = await runWithThrottleRetry(() => readInventoryCountsRaw());
   } catch (e) {
     // 既存読取失敗時はマージせずそのまま書く（新規ショップ等）
   }
