@@ -848,6 +848,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   let inventoryCounts: InventoryCount[] = Array.isArray(inventoryCountsRaw) ? inventoryCountsRaw : [];
+  // ✅ 一覧は常に棚卸ID（#C0001, #C0002…）の数値順で表示（保存順・list/main に依存しない）
+  if (inventoryCounts.length > 1) {
+    inventoryCounts = [...inventoryCounts].sort((a, b) => {
+      const na = parseCountNameNumber((a as { countName?: string }).countName);
+      const nb = parseCountNameNumber((b as { countName?: string }).countName);
+      return na - nb;
+    });
+  }
   if (inventoryCounts.length > 0 && usedListMetafield) {
     try {
       // ✅ list 由来データ用：過去にキャンセルしたが当時のバグで status が "in_progress" のまま保存されている件を表示時補正（全グループが cancelledGroupIds に含まれるなら status を "cancelled" に）
@@ -1642,8 +1650,7 @@ export async function action({ request }: ActionFunctionArgs) {
     actionType === "redistribute_count_group_items" ||
     actionType === "ensure_count_groups_completed" ||
     actionType === "sort_counts_by_count_name";
-  const sortAlsoNeedsList = actionType === "sort_counts_by_count_name";
-  const [currentResp, inventoryCountsFromChunked, listForSort] = await Promise.all([
+  const [currentResp, inventoryCountsFromChunked] = await Promise.all([
     admin.graphql(
       `#graphql
         query GetCurrentData {
@@ -1654,7 +1661,6 @@ export async function action({ request }: ActionFunctionArgs) {
       `
     ),
     needInventoryCounts ? readInventoryCountsChunked(admin) : Promise.resolve([]),
-    sortAlsoNeedsList ? readInventoryCountsListChunked(admin) : Promise.resolve([]),
   ]);
   const currentJson = await currentResp.json();
   let productGroups: ProductGroup[] = [];
@@ -1992,11 +1998,9 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true, groupsCompleted: true } as const;
   }
 
-  // ✅ 一度だけ：棚卸一覧を棚卸ID（#C0001, #C0002…）の数値順に並び替えて保存する
-  // 表示が list 由来のときは list をソート対象にする（list と main の両方を同じ順で書き直すため、リロード後に並びが反映される）
+  // ✅ 一度だけ：棚卸一覧を棚卸ID（#C0001, #C0002…）の数値順に並び替えて保存する（main 全件をソートして list/main 両方書き直す）
   if (actionType === "sort_counts_by_count_name") {
-    const toSort = Array.isArray(listForSort) && listForSort.length > 0 ? listForSort : inventoryCounts;
-    const sorted = [...toSort].sort((a, b) => {
+    const sorted = [...inventoryCounts].sort((a, b) => {
       const na = parseCountNameNumber((a as { countName?: string }).countName);
       const nb = parseCountNameNumber((b as { countName?: string }).countName);
       return na - nb;
