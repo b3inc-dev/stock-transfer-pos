@@ -2,7 +2,7 @@
 // 在庫情報画面（在庫高表示・変動履歴）
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams, useFetcher, useLocation } from "react-router";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { authenticate } from "../shopify.server";
 import { getDateInShopTimezone, formatDateTimeInShopTimezone } from "../utils/timezone";
 import db from "../db.server";
@@ -501,53 +501,60 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;
     console.error("[inventory-info] Loader error:", errorMessage, errorStack);
-    
-    // JSONレスポンスを返す（React RouterのloaderはJSONを期待している）
-    // エラーが発生しても、可能な限りデータを返して画面を表示できるようにする
-    return {
-      locations: [],
-      selectedDate: new Date().toISOString().slice(0, 10),
-      selectedLocationIds: [],
-      snapshots: [],
-      summary: {
-        totalQuantity: 0,
-        totalRetailValue: 0,
-        totalCompareAtPriceValue: 0,
-        totalCostValue: 0,
-      },
-      isToday: false,
-      shopId: "",
-      shopName: "",
-      shopTimezone: "UTC",
-      todayInShopTimezone: new Date().toISOString().slice(0, 10),
-      firstSnapshotDate: new Date().toISOString().slice(0, 10),
-      hasYesterdaySnapshot: false,
-      yesterdayDateStr: new Date().toISOString().slice(0, 10),
-      snapshotRefreshTokenExpires: null,
-      todaySnapshotUpdatedAt: null,
-      snapshotDisplayUpdatedAt: null,
-      firstChangeHistoryDate: null,
-      changeHistoryLogs: [],
-      changeHistoryPagination: {
-        total: 0,
-        startIndex: 0,
-        pageSize: 5000,
-        currentPage: 1,
-        totalPages: 0,
-        hasNextPage: false,
-        hasPreviousPage: false,
-      },
-      hasExplicitFilters: false,
-      changeHistoryFilters: {
-        startDate: new Date().toISOString().slice(0, 10),
-        endDate: new Date().toISOString().slice(0, 10),
-        locationIds: [],
-        inventoryItemIds: [],
-        activityTypes: [],
-        sortOrder: "desc",
-      },
-      error: errorMessage, // エラーメッセージを追加
-    };
+
+    try {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      return {
+        locations: [],
+        selectedDate: todayStr,
+        selectedLocationIds: [],
+        snapshots: [],
+        summary: {
+          totalQuantity: 0,
+          totalRetailValue: 0,
+          totalCompareAtPriceValue: 0,
+          totalCostValue: 0,
+        },
+        isToday: false,
+        shopId: "",
+        shopName: "",
+        shopTimezone: "UTC",
+        todayInShopTimezone: todayStr,
+        firstSnapshotDate: todayStr,
+        hasYesterdaySnapshot: false,
+        yesterdayDateStr: todayStr,
+        snapshotRefreshTokenExpires: null,
+        todaySnapshotUpdatedAt: null,
+        snapshotDisplayUpdatedAt: null,
+        firstChangeHistoryDate: null,
+        changeHistoryLogs: [],
+        changeHistoryPagination: {
+          total: 0,
+          startIndex: 0,
+          pageSize: 5000,
+          currentPage: 1,
+          totalPages: 0,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        },
+        hasExplicitFilters: false,
+        changeHistoryFilters: {
+          startDate: todayStr,
+          endDate: todayStr,
+          locationIds: [],
+          inventoryItemIds: [],
+          activityTypes: [],
+          sortOrder: "desc",
+        },
+        error: errorMessage,
+      };
+    } catch (fallbackError) {
+      console.error("[inventory-info] Fallback object build failed:", fallbackError);
+      throw new Response(
+        JSON.stringify({ error: "在庫情報の読み込みに失敗しました。しばらくしてから再度お試しください。" }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
   }
 }
 
@@ -649,12 +656,25 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function InventoryInfoPage() {
-  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, todaySnapshotUpdatedAt, snapshotDisplayUpdatedAt, firstChangeHistoryDate, changeHistoryLogs, changeHistoryPagination, hasExplicitFilters, changeHistoryFilters } =
-    useLoaderData<typeof loader>();
+  const loaderData = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
   const fetcher = useFetcher<typeof action>();
   const ensuredYesterdayRef = useRef(false);
+
+  const { locations, selectedDate, selectedLocationIds, snapshots, summary, isToday, shopId, shopName, shopTimezone, todayInShopTimezone, firstSnapshotDate, hasYesterdaySnapshot, yesterdayDateStr, snapshotRefreshTokenExpires, todaySnapshotUpdatedAt, snapshotDisplayUpdatedAt, firstChangeHistoryDate, changeHistoryLogs, changeHistoryPagination, hasExplicitFilters, changeHistoryFilters } =
+    loaderData as typeof loaderData & { error?: string };
+
+  // loader でエラーが発生した場合は簡易メッセージのみ表示し、以降の描画で例外を出さない
+  if ("error" in loaderData && typeof (loaderData as { error?: string }).error === "string") {
+    return (
+      <div style={{ padding: 24, fontFamily: "sans-serif" }}>
+        <h2 style={{ color: "#d72c0d", marginBottom: 8 }}>在庫情報の読み込みに失敗しました</h2>
+        <p style={{ color: "#6d7175", marginBottom: 16 }}>{(loaderData as { error: string }).error}</p>
+        <p style={{ fontSize: 14, color: "#6d7175" }}>しばらくしてから再度お試しください。解決しない場合は管理者にお問い合わせください。</p>
+      </div>
+    );
+  }
 
   // タブ管理（URLパラメータから取得、デフォルトは在庫高）
   type InventoryTabId = "inventory-level" | "change-history";
