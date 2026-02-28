@@ -74,6 +74,10 @@ REQUIREMENTS_FINAL.md に基づき、確定処理まわりを実装と照らし�
 | 差異調整 | 差異あり時は必ず `await adjustInventoryToActual` 成功後に toast / onAfterConfirm（2314–2355）。catch 時は toast 成功も onAfterConfirm も呼ばない（2329–2335） | ✅ 成功トースト＝差異調整済み。 |
 | ステータス（メタ） | メタの更新は runWithBackgroundWriteRetry 内の read → merge → write。失敗時は next.catch で formatSaveError トースト（2101, 2270, 2396）。最大3回リトライ | ⚠️ 一時的な失敗時のみステータス未反映の可能性。その場合は後からエラートースト。 |
 
+**単一グループで在庫調整したのにステータスが完了にならない事象（対応済み）**  
+- **原因**: mergeCountWithStorage で `allDone` が false になると `status` が "in_progress" になる。単一グループでも、groupItems のキーと groupIdsForCheck の ID の形式差（GID と数値など）で getGroupItemsByKey が空を返すと allDone が false になり、クライアントでは「完了」で組み立てているのにメタには "in_progress" が書かれていた。
+- **対応**: mergeCountWithStorage 内で **locallyBuilt.status === "completed" のときは常に status = "completed" で上書き**するガードを追加。確定処理で「完了」と組み立てた場合は、allDone の結果に依存せず必ず「完了」で書き込む。
+
 ---
 
 ### 項目5: 確定失敗なのに一部だけ在庫調整される可能性

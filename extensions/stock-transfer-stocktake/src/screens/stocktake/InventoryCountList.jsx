@@ -137,6 +137,8 @@ function mergeCountWithStorage(fromStorage, locallyBuilt) {
     });
   let status =
     locallyBuilt.status === "cancelled" ? (allDone ? "completed" : "cancelled") : allDone ? "completed" : "in_progress";
+  // ✅ 確定処理でクライアントが「完了」と組み立てた場合は必ず完了で書く（単一グループでキー不一致等により allDone が false になってもステータスが完了にならない事象を防ぐ）
+  if (locallyBuilt.status === "completed") status = "completed";
   // ✅ 一度完了したものを未処理に戻さない：base（fromStorage）が完了のときは「完了」を維持
   if (status === "in_progress" && fromStorage?.status === "completed" && groupIdsForCheck.length > 0) {
     const baseGroupItems = fromStorage?.groupItems && typeof fromStorage.groupItems === "object" ? fromStorage.groupItems : {};
