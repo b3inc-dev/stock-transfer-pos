@@ -848,12 +848,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   let inventoryCounts: InventoryCount[] = Array.isArray(inventoryCountsRaw) ? inventoryCountsRaw : [];
-  // ✅ 一覧は常に棚卸ID（#C0001, #C0002…）の数値順で表示（保存順・list/main に依存しない）
+  // ✅ 一覧は棚卸IDの番号が新しい順（#C0025, #C0024… #C0001）で表示
   if (inventoryCounts.length > 1) {
     inventoryCounts = [...inventoryCounts].sort((a, b) => {
       const na = parseCountNameNumber((a as { countName?: string }).countName);
       const nb = parseCountNameNumber((b as { countName?: string }).countName);
-      return na - nb;
+      return nb - na;
     });
   }
   if (inventoryCounts.length > 0 && usedListMetafield) {
@@ -2501,12 +2501,8 @@ export async function action({ request }: ActionFunctionArgs) {
       }
 
       const loc = locations.find((l) => l.id === locationId);
-      // 既存の最大番号+1 を付与して重複を防ぎ、一度振った番号は固定される（ID に紐づく）
-      const maxExistingNumber = (inventoryCounts ?? []).reduce(
-        (max, c) => Math.max(max, parseCountNameNumber((c as { countName?: string }).countName)),
-        0
-      );
-      const countName = `#C${String(maxExistingNumber + 1).padStart(4, "0")}`;
+      // 番号重複を防ぐ：保存直前に最新の一覧を読んでから ensureCountNamesOnCounts で付与（action 開始時の inventoryCounts は別タブ・同時発行で古い可能性があるため使わない）
+      const existingAtWrite = await readInventoryCountsChunked(admin);
 
       // メタフィールド値は 2MB 制限（API 2026-04 以降は 16KB の可能性あり）。大きすぎる場合は ID を保存せず POS でコレクションから読む
       const METAFIELD_VALUE_MAX_BYTES = 500_000; // 500KB に抑えてリクエストタイムアウト・保存失敗を防ぐ
@@ -2516,7 +2512,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
       const newCount: InventoryCount = {
         id: generateId("count"),
-        countName,
+        countName: "", // 空のまま渡し、ensureCountNamesOnCounts で一意の番号を付与する
         locationId,
         locationName: loc?.name,
         productGroupId: targetProductGroupIds[0],
@@ -2529,17 +2525,21 @@ export async function action({ request }: ActionFunctionArgs) {
         createdAt: new Date().toISOString(),
       };
 
-      let payload = JSON.stringify([...inventoryCounts, newCount]);
-      if (payload.length > METAFIELD_VALUE_MAX_BYTES) {
-        inventoryItemIdsOmittedDueToSize = true;
-        inventoryItemIdsToSave = undefined;
-        newCount.inventoryItemIdsByGroup = undefined;
-        newCount.inventoryItemIdsOmittedDueToSize = true;
-        payload = JSON.stringify([...inventoryCounts, newCount]);
-      }
-      inventoryCounts.push(newCount);
+      let fullList: InventoryCount[] = [...existingAtWrite, newCount];
+      let withNames = ensureCountNamesOnCounts(fullList);
+      const assignedCountName = withNames.find((c) => String(c.id) === String(newCount.id))?.countName ?? "";
 
-      const { userErrors: saveErrs } = await writeInventoryCountsChunked(admin, inventoryCounts, ownerId);
+      let payload = JSON.stringify(withNames);
+      if (payload.length > METAFIELD_VALUE_MAX_BYTES) {
+        const newInList = withNames.find((c) => String(c.id) === String(newCount.id));
+        if (newInList) {
+          (newInList as InventoryCount).inventoryItemIdsByGroup = undefined;
+          (newInList as InventoryCount).inventoryItemIdsOmittedDueToSize = true;
+        }
+        payload = JSON.stringify(withNames);
+      }
+
+      const { userErrors: saveErrs } = await writeInventoryCountsChunked(admin, withNames as InventoryCount[], ownerId);
       if (saveErrs.length) {
         return { ok: false, error: saveErrs.map((e: { message?: string }) => e.message).join(" / ") as const };
       }
@@ -2547,8 +2547,8 @@ export async function action({ request }: ActionFunctionArgs) {
       return {
         ok: true,
         inventoryCountId: newCount.id,
-        countName: newCount.countName,
-        inventoryItemIdsOmittedDueToSize: newCount.inventoryItemIdsOmittedDueToSize ?? false,
+        countName: assignedCountName,
+        inventoryItemIdsOmittedDueToSize: (withNames.find((c) => String(c.id) === String(newCount.id)) as InventoryCount | undefined)?.inventoryItemIdsOmittedDueToSize ?? false,
       };
     } catch (e) {
       console.error("[inventory-count] create_inventory_count failed:", e);
@@ -4265,11 +4265,11 @@ export default function InventoryCountPage() {
     if (statusFilters.size > 0) {
       list = list.filter((c) => statusFilters.has(c.status));
     }
-    // 棚卸ID（#C0001, #C0002…）の数値順で表示（loader の並びを維持）
+    // 棚卸IDの番号が新しい順（#C0025, #C0024… #C0001）で表示
     return list.sort((a, b) => {
       const na = parseCountNameNumber((a as { countName?: string }).countName);
       const nb = parseCountNameNumber((b as { countName?: string }).countName);
-      return na - nb;
+      return nb - na;
     });
   }, [inventoryCounts, locationFilters, statusFilters]);
 
