@@ -831,8 +831,42 @@ function splitCountIntoParts(count) {
 }
 
 /**
+ * 書き込み前に countName が欠けている件にのみ付与する（既存の countName は変更しない）。
+ * writeInventoryCounts から呼び、確定後バックグラウンドで readInventoryCountsRaw 由来の list を書くときに空白で上書きするのを防ぐ。
+ */
+function ensureCountNamesBeforeWrite(counts) {
+  if (!Array.isArray(counts) || counts.length === 0) return counts;
+  const hasMissing = counts.some((c) => !c?.countName || String(c.countName).trim() === "");
+  if (!hasMissing) return counts;
+  const maxExistingNumber = counts.reduce((max, c) => {
+    const n = parseCountNameNumber(c?.countName);
+    return n > max ? n : max;
+  }, 0);
+  const missingCountNameCounts = [...counts]
+    .filter((c) => !c?.countName || String(c.countName).trim() === "")
+    .sort((a, b) => {
+      const aTime = new Date(a?.createdAt || 0).getTime();
+      const bTime = new Date(b?.createdAt || 0).getTime();
+      if (aTime !== bTime) return aTime - bTime;
+      return String(a?.id ?? "").localeCompare(String(b?.id ?? ""), undefined, { numeric: true });
+    });
+  const assignedCountNameById = new Map();
+  let nextNumber = maxExistingNumber + 1;
+  for (const c of missingCountNameCounts) {
+    if (c?.id) assignedCountNameById.set(c.id, `#C${String(nextNumber).padStart(4, "0")}`);
+    nextNumber += 1;
+  }
+  return counts.map((c) => {
+    if (c?.countName && String(c.countName).trim() !== "") return c;
+    const countName = c?.id ? assignedCountNameById.get(c.id) : null;
+    return countName ? { ...c, countName } : c;
+  });
+}
+
+/**
  * 棚卸一覧をメタフィールドに保存する。必ず「全件」の配列を渡すこと。
  * 部分的な配列で呼ぶと他棚卸IDが消えるため、呼び出し元は read で取得した全件を更新してから渡すこと。
+ * 書き込み前に countName が欠けている件には付与する（空白で上書きしない）。
  */
 export async function writeInventoryCounts(counts) {
   const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
@@ -840,7 +874,7 @@ export async function writeInventoryCounts(counts) {
   const ownerId = d?.currentAppInstallation?.id;
   if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
 
-  const arr = Array.isArray(counts) ? counts : [];
+  const arr = ensureCountNamesBeforeWrite(Array.isArray(counts) ? counts : []);
   if (arr.length === 0) {
     const gqlCheck = `#graphql query MainKey { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
     const check = await graphql(gqlCheck);

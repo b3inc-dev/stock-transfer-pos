@@ -324,6 +324,9 @@ export function InventoryCountConditions({
               String(x?.id ?? "") === idStr
                 ? {
                     ...x,
+                    ...(full.countName != null && String(full.countName).trim() !== ""
+                      ? { countName: full.countName }
+                      : {}),
                     groupItems: full.groupItems,
                     items: full.items,
                     inventoryItemIdsByGroup: full.inventoryItemIdsByGroup,

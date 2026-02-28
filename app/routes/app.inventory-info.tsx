@@ -2,7 +2,7 @@
 // 在庫情報画面（在庫高表示・変動履歴）
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams, useFetcher, useLocation } from "react-router";
-import { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { authenticate } from "../shopify.server";
 import { getDateInShopTimezone, formatDateTimeInShopTimezone } from "../utils/timezone";
 import db from "../db.server";
@@ -815,7 +815,7 @@ export default function InventoryInfoPage() {
   const chHasPagination = chPagination.hasNextPage || chPagination.hasPreviousPage;
 
   // 在庫変動履歴のロケーション表示用：GIDや数値IDからロケーション名を解決（棚卸などで locationName が GID のまま保存されている場合に対応）
-  const locationNameByLocationId = useMemo(() => {
+  const locationNameByLocationId = React.useMemo(() => {
     const map = new Map<string, string>();
     for (const loc of locations || []) {
       if (loc?.name != null) {
