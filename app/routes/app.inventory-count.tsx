@@ -5482,22 +5482,22 @@ export default function InventoryCountPage() {
                           <button
                             type="button"
                             onClick={() => fetcher.submit({ actionType: "repair_count_names" }, { method: "post" })}
-                            disabled={fetcher.state !== "idle" || inventoryCounts.length === 0}
+                            disabled={fetcher.state !== "idle"}
                             style={{
                               padding: "8px 16px",
-                              backgroundColor: fetcher.state !== "idle" || inventoryCounts.length === 0 ? "#e5e7eb" : "#f3f4f6",
+                              backgroundColor: fetcher.state !== "idle" ? "#e5e7eb" : "#f3f4f6",
                               color: "#6b7280",
                               border: "1px solid #e5e7eb",
                               borderRadius: "6px",
                               fontSize: "13px",
-                              cursor: fetcher.state !== "idle" || inventoryCounts.length === 0 ? "not-allowed" : "pointer",
+                              cursor: fetcher.state !== "idle" ? "not-allowed" : "pointer",
                               width: "100%",
                             }}
                           >
                             棚卸IDを修復
                           </button>
                           <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "-4px" }}>
-                            表示が空白の棚卸IDに番号を再付与します。POS・履歴一覧を再読み込みすると反映されます。
+                            表示が空白の棚卸IDに番号を再付与します。一覧に0件と出ていても、メタフィールドにデータがあれば修復できます。POS・履歴を再読み込みすると反映されます。
                           </s-text>
                         </div>
                         {fetcher.data?.ok && typeof (fetcher.data as { repaired?: number }).repaired === "number" && (
