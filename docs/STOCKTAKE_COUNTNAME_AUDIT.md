@@ -80,6 +80,32 @@
 
 ---
 
+## 3.5 確定フロー（最後のグループ完了対応）と空白上書きの有無・完了の根拠
+
+**対象**: まとめて表示・商品グループごとに表示・1グループのみの棚卸で「最後のグループが完了にならない」問題の解消時に、**データが空で上書きされる要因が発生していないか**と、**問題なく完了確定される根拠**。
+
+### 確定時にデータが空で上書きされる要因は発生していない
+
+| レイヤー | 内容 | 根拠 |
+|----------|------|------|
+| **1. buildUpdatedCountFromLocalState** | 戻りは `{ ...count, groupItems, status, completedAt, items }` のみ。 | **countName / locationId / productGroupIds は一切書き換えていない**。`...count` でそのまま引き継ぐため、画面で持っている count のメタデータが空白でなければ locallyBuilt も空白にならない。行のグループ割り当て（invIdToGroupId）は groupItems の**追加・上書き**のみで、メタフィールド（countName 等）には触れない。 |
+| **2. mergeCountWithStorage** | toWrite 生成時に「fromStorage の有効値で空白を上書きし直す」処理がある。 | 既存の **§2 表** のとおり、`out.countName` / `out.locationId` / `out.locationName` / `out.productGroupIds` が空白になる場合は **fromStorage の値を明示的に採用**（119–132 行目）。確定フローでは必ず `toWrite = mergeCountWithStorage(fromStorage, locallyBuilt)` を経由するため、**toWrite がメタデータ空白で write に回る経路はない**。 |
+| **3. writeInventoryCounts（POS）** | 保存前に必ず既存読取 → mergeExistingNonBlank → ensureCountNamesBeforeWrite → filterInvalidCountsBeforeWrite を実行。 | **§0・§1** のとおり。仮に toWrite の 1 件がメタデータ欠けていても、**既存の同 id の値で補完**され、**id ありで countName/locationId が空白のレコードは保存対象から除外**される。確定で渡す `merged` 配列は「read で取った list の 1 件を toWrite に差し替えただけ」なので、他件は既存のまま；差し替え件も上記 3 段階で保護される。 |
+
+**結論**: 確定時の「最後のグループ完了」対応（invIdToGroupId の追加・onAfterConfirm(toWrite) に変更）では、**countName / locationId / productGroupIds / locationName を空白で上書きする新たな要因は発生していない**。buildUpdatedCountFromLocalState でメタを触らないこと、mergeCountWithStorage の空白防止、write 側の mergeExistingNonBlank と filterInvalidCountsBeforeWrite の三重で守られている。
+
+### 問題なく完了確定される根拠
+
+| 観点 | 根拠 |
+|------|------|
+| **書くデータの正しさ** | 確定時は常に **readInventoryCountsRaw() → fromStorage 取得 → toWrite = mergeCountWithStorage(fromStorage, locallyBuilt) → writeInventoryCounts(merged)** の順で実行する。merged の「当該 id の要素」は toWrite のみ。toWrite は **fromStorage の groupItems と locallyBuilt の groupItems をマージ**（`mergedGroupItems = { ...fromStorage.groupItems, ...locallyBuilt.groupItems }`）したうえで、**allDone を全 productGroupIds について「キャンセル済みまたは groupItems に 1 件以上あるか」で再計算**し、status / completedAt を付け直している。そのため「最後のグループだけ完了にした」場合でも、fromStorage に既に完了している他グループが入っていれば、toWrite には全グループ分の groupItems が入り、allDone が true になって status: "completed" で保存される。 |
+| **UI に渡す値** | 保存完了後に **onAfterConfirm(toWrite)** を呼ぶように変更済み。toWrite は上記の merge 結果なので、**全グループ完了を反映した status/groupItems** が親に渡り、一覧・モーダルで「完了」が正しく表示される。 |
+| **単一グループ・まとめて表示** | 単一グループは `else if (currentGroupId)` で groupItems を 1 グループ分だけ組み、allIds が 1 件のため allDone はその 1 グループで決まる。まとめて表示では invIdToGroupId により行が正しいグループに割り当てられ、全グループ分の groupItems が locallyBuilt に入る。いずれも toWrite に正しい groupItems と status が入り、write に渡る。 |
+
+**結論**: 確定フローは「read → merge（fromStorage + locallyBuilt）→ write」に統一され、**保存するのは常に merge 結果**である。merge 時に groupItems の結合と status/completedAt の再計算をしているため、最後のグループを完了したときも他グループが fromStorage に入っていれば漏れなく完了になり、かつ **空白で上書きする経路はなく、問題なく完了確定される**。
+
+---
+
 ## 4. 防御ポイント
 
 - **countName**: **writeInventoryCounts** / **writeInventoryCountsChunked** の書き込み前に **ensureCountNamesBeforeWrite(counts)** を必ず実行する。呼び出し元が readInventoryCountsRaw のみで list を組み立てて渡しても、欠けている countName が補完され、他件が空白で上書きされない。

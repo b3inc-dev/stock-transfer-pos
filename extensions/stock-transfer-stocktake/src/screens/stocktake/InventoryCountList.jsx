@@ -145,12 +145,33 @@ function buildUpdatedCountFromLocalState(count, lines, opts) {
   const parentGroupItems = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
   const groupItems = { ...parentGroupItems };
   const currentGroupId = productGroupId || (Array.isArray(targetProductGroupIds) && targetProductGroupIds[0]) || null;
+  const allIds =
+    Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0
+      ? count.productGroupIds
+      : count.productGroupId
+        ? [count.productGroupId]
+        : [];
 
   if (isMultipleMode && Array.isArray(targetProductGroupIds) && targetProductGroupIds.length > 0) {
     const editableLines = lines.filter((l) => !l.isReadOnly);
+    // ✅ 行に productGroupId が無い場合（まとめて読込で全グループが平たんに返る場合）、inventoryItemIdsByGroup で所属グループを判定して最後のグループが完了になるよう割り当てる
+    const idsByGroup = count?.inventoryItemIdsByGroup && typeof count.inventoryItemIdsByGroup === "object" ? count.inventoryItemIdsByGroup : null;
+    const invIdToGroupId = new Map();
+    if (idsByGroup && allIds.length > 0) {
+      for (const gid of allIds) {
+        const ids = getGroupItemsByKey(idsByGroup, gid);
+        const idList = Array.isArray(ids) ? ids : (idsByGroup[gid] || []);
+        const arr = Array.isArray(idList) ? idList : [];
+        for (const id of arr) {
+          const n = normalizeIdForMatch(String(id ?? "").trim());
+          if (n && !invIdToGroupId.has(n)) invIdToGroupId.set(n, gid);
+        }
+      }
+    }
     const linesByGroup = new Map();
     for (const l of editableLines) {
-      const gid = l.productGroupId || targetProductGroupIds[0];
+      const invIdNorm = normalizeIdForMatch(String(l?.inventoryItemId ?? "").trim());
+      const gid = l.productGroupId || (invIdNorm && invIdToGroupId.get(invIdNorm)) || targetProductGroupIds[0];
       if (!gid) continue;
       if (!linesByGroup.has(gid)) linesByGroup.set(gid, []);
       linesByGroup.get(gid).push(l);
@@ -198,12 +219,6 @@ function buildUpdatedCountFromLocalState(count, lines, opts) {
     groupItems[currentGroupId] = entry;
   }
 
-  const allIds =
-    Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0
-      ? count.productGroupIds
-      : count.productGroupId
-        ? [count.productGroupId]
-        : [];
   const cancelledSet = cancelledGroupIdSet(count);
   const allDone =
     allIds.length > 0 &&
@@ -1950,7 +1965,7 @@ export function InventoryCountList({
         .filter((l) => l.currentQuantity !== l.actualQuantity);
       
       if (allItemsToAdjust.length === 0) {
-        // ✅ 在庫差異なし：アプリタイル上で待たせずモーダルを即閉じ、組み立て・保存はバックグラウンドで実行
+        // ✅ 在庫差異なし：read → merge → write 後に merge 結果を onAfterConfirm に渡し、商品グループごと表示・1グループのみでも最後のグループが完了になるようする
         setSubmitting(true);
         setTimeout(() => {
           try {
@@ -1960,8 +1975,6 @@ export function InventoryCountList({
               productGroupId,
             });
             toast("棚卸を完了しました");
-            onAfterConfirm?.(locallyBuilt);
-            setSubmitting(false);
             readInventoryCountsRaw()
               .then((counts) => {
                 const idStr = String(count?.id ?? "");
@@ -1971,20 +1984,23 @@ export function InventoryCountList({
                 const merged = list.some((c) => String(c?.id ?? "") === idStr)
                   ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
                   : [...list, toWrite];
-                return writeInventoryCounts(merged);
+                return writeInventoryCounts(merged).then(() => toWrite);
+              })
+              .then((toWrite) => {
+                if (toWrite) onAfterConfirm?.(toWrite);
+                setSubmitting(false);
               })
               .catch((e) => {
                 toast(`保存に失敗しました: ${e?.message ?? e}`);
                 onAfterConfirm?.(null);
+                setSubmitting(false);
               });
           } catch (e) {
             toast(`エラー: ${e?.message ?? e}`);
             onAfterConfirm?.(null);
-          } finally {
             setSubmitting(false);
           }
         }, 0);
-        setSubmitting(false);
         return true;
       }
       
@@ -2022,14 +2038,13 @@ export function InventoryCountList({
           console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
           toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
         }
-        // ✅ ローカル状態のみで更新後 count を組み立て、read をブロックせず即「完了」表示（アプリタイルの待機時間削減）
+        // ✅ ローカル状態で更新後 count を組み立て。保存完了後に merge 結果を onAfterConfirm に渡し、商品グループごと表示でも完了ステータスが正しくなるようにする
         const locallyBuiltAdjust = buildUpdatedCountFromLocalState(count, lines, {
           isMultipleMode: true,
           targetProductGroupIds,
           productGroupId,
         });
         toast("棚卸を完了しました");
-        onAfterConfirm?.(locallyBuiltAdjust);
         setSubmitting(false);
         Promise.all([
           logInventoryCountToApi({
@@ -2046,14 +2061,17 @@ export function InventoryCountList({
             const merged = list.some((c) => String(c?.id ?? "") === idStr)
               ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
               : [...list, toWrite];
-            return writeInventoryCounts(merged);
+            return writeInventoryCounts(merged).then(() => toWrite);
           }),
           clearAllInventoryCountDraftsForCount({
             countId: count.id,
             locationId: count.locationId,
             productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
           }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
-        ]).catch((e) => {
+        ]).then((results) => {
+          const writeResult = results[1];
+          if (writeResult) onAfterConfirm?.(writeResult);
+        }).catch((e) => {
           toast(`保存に失敗しました: ${e?.message ?? e}`);
           onAfterConfirm?.(null);
         });
@@ -2074,7 +2092,7 @@ export function InventoryCountList({
     }
 
     if (itemsToAdjust.length === 0) {
-      // ✅ 在庫差異なし：アプリタイル上で待たせずモーダルを即閉じ、組み立て・保存はバックグラウンドで実行
+      // ✅ 在庫差異なし：read → merge → write 後に merge 結果を onAfterConfirm に渡し、1グループのみ・グループごと表示でも完了ステータスが正しくなるようにする
       setSubmitting(true);
       setTimeout(() => {
         try {
@@ -2084,8 +2102,6 @@ export function InventoryCountList({
             productGroupId,
           });
           toast("棚卸を完了しました");
-          onAfterConfirm?.(locallyBuiltNoAdjust);
-          setSubmitting(false);
           readInventoryCountsRaw()
             .then((counts) => {
               const idStr = String(count?.id ?? "");
@@ -2096,26 +2112,29 @@ export function InventoryCountList({
                 ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
                 : [...list, toWrite];
               return Promise.all([
-                writeInventoryCounts(merged),
+                writeInventoryCounts(merged).then(() => toWrite),
                 clearAllInventoryCountDraftsForCount({
                   countId: count.id,
                   locationId: count.locationId,
                   productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
                 }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
-              ]);
+              ]).then(([toWriteResult]) => toWriteResult);
+            })
+            .then((toWrite) => {
+              if (toWrite) onAfterConfirm?.(toWrite);
+              setSubmitting(false);
             })
             .catch((e) => {
               toast(`保存に失敗しました: ${e?.message ?? e}`);
               onAfterConfirm?.(null);
+              setSubmitting(false);
             });
         } catch (e) {
           toast(`エラー: ${e?.message ?? e}`);
           onAfterConfirm?.(null);
-        } finally {
           setSubmitting(false);
         }
       }, 0);
-      setSubmitting(false);
       return true;
     }
 
@@ -2180,7 +2199,7 @@ export function InventoryCountList({
           return false;
         }
 
-        // ✅ ローカル状態のみで更新後 count を組み立て、read をブロックせず即「完了」表示（アプリタイルの待機時間削減）
+        // ✅ ローカル状態で更新後 count を組み立て。保存完了後に merge 結果を onAfterConfirm に渡し、1グループのみ・グループごと表示でも完了ステータスが正しくなるようにする
         const locallyBuiltResult = buildUpdatedCountFromLocalState(count, lines, {
           isMultipleMode,
           targetProductGroupIds,
@@ -2191,7 +2210,6 @@ export function InventoryCountList({
           return false;
         }
         toast("棚卸を完了しました");
-        onAfterConfirm?.(locallyBuiltResult);
         setSubmitting(false);
         Promise.all([
           logInventoryCountToApi({
@@ -2208,14 +2226,17 @@ export function InventoryCountList({
             const merged = list.some((c) => String(c?.id ?? "") === idStr)
               ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
               : [...list, toWrite];
-            return writeInventoryCounts(merged);
+            return writeInventoryCounts(merged).then(() => toWrite);
           }),
           clearAllInventoryCountDraftsForCount({
             countId: count.id,
             locationId: count.locationId,
             productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
           }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
-        ]).catch((e) => {
+        ]).then((results) => {
+          const writeResult = results[1];
+          if (writeResult) onAfterConfirm?.(writeResult);
+        }).catch((e) => {
           toast(`保存に失敗しました: ${e?.message ?? e}`);
           onAfterConfirm?.(null);
         });
