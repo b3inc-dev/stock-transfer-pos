@@ -65,6 +65,39 @@ const STOCKTAKE_CSV_LABELS: Record<string, string> = {
 };
 const DEFAULT_STOCKTAKE_CSV_COLUMNS = [...STOCKTAKE_CSV_COLUMN_IDS];
 
+/**
+ * 商品名＋オプション表示用に title を分解する。
+ * 区切りは " / "（スペース+スラッシュ+スペース）のみ。オプション値内の "/"（例: iPhone7/8）は分割しない。
+ * item に option1/option2/option3 がある場合はそれを優先する。
+ */
+function parseTitleToProductAndOptions(
+  titleRaw: string,
+  item?: { option1?: string; option2?: string; option3?: string }
+): { productName: string; option1: string; option2: string; option3: string } {
+  const raw = String(titleRaw || "").trim();
+  const hasExplicitOptions = item && (
+    (item.option1 !== undefined && item.option1 !== "") ||
+    (item.option2 !== undefined && item.option2 !== "") ||
+    (item.option3 !== undefined && item.option3 !== "")
+  );
+  if (hasExplicitOptions) {
+    const productName = raw.includes(" / ") ? raw.split(" / ")[0].trim() || raw : raw;
+    return {
+      productName: productName || "（商品名なし）",
+      option1: String(item!.option1 ?? "").trim(),
+      option2: String(item!.option2 ?? "").trim(),
+      option3: String(item!.option3 ?? "").trim(),
+    };
+  }
+  const idx = raw.indexOf(" / ");
+  if (idx >= 0) {
+    const productName = raw.slice(0, idx).trim();
+    const variantPart = raw.slice(idx + 3).trim();
+    return { productName: productName || raw, option1: variantPart, option2: "", option3: "" };
+  }
+  return { productName: raw || "（商品名なし）", option1: "", option2: "", option3: "" };
+}
+
 // POS と同一の正規化：groupItems キー照合で管理画面とタイルの表示を一致させる
 function normalizeIdForMatch(id: string | number | undefined | null): string {
   const s = String(id ?? "").trim();
@@ -670,7 +703,10 @@ function toInventoryItemGidForCount(inventoryItemId: string): string | null {
   return null;
 }
 
-/** 管理画面から inventorySetQuantities で在庫を設定（POS の adjustInventoryToActual と同様） */
+/** Shopify inventorySetQuantities の quantities 配列の最大件数（API 制限） */
+const INVENTORY_SET_QUANTITIES_MAX = 250;
+
+/** 管理画面から inventorySetQuantities で在庫を設定（POS の adjustInventoryToActual と同様）。250件超はチャンク分割して複数回実行。 */
 async function adjustInventoryQuantitiesServer(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   locationId: string,
@@ -690,43 +726,47 @@ async function adjustInventoryQuantitiesServer(
   if (validQuantities.length === 0) {
     return { ok: false, invalidCount, error: "有効な在庫アイテムがありません" };
   }
-  const input: Record<string, unknown> = {
-    name: "available",
-    reason: "correction",
-    ignoreCompareQuantity: true,
-    quantities: validQuantities.map((q) => ({
-      inventoryItemId: q.inventoryItemId,
-      locationId: locationGid,
-      quantity: q.quantity,
-      compareQuantity: q.compareQuantity,
-    })),
-  };
-  if (referenceDocumentUri) {
-    input.referenceDocumentUri = `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`;
-  }
-  try {
-    const resp = await admin.graphql(
-      `#graphql
-        mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-          inventorySetQuantities(input: $input) {
-            inventoryAdjustmentGroup { id }
-            userErrors { field message }
+  const refUri = referenceDocumentUri
+    ? `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`
+    : undefined;
+  for (let i = 0; i < validQuantities.length; i += INVENTORY_SET_QUANTITIES_MAX) {
+    const chunk = validQuantities.slice(i, i + INVENTORY_SET_QUANTITIES_MAX);
+    const input: Record<string, unknown> = {
+      name: "available",
+      reason: "correction",
+      ignoreCompareQuantity: true,
+      quantities: chunk.map((q) => ({
+        inventoryItemId: q.inventoryItemId,
+        locationId: locationGid,
+        quantity: q.quantity,
+        compareQuantity: q.compareQuantity,
+      })),
+    };
+    if (refUri) input.referenceDocumentUri = refUri;
+    try {
+      const resp = await admin.graphql(
+        `#graphql
+          mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+            inventorySetQuantities(input: $input) {
+              inventoryAdjustmentGroup { id }
+              userErrors { field message }
+            }
           }
-        }
-      `,
-      { variables: { input } }
-    );
-    const json = await resp.json();
-    const data = json?.data?.inventorySetQuantities;
-    const errs = data?.userErrors ?? [];
-    if (errs.length) {
-      return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") };
+        `,
+        { variables: { input } }
+      );
+      const json = await resp.json();
+      const data = json?.data?.inventorySetQuantities;
+      const errs = data?.userErrors ?? [];
+      if (errs.length) {
+        return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") };
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: msg };
     }
-    return { ok: true, invalidCount: invalidCount > 0 ? invalidCount : undefined };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: msg };
   }
+  return { ok: true, invalidCount: invalidCount > 0 ? invalidCount : undefined };
 }
 
 /** 管理画面から棚卸確定・リセット時の変動ログを DB に記録（api/log-inventory-change と同様のロジック） */
@@ -1953,7 +1993,7 @@ export async function action({ request }: ActionFunctionArgs) {
               if (!item?.variant) return null;
               const productTitle = item.variant.product?.title ?? "";
               const variantTitle = item.variant.title ?? "";
-              const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${productTitle}/${variantTitle}` : productTitle;
+              const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${productTitle} / ${variantTitle}` : productTitle;
               const qty = item.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
               const currentQuantity = qty != null ? Number(qty) : 0;
               return {
@@ -2760,7 +2800,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 if (!item?.variant) return null;
                 const productTitle = item.variant.product?.title ?? "";
                 const variantTitle = item.variant.title ?? "";
-                const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${productTitle}/${variantTitle}` : productTitle;
+                const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${productTitle} / ${variantTitle}` : productTitle;
                 const qty = item.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
                 const currentQuantity = qty !== null && qty !== undefined ? Number(qty) : 0;
                 return {
@@ -2810,7 +2850,7 @@ export async function action({ request }: ActionFunctionArgs) {
                     if (!item2?.variant) return null;
                     const productTitle2 = item2.variant.product?.title ?? "";
                     const variantTitle2 = item2.variant.title ?? "";
-                    const fullTitle2 = variantTitle2 && variantTitle2 !== "Default Title" ? `${productTitle2}/${variantTitle2}` : productTitle2;
+                    const fullTitle2 = variantTitle2 && variantTitle2 !== "Default Title" ? `${productTitle2} / ${variantTitle2}` : productTitle2;
                     const qty2 = item2.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
                     const currentQuantity2 = qty2 !== null && qty2 !== undefined ? Number(qty2) : 0;
                     return {
@@ -2927,7 +2967,7 @@ export async function action({ request }: ActionFunctionArgs) {
                   if (!item?.variant) return null;
                   const productTitle = item.variant.product?.title ?? "";
                   const variantTitle = item.variant.title ?? "";
-                  const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${productTitle}/${variantTitle}` : productTitle;
+                  const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${productTitle} / ${variantTitle}` : productTitle;
                   const qty = item.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
                   const currentQuantity = qty !== null && qty !== undefined ? Number(qty) : 0;
                   return {
@@ -2977,7 +3017,7 @@ export async function action({ request }: ActionFunctionArgs) {
                       if (!item2?.variant) return null;
                       const productTitle2 = item2.variant.product?.title ?? "";
                       const variantTitle2 = item2.variant.title ?? "";
-                      const fullTitle2 = variantTitle2 && variantTitle2 !== "Default Title" ? `${productTitle2}/${variantTitle2}` : productTitle2;
+                      const fullTitle2 = variantTitle2 && variantTitle2 !== "Default Title" ? `${productTitle2} / ${variantTitle2}` : productTitle2;
                       const qty2 = item2.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
                       const currentQuantity2 = qty2 !== null && qty2 !== undefined ? Number(qty2) : 0;
                       return {
@@ -3067,7 +3107,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 if (selectedVariantIds.length === 0 || selectedVariantIds.includes(variant.id)) {
                   const title = product.title || "";
                   const variantTitle = variant.title || "";
-                  const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${title}/${variantTitle}` : title;
+                  const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${title} / ${variantTitle}` : title;
                   products.push({
                     variantId: variant.id,
                     inventoryItemId: variant.inventoryItem.id,
@@ -4551,13 +4591,9 @@ export default function InventoryCountPage() {
 
       if (detail && c.items?.length) {
         c.items.forEach((it) => {
-          const titleRaw = String(it.title || "").trim();
-          const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-          const productName = parts[0] || titleRaw || (it as any).sku || "-";
-          const optionParts = parts.length >= 2 ? parts.slice(1) : [];
-          const option1 = optionParts[0] || "";
-          const option2 = optionParts[1] || "";
-          const option3 = optionParts[2] || "";
+          const parsed = parseTitleToProductAndOptions(String(it.title || "").trim(), it as any);
+          const productName = parsed.productName || (it as any).sku || "-";
+          const { option1, option2, option3 } = parsed;
           const sku = String((it as any).sku ?? "").trim();
           const jan = String((it as any).barcode ?? "").trim();
           const kindLabel = (it as any).isExtra ? "予定外" : "";
@@ -7019,13 +7055,9 @@ export default function InventoryCountPage() {
                                       </thead>
                                       <tbody>
                                         {normalItems.map((it, idx) => {
-                                          const titleRaw = String(it.title || "").trim();
-                                          const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-                                          const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
-                                          const optionParts = parts.length >= 2 ? parts.slice(1) : [];
-                                          const option1 = optionParts[0] || "";
-                                          const option2 = optionParts[1] || "";
-                                          const option3 = optionParts[2] || "";
+                                          const parsed = parseTitleToProductAndOptions(String(it.title || "").trim(), it as any);
+                                          const productName = parsed.productName || it.sku || "（商品名なし）";
+                                          const { option1, option2, option3 } = parsed;
                                           const sku = String(it.sku || "").trim();
                                           const jan = String((it as any).barcode || "").trim();
                                           const cellStyle: React.CSSProperties = { padding: "8px", borderRight: "1px solid #eee" };
@@ -7190,13 +7222,9 @@ export default function InventoryCountPage() {
                                     </thead>
                                     <tbody>
                                       {extraItemsAll.map((it, idx) => {
-                                        const titleRaw = String(it.title || "").trim();
-                                        const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-                                        const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
-                                        const optionParts = parts.length >= 2 ? parts.slice(1) : [];
-                                        const option1 = optionParts[0] || "";
-                                        const option2 = optionParts[1] || "";
-                                        const option3 = optionParts[2] || "";
+                                        const parsed = parseTitleToProductAndOptions(String(it.title || "").trim(), it as any);
+                                        const productName = parsed.productName || it.sku || "（商品名なし）";
+                                        const { option1, option2, option3 } = parsed;
                                         const sku = String(it.sku || "").trim();
                                         const jan = String((it as any).barcode || "").trim();
                                         return (
@@ -7424,13 +7452,9 @@ export default function InventoryCountPage() {
                                       </thead>
                                       <tbody>
                                         {extraItems.map((it, idx) => {
-                                          const titleRaw = String(it.title || "").trim();
-                                          const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-                                          const productName = parts[0] || titleRaw || it.sku || "（商品名なし）";
-                                          const optionParts = parts.length >= 2 ? parts.slice(1) : [];
-                                          const option1 = optionParts[0] || "";
-                                          const option2 = optionParts[1] || "";
-                                          const option3 = optionParts[2] || "";
+                                          const parsed = parseTitleToProductAndOptions(String(it.title || "").trim(), it as any);
+                                          const productName = parsed.productName || it.sku || "（商品名なし）";
+                                          const { option1, option2, option3 } = parsed;
                                           const sku = String(it.sku || "").trim();
                                           const jan = String((it as any).barcode || "").trim();
                                           return (
@@ -7758,13 +7782,9 @@ export default function InventoryCountPage() {
                         const isGroupCompleted = (it as any).isGroupCompleted || false;
                         const statusLabel = isGroupCompleted ? "完了" : "進行中";
 
-                        const titleRaw = String(it.title || "").trim();
-                        const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
-                        const productName = parts[0] || titleRaw || (it as any).sku || "-";
-                        const optionParts = parts.length >= 2 ? parts.slice(1) : [];
-                        const option1 = optionParts[0] || "";
-                        const option2 = optionParts[1] || "";
-                        const option3 = optionParts[2] || "";
+                        const parsed = parseTitleToProductAndOptions(String(it.title || "").trim(), it as any);
+                        const productName = parsed.productName || (it as any).sku || "-";
+                        const { option1, option2, option3 } = parsed;
                         const sku = String((it as any).sku ?? "").trim();
                         const jan = String((it as any).barcode ?? "").trim();
                         const isExtra = !!(it as any).isExtra;

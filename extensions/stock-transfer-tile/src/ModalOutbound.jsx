@@ -933,9 +933,9 @@ function buildInboundNoteLine_({ shipmentId, locationId, finalize, note, over, e
   if (Array.isArray(extras) && extras.length > 0) {
     lines.push(`予定外入庫: ${extras.length}件`);
     extras.forEach((e) => {
-      // 商品名とオプションを分離
+      // 商品名とオプションを分離（区切りは " / " のみ。オプション値内の "/" 例: iPhone7/8 は分割しない）
       const titleRaw = String(e?.title || e?.inventoryItemId || "不明").trim();
-      const parts = titleRaw.split("/").map((s) => s.trim()).filter(Boolean);
+      const parts = titleRaw.split(" / ").map((s) => s.trim()).filter(Boolean);
       const productName = parts[0] || titleRaw;
       const option = parts.length >= 2 ? parts.slice(1).join(" / ") : "";
       

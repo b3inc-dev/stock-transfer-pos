@@ -1970,6 +1970,7 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
   const maxRetries = 3;
   const retryDelayMs = 1000;
   
+  // ✅ 在庫数の反映は1回の mutation で全件まとめて実行するため、途中で「一部だけ在庫調整された」状態にはならない（成功なら全件更新、失敗なら全件未更新）。
   const m = `#graphql
     mutation Set($input: InventorySetQuantitiesInput!) {
       inventorySetQuantities(input: $input) {

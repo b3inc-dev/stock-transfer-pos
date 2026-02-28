@@ -2557,11 +2557,12 @@ export function InventoryCountList({
     return v;
   };
 
+  // 区切りは " / "（スペース+スラッシュ+スペース）のみ。オプション値内の "/"（例: iPhone7/8）は分割しない。
   const normalizeVariantOptions_ = (productTitle, variantTitle) => {
     const v = normalizeVariantTitleForDisplay_(productTitle, variantTitle);
     if (!v) return [];
-    const parts = v.split("/").map((s) => s.trim()).filter(Boolean);
-    return parts;
+    const parts = v.split(" / ").map((s) => s.trim()).filter(Boolean);
+    return parts.length > 0 ? parts : [v];
   };
 
   const formatOptionsLine_ = (options) => {

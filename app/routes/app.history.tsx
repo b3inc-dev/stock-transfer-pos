@@ -574,16 +574,16 @@ export async function action({ request }: ActionFunctionArgs) {
             const qtyA = lineMatchA ? parseInt(lineMatchA[5] || "0", 10) : 0;
             const qtyB = lineMatchB ? parseInt(lineMatchB[5] || "0", 10) : 0;
             const qty = qtyA > 0 ? qtyA : qtyB;
-            // 形式B（旧）: 行に「オプション:」が無く、タイトルに「 / 」が含まれる場合（例: "商品名 / Silver / iPhone15Pro"）は、オプションをタイトルから分離する
+            // 形式B（旧）: 行に「オプション:」が無く、タイトルに「 / 」が含まれる場合は、商品名とオプションを分離。区切りは " / " のみ（オプション値内の "/" 例: iPhone7/8 は分割しない）
             if (qty > 0 && !options && title.includes(" / ")) {
-              const parts = title.split("/").map((s) => s.trim()).filter(Boolean);
+              const parts = title.split(" / ").map((s) => s.trim()).filter(Boolean);
               if (parts.length >= 2) {
                 title = parts[0] || title;
                 options = parts.slice(1).join(" / ");
               }
             }
             if (qty > 0) {
-              // オプションを分割（例: "Special Selling 1 / Free" → option1: "Special Selling 1", option2: "Free"）
+              // オプションを分割（区切りは " / " のみ）
               const optionParts = options.split(" / ").filter(Boolean);
               
               extrasItems.push({
