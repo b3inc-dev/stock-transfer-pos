@@ -972,6 +972,41 @@ function parseCountNameNumber(countName: string | null | undefined): number {
   return m ? Math.max(0, parseInt(m[1], 10)) : 0;
 }
 
+/**
+ * 欠けている countName にのみ番号を付与する（既存の countName は変更しない）。
+ * 管理画面の「棚卸IDを修復」で使用。POS の ensureCountNamesBeforeWrite と同様のロジック。
+ */
+function ensureCountNamesOnCounts(counts: InventoryCount[]): InventoryCount[] {
+  if (!Array.isArray(counts) || counts.length === 0) return counts;
+  const hasMissing = counts.some(
+    (c) => !c?.countName || String(c.countName).trim() === ""
+  );
+  if (!hasMissing) return counts;
+  const maxExistingNumber = counts.reduce(
+    (max, c) => Math.max(max, parseCountNameNumber(c?.countName)),
+    0
+  );
+  const missingCountNameCounts = [...counts]
+    .filter((c) => !c?.countName || String(c.countName).trim() === "")
+    .sort((a, b) => {
+      const aTime = new Date(a?.createdAt ?? 0).getTime();
+      const bTime = new Date(b?.createdAt ?? 0).getTime();
+      if (aTime !== bTime) return aTime - bTime;
+      return String(a?.id ?? "").localeCompare(String(b?.id ?? ""), undefined, { numeric: true });
+    });
+  const assignedCountNameById = new Map<string, string>();
+  let nextNumber = maxExistingNumber + 1;
+  for (const c of missingCountNameCounts) {
+    if (c?.id) assignedCountNameById.set(c.id, `#C${String(nextNumber).padStart(4, "0")}`);
+    nextNumber += 1;
+  }
+  return counts.map((c) => {
+    if (c?.countName && String(c.countName).trim() !== "") return c;
+    const countName = c?.id ? assignedCountNameById.get(c.id) : null;
+    return countName ? { ...c, countName } : c;
+  });
+}
+
 const SKU_BATCH_SIZE = 25;
 const SKU_BATCH_CONCURRENCY = 10;
 /** Shopify GraphQL nodes(ids) の最大件数（250を超えるとエラーになるため編集時の商品リスト取得でチャンクに分割） */
@@ -1472,6 +1507,24 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (!ownerId) {
     return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
+  }
+
+  if (actionType === "repair_count_names") {
+    try {
+      const counts = await readInventoryCountsChunked(admin);
+      const countsWithName = ensureCountNamesOnCounts(counts);
+      const repairedCount = countsWithName.filter(
+        (c, i) => !counts[i]?.countName || String(counts[i].countName).trim() === ""
+      ).length;
+      const { userErrors } = await writeInventoryCountsChunked(admin, countsWithName, ownerId);
+      if (userErrors.length) {
+        return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
+      }
+      return { ok: true, repaired: repairedCount } as const;
+    } catch (e) {
+      console.error("[inventory-count] repair_count_names failed:", e);
+      return { ok: false, error: "棚卸IDの修復中にエラーが発生しました。時間をおいて再度お試しください。" as const };
+    }
   }
 
   // 現在のデータを取得（商品グループは常に取得。棚卸フルデータは create_inventory_count および履歴編集・確定・キャンセル・モーダル用1件取得時に取得）
@@ -3221,6 +3274,13 @@ export default function InventoryCountPage() {
   const [modalEditedQuantities, setModalEditedQuantities] = useState<Record<string, Record<string, number>>>({});
   const historyActionFetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
+  // 棚卸ID修復成功時に一覧を再取得
+  useEffect(() => {
+    const d = fetcher.data;
+    if (d && (d as { ok?: boolean }).ok && typeof (d as { repaired?: number }).repaired === "number") {
+      revalidator.revalidate();
+    }
+  }, [fetcher.data, revalidator]);
   // ✅ list 由来で groupItems がない棚卸のフルデータ取得（モーダルでステータス・完了/未完了を正しく表示するため）
   const countFullFetcher = useFetcher<typeof action>();
   // ✅ 履歴一覧：各行の「N件 N/N」をバックグラウンドで取得（先に描画し数値は後から流し込む）
@@ -5419,7 +5479,37 @@ export default function InventoryCountPage() {
                           >
                             棚卸IDを発行
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => fetcher.submit({ actionType: "repair_count_names" }, { method: "post" })}
+                            disabled={fetcher.state !== "idle" || inventoryCounts.length === 0}
+                            style={{
+                              padding: "8px 16px",
+                              backgroundColor: fetcher.state !== "idle" || inventoryCounts.length === 0 ? "#e5e7eb" : "#f3f4f6",
+                              color: "#6b7280",
+                              border: "1px solid #e5e7eb",
+                              borderRadius: "6px",
+                              fontSize: "13px",
+                              cursor: fetcher.state !== "idle" || inventoryCounts.length === 0 ? "not-allowed" : "pointer",
+                              width: "100%",
+                            }}
+                          >
+                            棚卸IDを修復
+                          </button>
+                          <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "-4px" }}>
+                            表示が空白の棚卸IDに番号を再付与します。POS・履歴一覧を再読み込みすると反映されます。
+                          </s-text>
                         </div>
+                        {fetcher.data?.ok && typeof (fetcher.data as { repaired?: number }).repaired === "number" && (
+                          <s-box padding="base" background="subdued">
+                            <s-text emphasis="bold" tone="success">
+                              棚卸IDを{(fetcher.data as { repaired: number }).repaired}件修復しました。
+                            </s-text>
+                            <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
+                              POS・履歴タブを再読み込みすると反映されます。
+                            </s-text>
+                          </s-box>
+                        )}
                         {fetcher.data?.ok && fetcher.data.inventoryCountId && (
                           <s-box padding="base" background="subdued">
                             <s-text emphasis="bold" tone="success">
