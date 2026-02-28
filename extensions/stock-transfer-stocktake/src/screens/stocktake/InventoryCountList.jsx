@@ -2077,15 +2077,17 @@ export function InventoryCountList({
               : [...list, toWrite];
             return writeInventoryCounts(merged).then(() => toWrite);
           }),
-          clearAllInventoryCountDraftsForCount({
-            countId: count.id,
-            locationId: count.locationId,
-            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-          }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
         ]).then((results) => {
           const writeResult = results[1];
           toast("棚卸を完了しました");
-          if (writeResult) onAfterConfirm?.(writeResult);
+          if (writeResult) {
+            onAfterConfirm?.(writeResult);
+            clearAllInventoryCountDraftsForCount({
+              countId: count.id,
+              locationId: count.locationId,
+              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+            }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+          }
           setSubmitting(false);
         }).catch((e) => {
           toast(formatSaveError(e));
@@ -2127,19 +2129,17 @@ export function InventoryCountList({
               const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
                 ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
                 : [...list, toWrite];
-              return Promise.all([
-                writeInventoryCounts(merged).then(() => toWrite),
-                clearAllInventoryCountDraftsForCount({
-                  countId: count.id,
-                  locationId: count.locationId,
-                  productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-                }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
-              ]).then(([toWriteResult]) => toWriteResult);
+              return writeInventoryCounts(merged).then(() => toWrite);
             })
             .then((toWrite) => {
               if (toWrite) {
                 toast("棚卸を完了しました");
                 onAfterConfirm?.(toWrite);
+                clearAllInventoryCountDraftsForCount({
+                  countId: count.id,
+                  locationId: count.locationId,
+                  productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+                }).catch((e) => console.error("Failed to clear inventory count draft:", e));
               }
               setSubmitting(false);
             })
@@ -2245,15 +2245,17 @@ export function InventoryCountList({
               : [...list, toWrite];
             return writeInventoryCounts(merged).then(() => toWrite);
           }),
-          clearAllInventoryCountDraftsForCount({
-            countId: count.id,
-            locationId: count.locationId,
-            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-          }).catch((e) => console.error("Failed to clear inventory count draft:", e)),
         ]).then((results) => {
           const writeResult = results[1];
           toast("棚卸を完了しました");
-          if (writeResult) onAfterConfirm?.(writeResult);
+          if (writeResult) {
+            onAfterConfirm?.(writeResult);
+            clearAllInventoryCountDraftsForCount({
+              countId: count.id,
+              locationId: count.locationId,
+              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+            }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+          }
           setSubmitting(false);
         }).catch((e) => {
           toast(formatSaveError(e));
