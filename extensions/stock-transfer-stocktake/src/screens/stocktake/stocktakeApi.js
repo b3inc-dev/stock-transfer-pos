@@ -853,6 +853,10 @@ function mergeExistingNonBlank(counts, existing) {
     const ex = existingById.get(String(id));
     if (!ex || typeof ex !== "object") return c;
     const out = { ...c };
+    // ✅ 完了確定時などで countName が空白で上書きされないよう、既存の countName を維持
+    const outCountName = out.countName != null && String(out.countName).trim() !== "";
+    const exCountName = ex.countName != null && String(ex.countName).trim() !== "";
+    if (!outCountName && exCountName) out.countName = ex.countName;
     if (!out.locationId && ex.locationId) out.locationId = ex.locationId;
     if (ex.locationName && !out.locationName) out.locationName = ex.locationName;
     const hasPgIds = Array.isArray(out.productGroupIds) && out.productGroupIds.length > 0;

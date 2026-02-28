@@ -1972,6 +1972,7 @@ export async function action({ request }: ActionFunctionArgs) {
       : productGroupIds.map((id) => productGroups.find((g) => g.id === id)?.name ?? "");
     const updatedCount: InventoryCount = {
       ...count,
+      countName: (count as { countName?: string }).countName ?? count.countName,
       groupItems: groupItemsNew,
       items: [...allItems],
       productGroupNames: productGroupNames.length > 0 ? productGroupNames : undefined,
@@ -3721,8 +3722,8 @@ export default function InventoryCountPage() {
     if (d && (d as { ok?: boolean }).ok && typeof (d as { repaired?: number }).repaired === "number") {
       revalidator.revalidate();
     }
+    // ✅ 復元・振り分け・グループ完了は書き込み直後に revalidate すると loader のチャンク読込が Throttled 等で失敗し「再読込してください」になりがちなため、モーダルだけ閉じる（一覧はユーザーがページ再読み込みで更新）
     if (d && (d as { ok?: boolean }).ok && (d as { restored?: boolean }).restored === true) {
-      revalidator.revalidate();
       setModalOpen(false);
       setModalCount(null);
       setRestoreCountName("");
@@ -3730,12 +3731,10 @@ export default function InventoryCountPage() {
       setRestoreProductGroupIds([]);
     }
     if (d && (d as { ok?: boolean }).ok && (d as { redistributed?: boolean }).redistributed === true) {
-      revalidator.revalidate();
       setModalOpen(false);
       setModalCount(null);
     }
     if (d && (d as { ok?: boolean }).ok && (d as { groupsCompleted?: boolean }).groupsCompleted === true) {
-      revalidator.revalidate();
       setModalOpen(false);
       setModalCount(null);
     }
@@ -6009,14 +6008,14 @@ export default function InventoryCountPage() {
                         {fetcher.data?.ok && (fetcher.data as { redistributed?: boolean }).redistributed === true && (
                           <s-box padding="base" background="subdued">
                             <s-text emphasis="bold" tone="success">
-                              グループ振り分けを修正しました。アプリ・管理画面で各グループが正しく表示されます。
+                              グループ振り分けを修正しました。一覧を更新するにはページを再読み込みしてください。
                             </s-text>
                           </s-box>
                         )}
                         {fetcher.data?.ok && (fetcher.data as { groupsCompleted?: boolean }).groupsCompleted === true && (
                           <s-box padding="base" background="subdued">
                             <s-text emphasis="bold" tone="success">
-                              商品グループをすべて完了にしました（現在在庫で確定）。アプリ・管理画面で各グループが完了で表示されます。
+                              商品グループをすべて完了にしました（現在在庫で確定）。一覧を更新するにはページを再読み込みしてください。
                             </s-text>
                           </s-box>
                         )}
@@ -6527,6 +6526,12 @@ export default function InventoryCountPage() {
                     ×
                   </button>
                 </div>
+
+                {fetcher.data && !(fetcher.data as { ok?: boolean }).ok && (fetcher.data as { error?: string }).error && (
+                  <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#fef2f2", border: "1px solid #ef4444", borderRadius: "6px", fontSize: "13px", color: "#b91c1c" }}>
+                    <strong>処理に失敗しました。</strong> {(fetcher.data as { error?: string }).error}
+                  </div>
+                )}
 
                 {modalCount && (
                   <>

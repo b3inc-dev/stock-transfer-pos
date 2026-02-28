@@ -40,6 +40,9 @@
 
 **ロケーション・商品グループ・groupItems の空白上書き防止（2026-02 追加）**  
 - **POS** `writeInventoryCounts`: 書き込み前に **readInventoryCountsRaw()** で既存を取得し、**mergeExistingNonBlank(counts, existing)** を実行。渡された counts のうち locationId / productGroupIds / groupItems / items が空白の件は、既存の値を補完してから書くため、既存のロケーション・グループが空白で上書きされない。
+
+**アプリタイル完了確定時の countName 維持（2026-02 追加）**  
+- **POS** `mergeExistingNonBlank`: 既存に countName があり渡し側が空白の場合は **countName を既存の値で補完**するよう追加。確定時の toWrite が何らかの経路で countName を欠いたまま writeInventoryCounts に渡っても、既存読取後の merge で countName が復元され、削除・空白で上書きされない。
 - **管理画面** `writeInventoryCountsChunked`: 同様に書き込み前に **readInventoryCountsChunked(admin)** で既存を取得し、**mergeExistingNonBlank(counts, existing)** を実行してから保存。
 
 **絶対に空白のIDを生成しない（2026-02 追加）**  
