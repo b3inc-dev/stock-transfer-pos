@@ -2003,6 +2003,11 @@ export function InventoryCountList({
                 if (toWrite) {
                   toast("棚卸を完了しました");
                   onAfterConfirm?.(toWrite);
+                  clearAllInventoryCountDraftsForCount({
+                    countId: count.id,
+                    locationId: count.locationId,
+                    productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+                  }).catch((e) => console.error("Failed to clear inventory count draft:", e));
                 }
               } finally {
                 setSubmitting(false);
