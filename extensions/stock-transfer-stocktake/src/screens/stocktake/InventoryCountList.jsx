@@ -1999,16 +1999,22 @@ export function InventoryCountList({
               return writeInventoryCounts(merged).then(() => toWrite);
             })
             .then((toWrite) => {
-              if (toWrite) {
-                toast("棚卸を完了しました");
-                onAfterConfirm?.(toWrite);
+              try {
+                if (toWrite) {
+                  toast("棚卸を完了しました");
+                  onAfterConfirm?.(toWrite);
+                }
+              } finally {
+                setSubmitting(false);
               }
-              setSubmitting(false);
             })
             .catch((e) => {
-              toast(formatSaveError(e));
-              onAfterConfirm?.(null);
-              setSubmitting(false);
+              try {
+                toast(formatSaveError(e));
+                onAfterConfirm?.(null);
+              } finally {
+                setSubmitting(false);
+              }
             });
         } catch (e) {
           toast(`エラー: ${e?.message ?? e}`);
@@ -2076,21 +2082,27 @@ export function InventoryCountList({
             return writeInventoryCounts(merged).then(() => toWrite);
           }),
         ]).then((results) => {
-          const writeResult = results[1];
-          toast("棚卸を完了しました");
-          if (writeResult) {
-            onAfterConfirm?.(writeResult);
-            clearAllInventoryCountDraftsForCount({
-              countId: count.id,
-              locationId: count.locationId,
-              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-            }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+          try {
+            const writeResult = results[1];
+            toast("棚卸を完了しました");
+            if (writeResult) {
+              onAfterConfirm?.(writeResult);
+              clearAllInventoryCountDraftsForCount({
+                countId: count.id,
+                locationId: count.locationId,
+                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+              }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+            }
+          } finally {
+            setSubmitting(false);
           }
-          setSubmitting(false);
         }).catch((e) => {
-          toast(formatSaveError(e));
-          onAfterConfirm?.(null);
-          setSubmitting(false);
+          try {
+            toast(formatSaveError(e));
+            onAfterConfirm?.(null);
+          } finally {
+            setSubmitting(false);
+          }
         });
         return true;
         } catch (updateError) {
@@ -2129,21 +2141,27 @@ export function InventoryCountList({
             return writeInventoryCounts(merged).then(() => toWrite);
           })
           .then((toWrite) => {
-            if (toWrite) {
-              toast("棚卸を完了しました");
-              onAfterConfirm?.(toWrite);
-              clearAllInventoryCountDraftsForCount({
-                countId: count.id,
-                locationId: count.locationId,
-                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-              }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+            try {
+              if (toWrite) {
+                toast("棚卸を完了しました");
+                onAfterConfirm?.(toWrite);
+                clearAllInventoryCountDraftsForCount({
+                  countId: count.id,
+                  locationId: count.locationId,
+                  productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+                }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+              }
+            } finally {
+              setSubmitting(false);
             }
-            setSubmitting(false);
           })
           .catch((e) => {
-            toast(formatSaveError(e));
-            onAfterConfirm?.(null);
-            setSubmitting(false);
+            try {
+              toast(formatSaveError(e));
+              onAfterConfirm?.(null);
+            } finally {
+              setSubmitting(false);
+            }
           });
       } catch (e) {
         toast(`エラー: ${e?.message ?? e}`);
@@ -2242,21 +2260,27 @@ export function InventoryCountList({
             return writeInventoryCounts(merged).then(() => toWrite);
           }),
         ]).then((results) => {
-          const writeResult = results[1];
-          toast("棚卸を完了しました");
-          if (writeResult) {
-            onAfterConfirm?.(writeResult);
-            clearAllInventoryCountDraftsForCount({
-              countId: count.id,
-              locationId: count.locationId,
-              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-            }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+          try {
+            const writeResult = results[1];
+            toast("棚卸を完了しました");
+            if (writeResult) {
+              onAfterConfirm?.(writeResult);
+              clearAllInventoryCountDraftsForCount({
+                countId: count.id,
+                locationId: count.locationId,
+                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+              }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+            }
+          } finally {
+            setSubmitting(false);
           }
-          setSubmitting(false);
         }).catch((e) => {
-          toast(formatSaveError(e));
-          onAfterConfirm?.(null);
-          setSubmitting(false);
+          try {
+            toast(formatSaveError(e));
+            onAfterConfirm?.(null);
+          } finally {
+            setSubmitting(false);
+          }
         });
         return true;
       } catch (updateError) {
