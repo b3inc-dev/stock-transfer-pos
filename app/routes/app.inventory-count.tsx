@@ -1635,7 +1635,8 @@ export async function action({ request }: ActionFunctionArgs) {
     actionType === "cancel_stocktake_group" ||
     actionType === "cancel_stocktake" ||
     actionType === "get_count_full" ||
-    actionType === "restore_count_as_completed";
+    actionType === "restore_count_as_completed" ||
+    actionType === "redistribute_count_group_items";
   const [currentResp, inventoryCountsFromChunked] = await Promise.all([
     admin.graphql(
       `#graphql
@@ -1746,9 +1747,39 @@ export async function action({ request }: ActionFunctionArgs) {
         allEntries[i + j] = results[j];
       }
     }
-    const firstGroupId = productGroupIds[0];
+    // 複数グループ時は商品グループの inventoryItemIds で所属を判定し、グループごとに振り分ける（アプリタイルで「一番上だけ処理済み」にならないようにする）
+    const invIdToGroupId = new Map<string, string>();
+    for (const gid of productGroupIds) {
+      const g = productGroups.find((gr) => gr.id === gid || normalizeIdForMatch(gr.id) === normalizeIdForMatch(gid));
+      const ids = (g as any)?.inventoryItemIds ?? [];
+      if (Array.isArray(ids)) {
+        for (const id of ids) {
+          const n = normalizeIdForMatch(String(id ?? "").trim());
+          if (n && !invIdToGroupId.has(n)) invIdToGroupId.set(n, gid);
+        }
+      }
+    }
     const groupItemsNew: Record<string, unknown[]> = {};
-    groupItemsNew[firstGroupId] = allEntries;
+    for (const gid of productGroupIds) {
+      const normalizedGid = normalizeIdForMatch(gid);
+      groupItemsNew[gid] = allEntries.filter((it: any) => {
+        const invNorm = normalizeIdForMatch(String(it?.inventoryItemId ?? "").trim());
+        const assigned = invIdToGroupId.get(invNorm);
+        return assigned != null && normalizeIdForMatch(assigned) === normalizedGid;
+      });
+    }
+    const assignedCount = Object.values(groupItemsNew).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0);
+    if (assignedCount < allEntries.length && productGroupIds.length > 0) {
+      const firstGroupId = productGroupIds[0];
+      const unassigned = allEntries.filter((it: any) => {
+        const invNorm = normalizeIdForMatch(String(it?.inventoryItemId ?? "").trim());
+        return !invIdToGroupId.has(invNorm);
+      });
+      if (unassigned.length > 0) {
+        const existing = (groupItemsNew[firstGroupId] as unknown[]) ?? [];
+        (groupItemsNew as Record<string, unknown[]>)[firstGroupId] = [...existing, ...unassigned];
+      }
+    }
     const namesFromGroups = productGroupNames && productGroupNames.length > 0
       ? productGroupNames
       : productGroupIds.map((id) => productGroups.find((g) => g.id === id)?.name ?? "");
@@ -1769,6 +1800,73 @@ export async function action({ request }: ActionFunctionArgs) {
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, restored: true } as const;
+  }
+
+  // ✅ 復元時に1グループにまとめて保存されてしまった棚卸の groupItems を、商品グループごとに正しく振り分け直す
+  if (actionType === "redistribute_count_group_items") {
+    const countId = (formData.get("countId") as string)?.trim();
+    if (!countId) return { ok: false, error: "countId は必須です" as const };
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "指定された棚卸が見つかりません" as const };
+    const productGroupIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0
+      ? count.productGroupIds
+      : count.productGroupId
+        ? [count.productGroupId]
+        : [];
+    if (productGroupIds.length < 2) return { ok: false, error: "複数グループの棚卸のみ振り分け対象です" as const };
+    const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? (count as any).groupItems : {};
+    const allEntries: Array<{ inventoryItemId: string; [k: string]: unknown }> = [];
+    for (const arr of Object.values(groupItemsMap)) {
+      if (Array.isArray(arr)) allEntries.push(...arr.map((it: any) => ({ ...it, inventoryItemId: String(it?.inventoryItemId ?? "").trim() })));
+    }
+    const itemsLegacy = Array.isArray(count.items) ? count.items : [];
+    if (allEntries.length === 0 && itemsLegacy.length > 0) {
+      itemsLegacy.forEach((it: any) => allEntries.push({ ...it, inventoryItemId: String(it?.inventoryItemId ?? "").trim() }));
+    }
+    if (allEntries.length === 0) return { ok: false, error: "振り分けする商品がありません" as const };
+    const invIdToGroupId = new Map<string, string>();
+    for (const gid of productGroupIds) {
+      const g = productGroups.find((gr) => gr.id === gid || normalizeIdForMatch(gr.id) === normalizeIdForMatch(gid));
+      const ids = (g as any)?.inventoryItemIds ?? [];
+      if (Array.isArray(ids)) {
+        for (const id of ids) {
+          const n = normalizeIdForMatch(String(id ?? "").trim());
+          if (n && !invIdToGroupId.has(n)) invIdToGroupId.set(n, gid);
+        }
+      }
+    }
+    const groupItemsNew: Record<string, unknown[]> = {};
+    for (const gid of productGroupIds) {
+      const normalizedGid = normalizeIdForMatch(gid);
+      groupItemsNew[gid] = allEntries.filter((it: any) => {
+        const invNorm = normalizeIdForMatch(String(it?.inventoryItemId ?? "").trim());
+        const assigned = invIdToGroupId.get(invNorm);
+        return assigned != null && normalizeIdForMatch(assigned) === normalizedGid;
+      });
+    }
+    const assignedCount = Object.values(groupItemsNew).reduce((s, a) => s + (Array.isArray(a) ? a.length : 0), 0);
+    if (assignedCount < allEntries.length && productGroupIds.length > 0) {
+      const firstGroupId = productGroupIds[0];
+      const unassigned = allEntries.filter((it: any) => {
+        const invNorm = normalizeIdForMatch(String(it?.inventoryItemId ?? "").trim());
+        return !invIdToGroupId.has(invNorm);
+      });
+      if (unassigned.length > 0) {
+        const existing = (groupItemsNew[firstGroupId] as unknown[]) ?? [];
+        (groupItemsNew as Record<string, unknown[]>)[firstGroupId] = [...existing, ...unassigned];
+      }
+    }
+    const updatedCount: InventoryCount = {
+      ...count,
+      groupItems: groupItemsNew,
+      items: [...allEntries],
+    };
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
+    return { ok: true, redistributed: true } as const;
   }
 
   if (actionType === "save_product_group") {
@@ -3501,6 +3599,11 @@ export default function InventoryCountPage() {
       setRestoreCountName("");
       setRestoreLocationId("");
       setRestoreProductGroupIds([]);
+    }
+    if (d && (d as { ok?: boolean }).ok && (d as { redistributed?: boolean }).redistributed === true) {
+      revalidator.revalidate();
+      setModalOpen(false);
+      setModalCount(null);
     }
   }, [fetcher.data, revalidator]);
   // ✅ list 由来で groupItems がない棚卸のフルデータ取得（モーダルでステータス・完了/未完了を正しく表示するため）
@@ -5701,28 +5804,33 @@ export default function InventoryCountPage() {
                           >
                             棚卸IDを発行
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => fetcher.submit({ action: "repair_count_names" }, { method: "post" })}
-                            disabled={fetcher.state !== "idle"}
-                            style={{
-                              padding: "8px 16px",
-                              backgroundColor: fetcher.state !== "idle" ? "#e5e7eb" : "#f3f4f6",
-                              color: "#6b7280",
-                              border: "1px solid #e5e7eb",
-                              borderRadius: "6px",
-                              fontSize: "13px",
-                              cursor: fetcher.state !== "idle" ? "not-allowed" : "pointer",
-                              width: "100%",
-                            }}
-                          >
-                            棚卸IDを修復
-                          </button>
-                          <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "-4px" }}>
-                            表示が空白の棚卸IDに番号を再付与します。一覧に0件と出ていても、メタフィールドにデータがあれば修復できます。POS・履歴を再読み込みすると反映されます。
-                          </s-text>
+                          {/* 復旧完了のため棚卸ID修復ボタンは非表示（必要なら false を true に変更して再有効化） */}
+                          {false && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => fetcher.submit({ action: "repair_count_names" }, { method: "post" })}
+                                disabled={fetcher.state !== "idle"}
+                                style={{
+                                  padding: "8px 16px",
+                                  backgroundColor: fetcher.state !== "idle" ? "#e5e7eb" : "#f3f4f6",
+                                  color: "#6b7280",
+                                  border: "1px solid #e5e7eb",
+                                  borderRadius: "6px",
+                                  fontSize: "13px",
+                                  cursor: fetcher.state !== "idle" ? "not-allowed" : "pointer",
+                                  width: "100%",
+                                }}
+                              >
+                                棚卸IDを修復
+                              </button>
+                              <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "-4px" }}>
+                                表示が空白の棚卸IDに番号を再付与します。一覧に0件と出ていても、メタフィールドにデータがあれば修復できます。POS・履歴を再読み込みすると反映されます。
+                              </s-text>
+                            </>
+                          )}
                         </div>
-                        {fetcher.data?.ok && typeof (fetcher.data as { repaired?: number }).repaired === "number" && (
+                        {false && fetcher.data?.ok && typeof (fetcher.data as { repaired?: number }).repaired === "number" && (
                           <s-box padding="base" background="subdued">
                             <s-text emphasis="bold" tone="success">
                               棚卸IDを{(fetcher.data as { repaired: number }).repaired}件修復しました。
@@ -5736,6 +5844,13 @@ export default function InventoryCountPage() {
                           <s-box padding="base" background="subdued">
                             <s-text emphasis="bold" tone="success">
                               棚卸を復元しました（指定のID・ロケーション・グループで現在在庫のまま完了確定）。
+                            </s-text>
+                          </s-box>
+                        )}
+                        {fetcher.data?.ok && (fetcher.data as { redistributed?: boolean }).redistributed === true && (
+                          <s-box padding="base" background="subdued">
+                            <s-text emphasis="bold" tone="success">
+                              グループ振り分けを修正しました。アプリ・管理画面で各グループが正しく表示されます。
                             </s-text>
                           </s-box>
                         )}
@@ -6242,6 +6357,38 @@ export default function InventoryCountPage() {
 
                 {modalCount && (
                   <>
+                  {/* 復元時に1グループにまとめて保存されてしまった棚卸：グループ振り分けを修正するボタン */}
+                  {Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 1 &&
+                    Object.keys((modalCount as any)?.groupItems || {}).length === 1 && (
+                    <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#f0fdf4", border: "1px solid #22c55e", borderRadius: "6px", fontSize: "13px" }}>
+                      <div style={{ fontWeight: 600, marginBottom: "6px", color: "#166534" }}>グループ振り分けの修正</div>
+                      <p style={{ margin: "0 0 10px 0", color: "#15803d" }}>
+                        この棚卸は復元時に全商品が1つのグループにまとめて保存されています。商品グループごとに振り分けを修正すると、アプリ・管理画面で各グループが正しく「完了」で表示され、数量も正しくなります。
+                      </p>
+                      <button
+                        type="button"
+                        disabled={fetcher.state !== "idle"}
+                        onClick={() => {
+                          const fd = new FormData();
+                          fd.set("action", "redistribute_count_group_items");
+                          fd.set("countId", String(modalCount.id));
+                          fetcher.submit(fd, { method: "post" });
+                        }}
+                        style={{
+                          padding: "8px 16px",
+                          backgroundColor: fetcher.state !== "idle" ? "#bbf7d0" : "#22c55e",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "6px",
+                          cursor: fetcher.state !== "idle" ? "not-allowed" : "pointer",
+                          fontSize: "13px",
+                          fontWeight: 600,
+                        }}
+                      >
+                        {fetcher.state !== "idle" ? "処理中..." : "グループ振り分けを修正"}
+                      </button>
+                    </div>
+                  )}
                   {((): boolean => {
                     const hasMeta = (modalCount.locationId && String(modalCount.locationId).trim() !== "") ||
                       (Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0) ||

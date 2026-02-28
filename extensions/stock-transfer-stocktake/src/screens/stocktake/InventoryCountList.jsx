@@ -961,6 +961,7 @@ export function InventoryCountList({
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
               const productsRaw = await fetchProductsByGroups([groupId], c.locationId, {
                 productFirst,
+                limit: 2000,
                 filterByInventoryLevel: false,
                 includeImages: false,
                 ...fetchOptsBase,
@@ -982,11 +983,12 @@ export function InventoryCountList({
           
           if (completedItems || isGroupCancelled) {
             // ✅ 完了済みまたはキャンセル済みのグループ：APIの groupItems から読み込んで読み取り専用で表示（下書きで上書きしない）
-            // ✅ 画像URLを取得するため、商品情報を取得
+            // ✅ 画像URLを取得するため、商品情報を取得。初回読み込み数より多いグループでも全件取得するため limit: 2000
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
               const productsRaw = await fetchProductsByGroups([groupId], c.locationId, {
                 productFirst,
+                limit: 2000,
                 filterByInventoryLevel: false,
                 includeImages: showImages && !liteMode,
                 ...fetchOptsBase,
@@ -1461,6 +1463,7 @@ export function InventoryCountList({
           const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
           const products = await fetchProductsByGroups([groupId], count.locationId, {
             productFirst,
+            limit: 2000,
             filterByInventoryLevel: false,
             includeImages: false,
             ...fetchOptsBase,
@@ -1484,6 +1487,7 @@ export function InventoryCountList({
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
         let productsForCompleted = await fetchProductsByGroups([groupId], count.locationId, {
           productFirst,
+          limit: 2000,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
           ...fetchOptsBase,
@@ -1528,6 +1532,7 @@ export function InventoryCountList({
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
         let productsRaw = await fetchProductsByGroups([groupId], count.locationId, {
           productFirst,
+          limit: 2000,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
           ...fetchOptsBase,
@@ -1537,6 +1542,7 @@ export function InventoryCountList({
           await new Promise((r) => setTimeout(r, 1000));
           productsRaw = await fetchProductsByGroups([groupId], count.locationId, {
             productFirst,
+            limit: 2000,
             filterByInventoryLevel: false,
             includeImages: showImages && !liteMode,
             ...fetchOptsBase,

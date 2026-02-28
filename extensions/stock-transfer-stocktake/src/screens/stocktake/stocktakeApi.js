@@ -1258,10 +1258,10 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
       idsToUse = group.inventoryItemIds;
     }
     if (idsToUse && Array.isArray(idsToUse) && idsToUse.length > 0) {
-      // ✅ 表示件数（productFirst）を適用。未適用だと450件等を一括取得して長時間読み込みになる
-      // ✅ 初回は effectiveFirst 件まで、さらに読み込むは offset + limit で続きを取得
+      // ✅ 表示件数：limit が明示されていればその範囲まで取得（単一グループ全件用）。未指定時は effectiveFirst でまとめて表示の負荷を抑える
+      // ✅ 初回は limit 指定時は limit まで、未指定は effectiveFirst 件まで。さらに読み込むは offset + limit で続きを取得
       const pageSize = offset === 0
-        ? Math.min(limit ?? effectiveFirst, effectiveFirst)
+        ? (limit != null && limit > 0 ? Math.min(limit, 2000) : effectiveFirst)
         : (limit ?? effectiveFirst);
       const idsToFetch = idsToUse.slice(offset, offset + pageSize);
       if (idsToUse.length > offset + idsToFetch.length) hasMoreFromSavedIds = true;
