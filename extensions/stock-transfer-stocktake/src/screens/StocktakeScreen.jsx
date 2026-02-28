@@ -159,6 +159,7 @@ export function StocktakeScreen({ onBack, setHeader, setFooter, onViewChange, li
   }, []);
 
   // コンディション画面
+  // ✅ 確定後に戻ったとき、一覧が「処理中」のままになる不整合を防ぐ：親の count（確定直後の updatedCount）を渡し、同一IDの行はそれで上書き表示する
   if (view === VIEW.CONDITIONS) {
     return (
       <InventoryCountConditions
@@ -168,6 +169,7 @@ export function StocktakeScreen({ onBack, setHeader, setFooter, onViewChange, li
           setCount(c);
           setView(VIEW.PRODUCT_GROUP_SELECTION);
         }}
+        currentCountFromParent={count}
         liteMode={liteMode}
         onToggleLiteMode={onToggleLiteMode}
         setHeader={setHeader}

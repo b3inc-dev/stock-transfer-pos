@@ -248,6 +248,8 @@ export async function readInventoryCountsRaw() {
   if (!parsed?._chunked || typeof parsed.totalChunks !== "number" || parsed.totalChunks < 1) return [];
   const fullCounts = [];
   const partsByCountId = new Map();
+  const CHUNK_READ_MAX_RETRIES = 3;
+  const CHUNK_READ_RETRY_DELAY_MS = 1500;
   for (let i = 0; i < parsed.totalChunks; i++) {
     const key = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`;
     const gqlChunk = `#graphql
@@ -257,11 +259,22 @@ export async function readInventoryCountsRaw() {
         }
       }`;
     let chunkRaw = null;
-    try {
-      const chunkData = await graphql(gqlChunk, { key });
-      chunkRaw = chunkData?.currentAppInstallation?.metafield?.value;
-    } catch (e) {
-      throw new Error(`棚卸チャンク${i}の読み取りに失敗しました（部分保存で他データが消えるのを防ぐため中断）: ${e?.message ?? e}`);
+    let lastChunkError = null;
+    for (let attempt = 1; attempt <= CHUNK_READ_MAX_RETRIES; attempt++) {
+      try {
+        const chunkData = await runWithThrottleRetry(() => graphql(gqlChunk, { key }));
+        chunkRaw = chunkData?.currentAppInstallation?.metafield?.value;
+        lastChunkError = null;
+        break;
+      } catch (e) {
+        lastChunkError = e;
+        if (attempt < CHUNK_READ_MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, CHUNK_READ_RETRY_DELAY_MS * attempt));
+        }
+      }
+    }
+    if (lastChunkError != null) {
+      throw new Error(`棚卸チャンク${i}の読み取りに失敗しました（部分保存で他データが消えるのを防ぐため中断）: ${lastChunkError?.message ?? lastChunkError}`);
     }
     if (chunkRaw == null) {
       throw new Error(`棚卸チャンク${i}が存在しません。メタフィールドが欠落している可能性があります（上書きで他データが消えるのを防ぐため読み取りを中断します）。`);
@@ -336,7 +349,6 @@ function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
   if (!Array.isArray(counts)) return [];
   return counts.map((c) => {
     if (c?.status === "cancelled") return c;
-    if (c?.status === "completed") return c;
     const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
       ? c.productGroupIds
       : c.productGroupId ? [c.productGroupId] : [];
@@ -358,9 +370,14 @@ function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
           ? { ...c, status: "cancelled", completedAt: undefined }
           : { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
       }
+      // 部分取得（list 等で groupItems なし）のときは completed をそのまま返す
+      if (c?.status === "completed") return c;
       return c;
     }
-    // completed は上書きしない（部分取得・list で groupItems が欠けていても「未処理」に戻さない）
+    // ✅ 完了なのに1つでもグループの groupItems が欠けている不整合を修復（「棚卸は完了だが1グループだけ未完了」表示を防ぐ）
+    if (c?.status === "completed" && allIds.length > 0 && !allDone) {
+      return { ...c, status: "in_progress", completedAt: undefined };
+    }
     if (!allDone && c.status === "completed") return c;
     if (allDone && c.status !== "completed") {
       return { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
@@ -712,12 +729,12 @@ export async function readInventoryCounts() {
     let needsUpdate = false;
     const countsFixed = counts.map((c) => {
       if (c?.status === "cancelled") return c;
-      if (c?.status === "completed") return c;
       const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
         ? c.productGroupIds
         : c.productGroupId ? [c.productGroupId] : [];
       
       if (allIds.length === 0) {
+        if (c?.status === "completed") return c;
         return c;
       }
       
@@ -731,10 +748,15 @@ export async function readInventoryCounts() {
         return items.length > 0;
       });
       const isCompleted = allDone;
-      
-      // 確定済み（completed）は groupItems が欠けていても「未処理」に戻さない（再読み込みで完了が消える不具合防止）
-      if (!isCompleted && c.status === "completed") return c;
-      
+      const hasGroupItems = groupItemsMap && Object.keys(groupItemsMap).length > 0;
+
+      // ✅ 完了なのに1つでもグループの groupItems が欠けている不整合を修復（「棚卸は完了だが1グループだけ未完了」表示を防ぐ）。修復時は needsUpdate で保存する。
+      if (c?.status === "completed" && hasGroupItems && !allDone) {
+        needsUpdate = true;
+        return { ...c, status: "in_progress", completedAt: undefined };
+      }
+      if (c?.status === "completed") return c;
+
       if (isCompleted && c.status !== "completed") {
         needsUpdate = true;
         return {

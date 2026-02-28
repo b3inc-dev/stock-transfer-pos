@@ -108,6 +108,7 @@ export function InventoryCountConditions({
   onLocationChange,
   liteMode,
   onToggleLiteMode,
+  currentCountFromParent,
 }) {
   const [viewMode, setViewMode] = useState("pending"); // "pending" | "completed"
   const [allLocations, setAllLocations] = useState([]);
@@ -142,10 +143,26 @@ export function InventoryCountConditions({
     });
   }, []);
 
-  const listToShow = useMemo(() => {
+  // ✅ 確定後にコンディション画面に戻ったとき、一覧が古いステータスのままになる不整合を防ぐ：親から渡された count（確定直後の updatedCount）で同一IDの行を上書き
+  // 親が minimal のときは行の groupItems/items を消さない（他処理・バックグラウンド取得で得た詳細を維持）
+  const displayedCounts = useMemo(() => {
     const base = Array.isArray(counts) ? counts : [];
-    return viewMode === "completed" ? base.filter(isCompleted) : base.filter((c) => !isCompleted(c));
-  }, [counts, viewMode]);
+    if (!currentCountFromParent?.id) return base;
+    const parentId = String(currentCountFromParent.id);
+    return base.map((c) => {
+      if (String(c?.id) !== parentId) return c;
+      const merged = { ...c, ...currentCountFromParent };
+      const parentHasGroupItems = currentCountFromParent?.groupItems && typeof currentCountFromParent.groupItems === "object" && Object.keys(currentCountFromParent.groupItems).length > 0;
+      const parentHasItems = Array.isArray(currentCountFromParent?.items) && currentCountFromParent.items.length > 0;
+      if (!parentHasGroupItems && c?.groupItems && typeof c.groupItems === "object") merged.groupItems = c.groupItems;
+      if (!parentHasItems && Array.isArray(c?.items) && c.items.length > 0) merged.items = c.items;
+      return merged;
+    });
+  }, [counts, currentCountFromParent]);
+
+  const listToShow = useMemo(() => {
+    return viewMode === "completed" ? displayedCounts.filter(isCompleted) : displayedCounts.filter((c) => !isCompleted(c));
+  }, [displayedCounts, viewMode]);
 
   const hasMoreHistory = loadedChunkCount < chunkCount;
   // ✅ さらに読み込み：productGroups/totalChunks/useListMetafield を渡してチャンク1本だけ取得（軽量化）
@@ -183,7 +200,7 @@ export function InventoryCountConditions({
     }
   }, [loadedChunkCount, chunkCount, locationGid, filterByLocation]);
 
-  const baseAll = Array.isArray(counts) ? counts : [];
+  const baseAll = displayedCounts;
   const pendingCountsAll = baseAll.filter((c) => !isCompleted(c));
   const completedCountsAll = baseAll.filter(isCompleted);
 

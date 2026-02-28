@@ -380,8 +380,9 @@ export function InventoryCountProductGroupSelection({
           const groupName = group?.name || groupId;
 
           // ✅ ステータスは count から即時表示（在庫数読込ボタン不要）。完了・キャンセル・未処理を groupItems / cancelledGroupIds で判定
+          // ✅ 棚卸IDが完了の場合は、groupItems が無くても「処理済み」表示する（グループ一覧で未処理・商品リストで完了になる不整合を防ぐ）
           const groupItemsForStatus = getGroupItemsByKey(groupItemsMap, groupId);
-          const isGroupCompleted = groupItemsForStatus.length > 0;
+          const isGroupCompleted = groupItemsForStatus.length > 0 || c?.status === "completed";
           const isGroupCancelled = cancelledSet.has(normalizeIdForMatch(groupId));
           let statusJa = "未処理";
           if (isGroupCancelled) statusJa = "キャンセル";

@@ -23,11 +23,14 @@ import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.j
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
-/** 保存失敗時のメッセージ（Throttled のときは再試行を促す文言に） */
+/** 保存失敗時のメッセージ（Throttled・チャンク読み取り失敗のときは再試行を促す文言に） */
 function formatSaveError(e) {
   const msg = String(e?.message ?? e);
   if (/throttle/i.test(msg)) {
     return "保存に失敗しました: サーバー負荷により一時制限されています。しばらく待ってから再度「確定」を押してください。";
+  }
+  if (/チャンク/i.test(msg)) {
+    return "保存に失敗しました: 棚卸データの読み取りでエラーが発生しました。しばらく待ってから再度「確定」を押してください。";
   }
   return `保存に失敗しました: ${msg}`;
 }
@@ -132,9 +135,25 @@ function mergeCountWithStorage(fromStorage, locallyBuilt) {
       const items = getGroupItemsByKey(mergedGroupItems, id);
       return Array.isArray(items) && items.length > 0;
     });
-  const status =
+  let status =
     locallyBuilt.status === "cancelled" ? (allDone ? "completed" : "cancelled") : allDone ? "completed" : "in_progress";
-  const completedAt = allDone ? new Date().toISOString() : undefined;
+  // ✅ 一度完了したものを未処理に戻さない：base（fromStorage）が完了のときは「完了」を維持
+  if (status === "in_progress" && fromStorage?.status === "completed" && groupIdsForCheck.length > 0) {
+    const baseGroupItems = fromStorage?.groupItems && typeof fromStorage.groupItems === "object" ? fromStorage.groupItems : {};
+    const hasAnyInBase = baseGroupItems && Object.keys(baseGroupItems).length > 0;
+    // base に groupItems が無い（read 失敗で count 一覧用 minimal を渡した場合など）は判定できないため、完了を維持して誤って未処理に戻さない
+    if (!hasAnyInBase) {
+      status = "completed";
+    } else {
+      const baseHasAll = groupIdsForCheck.every((id) => {
+        if (cancelledSet.has(normalizeIdForMatch(id))) return true;
+        const items = getGroupItemsByKey(baseGroupItems, id);
+        return Array.isArray(items) && items.length > 0;
+      });
+      if (baseHasAll) status = "completed";
+    }
+  }
+  const completedAt = allDone ? new Date().toISOString() : status === "completed" ? (fromStorage?.completedAt ?? new Date().toISOString()) : undefined;
   const out = {
     ...fromStorage,
     ...locallyBuilt,
@@ -3195,9 +3214,10 @@ export function InventoryCountList({
                       groupItemsFromMap = countItemsLegacy;
                     }
                     // ✅ 完了判定：groupItemsが存在するか、またはlinesにisReadOnly: trueの商品が含まれている場合に完了と判定
+                    // ✅ 棚卸IDが完了の場合は、グループ一覧で groupItems が無い（minimal の count 等）でも「完了」表示する（商品リストを開くと完了になる不整合を防ぐ）
                     const hasGroupItems = groupItemsFromMap.length > 0;
                     const hasReadOnlyLines = groupLines.some((l) => l.isReadOnly === true);
-                    const isGroupCompleted = hasGroupItems || hasReadOnlyLines;
+                    const isGroupCompleted = hasGroupItems || hasReadOnlyLines || count?.status === "completed";
                     // ✅ 完了済みグループの数量を計算
                     // ✅ hasGroupItemsがtrueの場合はgroupItemsFromMapから、falseの場合はlinesから直接計算
                     const completedTotalQty = hasGroupItems 
