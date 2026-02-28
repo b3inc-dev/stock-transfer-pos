@@ -1099,6 +1099,12 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 }
 
+/** 発注ID（#P0001）から数値を取得。ソート用 */
+function parseOrderNameNumber(name: string | undefined): number {
+  const m = String(name ?? "").trim().match(/^#P(\d+)$/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 export default function OrderPage() {
   const loaderData = useLoaderData<typeof loader>();
   const {
@@ -1159,6 +1165,7 @@ export default function OrderPage() {
   // フィルター状態（ロケーション・ステータス）
   const [locationFilters, setLocationFilters] = useState<Set<string>>(new Set());
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
+  const [idSortOrder, setIdSortOrder] = useState<"asc" | "desc">("desc");
 
   // モーダル状態
   const [modalOpen, setModalOpen] = useState(false);
@@ -1210,8 +1217,15 @@ export default function OrderPage() {
       filtered = filtered.filter((e) => statusFilters.has(e.status));
     }
 
-    return filtered;
-  }, [entries, locationFilters, statusFilters]);
+    return filtered.sort((a, b) => {
+      const na = parseOrderNameNumber(a.orderName);
+      const nb = parseOrderNameNumber(b.orderName);
+      if (na !== nb) return idSortOrder === "desc" ? nb - na : na - nb;
+      const t1 = new Date(a.createdAt || 0).getTime();
+      const t2 = new Date(b.createdAt || 0).getTime();
+      return idSortOrder === "desc" ? t2 - t1 : t1 - t2;
+    });
+  }, [entries, locationFilters, statusFilters, idSortOrder]);
 
   const estimatedTotal = `${filteredEntries.length}件`;
 
@@ -1830,6 +1844,27 @@ export default function OrderPage() {
                             </div>
                           );
                         })}
+                      </div>
+                    </s-stack>
+                  </div>
+
+                  {/* ソート: 発注ID 昇順 / 降順 */}
+                  <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                    <s-stack gap="base">
+                      <s-text emphasis="bold" size="large">ソート</s-text>
+                      <s-text tone="subdued" size="small">発注IDの表示順を選びます。</s-text>
+                      <s-divider />
+                      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                        <div onClick={() => setIdSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "desc" ? "#eff6ff" : "transparent", border: idSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
+                          <input type="radio" checked={idSortOrder === "desc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                          <span style={{ fontWeight: idSortOrder === "desc" ? 600 : 500 }}>発注ID 降順（新しい順）</span>
+                          <span style={{ fontSize: "12px", color: "#6b7280" }}>#P0025 → #P0001</span>
+                        </div>
+                        <div onClick={() => setIdSortOrder("asc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "asc" ? "#eff6ff" : "transparent", border: idSortOrder === "asc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
+                          <input type="radio" checked={idSortOrder === "asc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                          <span style={{ fontWeight: idSortOrder === "asc" ? 600 : 500 }}>発注ID 昇順（古い順）</span>
+                          <span style={{ fontSize: "12px", color: "#6b7280" }}>#P0001 → #P0025</span>
+                        </div>
                       </div>
                     </s-stack>
                   </div>

@@ -900,6 +900,13 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 }
 
+/** 仕入名称（#B0001 / #P0001）から数値を取得。ソート用 */
+function parsePurchaseNameNumber(name: string | undefined): number {
+  const s = String(name ?? "").trim();
+  const m = s.match(/^#B(\d+)$/) ?? s.match(/^#P(\d+)$/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 export default function PurchasePage() {
   const loaderData = useLoaderData<typeof loader>();
   const { locations, entries, pageInfo, suppliers, carriers, shopTimezone, todayInShopTimezone, purchaseCsvExportColumns } = loaderData || {
@@ -937,6 +944,7 @@ export default function PurchasePage() {
   const [supplierFilters, setSupplierFilters] = useState<Set<string>>(new Set());
   // 作成元フィルター: "order"（発注から作成）, "b"（#B系＝POS/新規作成）
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
+  const [idSortOrder, setIdSortOrder] = useState<"asc" | "desc">("desc");
 
   const [modalOpen, setModalOpen] = useState(false);
   const [modalEntry, setModalEntry] = useState<PurchaseEntry | null>(null);
@@ -1105,11 +1113,14 @@ export default function PurchasePage() {
     }
 
     return filtered.sort((a, b) => {
+      const na = parsePurchaseNameNumber(a.purchaseName);
+      const nb = parsePurchaseNameNumber(b.purchaseName);
+      if (na !== nb) return idSortOrder === "desc" ? nb - na : na - nb;
       const t1 = new Date(a.createdAt).getTime();
       const t2 = new Date(b.createdAt).getTime();
-      return t2 - t1;
+      return idSortOrder === "desc" ? t2 - t1 : t1 - t2;
     });
-  }, [entries, locationFilters, statusFilters, supplierFilters, sourceFilters]);
+  }, [entries, locationFilters, statusFilters, supplierFilters, sourceFilters, idSortOrder]);
 
   const estimatedTotal = pageInfo.hasNextPage ? `${filteredEntries.length}件以上` : `${filteredEntries.length}件`;
 
@@ -2747,6 +2758,27 @@ export default function PurchasePage() {
                             </div>
                           );
                         })}
+                      </div>
+                    </s-stack>
+                  </div>
+
+                  {/* ソート: 仕入ID 昇順 / 降順 */}
+                  <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                    <s-stack gap="base">
+                      <s-text emphasis="bold" size="large">ソート</s-text>
+                      <s-text tone="subdued" size="small">仕入IDの表示順を選びます。</s-text>
+                      <s-divider />
+                      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                        <div onClick={() => setIdSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "desc" ? "#eff6ff" : "transparent", border: idSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
+                          <input type="radio" checked={idSortOrder === "desc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                          <span style={{ fontWeight: idSortOrder === "desc" ? 600 : 500 }}>仕入ID 降順（新しい順）</span>
+                          <span style={{ fontSize: "12px", color: "#6b7280" }}>#B0025 → #B0001</span>
+                        </div>
+                        <div onClick={() => setIdSortOrder("asc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "asc" ? "#eff6ff" : "transparent", border: idSortOrder === "asc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
+                          <input type="radio" checked={idSortOrder === "asc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                          <span style={{ fontWeight: idSortOrder === "asc" ? 600 : 500 }}>仕入ID 昇順（古い順）</span>
+                          <span style={{ fontSize: "12px", color: "#6b7280" }}>#B0001 → #B0025</span>
+                        </div>
                       </div>
                     </s-stack>
                   </div>

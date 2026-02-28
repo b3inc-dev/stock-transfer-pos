@@ -278,6 +278,12 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 }
 
+/** 調整ID（#A0001）から数値を取得。ソート用 */
+function parseAdjustmentNameNumber(name: string | undefined): number {
+  const m = String(name ?? "").trim().match(/^#A(\d+)$/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 // 調整IDから連番表示を生成（#A0001形式）
 function formatAdjustmentName(entry: AdjustmentEntry, allEntries: AdjustmentEntry[], index: number): string {
   // 既にadjustmentNameが設定されている場合はそれを使用（既存のエントリの名称を変更しない）
@@ -345,6 +351,7 @@ export default function AdjustmentPage() {
   // フィルター状態（複数選択対応、入出庫履歴と同じ）
   const [locationFilters, setLocationFilters] = useState<Set<string>>(new Set());
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
+  const [idSortOrder, setIdSortOrder] = useState<"asc" | "desc">("desc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // 商品リストモーダル状態
@@ -371,11 +378,14 @@ export default function AdjustmentPage() {
     }
 
     return filtered.sort((a, b) => {
+      const na = parseAdjustmentNameNumber(a.adjustmentName);
+      const nb = parseAdjustmentNameNumber(b.adjustmentName);
+      if (na !== nb) return idSortOrder === "desc" ? nb - na : na - nb;
       const t1 = new Date(a.createdAt).getTime();
       const t2 = new Date(b.createdAt).getTime();
-      return t2 - t1; // 新しい順
+      return idSortOrder === "desc" ? t2 - t1 : t1 - t2;
     });
-  }, [entries, locationFilters, statusFilters]);
+  }, [entries, locationFilters, statusFilters, idSortOrder]);
 
   // 全件数の表示（入出庫履歴と同じ形式）
   const estimatedTotal = pageInfo.hasNextPage
@@ -750,6 +760,27 @@ export default function AdjustmentPage() {
                               </div>
                             );
                           })}
+                        </div>
+                      </s-stack>
+                    </div>
+
+                    {/* ソート: 調整ID 昇順 / 降順 */}
+                    <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                      <s-stack gap="base">
+                        <s-text emphasis="bold" size="large">ソート</s-text>
+                        <s-text tone="subdued" size="small">調整IDの表示順を選びます。</s-text>
+                        <s-divider />
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          <div onClick={() => setIdSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "desc" ? "#eff6ff" : "transparent", border: idSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <input type="radio" checked={idSortOrder === "desc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: idSortOrder === "desc" ? 600 : 500 }}>調整ID 降順（新しい順）</span>
+                            <span style={{ fontSize: "12px", color: "#6b7280" }}>#A0025 → #A0001</span>
+                          </div>
+                          <div onClick={() => setIdSortOrder("asc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "asc" ? "#eff6ff" : "transparent", border: idSortOrder === "asc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <input type="radio" checked={idSortOrder === "asc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: idSortOrder === "asc" ? 600 : 500 }}>調整ID 昇順（古い順）</span>
+                            <span style={{ fontSize: "12px", color: "#6b7280" }}>#A0001 → #A0025</span>
+                          </div>
                         </div>
                       </s-stack>
                     </div>

@@ -3717,6 +3717,7 @@ export default function InventoryCountPage() {
 
   const [locationFilters, setLocationFilters] = useState<Set<string>>(new Set());
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
+  const [countNameSortOrder, setCountNameSortOrder] = useState<"asc" | "desc">("desc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [modalOpen, setModalOpen] = useState(false);
   const [modalCount, setModalCount] = useState<InventoryCount | null>(null);
@@ -3749,9 +3750,6 @@ export default function InventoryCountPage() {
     if (d && (d as { ok?: boolean }).ok && (d as { groupsCompleted?: boolean }).groupsCompleted === true) {
       setModalOpen(false);
       setModalCount(null);
-    }
-    if (d && (d as { ok?: boolean }).ok && (d as { sortedByCountName?: boolean }).sortedByCountName === true) {
-      revalidator.revalidate();
     }
   }, [fetcher.data, revalidator]);
   // ✅ list 由来で groupItems がない棚卸のフルデータ取得（モーダルでステータス・完了/未完了を正しく表示するため）
@@ -4265,13 +4263,13 @@ export default function InventoryCountPage() {
     if (statusFilters.size > 0) {
       list = list.filter((c) => statusFilters.has(c.status));
     }
-    // 棚卸IDの番号が新しい順（#C0025, #C0024… #C0001）で表示
+    // 棚卸IDの並び順（昇順 or 降順は countNameSortOrder で切り替え）
     return list.sort((a, b) => {
       const na = parseCountNameNumber((a as { countName?: string }).countName);
       const nb = parseCountNameNumber((b as { countName?: string }).countName);
-      return nb - na;
+      return countNameSortOrder === "desc" ? nb - na : na - nb;
     });
-  }, [inventoryCounts, locationFilters, statusFilters]);
+  }, [inventoryCounts, locationFilters, statusFilters, countNameSortOrder]);
 
   // ✅ 一覧表示で未完了グループの商品リストを取得
   // ✅ 502根本対策：一覧では未完了グループの母数を取得しない（get_incomplete_group_products はモーダルを開いたときのみ呼ぶ）。
@@ -5953,28 +5951,6 @@ export default function InventoryCountPage() {
                           >
                             棚卸IDを発行
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => fetcher.submit({ action: "sort_counts_by_count_name" }, { method: "post" })}
-                            disabled={fetcher.state !== "idle" || !inventoryCounts || inventoryCounts.length === 0}
-                            style={{
-                              padding: "8px 16px",
-                              backgroundColor: fetcher.state !== "idle" || !inventoryCounts || inventoryCounts.length === 0 ? "#e5e7eb" : "#3b82f6",
-                              color: "white",
-                              border: "none",
-                              borderRadius: "6px",
-                              fontSize: "13px",
-                              fontWeight: 600,
-                              cursor: fetcher.state !== "idle" || !inventoryCounts || inventoryCounts.length === 0 ? "not-allowed" : "pointer",
-                              width: "100%",
-                              marginTop: "8px",
-                            }}
-                          >
-                            {fetcher.state !== "idle" ? "処理中..." : "棚卸ID順に並び替え"}
-                          </button>
-                          <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
-                            一覧を #C0001, #C0002… の数値順に並び替えて保存します（#C0017 が #C0016 と #C0018 の間などに収まります）。
-                          </s-text>
                           {/* 復旧完了のため棚卸ID修復ボタンは非表示（必要なら false を true に変更して再有効化） */}
                           {false && (
                             <>
@@ -6029,13 +6005,6 @@ export default function InventoryCountPage() {
                           <s-box padding="base" background="subdued">
                             <s-text emphasis="bold" tone="success">
                               商品グループをすべて完了にしました（現在在庫で確定）。一覧を更新するにはページを再読み込みしてください。
-                            </s-text>
-                          </s-box>
-                        )}
-                        {fetcher.data?.ok && (fetcher.data as { sortedByCountName?: boolean }).sortedByCountName === true && (
-                          <s-box padding="base" background="subdued">
-                            <s-text emphasis="bold" tone="success">
-                              棚卸一覧を棚卸ID順（#C0001, #C0002…）に並び替えました。
                             </s-text>
                           </s-box>
                         )}
@@ -6269,6 +6238,60 @@ export default function InventoryCountPage() {
                               </div>
                             );
                           })}
+                        </div>
+                      </s-stack>
+                    </div>
+
+                    {/* ソート: 棚卸ID 昇順 / 降順 */}
+                    <div
+                      style={{
+                        background: "#ffffff",
+                        borderRadius: 12,
+                        boxShadow: "0 0 0 1px #e1e3e5",
+                        padding: 16,
+                      }}
+                    >
+                      <s-stack gap="base">
+                        <s-text emphasis="bold" size="large">ソート</s-text>
+                        <s-text tone="subdued" size="small">
+                          棚卸IDの表示順を選びます。
+                        </s-text>
+                        <s-divider />
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          <div
+                            onClick={() => setCountNameSortOrder("desc")}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: "6px",
+                              cursor: "pointer",
+                              backgroundColor: countNameSortOrder === "desc" ? "#eff6ff" : "transparent",
+                              border: countNameSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "8px",
+                            }}
+                          >
+                            <input type="radio" checked={countNameSortOrder === "desc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: countNameSortOrder === "desc" ? 600 : 500 }}>棚卸ID 降順（新しい順）</span>
+                            <span style={{ fontSize: "12px", color: "#6b7280" }}>#C0025 → #C0001</span>
+                          </div>
+                          <div
+                            onClick={() => setCountNameSortOrder("asc")}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: "6px",
+                              cursor: "pointer",
+                              backgroundColor: countNameSortOrder === "asc" ? "#eff6ff" : "transparent",
+                              border: countNameSortOrder === "asc" ? "1px solid #2563eb" : "1px solid #e1e3e5",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "8px",
+                            }}
+                          >
+                            <input type="radio" checked={countNameSortOrder === "asc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: countNameSortOrder === "asc" ? 600 : 500 }}>棚卸ID 昇順（古い順）</span>
+                            <span style={{ fontSize: "12px", color: "#6b7280" }}>#C0001 → #C0025</span>
+                          </div>
                         </div>
                       </s-stack>
                     </div>

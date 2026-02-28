@@ -741,6 +741,7 @@ export default function HistoryPage() {
   const [outboundLocationFilters, setOutboundLocationFilters] = useState<Set<string>>(new Set());
   const [inboundLocationFilters, setInboundLocationFilters] = useState<Set<string>>(new Set());
   const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
+  const [dateSortOrder, setDateSortOrder] = useState<"asc" | "desc">("desc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // 商品リストモーダル状態（lineItems は CSV 用、grouped は UI 表示用）
@@ -782,8 +783,12 @@ export default function HistoryPage() {
       filtered = filtered.filter((h) => statusFilters.has(h.status));
     }
 
-    return filtered;
-  }, [histories, outboundLocationFilters, inboundLocationFilters, statusFilters]);
+    return filtered.sort((a, b) => {
+      const t1 = new Date(a.dateCreated || 0).getTime();
+      const t2 = new Date(b.dateCreated || 0).getTime();
+      return dateSortOrder === "desc" ? t2 - t1 : t1 - t2;
+    });
+  }, [histories, outboundLocationFilters, inboundLocationFilters, statusFilters, dateSortOrder]);
 
   // ステータスの一覧を取得（日本語表記）
   const statuses = useMemo(() => {
@@ -1262,6 +1267,25 @@ export default function HistoryPage() {
                               </div>
                             );
                           })}
+                        </div>
+                      </s-stack>
+                    </div>
+
+                    {/* ソート: 日付 昇順 / 降順 */}
+                    <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                      <s-stack gap="base">
+                        <s-text emphasis="bold" size="large">ソート</s-text>
+                        <s-text tone="subdued" size="small">入出庫履歴の表示順（日付）を選びます。</s-text>
+                        <s-divider />
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          <div onClick={() => setDateSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: dateSortOrder === "desc" ? "#eff6ff" : "transparent", border: dateSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <input type="radio" checked={dateSortOrder === "desc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: dateSortOrder === "desc" ? 600 : 500 }}>日付 降順（新しい順）</span>
+                          </div>
+                          <div onClick={() => setDateSortOrder("asc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: dateSortOrder === "asc" ? "#eff6ff" : "transparent", border: dateSortOrder === "asc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <input type="radio" checked={dateSortOrder === "asc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+                            <span style={{ fontWeight: dateSortOrder === "asc" ? 600 : 500 }}>日付 昇順（古い順）</span>
+                          </div>
                         </div>
                       </s-stack>
                     </div>
