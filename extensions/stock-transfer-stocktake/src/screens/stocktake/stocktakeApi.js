@@ -972,7 +972,18 @@ export async function writeInventoryCounts(counts) {
   } catch (e) {
     // 既存読取失敗時はマージせずそのまま書く（新規ショップ等）
   }
-  const merged = mergeExistingNonBlank(Array.isArray(counts) ? counts : [], existing);
+  let merged = mergeExistingNonBlank(Array.isArray(counts) ? counts : [], existing);
+  // ✅ 呼び出し元の read が空を返した場合に既存棚卸IDを消さないよう、existing にあり merged に無い件を足す
+  if (Array.isArray(existing) && existing.length > 0 && merged.length < existing.length) {
+    const mergedIds = new Set(
+      merged.map((c) => String(c?.id ?? c?.countId ?? "")).filter(Boolean)
+    );
+    const missing = existing.filter((e) => {
+      const id = e?.id ?? e?.countId;
+      return id && !mergedIds.has(String(id));
+    });
+    if (missing.length > 0) merged = [...merged, ...missing];
+  }
   const withNames = ensureCountNamesBeforeWrite(merged);
   const arr = filterInvalidCountsBeforeWrite(withNames);
   try {
