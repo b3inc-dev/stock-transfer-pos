@@ -7,6 +7,11 @@ const SHOPIFY = globalThis?.shopify ?? {};
 const INVENTORY_COUNTS_CHUNK_BYTES = 32_000;
 const INVENTORY_COUNTS_CHUNK_KEY_PREFIX = "inventory_counts_v1_c";
 const METAFIELDS_SET_MAX = 25;
+/** Throttled 時リトライ待機（ms）。確定保存の連続メタフィールド書き込みでスロットリングされやすいため */
+const THROTTLE_RETRY_DELAY_MS = 2000;
+const THROTTLE_RETRY_MAX = 2;
+/** バッチ間の待機（ms）。連続書き込みで Throttled になりにくくする */
+const BATCH_WRITE_DELAY_MS = 150;
 
 /** 一覧用軽量メタフィールド（id, locationId, status, countName, createdAt, productGroupIds のみ） */
 const INVENTORY_COUNTS_LIST_KEY = "inventory_counts_list_v1";
@@ -64,6 +69,27 @@ async function graphql(query, variables, opts = {}) {
   } finally {
     done = true;
     if (iv) clearInterval(iv);
+  }
+}
+
+/**
+ * Throttled 時に待機してリトライする。確定保存時の連続メタフィールド書き込みでスロットリングされやすいため。
+ * @param {() => Promise<any>} fn
+ * @param {number} maxRetries
+ * @returns {Promise<any>}
+ */
+async function runWithThrottleRetry(fn, maxRetries = THROTTLE_RETRY_MAX) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      if (/throttle/i.test(msg) && attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, THROTTLE_RETRY_DELAY_MS));
+        continue;
+      }
+      throw e;
+    }
   }
 }
 
@@ -949,8 +975,10 @@ export async function writeInventoryCounts(counts) {
     const backupValue = JSON.stringify(backupList);
     if (backupValue.length <= INVENTORY_COUNTS_BACKUP_MAX_BYTES) {
       const mutation = `#graphql mutation SetBackup($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
-      await graphql(mutation, {
-        metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_BACKUP_KEY, type: "json", value: backupValue }],
+      await runWithThrottleRetry(async () => {
+        await graphql(mutation, {
+          metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_BACKUP_KEY, type: "json", value: backupValue }],
+        });
       });
     }
   } catch (e) {
@@ -1056,20 +1084,24 @@ export async function writeInventoryCounts(counts) {
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: "[]" },
       { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: "{}" },
     ];
-    const res = await graphql(mutation, { metafields });
-    const errs = res?.metafieldsSet?.userErrors ?? [];
-    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+    await runWithThrottleRetry(async () => {
+      const res = await graphql(mutation, { metafields });
+      const errs = res?.metafieldsSet?.userErrors ?? [];
+      if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+    });
     return;
   }
 
   if (payloads.length === 1 && payloads[0].length === 1 && !payloads[0][0]._part) {
     const full = JSON.stringify(payloads[0]);
     if (full.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
-      const res = await graphql(mutation, {
-        metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full }],
+      await runWithThrottleRetry(async () => {
+        const res = await graphql(mutation, {
+          metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full }],
+        });
+        const errs = res?.metafieldsSet?.userErrors ?? [];
+        if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
       });
-      const errs = res?.metafieldsSet?.userErrors ?? [];
-      if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
       return;
     }
   }
@@ -1088,9 +1120,14 @@ export async function writeInventoryCounts(counts) {
   ];
   for (let i = 0; i < metafields.length; i += METAFIELDS_SET_MAX) {
     const batch = metafields.slice(i, i + METAFIELDS_SET_MAX);
-    const res = await graphql(mutation, { metafields: batch });
-    const errs = res?.metafieldsSet?.userErrors ?? [];
-    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+    await runWithThrottleRetry(async () => {
+      const res = await graphql(mutation, { metafields: batch });
+      const errs = res?.metafieldsSet?.userErrors ?? [];
+      if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+    });
+    if (i + METAFIELDS_SET_MAX < metafields.length && BATCH_WRITE_DELAY_MS > 0) {
+      await new Promise((r) => setTimeout(r, BATCH_WRITE_DELAY_MS));
+    }
   }
 
   const listItems = arr.map(toMinimalCountForList).filter(Boolean);
@@ -1126,9 +1163,14 @@ export async function writeInventoryCounts(counts) {
   ];
   for (let i = 0; i < listMetafields.length; i += METAFIELDS_SET_MAX) {
     const batch = listMetafields.slice(i, i + METAFIELDS_SET_MAX);
-    const res = await graphql(mutation, { metafields: batch });
-    const errs = res?.metafieldsSet?.userErrors ?? [];
-    if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+    await runWithThrottleRetry(async () => {
+      const res = await graphql(mutation, { metafields: batch });
+      const errs = res?.metafieldsSet?.userErrors ?? [];
+      if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+    });
+    if (i + METAFIELDS_SET_MAX < listMetafields.length && BATCH_WRITE_DELAY_MS > 0) {
+      await new Promise((r) => setTimeout(r, BATCH_WRITE_DELAY_MS));
+    }
   }
 }
 

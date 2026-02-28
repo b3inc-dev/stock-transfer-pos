@@ -23,6 +23,14 @@ import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.j
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
+/** 保存失敗時のメッセージ（Throttled のときは再試行を促す文言に） */
+function formatSaveError(e) {
+  const msg = String(e?.message ?? e);
+  if (/throttle/i.test(msg)) {
+    return "保存に失敗しました: サーバー負荷により一時制限されています。しばらく待ってから再度「確定」を押してください。";
+  }
+  return `保存に失敗しました: ${msg}`;
+}
 
 /** 棚卸確定時の在庫変動を共通関数で記録（履歴で種別が正しく表示されるようにする） */
 
@@ -1997,7 +2005,7 @@ export function InventoryCountList({
                 setSubmitting(false);
               })
               .catch((e) => {
-                toast(`保存に失敗しました: ${e?.message ?? e}`);
+                toast(formatSaveError(e));
                 onAfterConfirm?.(null);
                 setSubmitting(false);
               });
@@ -2078,7 +2086,7 @@ export function InventoryCountList({
           const writeResult = results[1];
           if (writeResult) onAfterConfirm?.(writeResult);
         }).catch((e) => {
-          toast(`保存に失敗しました: ${e?.message ?? e}`);
+          toast(formatSaveError(e));
           onAfterConfirm?.(null);
         });
         return true;
@@ -2131,7 +2139,7 @@ export function InventoryCountList({
               setSubmitting(false);
             })
             .catch((e) => {
-              toast(`保存に失敗しました: ${e?.message ?? e}`);
+              toast(formatSaveError(e));
               onAfterConfirm?.(null);
               setSubmitting(false);
             });
@@ -2243,7 +2251,7 @@ export function InventoryCountList({
           const writeResult = results[1];
           if (writeResult) onAfterConfirm?.(writeResult);
         }).catch((e) => {
-          toast(`保存に失敗しました: ${e?.message ?? e}`);
+          toast(formatSaveError(e));
           onAfterConfirm?.(null);
         });
         return true;

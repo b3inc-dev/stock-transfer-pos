@@ -41,9 +41,10 @@
 **ロケーション・商品グループ・groupItems の空白上書き防止（2026-02 追加）**  
 - **POS** `writeInventoryCounts`: 書き込み前に **readInventoryCountsRaw()** で既存を取得し、**mergeExistingNonBlank(counts, existing)** を実行。渡された counts のうち locationId / productGroupIds / groupItems / items が空白の件は、既存の値を補完してから書くため、既存のロケーション・グループが空白で上書きされない。
 
-**アプリタイル完了確定時の countName 維持（2026-02 追加）**  
-- **POS** `mergeExistingNonBlank`: 既存に countName があり渡し側が空白の場合は **countName を既存の値で補完**するよう追加。確定時の toWrite が何らかの経路で countName を欠いたまま writeInventoryCounts に渡っても、既存読取後の merge で countName が復元され、削除・空白で上書きされない。
-- **管理画面** `writeInventoryCountsChunked`: 同様に書き込み前に **readInventoryCountsChunked(admin)** で既存を取得し、**mergeExistingNonBlank(counts, existing)** を実行してから保存。
+**countName の補完（2026-02 追加）**  
+- **POS** `mergeExistingNonBlank`: 既存に countName があり渡し側が空白の場合は **countName を既存の値で補完**。確定時の toWrite が countName を欠いたまま渡っても既存で復元され、空白で上書きされない。
+- **管理画面** `mergeExistingNonBlank`: 同様に **countName を既存の値で補完**するよう追加。管理画面の全 write で空白の countName で上書きされない。
+- **管理画面** `writeInventoryCountsChunked`: 書き込み前に **readInventoryCountsChunked(admin)** で既存を取得し、**mergeExistingNonBlank(counts, existing)**（countName 含む）を実行してから保存。
 
 **絶対に空白のIDを生成しない（2026-02 追加）**  
 - **POS** / **管理画面** とも、書き込み直前に **filterInvalidCountsBeforeWrite(counts)** を実行。`id` があるのに `countName` または `locationId` が空白のレコードは配列から除外し、保存しない。そのため「空白のID」を新規に永続化することはない。
@@ -155,7 +156,7 @@
 | 順序 | 処理 | 役割 |
 |------|------|------|
 | 1 | **既存読取** | POS: readInventoryCountsRaw() / 管理画面: readInventoryCountsChunked(admin) |
-| 2 | **mergeExistingNonBlank(counts, existing)** | 渡された `counts` のうち、locationId / productGroupIds / groupItems / items が空白の件は、既存の値で補完。既存の非空白を空白で上書きしない。 |
+| 2 | **mergeExistingNonBlank(counts, existing)** | 渡された `counts` のうち、**countName** / locationId / productGroupIds / groupItems / items が空白の件は、既存の値で補完。既存の非空白を空白で上書きしない。（POS・管理画面とも countName を補完対象に含む） |
 | 3 | **ensureCountNamesBeforeWrite** / **ensureCountNamesOnCounts** | countName が欠けている件にのみ番号を付与。既存の countName は変更しない。 |
 | 4 | **filterInvalidCountsBeforeWrite(counts)** | `id` はあるが `countName` または `locationId` が空白のレコードを配列から除外。**そのようなオブジェクトはこのあと書き込みループに渡らない。** |
 
@@ -187,3 +188,101 @@
 - さらに、確定時に「一覧由来の空白」で toWrite が上書きされる可能性は、**mergeCountWithStorage** の修正で塞いでいる。  
 
 以上が、「他に空白上書きの要因が絶対に残っていない」と言える根拠です。
+
+---
+
+## 7. 全処理経路の網羅確認（アプリタイル・管理画面）
+
+以下の一覧は、棚卸データを**読み・組み立て・書き**する全経路を列挙し、いずれも空白で上書きされる要因がないことを確認したものです。
+
+### 7.1 アプリタイル（POS）— 書き込み経路
+
+| # | 呼び出し元・処理 | 渡すデータ | 空白上書き防止 |
+|---|------------------|------------|----------------|
+| 1 | **stocktakeApi.js** readInventoryCountsFirstPage（チャンク0未存在時） | `writeInventoryCounts(parsed)` | 必ず **mergeExistingNonBlank**（countName 含む）→ **ensureCountNamesBeforeWrite** → **filterInvalidCountsBeforeWrite** を経る。 |
+| 2 | **stocktakeApi.js** readInventoryCounts（countName 補完後の write） | `writeInventoryCounts(countsWithName)` | 同上。countsWithName は既に countName 付与済み。 |
+| 3 | **InventoryCountList.jsx** draft→in_progress（棚卸を開いたとき） | `readInventoryCounts()` の allCounts を 1 件だけ status 更新 → `writeInventoryCounts(updated)` | 同上。readInventoryCounts() は countName 付与済み。 |
+| 4 | **InventoryCountList.jsx** handleComplete（確定・在庫調整なし） | `readInventoryCountsRaw()` → toWrite = **mergeCountWithStorage**(fromStorage, locallyBuilt) → merged → `writeInventoryCounts(merged)` | **mergeCountWithStorage** で countName/locationId 等の空白を fromStorage で補正。write 内で **mergeExistingNonBlank**（countName 含む）→ ensure → filter。 |
+| 5 | **InventoryCountList.jsx** handleComplete（確定・在庫調整あり・複数グループ） | 同上（locallyBuiltAdjust） | 同上。 |
+| 6 | **InventoryCountList.jsx** handleComplete（確定・在庫調整なし・単一/グループ別） | 同上（locallyBuiltNoAdjust） | 同上。 |
+| 7 | **InventoryCountList.jsx** handleComplete（確定・在庫調整あり・単一/グループ別） | 同上（locallyBuiltResult） | 同上。 |
+| 8 | **InventoryCountProductGroupSelection.jsx** draft→in_progress | `readInventoryCounts()` → 1 件だけ status 更新 → `writeInventoryCounts(updated)` | write 内で mergeExistingNonBlank（countName 含む）→ ensure → filter。 |
+
+### 7.2 管理画面 — 書き込み経路
+
+| # | 処理（actionType） | 渡すデータ | 空白上書き防止 |
+|---|--------------------|------------|----------------|
+| 1 | repair_count_names | ensureCountNamesOnCounts 済み counts → writeInventoryCountsChunked | **mergeExistingNonBlank**（countName 含む）→ ensureCountNamesOnCounts → filterInvalidCountsBeforeWrite。 |
+| 2 | create_inventory_count | 既存 inventoryCounts に newCount を push → writeInventoryCountsChunked | 同上。newCount は countName 付与済み。 |
+| 3 | restore_count_as_completed / redistribute_count_group_items / ensure_count_groups_completed | 1 件更新した updatedCounts → writeInventoryCountsChunked | 同上。更新件は countName を明示保持。 |
+| 4 | sort_counts_by_count_name | ソートした配列 → writeInventoryCountsChunked | 同上。ソートのみで項目は変更しない。 |
+| 5 | update_stocktake_quantity / confirm_stocktake_group / reset_stocktake_group / confirm_stocktake_all / reset_stocktake_all / cancel_stocktake_group / cancel_stocktake | 各 action 内で 1 件更新した updatedCounts → writeInventoryCountsChunked | 同上。既存を map で 1 件差し替えのみ。 |
+
+### 7.3 読み込み・マージ経路（空白を伝搬しないことの確認）
+
+| 箇所 | 内容 | 空白で上書きしない根拠 |
+|------|------|------------------------|
+| **InventoryCountConditions.jsx** setCounts マージ | readInventoryCountById(full) の結果をマージ | **full.countName** を明示的にマージ対象に含める。 |
+| **InventoryCountList.jsx** mergeCountWithStorage | toWrite = merge(fromStorage, locallyBuilt) | fromStorage に countName/locationId/locationName/productGroupIds があり out が空白の場合は **fromStorage を採用**。 |
+| **InventoryCountList.jsx** buildUpdatedCountFromLocalState | 確定用の更新後 count を組み立て | `return { ...count, groupItems, status, completedAt, items }` のみ。countName 等は **...count で維持**。 |
+| **stocktakeApi.js** mergeExistingNonBlank（POS） | write 前の補完 | 渡し側が空白で既存にありれば **countName** / locationId / productGroupIds / groupItems / items を既存で補完。 |
+| **app.inventory-count.tsx** mergeExistingNonBlank（管理画面） | write 前の補完 | 同上（**countName** を補完対象に含む）。 |
+
+### 7.4 結論
+
+- **アプリタイル・管理画面の全書き込み**は、いずれも **writeInventoryCounts** または **writeInventoryCountsChunked** の**単一入口**を経由する。
+- 両方の入口で **既存読取 → mergeExistingNonBlank（countName 含む）→ ensureCountNames → filterInvalidCountsBeforeWrite** が必ず実行される。
+- 確定時は **mergeCountWithStorage** で fromStorage の有効値を空白で上書きしない。
+- したがって、**全処理経路で空白で上書きされる要因は残っていない**。
+
+---
+
+## 8. 「他には絶対ない」と言い切れる根拠（網羅の論拠）
+
+以下は、**漏れなく全ての経路を押さえている**と断言できる**論理的な根拠**です。
+
+### 8.1 永続化の入口が2つしかない（コード上の事実）
+
+- 棚卸データが **メタフィールドに保存される**のは、次の2つの関数が **GraphQL の metafieldsSet** を呼ぶとき**だけ**です。
+  1. **POS**: `extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js` の **export async function writeInventoryCounts(counts)**
+  2. **管理画面**: `app/routes/app.inventory-count.tsx` の **async function writeInventoryCountsChunked(admin, counts, ownerId)**
+
+- リポジトリ内で **キー `inventory_counts_v1` または `inventory_counts_v1_c*` を「書く」** のは上記2つの関数内だけです。
+  - 検索方法: `INVENTORY_COUNTS_KEY` / `inventory_counts_v1` を書き込んでいる箇所を grep すると、**書く**のは `stocktakeApi.js`（writeInventoryCounts 内）と `app.inventory-count.tsx`（writeInventoryCountsChunked 内）のみ。
+  - 他ファイルの metafieldsSet は、product_groups / settings / loss / order / inbound など**別メタフィールド用**であり、棚卸用キーには触れない。
+
+→ **「棚卸の空白上書き」が起きるのは、このどちらかの関数に「空白を含む counts」が渡り、そのまま保存されるときだけ**です。それ以外の経路でメタフィールドが書き換わることはありません。
+
+### 8.2 2つの入口はどちらも「必ずガードを通る」
+
+- どちらの関数も、**メタフィールドを書きに出す直前**に、次の順で**必ず**実行されます（早期 return や分岐でスキップされる経路はない）。
+  1. **既存読取**（POS: readInventoryCountsRaw / 管理画面: readInventoryCountsChunked）
+  2. **mergeExistingNonBlank(counts, existing)** … 渡された counts のうち、countName / locationId / productGroupIds / groupItems / items が空白の件は既存で補完。
+  3. **ensureCountNamesBeforeWrite** または **ensureCountNamesOnCounts** … countName が欠けている件にのみ番号を付与。
+  4. **filterInvalidCountsBeforeWrite(counts)** … id はあるが countName または locationId が空白のレコードを**保存対象から除外**。
+
+- 実際に **metafieldsSet に渡す payload** は、**4 のあとの配列だけ**です。4 で「id ありで countName または locationId が空白」の要素は配列から除かれるため、**そのようなオブジェクトがメタフィールドに保存されるコードパスは存在しません**。
+
+→ **「2つの入口のどちらを通っても、空白の countName / locationId を持ったレコードは保存されない」** ことが、コードの構造から言えます。
+
+### 8.3 2つの入口を呼ぶ箇所の網羅
+
+- **writeInventoryCounts** の呼び出し元は、**すべて**次のいずれかです（grep で確認済み）。
+  - stocktakeApi.js 内: readInventoryCountsFirstPage、readInventoryCounts
+  - InventoryCountList.jsx: draft→in_progress の 1 か所、handleComplete 内 4 経路
+  - InventoryCountProductGroupSelection.jsx: draft→in_progress の 1 か所
+
+- **writeInventoryCountsChunked** の呼び出し元は、**すべて** app.inventory-count.tsx の action 内のみで、repair_count_names / create_inventory_count / restore_count_as_completed / redistribute_count_group_items / ensure_count_groups_completed / sort_counts_by_count_name / update_stocktake_quantity / confirm_stocktake_group / reset_stocktake_group / confirm_stocktake_all / reset_stocktake_all / cancel_stocktake_group / cancel_stocktake のいずれかです。
+
+- つまり、**棚卸メタフィールドを書く可能性がある処理は、上記の一覧以外にありません**。かつ、いずれも「書く」ときは必ず **writeInventoryCounts** または **writeInventoryCountsChunked** を経由し、その中で 8.2 のガードを通過します。
+
+- 確定時だけ、**write に渡す「当該1件」** が **mergeCountWithStorage(fromStorage, locallyBuilt)** で組み立てられます。ここで「locallyBuilt の空白で fromStorage の有効値を上書きしない」ように明示的に補正しているため、**toWrite が空白のまま write に回る経路はありません**。
+
+### 8.4 論理のまとめ（網羅できた根拠）
+
+1. **空白で上書きが起きる** ⇔ どこかで「棚卸メタフィールドに、countName や locationId が空白のレコード」が**保存される**。
+2. 棚卸メタフィールドに**保存する**コードは、**writeInventoryCounts** と **writeInventoryCountsChunked** の**2つだけ**（8.1）。
+3. その**2つはどちらも**、保存前に **mergeExistingNonBlank → ensureCountNames → filterInvalidCountsBeforeWrite** を**必ず**通す（8.2）。したがって「id ありで countName または locationId が空白のレコード」は**保存されない**。
+4. その2つの関数を**呼ぶ**箇所は、上記の一覧で**すべて列挙済み**であり、確定時は **mergeCountWithStorage** で空白で上書きしない（8.3）。
+
+→ **「空白で上書きする経路」は、コード上に存在しない。** したがって **「他には絶対ない」「全て網羅できている」** と言える根拠になります。

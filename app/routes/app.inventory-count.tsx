@@ -1035,6 +1035,9 @@ function mergeExistingNonBlank(counts: InventoryCount[], existing: InventoryCoun
     const ex = existingById.get(String(id));
     if (!ex || typeof ex !== "object") return c;
     const out = { ...c };
+    const outCountName = out.countName != null && String(out.countName).trim() !== "";
+    const exCountName = ex.countName != null && String(ex.countName).trim() !== "";
+    if (!outCountName && exCountName) out.countName = ex.countName;
     if (!out.locationId && ex.locationId) out.locationId = ex.locationId;
     if (ex.locationName && !out.locationName) out.locationName = ex.locationName;
     const hasPgIds = Array.isArray(out.productGroupIds) && out.productGroupIds.length > 0;
@@ -1639,7 +1642,8 @@ export async function action({ request }: ActionFunctionArgs) {
     actionType === "redistribute_count_group_items" ||
     actionType === "ensure_count_groups_completed" ||
     actionType === "sort_counts_by_count_name";
-  const [currentResp, inventoryCountsFromChunked] = await Promise.all([
+  const sortAlsoNeedsList = actionType === "sort_counts_by_count_name";
+  const [currentResp, inventoryCountsFromChunked, listForSort] = await Promise.all([
     admin.graphql(
       `#graphql
         query GetCurrentData {
@@ -1650,6 +1654,7 @@ export async function action({ request }: ActionFunctionArgs) {
       `
     ),
     needInventoryCounts ? readInventoryCountsChunked(admin) : Promise.resolve([]),
+    sortAlsoNeedsList ? readInventoryCountsListChunked(admin) : Promise.resolve([]),
   ]);
   const currentJson = await currentResp.json();
   let productGroups: ProductGroup[] = [];
@@ -1988,8 +1993,10 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // ✅ 一度だけ：棚卸一覧を棚卸ID（#C0001, #C0002…）の数値順に並び替えて保存する
+  // 表示が list 由来のときは list をソート対象にする（list と main の両方を同じ順で書き直すため、リロード後に並びが反映される）
   if (actionType === "sort_counts_by_count_name") {
-    const sorted = [...inventoryCounts].sort((a, b) => {
+    const toSort = Array.isArray(listForSort) && listForSort.length > 0 ? listForSort : inventoryCounts;
+    const sorted = [...toSort].sort((a, b) => {
       const na = parseCountNameNumber((a as { countName?: string }).countName);
       const nb = parseCountNameNumber((b as { countName?: string }).countName);
       return na - nb;
@@ -6567,8 +6574,8 @@ export default function InventoryCountPage() {
                       </button>
                     </div>
                   )}
-                  {/* 履歴で「IDは完了だが商品グループが全て未完了」のとき：現在在庫で各グループを完了にする */}
-                  {modalCount.status === "completed" &&
+                  {/* 復旧完了のため非表示（必要なら false を true に変更して再有効化） */}
+                  {false && modalCount.status === "completed" &&
                     Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0 && (
                     <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#eff6ff", border: "1px solid #3b82f6", borderRadius: "6px", fontSize: "13px" }}>
                       <div style={{ fontWeight: 600, marginBottom: "6px", color: "#1e40af" }}>商品グループをすべて完了にする</div>
