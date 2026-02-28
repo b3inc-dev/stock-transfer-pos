@@ -1990,12 +1990,12 @@ export function InventoryCountList({
             });
             readInventoryCountsRaw()
               .then((counts) => {
-                const idStr = String(count?.id ?? "");
+                const idNorm = normalizeIdForMatch(count?.id ?? "");
                 const list = Array.isArray(counts) ? counts : [];
-                const fromStorage = list.find((c) => String(c?.id ?? "") === idStr);
+                const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
                 const toWrite = mergeCountWithStorage(fromStorage, locallyBuilt);
-                const merged = list.some((c) => String(c?.id ?? "") === idStr)
-                  ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
+                const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                  ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
                   : [...list, toWrite];
                 return writeInventoryCounts(merged).then(() => toWrite);
               })
@@ -2069,12 +2069,12 @@ export function InventoryCountList({
             sourceId: count.id,
           }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
           readInventoryCountsRaw().then((counts) => {
-            const idStr = String(count?.id ?? "");
+            const idNorm = normalizeIdForMatch(count?.id ?? "");
             const list = Array.isArray(counts) ? counts : [];
-            const fromStorage = list.find((c) => String(c?.id ?? "") === idStr);
+            const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
             const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltAdjust);
-            const merged = list.some((c) => String(c?.id ?? "") === idStr)
-              ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
+            const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+              ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
               : [...list, toWrite];
             return writeInventoryCounts(merged).then(() => toWrite);
           }),
@@ -2121,12 +2121,12 @@ export function InventoryCountList({
           });
           readInventoryCountsRaw()
             .then((counts) => {
-              const idStr = String(count?.id ?? "");
+              const idNorm = normalizeIdForMatch(count?.id ?? "");
               const list = Array.isArray(counts) ? counts : [];
-              const fromStorage = list.find((c) => String(c?.id ?? "") === idStr);
+              const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
               const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltNoAdjust);
-              const merged = list.some((c) => String(c?.id ?? "") === idStr)
-                ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
+              const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
                 : [...list, toWrite];
               return Promise.all([
                 writeInventoryCounts(merged).then(() => toWrite),
@@ -2238,12 +2238,12 @@ export function InventoryCountList({
             sourceId: count.id,
           }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
           readInventoryCountsRaw().then((counts) => {
-            const idStr = String(count?.id ?? "");
+            const idNorm = normalizeIdForMatch(count?.id ?? "");
             const list = Array.isArray(counts) ? counts : [];
-            const fromStorage = list.find((c) => String(c?.id ?? "") === idStr);
+            const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
             const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltResult);
-            const merged = list.some((c) => String(c?.id ?? "") === idStr)
-              ? list.map((c) => (String(c?.id ?? "") === idStr ? toWrite : c))
+            const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+              ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
               : [...list, toWrite];
             return writeInventoryCounts(merged).then(() => toWrite);
           }),
