@@ -1017,10 +1017,11 @@ function generateId(prefix: string): string {
   return `${prefix}_${timestamp}_${random}`;
 }
 
-/** #C0001 形式の countName から数値を取得。パースできない場合は 0 */
+/** #C0001 形式の countName から数値を取得。# なし（C0017）にも対応。パースできない場合は 0 */
 function parseCountNameNumber(countName: string | null | undefined): number {
   if (!countName || typeof countName !== "string") return 0;
-  const m = countName.trim().match(/^#C0*(\d+)$/i);
+  const s = countName.trim();
+  const m = s.match(/^#?C0*(\d+)$/i) ?? s.match(/^0*(\d+)$/);
   return m ? Math.max(0, parseInt(m[1], 10)) : 0;
 }
 
@@ -4264,10 +4265,11 @@ export default function InventoryCountPage() {
     if (statusFilters.size > 0) {
       list = list.filter((c) => statusFilters.has(c.status));
     }
+    // 棚卸ID（#C0001, #C0002…）の数値順で表示（loader の並びを維持）
     return list.sort((a, b) => {
-      const t1 = new Date(a.createdAt).getTime();
-      const t2 = new Date(b.createdAt).getTime();
-      return t2 - t1;
+      const na = parseCountNameNumber((a as { countName?: string }).countName);
+      const nb = parseCountNameNumber((b as { countName?: string }).countName);
+      return na - nb;
     });
   }, [inventoryCounts, locationFilters, statusFilters]);
 
