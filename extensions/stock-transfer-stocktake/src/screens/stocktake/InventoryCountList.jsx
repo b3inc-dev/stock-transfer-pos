@@ -75,6 +75,9 @@ const INVENTORY_COUNT_DRAFT_PREFIX = "stock_transfer_pos_inventory_count_draft_v
 const INVENTORY_COUNT_DRAFT_LEGACY_KEY = "stock_transfer_pos_inventory_count_draft_v1"; // 単一グループ用（ロス・出庫と同様の単一キー）
 const CONFIRM_INVENTORY_COUNT_MODAL_ID = "confirm-inventory-count-modal";
 
+/** 同一棚卸でグループA確定→すぐグループB確定した場合に、後者の read が前者の write 完了前に行うと先の完了が上書きされるのを防ぐため、count 単位でバックグラウンド write を直列化する */
+const pendingBackgroundWriteByCountId = new Map();
+
 // groupItems のキー照合（GID と数値 ID の混在で取れない不具合対策。管理画面と POS で明細数が一致するようにする）
 function getGroupItemsByKey(groupItemsMap, groupId) {
   if (!groupId || !groupItemsMap || typeof groupItemsMap !== "object") return [];
@@ -1979,7 +1982,7 @@ export function InventoryCountList({
         .filter((l) => l.currentQuantity !== l.actualQuantity);
       
       if (allItemsToAdjust.length === 0) {
-        // ✅ 在庫差異なし：read → merge → write 後に merge 結果を onAfterConfirm に渡し、商品グループごと表示・1グループのみでも最後のグループが完了になるようする（setTimeout を使わず即時開始で体感を短くする）
+        // ✅ 在庫差異なし：待機時間をなくすため「UIを先に完了→read/write/clearはバックグラウンド」に統一。確定成功まで下書きは消さない（write 成功時のみ clear）。
         setSubmitting(true);
         try {
           const locallyBuilt = buildUpdatedCountFromLocalState(count, lines, {
@@ -1987,40 +1990,37 @@ export function InventoryCountList({
             targetProductGroupIds,
             productGroupId,
           });
-          readInventoryCountsRaw()
-            .then((counts) => {
-              const idNorm = normalizeIdForMatch(count?.id ?? "");
-              const list = Array.isArray(counts) ? counts : [];
-              const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-              const toWrite = mergeCountWithStorage(fromStorage, locallyBuilt);
-              const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-                ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-                : [...list, toWrite];
-              return writeInventoryCounts(merged).then(() => toWrite);
-            })
-            .then((toWrite) => {
-              try {
-                if (toWrite) {
-                  toast("棚卸を完了しました");
-                  onAfterConfirm?.(toWrite);
-                  clearAllInventoryCountDraftsForCount({
-                    countId: count.id,
-                    locationId: count.locationId,
-                    productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-                  }).catch((e) => console.error("Failed to clear inventory count draft:", e));
-                }
-              } finally {
-                setSubmitting(false);
-              }
-            })
-            .catch((e) => {
-              try {
-                toast(formatSaveError(e));
-                onAfterConfirm?.(null);
-              } finally {
-                setSubmitting(false);
-              }
-            });
+          toast("棚卸を完了しました");
+          onAfterConfirm?.(locallyBuilt);
+          setSubmitting(false);
+          const countIdKey = normalizeIdForMatch(count?.id ?? "");
+          const runThisWrite = () =>
+            readInventoryCountsRaw()
+              .then((counts) => {
+                const idNorm = normalizeIdForMatch(count?.id ?? "");
+                const list = Array.isArray(counts) ? counts : [];
+                const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+                const toWrite = mergeCountWithStorage(fromStorage, locallyBuilt);
+                const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                  ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+                  : [...list, toWrite];
+                return writeInventoryCounts(merged).then(() => toWrite);
+              });
+          const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
+          const next = prev.then(runThisWrite, runThisWrite);
+          pendingBackgroundWriteByCountId.set(countIdKey, next);
+          next.then((toWrite) => {
+            if (toWrite) {
+              clearAllInventoryCountDraftsForCount({
+                countId: count.id,
+                locationId: count.locationId,
+                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+              }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+            }
+          }).catch((e) => {
+            toast(formatSaveError(e));
+            console.error("[InventoryCountList] 確定後の保存に失敗:", e);
+          });
         } catch (e) {
           toast(`エラー: ${e?.message ?? e}`);
           onAfterConfirm?.(null);
@@ -2063,51 +2063,52 @@ export function InventoryCountList({
           console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
           toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
         }
-        // ✅ ローカル状態で更新後 count を組み立て。保存完了後に merge 結果を onAfterConfirm に渡し、商品グループごと表示でも完了ステータスが正しくなるようにする
+        // ✅ ローカル状態で更新後 count を組み立て。要件どおり「UIを先に完了→read/write/clearはバックグラウンド」で処理中が1分以上続くのを防ぐ
         const locallyBuiltAdjust = buildUpdatedCountFromLocalState(count, lines, {
           isMultipleMode: true,
           targetProductGroupIds,
           productGroupId,
         });
-        Promise.all([
-          logInventoryCountToApi({
-            locationId: count.locationId,
-            locationName: locationName || count.locationName || "",
-            items: allItemsToAdjust,
-            sourceId: count.id,
-          }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
-          readInventoryCountsRaw().then((counts) => {
-            const idNorm = normalizeIdForMatch(count?.id ?? "");
-            const list = Array.isArray(counts) ? counts : [];
-            const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-            const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltAdjust);
-            const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-              ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-              : [...list, toWrite];
-            return writeInventoryCounts(merged).then(() => toWrite);
-          }),
-        ]).then((results) => {
-          try {
-            const writeResult = results[1];
-            toast("棚卸を完了しました");
-            if (writeResult) {
-              onAfterConfirm?.(writeResult);
-              clearAllInventoryCountDraftsForCount({
-                countId: count.id,
-                locationId: count.locationId,
-                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-              }).catch((e) => console.error("Failed to clear inventory count draft:", e));
-            }
-          } finally {
-            setSubmitting(false);
+        // 要件: トースト・onAfterConfirm・setSubmitting(false) でUIを先に完了し、read/write/clear はバックグラウンド実行
+        toast("棚卸を完了しました");
+        onAfterConfirm?.(locallyBuiltAdjust);
+        setSubmitting(false);
+        // 同一棚卸で連続確定した場合に後者の read が前者の write 完了前に走ると上書きされるのを防ぐため、count 単位で直列化
+        const countIdKey = normalizeIdForMatch(count?.id ?? "");
+        const runThisWrite = () =>
+          Promise.all([
+            logInventoryCountToApi({
+              locationId: count.locationId,
+              locationName: locationName || count.locationName || "",
+              items: allItemsToAdjust,
+              sourceId: count.id,
+            }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
+            readInventoryCountsRaw().then((counts) => {
+              const idNorm = normalizeIdForMatch(count?.id ?? "");
+              const list = Array.isArray(counts) ? counts : [];
+              const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+              const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltAdjust);
+              const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+                : [...list, toWrite];
+              return writeInventoryCounts(merged).then(() => toWrite);
+            }),
+          ]);
+        const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
+        const next = prev.then(runThisWrite, runThisWrite);
+        pendingBackgroundWriteByCountId.set(countIdKey, next);
+        next.then((results) => {
+          const writeResult = results?.[1];
+          if (writeResult) {
+            clearAllInventoryCountDraftsForCount({
+              countId: count.id,
+              locationId: count.locationId,
+              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+            }).catch((e) => console.error("Failed to clear inventory count draft:", e));
           }
         }).catch((e) => {
-          try {
-            toast(formatSaveError(e));
-            onAfterConfirm?.(null);
-          } finally {
-            setSubmitting(false);
-          }
+          toast(formatSaveError(e));
+          console.error("[InventoryCountList] 確定後の保存に失敗:", e);
         });
         return true;
         } catch (updateError) {
@@ -2126,7 +2127,7 @@ export function InventoryCountList({
     }
 
     if (itemsToAdjust.length === 0) {
-      // ✅ 在庫差異なし：read → merge → write 後に merge 結果を onAfterConfirm に渡し、1グループのみ・グループごと表示でも完了ステータスが正しくなるようにする（setTimeout を使わず即時開始で体感を短くする）
+      // ✅ 在庫差異なし：待機時間をなくすため「UIを先に完了→read/write/clearはバックグラウンド」に統一。確定成功まで下書きは消さない（write 成功時のみ clear）。
       setSubmitting(true);
       try {
         const locallyBuiltNoAdjust = buildUpdatedCountFromLocalState(count, lines, {
@@ -2134,40 +2135,37 @@ export function InventoryCountList({
           targetProductGroupIds,
           productGroupId,
         });
-        readInventoryCountsRaw()
-          .then((counts) => {
-            const idNorm = normalizeIdForMatch(count?.id ?? "");
-            const list = Array.isArray(counts) ? counts : [];
-            const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-            const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltNoAdjust);
-            const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-              ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-              : [...list, toWrite];
-            return writeInventoryCounts(merged).then(() => toWrite);
-          })
-          .then((toWrite) => {
-            try {
-              if (toWrite) {
-                toast("棚卸を完了しました");
-                onAfterConfirm?.(toWrite);
-                clearAllInventoryCountDraftsForCount({
-                  countId: count.id,
-                  locationId: count.locationId,
-                  productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-                }).catch((e) => console.error("Failed to clear inventory count draft:", e));
-              }
-            } finally {
-              setSubmitting(false);
-            }
-          })
-          .catch((e) => {
-            try {
-              toast(formatSaveError(e));
-              onAfterConfirm?.(null);
-            } finally {
-              setSubmitting(false);
-            }
-          });
+        toast("棚卸を完了しました");
+        onAfterConfirm?.(locallyBuiltNoAdjust);
+        setSubmitting(false);
+        const countIdKey = normalizeIdForMatch(count?.id ?? "");
+        const runThisWrite = () =>
+          readInventoryCountsRaw()
+            .then((counts) => {
+              const idNorm = normalizeIdForMatch(count?.id ?? "");
+              const list = Array.isArray(counts) ? counts : [];
+              const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+              const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltNoAdjust);
+              const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+                : [...list, toWrite];
+              return writeInventoryCounts(merged).then(() => toWrite);
+            });
+        const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
+        const next = prev.then(runThisWrite, runThisWrite);
+        pendingBackgroundWriteByCountId.set(countIdKey, next);
+        next.then((toWrite) => {
+          if (toWrite) {
+            clearAllInventoryCountDraftsForCount({
+              countId: count.id,
+              locationId: count.locationId,
+              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+            }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+          }
+        }).catch((e) => {
+          toast(formatSaveError(e));
+          console.error("[InventoryCountList] 確定後の保存に失敗:", e);
+        });
       } catch (e) {
         toast(`エラー: ${e?.message ?? e}`);
         onAfterConfirm?.(null);
@@ -2237,7 +2235,7 @@ export function InventoryCountList({
           return false;
         }
 
-        // ✅ ローカル状態で更新後 count を組み立て。保存完了後に merge 結果を onAfterConfirm に渡し、1グループのみ・グループごと表示でも完了ステータスが正しくなるようにする
+        // ✅ ローカル状態で更新後 count を組み立て。要件どおり「UIを先に完了→read/write/clearはバックグラウンド」で処理中が1分以上続くのを防ぐ
         const locallyBuiltResult = buildUpdatedCountFromLocalState(count, lines, {
           isMultipleMode,
           targetProductGroupIds,
@@ -2247,45 +2245,46 @@ export function InventoryCountList({
           setSubmitting(false);
           return false;
         }
-        Promise.all([
-          logInventoryCountToApi({
-            locationId: count.locationId,
-            locationName: locationName || count.locationName || "",
-            items: itemsToAdjust,
-            sourceId: count.id,
-          }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
-          readInventoryCountsRaw().then((counts) => {
-            const idNorm = normalizeIdForMatch(count?.id ?? "");
-            const list = Array.isArray(counts) ? counts : [];
-            const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-            const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltResult);
-            const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-              ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-              : [...list, toWrite];
-            return writeInventoryCounts(merged).then(() => toWrite);
-          }),
-        ]).then((results) => {
-          try {
-            const writeResult = results[1];
-            toast("棚卸を完了しました");
-            if (writeResult) {
-              onAfterConfirm?.(writeResult);
-              clearAllInventoryCountDraftsForCount({
-                countId: count.id,
-                locationId: count.locationId,
-                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-              }).catch((e) => console.error("Failed to clear inventory count draft:", e));
-            }
-          } finally {
-            setSubmitting(false);
+        // 要件: トースト・onAfterConfirm・setSubmitting(false) でUIを先に完了し、read/write/clear はバックグラウンド実行
+        toast("棚卸を完了しました");
+        onAfterConfirm?.(locallyBuiltResult);
+        setSubmitting(false);
+        // 同一棚卸で連続確定した場合に後者の read が前者の write 完了前に走ると上書きされるのを防ぐため、count 単位で直列化
+        const countIdKey = normalizeIdForMatch(count?.id ?? "");
+        const runThisWrite = () =>
+          Promise.all([
+            logInventoryCountToApi({
+              locationId: count.locationId,
+              locationName: locationName || count.locationName || "",
+              items: itemsToAdjust,
+              sourceId: count.id,
+            }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
+            readInventoryCountsRaw().then((counts) => {
+              const idNorm = normalizeIdForMatch(count?.id ?? "");
+              const list = Array.isArray(counts) ? counts : [];
+              const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+              const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltResult);
+              const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+                : [...list, toWrite];
+              return writeInventoryCounts(merged).then(() => toWrite);
+            }),
+          ]);
+        const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
+        const next = prev.then(runThisWrite, runThisWrite);
+        pendingBackgroundWriteByCountId.set(countIdKey, next);
+        next.then((results) => {
+          const writeResult = results?.[1];
+          if (writeResult) {
+            clearAllInventoryCountDraftsForCount({
+              countId: count.id,
+              locationId: count.locationId,
+              productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+            }).catch((e) => console.error("Failed to clear inventory count draft:", e));
           }
         }).catch((e) => {
-          try {
-            toast(formatSaveError(e));
-            onAfterConfirm?.(null);
-          } finally {
-            setSubmitting(false);
-          }
+          toast(formatSaveError(e));
+          console.error("[InventoryCountList] 確定後の保存に失敗:", e);
         });
         return true;
       } catch (updateError) {
@@ -2302,7 +2301,7 @@ export function InventoryCountList({
       setSubmitting(false);
       return false;
     }
-    // ※ 差異ありで Promise.all を開始して return true する経路では、setSubmitting(false) は Promise.all の .then/.catch でのみ行う（finally で実行すると完了前にボタンが有効になるため finally は使わない）
+    // ※ 差異ありは要件どおり「UIを先に完了（toast/onAfterConfirm/setSubmitting(false)）→ read/write/clear はバックグラウンド」のため、adjust 成功直後に setSubmitting(false) を実行している
   }, [count, itemsToAdjust, lines, onAfterConfirm, productGroupId, targetProductGroupIds, buildGroupItemsEntry]);
 
   // Header
