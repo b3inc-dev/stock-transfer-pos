@@ -2,15 +2,17 @@
 
 REQUIREMENTS_FINAL.md に基づき、確定処理まわりを実装と照らして確認した結果です。
 
+**再確認**: 7項目とも現行コード（InventoryCountList.jsx 確定4経路・stocktakeApi.js write/read/fixCountsStatusOnly・単一グループ用 resolvedAllIds/groupIdsForCheck 対応含む）で再検証済み。
+
 ---
 
 ## 再確認チェックリスト（7項目）
 
 | # | 確認項目 | 結果 | 補足 |
 |---|----------|------|------|
-| 1 | アプリタイル上の待機時間をできる限りなくす処理になっているか | ✅ | 全4経路で「toast / onAfterConfirm / setSubmitting(false)」を先に実行し、read/write/clear はバックグラウンド。ユーザーが待つのは差異あり時の在庫調整APIのみ。 |
-| 2 | 確定ボタン押下後、確実に成功するまで自動保存内容が消えないか（商品グループごと・まとめて表示・1グループのみ） | ✅ | `clearAllInventoryCountDraftsForCount` は write が成功した `.then` 内でのみ呼ばれる。失敗時は `.catch` でトーストのみで clear は呼ばない。 |
-| 3 | 確定処理は差異あり・差異なしどちらも問題なく処理されるか（商品グループごと・まとめて表示・1グループのみ） | ✅ | 4経路すべて実装済み。差異あり時は adjust 失敗で catch し成功トーストは出さない。差異なし時はバックグラウンド write 失敗時のみ後からエラートースト。 |
+| 1 | アプリタイル上の待機時間をできる限りなくす処理になっているか | ✅ | 全4経路で「toast / onAfterConfirm / setSubmitting(false)」を先に実行し、read/write/clear はバックグラウンド。ユーザーが待つのは差異あり時の在庫調整APIのみ。（商品グループごと表示・まとめて表示・単一商品グループのみのいずれも同様） |
+| 2 | 確定ボタン押下後、確実に成功するまで自動保存内容が消えないか（商品グループごと・まとめて表示・単一商品グループのみ） | ✅ | `clearAllInventoryCountDraftsForCount` は write が成功した `.then` 内でのみ呼ばれる。失敗時は `.catch` でトーストのみで clear は呼ばない。単一グループは count 単位キー＋LEGACY 削除で clear。 |
+| 3 | 確定処理は差異あり・差異なしどちらも問題なく処理されるか（商品グループごと・まとめて表示・単一商品グループのみ） | ✅ | 4経路すべて実装済み。差異あり時は adjust 失敗で catch し成功トーストは出さない。差異なし時はバックグラウンド write 失敗時のみ後からエラートースト。単一グループは resolvedAllIds/groupIdsForCheck でステータス「完了」が正しく書き込まれる。 |
 | 4 | 成功トーストを出したのに差異調整・ステータス変更がされない可能性はないか | 差異調整: ✅ なし / ステータス: ⚠️ write 失敗時のみ | 差異調整はトースト前に await 済みのため「トースト＝差異調整済み」。ステータス（メタ）はバックグラウンド write 失敗時のみ未反映の可能性あり（その場合は後からエラートースト）。 |
 | 5 | 確定失敗したのに一部商品の在庫調整がされてしまう可能性はないか | ✅ なし | `adjustInventoryToActual` は1回の mutation で全件実行。成功なら全件・失敗なら throw で全件未更新。部分だけ在庫が変わることはない。 |
 | 6 | 何かしらの処理で棚卸ID全体や他グループのステータスが完了→未処理に変わってしまう可能性はないか | ✅ なし | fixCountsStatusOnly / readInventoryCounts で `status === "completed"` は上書きしない。確定時は fromStorage ?? count とリトライで他グループの groupItems を落とさない。 |
@@ -129,6 +131,32 @@ REQUIREMENTS_FINAL.md に基づき、確定処理まわりを実装と照らし�
 
 ---
 
+## 9. 在庫調整（adjustInventoryToActual）の処理に不具合はないか
+
+**結論: 設計上は「全件一括・失敗時は全件未更新」で部分更新は起きない。Throttled 時のリトライが不足していたため対応した。**
+
+- **全件一括で実行**: `inventorySetQuantities` は1回の mutation で渡した `quantities` をまとめて反映する。成功すれば全件更新、失敗すれば throw で全件未更新。途中で「一部だけ在庫が変わった」状態にはならない（stocktakeApi.js 1978–1990 行付近）。
+- **不正な inventoryItemId**: `toInventoryItemGid` で GID に変換できない行は `quantities` から除外され、有効な行だけが API に送られる。その場合 `invalidCount` が返り、呼び出し元（InventoryCountList）で `result?.invalidCount > 0` のときトーストで「○件が不正なIDのため除外されました」と通知している。在庫が変わるのは「有効なIDの商品のみ」となるが、ユーザーには通知される。
+- **在庫有効化（ensureInventoryActivatedAtLocation）**: ロケーションに在庫レベルがないアイテムは先に `inventoryActivate` 等で有効化する。ここで1件でも errors が残ると `adjustInventoryToActual` は throw するため、有効化が全部成功するまで `inventorySetQuantities` には進まない。
+- **Throttled 時のリトライ不足（2026-02-28 対応）**: 従来、リトライ条件は `timeout` / `network` / `fetch` / `HTTP 5xx` のみで、**Throttled（429 や "Throttled" メッセージ）が含まれていなかった**。そのため API がスロットリングを返した場合に即失敗していた。  
+  **対応**:  
+  1. `inventorySetQuantities` の `graphql` 呼び出しを `runWithThrottleRetry` でラップし、Throttled 時もメタ書き込みと同様に待機・リトライするようにした。  
+  2. 既存の for ループ側のリトライ条件に `throttle` と `429` を追加し、Throttled 系エラーでもループ内でリトライするようにした。
+
+これにより、在庫調整は「全件一括・失敗時は全件未更新」を保ちつつ、Throttled 時にもリトライして成功しやすくなっている。
+
+---
+
+## 10. 単一グループの棚卸で「棚卸完了しました」トースト後もステータスが「完了」に変わらない（2026-02-28 対応）
+
+**原因**: 商品グループが1つだけの棚卸では、一覧や親から渡る `count` に `productGroupIds` / `productGroupId` が入っていないことがある。その場合、`buildUpdatedCountFromLocalState` と `mergeCountWithStorage` の両方で「全グループが揃ったか」の判定に使う `allIds` が空になり、`allDone` が常に false → ステータスが「in_progress」のまま書き込まれていた。
+
+**対応**:
+- **buildUpdatedCountFromLocalState**: `allIds` が空かつ `currentGroupId` があるときは `resolvedAllIds = [currentGroupId]` として `allDone` を計算。戻り値に `productGroupIds: resolvedAllIds` を付与（count に元々 productGroupIds がある場合は変更しない）。
+- **mergeCountWithStorage**: `allIds` が空のときは、マージ後の `groupItems` のキー（中身が非空のものだけ）を `groupIdsForCheck` として使い `allDone` を計算。書き込み結果に `productGroupIds` が無い場合は `groupIdsForCheck` を `out.productGroupIds` に設定し、次回読込で正しく扱えるようにした。
+
+---
+
 ## まとめ
 
 | 確認項目 | 結果 |
@@ -141,3 +169,4 @@ REQUIREMENTS_FINAL.md に基づき、確定処理まわりを実装と照らし�
 | 確定失敗なのに一部だけ在庫調整される可能性 | ❌ なし（adjust は全件一括・失敗時は全件未更新） |
 | 何かしらの処理で完了→未処理に変わる可能性 | ❌ なし（fixCountsStatusOnly/readInventoryCounts で completed は上書きしない・他IDはそのまま） |
 | 空や少ない件数でメタを上書きしてデータが消える可能性 | ❌ 空配列はブロック済み。少ない件数で上書きする場合は write 内で existing の不足分を補完するガードを追加済み。 |
+| 在庫調整（adjust）の処理に不具合はないか | ✅ 全件一括・失敗時は全件未更新。Throttled 時は runWithThrottleRetry とリトライ条件の追加で対応済み。不正IDは除外され invalidCount で通知。 |

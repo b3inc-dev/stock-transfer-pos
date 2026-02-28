@@ -115,10 +115,19 @@ function mergeCountWithStorage(fromStorage, locallyBuilt) {
       : locallyBuilt.productGroupId
         ? [locallyBuilt.productGroupId]
         : [];
+  // ✅ 単一グループで productGroupIds が無い場合、マージ後の groupItems のキーからグループID一覧を補う（さもないと allDone が false になりステータスが「完了」に更新されない）
+  const groupIdsForCheck =
+    allIds.length > 0
+      ? allIds
+      : (typeof mergedGroupItems === "object" && mergedGroupItems !== null
+          ? Object.keys(mergedGroupItems).filter(
+              (k) => mergedGroupItems[k] && Array.isArray(mergedGroupItems[k]) && mergedGroupItems[k].length > 0
+            )
+          : []);
   const cancelledSet = cancelledGroupIdSet(locallyBuilt);
   const allDone =
-    allIds.length > 0 &&
-    allIds.every((id) => {
+    groupIdsForCheck.length > 0 &&
+    groupIdsForCheck.every((id) => {
       if (cancelledSet.has(normalizeIdForMatch(id))) return true;
       const items = getGroupItemsByKey(mergedGroupItems, id);
       return Array.isArray(items) && items.length > 0;
@@ -148,6 +157,10 @@ function mergeCountWithStorage(fromStorage, locallyBuilt) {
   if (fromPgIds && !outPgIds) {
     out.productGroupIds = fromStorage.productGroupIds;
   }
+  // ✅ 単一グループで productGroupIds が無く groupIdsForCheck で補った場合、書き込み結果に productGroupIds を付与して次回読込で正しく扱えるようにする
+  if (!outPgIds && !fromPgIds && groupIdsForCheck.length > 0) {
+    out.productGroupIds = groupIdsForCheck;
+  }
   return out;
 }
 
@@ -167,6 +180,8 @@ function buildUpdatedCountFromLocalState(count, lines, opts) {
       : count.productGroupId
         ? [count.productGroupId]
         : [];
+  // ✅ 単一グループの棚卸で count に productGroupIds/productGroupId が無い場合、currentGroupId を allIds として使う（さもないと allDone が常に false になりステータスが「完了」にならない）
+  const resolvedAllIds = allIds.length > 0 ? allIds : (currentGroupId ? [currentGroupId] : []);
 
   if (isMultipleMode && Array.isArray(targetProductGroupIds) && targetProductGroupIds.length > 0) {
     const editableLines = lines.filter((l) => !l.isReadOnly);
@@ -237,8 +252,8 @@ function buildUpdatedCountFromLocalState(count, lines, opts) {
 
   const cancelledSet = cancelledGroupIdSet(count);
   const allDone =
-    allIds.length > 0 &&
-    allIds.every((id) => {
+    resolvedAllIds.length > 0 &&
+    resolvedAllIds.every((id) => {
       if (cancelledSet.has(normalizeIdForMatch(id))) return true;
       const items = getGroupItemsByKey(groupItems, id);
       return Array.isArray(items) && items.length > 0;
@@ -287,6 +302,10 @@ function buildUpdatedCountFromLocalState(count, lines, opts) {
     status: newStatus,
     completedAt: allDone ? new Date().toISOString() : undefined,
     items: itemsForCount,
+    // ✅ 単一グループで count に productGroupIds が無い場合、resolvedAllIds を渡して mergeCountWithStorage 側で allDone が正しく計算されるようにする
+    ...(resolvedAllIds.length > 0 && !(Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0)
+      ? { productGroupIds: resolvedAllIds }
+      : {}),
   };
 }
 

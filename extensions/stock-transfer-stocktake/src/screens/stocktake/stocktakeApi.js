@@ -2010,18 +2010,19 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
   let lastError;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const d = await graphql(m, { input });
-      
+      // ✅ Throttled 時もリトライする（write と同様 runWithThrottleRetry でラップ）
+      const d = await runWithThrottleRetry(() => graphql(m, { input }));
+
       // レスポンスが空の場合はエラー
       if (!d || !d.inventorySetQuantities) {
         throw new Error("GraphQL response is invalid");
       }
-      
+
       const errs = d?.inventorySetQuantities?.userErrors ?? [];
       if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
-      
+
       // ✅ 成功時は不正ID件数も返す（全件有効化済みのため除外なし）
-      return { 
+      return {
         adjustmentGroup: d.inventorySetQuantities.inventoryAdjustmentGroup ?? null,
         invalidCount,
         processedCount: quantities.length,
@@ -2029,14 +2030,20 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     } catch (e) {
       lastError = e;
       const msg = String(e?.message ?? e);
-      const isRetryable = msg.includes("timeout") || msg.includes("network") || msg.includes("fetch") || msg.includes("HTTP 5");
-      
+      const isRetryable =
+        msg.includes("timeout") ||
+        msg.includes("network") ||
+        msg.includes("fetch") ||
+        msg.includes("HTTP 5") ||
+        /throttle/i.test(msg) ||
+        /429/.test(msg);
+
       if (!isRetryable || attempt === maxRetries) {
         break;
       }
-      
+
       console.warn(`[adjustInventoryToActual] リトライ ${attempt}/${maxRetries}: ${msg}`);
-      await new Promise(resolve => setTimeout(resolve, retryDelayMs * attempt));
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
     }
   }
   
