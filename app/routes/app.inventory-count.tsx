@@ -1636,7 +1636,9 @@ export async function action({ request }: ActionFunctionArgs) {
     actionType === "cancel_stocktake" ||
     actionType === "get_count_full" ||
     actionType === "restore_count_as_completed" ||
-    actionType === "redistribute_count_group_items";
+    actionType === "redistribute_count_group_items" ||
+    actionType === "ensure_count_groups_completed" ||
+    actionType === "sort_counts_by_count_name";
   const [currentResp, inventoryCountsFromChunked] = await Promise.all([
     admin.graphql(
       `#graphql
@@ -1867,6 +1869,133 @@ export async function action({ request }: ActionFunctionArgs) {
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, redistributed: true } as const;
+  }
+
+  // ✅ 履歴棚卸で「IDは完了だが商品グループが全て未完了」の状態を解消：各グループの現在在庫を取得し、グループごとに完了として保存する
+  if (actionType === "ensure_count_groups_completed") {
+    const countId = (formData.get("countId") as string)?.trim();
+    if (!countId) return { ok: false, error: "countId は必須です" as const };
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "指定された棚卸が見つかりません" as const };
+    let locationId = String(count.locationId ?? "").trim();
+    if (!locationId) return { ok: false, error: "棚卸にロケーションが設定されていません" as const };
+    if (!locationId.startsWith("gid://")) {
+      const numMatch = locationId.match(/\d+/);
+      if (numMatch) locationId = `gid://shopify/Location/${numMatch[0]}`;
+    }
+    const productGroupIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0
+      ? count.productGroupIds
+      : count.productGroupId
+        ? [count.productGroupId]
+        : [];
+    if (productGroupIds.length === 0) return { ok: false, error: "商品グループが設定されていません" as const };
+
+    const BATCH_SIZE = 5;
+    const DELAY_MS = 180;
+    const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const groupItemsNew: Record<string, unknown[]> = {};
+    const allItems: Array<{ variantId: string; inventoryItemId: string; sku: string; title: string; currentQuantity: number; actualQuantity: number; [k: string]: unknown }> = [];
+
+    for (const gid of productGroupIds) {
+      const group = productGroups.find((g) => g.id === gid || normalizeIdForMatch(g.id) === normalizeIdForMatch(gid));
+      if (!group) continue;
+      let ids: string[] = (group as any).inventoryItemIds && Array.isArray((group as any).inventoryItemIds) ? [...(group as any).inventoryItemIds] : [];
+      if (ids.length === 0) {
+        try {
+          ids = await getInventoryItemIdsForGroup(admin, group);
+        } catch {
+          continue;
+        }
+      }
+      const groupEntries: Array<{ variantId: string; inventoryItemId: string; sku: string; title: string; currentQuantity: number; actualQuantity: number; [k: string]: unknown }> = [];
+      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+        if (i > 0) await delay(DELAY_MS);
+        const batch = ids.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(
+          batch.map(async (inventoryItemId) => {
+            const id = String(inventoryItemId ?? "").trim();
+            const gidForm = id.startsWith("gid://") ? id : `gid://shopify/InventoryItem/${id.replace(/\D/g, "") || id}`;
+            try {
+              const resp = await admin.graphql(
+                `#graphql
+                query ItemAndLevelForEnsure($id: ID!, $loc: ID!) {
+                  inventoryItem(id: $id) {
+                    id
+                    variant {
+                      id
+                      title
+                      sku
+                      barcode
+                      product { title }
+                    }
+                    inventoryLevel(locationId: $loc) {
+                      quantities(names: ["available"]) { name quantity }
+                    }
+                  }
+                }
+              `,
+                { variables: { id: gidForm, loc: locationId } }
+              );
+              const json = await resp.json();
+              const item = json?.data?.inventoryItem;
+              if (!item?.variant) return null;
+              const productTitle = item.variant.product?.title ?? "";
+              const variantTitle = item.variant.title ?? "";
+              const fullTitle = variantTitle && variantTitle !== "Default Title" ? `${productTitle}/${variantTitle}` : productTitle;
+              const qty = item.inventoryLevel?.quantities?.find((x: { name?: string; quantity?: string }) => x.name === "available")?.quantity;
+              const currentQuantity = qty != null ? Number(qty) : 0;
+              return {
+                variantId: item.variant.id,
+                inventoryItemId: item.id,
+                sku: item.variant.sku ?? "",
+                title: fullTitle,
+                currentQuantity,
+                actualQuantity: currentQuantity,
+              };
+            } catch {
+              return null;
+            }
+          })
+        );
+        for (const r of results) {
+          if (r) {
+            groupEntries.push(r);
+            allItems.push(r);
+          }
+        }
+      }
+      groupItemsNew[gid] = groupEntries;
+    }
+
+    const productGroupNames = Array.isArray(count.productGroupNames) && count.productGroupNames.length > 0
+      ? count.productGroupNames
+      : productGroupIds.map((id) => productGroups.find((g) => g.id === id)?.name ?? "");
+    const updatedCount: InventoryCount = {
+      ...count,
+      groupItems: groupItemsNew,
+      items: [...allItems],
+      productGroupNames: productGroupNames.length > 0 ? productGroupNames : undefined,
+      status: "completed",
+      completedAt: count.completedAt || new Date().toISOString(),
+    };
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
+    return { ok: true, groupsCompleted: true } as const;
+  }
+
+  // ✅ 一度だけ：棚卸一覧を棚卸ID（#C0001, #C0002…）の数値順に並び替えて保存する
+  if (actionType === "sort_counts_by_count_name") {
+    const sorted = [...inventoryCounts].sort((a, b) => {
+      const na = parseCountNameNumber((a as { countName?: string }).countName);
+      const nb = parseCountNameNumber((b as { countName?: string }).countName);
+      return na - nb;
+    });
+    const { userErrors } = await writeInventoryCountsChunked(admin, sorted as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
+    return { ok: true, sortedByCountName: true } as const;
   }
 
   if (actionType === "save_product_group") {
@@ -3604,6 +3733,14 @@ export default function InventoryCountPage() {
       revalidator.revalidate();
       setModalOpen(false);
       setModalCount(null);
+    }
+    if (d && (d as { ok?: boolean }).ok && (d as { groupsCompleted?: boolean }).groupsCompleted === true) {
+      revalidator.revalidate();
+      setModalOpen(false);
+      setModalCount(null);
+    }
+    if (d && (d as { ok?: boolean }).ok && (d as { sortedByCountName?: boolean }).sortedByCountName === true) {
+      revalidator.revalidate();
     }
   }, [fetcher.data, revalidator]);
   // ✅ list 由来で groupItems がない棚卸のフルデータ取得（モーダルでステータス・完了/未完了を正しく表示するため）
@@ -5804,6 +5941,28 @@ export default function InventoryCountPage() {
                           >
                             棚卸IDを発行
                           </button>
+                          <button
+                            type="button"
+                            onClick={() => fetcher.submit({ action: "sort_counts_by_count_name" }, { method: "post" })}
+                            disabled={fetcher.state !== "idle" || !inventoryCounts || inventoryCounts.length === 0}
+                            style={{
+                              padding: "8px 16px",
+                              backgroundColor: fetcher.state !== "idle" || !inventoryCounts || inventoryCounts.length === 0 ? "#e5e7eb" : "#3b82f6",
+                              color: "white",
+                              border: "none",
+                              borderRadius: "6px",
+                              fontSize: "13px",
+                              fontWeight: 600,
+                              cursor: fetcher.state !== "idle" || !inventoryCounts || inventoryCounts.length === 0 ? "not-allowed" : "pointer",
+                              width: "100%",
+                              marginTop: "8px",
+                            }}
+                          >
+                            {fetcher.state !== "idle" ? "処理中..." : "棚卸ID順に並び替え"}
+                          </button>
+                          <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
+                            一覧を #C0001, #C0002… の数値順に並び替えて保存します（#C0017 が #C0016 と #C0018 の間などに収まります）。
+                          </s-text>
                           {/* 復旧完了のため棚卸ID修復ボタンは非表示（必要なら false を true に変更して再有効化） */}
                           {false && (
                             <>
@@ -5851,6 +6010,20 @@ export default function InventoryCountPage() {
                           <s-box padding="base" background="subdued">
                             <s-text emphasis="bold" tone="success">
                               グループ振り分けを修正しました。アプリ・管理画面で各グループが正しく表示されます。
+                            </s-text>
+                          </s-box>
+                        )}
+                        {fetcher.data?.ok && (fetcher.data as { groupsCompleted?: boolean }).groupsCompleted === true && (
+                          <s-box padding="base" background="subdued">
+                            <s-text emphasis="bold" tone="success">
+                              商品グループをすべて完了にしました（現在在庫で確定）。アプリ・管理画面で各グループが完了で表示されます。
+                            </s-text>
+                          </s-box>
+                        )}
+                        {fetcher.data?.ok && (fetcher.data as { sortedByCountName?: boolean }).sortedByCountName === true && (
+                          <s-box padding="base" background="subdued">
+                            <s-text emphasis="bold" tone="success">
+                              棚卸一覧を棚卸ID順（#C0001, #C0002…）に並び替えました。
                             </s-text>
                           </s-box>
                         )}
@@ -6386,6 +6559,38 @@ export default function InventoryCountPage() {
                         }}
                       >
                         {fetcher.state !== "idle" ? "処理中..." : "グループ振り分けを修正"}
+                      </button>
+                    </div>
+                  )}
+                  {/* 履歴で「IDは完了だが商品グループが全て未完了」のとき：現在在庫で各グループを完了にする */}
+                  {modalCount.status === "completed" &&
+                    Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0 && (
+                    <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#eff6ff", border: "1px solid #3b82f6", borderRadius: "6px", fontSize: "13px" }}>
+                      <div style={{ fontWeight: 600, marginBottom: "6px", color: "#1e40af" }}>商品グループをすべて完了にする</div>
+                      <p style={{ margin: "0 0 10px 0", color: "#1d4ed8" }}>
+                        この棚卸はIDは完了ですが、商品グループが未完了表示になっている場合があります。現在の在庫数で各グループを「完了」として保存し直すと、アプリ・管理画面でグループごとに正しく完了で表示されます（在庫調整は行いません）。
+                      </p>
+                      <button
+                        type="button"
+                        disabled={fetcher.state !== "idle"}
+                        onClick={() => {
+                          const fd = new FormData();
+                          fd.set("action", "ensure_count_groups_completed");
+                          fd.set("countId", String(modalCount.id));
+                          fetcher.submit(fd, { method: "post" });
+                        }}
+                        style={{
+                          padding: "8px 16px",
+                          backgroundColor: fetcher.state !== "idle" ? "#bfdbfe" : "#3b82f6",
+                          color: "white",
+                          border: "none",
+                          borderRadius: "6px",
+                          cursor: fetcher.state !== "idle" ? "not-allowed" : "pointer",
+                          fontSize: "13px",
+                          fontWeight: 600,
+                        }}
+                      >
+                        {fetcher.state !== "idle" ? "処理中..." : "商品グループをすべて完了にする"}
                       </button>
                     </div>
                   )}
