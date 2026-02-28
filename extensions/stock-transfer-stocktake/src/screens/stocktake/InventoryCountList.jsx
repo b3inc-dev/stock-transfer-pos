@@ -1979,44 +1979,42 @@ export function InventoryCountList({
         .filter((l) => l.currentQuantity !== l.actualQuantity);
       
       if (allItemsToAdjust.length === 0) {
-        // ✅ 在庫差異なし：read → merge → write 後に merge 結果を onAfterConfirm に渡し、商品グループごと表示・1グループのみでも最後のグループが完了になるようする
+        // ✅ 在庫差異なし：read → merge → write 後に merge 結果を onAfterConfirm に渡し、商品グループごと表示・1グループのみでも最後のグループが完了になるようする（setTimeout を使わず即時開始で体感を短くする）
         setSubmitting(true);
-        setTimeout(() => {
-          try {
-            const locallyBuilt = buildUpdatedCountFromLocalState(count, lines, {
-              isMultipleMode: true,
-              targetProductGroupIds,
-              productGroupId,
+        try {
+          const locallyBuilt = buildUpdatedCountFromLocalState(count, lines, {
+            isMultipleMode: true,
+            targetProductGroupIds,
+            productGroupId,
+          });
+          readInventoryCountsRaw()
+            .then((counts) => {
+              const idNorm = normalizeIdForMatch(count?.id ?? "");
+              const list = Array.isArray(counts) ? counts : [];
+              const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+              const toWrite = mergeCountWithStorage(fromStorage, locallyBuilt);
+              const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+                : [...list, toWrite];
+              return writeInventoryCounts(merged).then(() => toWrite);
+            })
+            .then((toWrite) => {
+              if (toWrite) {
+                toast("棚卸を完了しました");
+                onAfterConfirm?.(toWrite);
+              }
+              setSubmitting(false);
+            })
+            .catch((e) => {
+              toast(formatSaveError(e));
+              onAfterConfirm?.(null);
+              setSubmitting(false);
             });
-            readInventoryCountsRaw()
-              .then((counts) => {
-                const idNorm = normalizeIdForMatch(count?.id ?? "");
-                const list = Array.isArray(counts) ? counts : [];
-                const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                const toWrite = mergeCountWithStorage(fromStorage, locallyBuilt);
-                const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-                  ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-                  : [...list, toWrite];
-                return writeInventoryCounts(merged).then(() => toWrite);
-              })
-              .then((toWrite) => {
-                if (toWrite) {
-                  toast("棚卸を完了しました");
-                  onAfterConfirm?.(toWrite);
-                }
-                setSubmitting(false);
-              })
-              .catch((e) => {
-                toast(formatSaveError(e));
-                onAfterConfirm?.(null);
-                setSubmitting(false);
-              });
-          } catch (e) {
-            toast(`エラー: ${e?.message ?? e}`);
-            onAfterConfirm?.(null);
-            setSubmitting(false);
-          }
-        }, 0);
+        } catch (e) {
+          toast(`エラー: ${e?.message ?? e}`);
+          onAfterConfirm?.(null);
+          setSubmitting(false);
+        }
         return true;
       }
       
@@ -2111,49 +2109,47 @@ export function InventoryCountList({
     }
 
     if (itemsToAdjust.length === 0) {
-      // ✅ 在庫差異なし：read → merge → write 後に merge 結果を onAfterConfirm に渡し、1グループのみ・グループごと表示でも完了ステータスが正しくなるようにする
+      // ✅ 在庫差異なし：read → merge → write 後に merge 結果を onAfterConfirm に渡し、1グループのみ・グループごと表示でも完了ステータスが正しくなるようにする（setTimeout を使わず即時開始で体感を短くする）
       setSubmitting(true);
-      setTimeout(() => {
-        try {
-          const locallyBuiltNoAdjust = buildUpdatedCountFromLocalState(count, lines, {
-            isMultipleMode,
-            targetProductGroupIds,
-            productGroupId,
+      try {
+        const locallyBuiltNoAdjust = buildUpdatedCountFromLocalState(count, lines, {
+          isMultipleMode,
+          targetProductGroupIds,
+          productGroupId,
+        });
+        readInventoryCountsRaw()
+          .then((counts) => {
+            const idNorm = normalizeIdForMatch(count?.id ?? "");
+            const list = Array.isArray(counts) ? counts : [];
+            const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+            const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltNoAdjust);
+            const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+              ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+              : [...list, toWrite];
+            return writeInventoryCounts(merged).then(() => toWrite);
+          })
+          .then((toWrite) => {
+            if (toWrite) {
+              toast("棚卸を完了しました");
+              onAfterConfirm?.(toWrite);
+              clearAllInventoryCountDraftsForCount({
+                countId: count.id,
+                locationId: count.locationId,
+                productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+              }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+            }
+            setSubmitting(false);
+          })
+          .catch((e) => {
+            toast(formatSaveError(e));
+            onAfterConfirm?.(null);
+            setSubmitting(false);
           });
-          readInventoryCountsRaw()
-            .then((counts) => {
-              const idNorm = normalizeIdForMatch(count?.id ?? "");
-              const list = Array.isArray(counts) ? counts : [];
-              const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-              const toWrite = mergeCountWithStorage(fromStorage, locallyBuiltNoAdjust);
-              const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-                ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-                : [...list, toWrite];
-              return writeInventoryCounts(merged).then(() => toWrite);
-            })
-            .then((toWrite) => {
-              if (toWrite) {
-                toast("棚卸を完了しました");
-                onAfterConfirm?.(toWrite);
-                clearAllInventoryCountDraftsForCount({
-                  countId: count.id,
-                  locationId: count.locationId,
-                  productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-                }).catch((e) => console.error("Failed to clear inventory count draft:", e));
-              }
-              setSubmitting(false);
-            })
-            .catch((e) => {
-              toast(formatSaveError(e));
-              onAfterConfirm?.(null);
-              setSubmitting(false);
-            });
-        } catch (e) {
-          toast(`エラー: ${e?.message ?? e}`);
-          onAfterConfirm?.(null);
-          setSubmitting(false);
-        }
-      }, 0);
+      } catch (e) {
+        toast(`エラー: ${e?.message ?? e}`);
+        onAfterConfirm?.(null);
+        setSubmitting(false);
+      }
       return true;
     }
 
@@ -2274,10 +2270,10 @@ export function InventoryCountList({
       const msg = String(e?.message ?? e);
       toast(`エラー: ${msg}`);
       console.error("[InventoryCountList] handleComplete error:", e);
-      return false;
-    } finally {
       setSubmitting(false);
+      return false;
     }
+    // ※ 差異ありで Promise.all を開始して return true する経路では、setSubmitting(false) は Promise.all の .then/.catch でのみ行う（finally で実行すると完了前にボタンが有効になるため finally は使わない）
   }, [count, itemsToAdjust, lines, onAfterConfirm, productGroupId, targetProductGroupIds, buildGroupItemsEntry]);
 
   // Header
