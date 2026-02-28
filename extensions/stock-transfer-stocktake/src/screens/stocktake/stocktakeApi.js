@@ -13,6 +13,9 @@ const INVENTORY_COUNTS_LIST_KEY = "inventory_counts_list_v1";
 const INVENTORY_COUNTS_LIST_CHUNK_PREFIX = "inventory_counts_list_v1_c";
 /** 棚卸ID → チャンク番号のインデックス（readInventoryCountById で全チャンク読まないため） */
 const INVENTORY_COUNT_INDEX_KEY = "inventory_count_index_v1";
+/** 書き込み前の1世代バックアップ用（復元用。list の軽量JSONのみ） */
+const INVENTORY_COUNTS_BACKUP_KEY = "inventory_counts_backup_v1";
+const INVENTORY_COUNTS_BACKUP_MAX_BYTES = 60_000;
 
 /** #C0001 形式の countName から数値（1）を取得。パースできない場合は 0 */
 function parseCountNameNumber(countName) {
@@ -831,6 +834,60 @@ function splitCountIntoParts(count) {
 }
 
 /**
+ * 書き込み前に、渡された counts のうち locationId / productGroupIds / groupItems などが
+ * 空白の件について、既存ストレージの値を補完する。何らかのアクション・表示・読み込み・確定時に
+ * 空白で上書きされて「IDだけ残った」レコードが増えるのを防ぐ。
+ * existing は readInventoryCountsRaw() の戻り値（既存の全件）。
+ */
+function mergeExistingNonBlank(counts, existing) {
+  if (!Array.isArray(counts) || counts.length === 0) return counts;
+  if (!Array.isArray(existing) || existing.length === 0) return counts;
+  const existingById = new Map();
+  for (const e of existing) {
+    const id = e?.id ?? e?.countId;
+    if (id) existingById.set(String(id), e);
+  }
+  return counts.map((c) => {
+    const id = c?.id ?? c?.countId;
+    if (!id) return c;
+    const ex = existingById.get(String(id));
+    if (!ex || typeof ex !== "object") return c;
+    const out = { ...c };
+    if (!out.locationId && ex.locationId) out.locationId = ex.locationId;
+    if (ex.locationName && !out.locationName) out.locationName = ex.locationName;
+    const hasPgIds = Array.isArray(out.productGroupIds) && out.productGroupIds.length > 0;
+    const exPgIds = Array.isArray(ex.productGroupIds) && ex.productGroupIds.length > 0;
+    if (!hasPgIds && exPgIds) out.productGroupIds = ex.productGroupIds;
+    if (!hasPgIds && ex.productGroupId && !exPgIds) out.productGroupIds = [ex.productGroupId];
+    if (!out.productGroupId && ex.productGroupId) out.productGroupId = ex.productGroupId;
+    const exPgNames = Array.isArray(ex.productGroupNames) && ex.productGroupNames.length > 0;
+    if ((!Array.isArray(out.productGroupNames) || out.productGroupNames.length === 0) && exPgNames) out.productGroupNames = ex.productGroupNames;
+    const hasGroupItems = out.groupItems && typeof out.groupItems === "object" && Object.keys(out.groupItems).length > 0;
+    const exGroupItems = ex.groupItems && typeof ex.groupItems === "object" && Object.keys(ex.groupItems).length > 0;
+    if (!hasGroupItems && exGroupItems) out.groupItems = ex.groupItems;
+    const hasItems = Array.isArray(out.items) && out.items.length > 0;
+    const exItems = Array.isArray(ex.items) && ex.items.length > 0;
+    if (!hasItems && exItems) out.items = ex.items;
+    return out;
+  });
+}
+
+/**
+ * 書き込み直前：id があるのに countName または locationId が空白のレコードは保存しない。
+ * 絶対に「空白のID」を新規に永続化しないための最終ガード。
+ */
+function filterInvalidCountsBeforeWrite(counts) {
+  if (!Array.isArray(counts) || counts.length === 0) return counts;
+  const hasCountName = (c) => c?.countName != null && String(c.countName).trim() !== "";
+  const hasLocationId = (c) => c?.locationId != null && String(c.locationId).trim() !== "";
+  return counts.filter((c) => {
+    const id = c?.id ?? c?.countId;
+    if (!id) return true;
+    return hasCountName(c) && hasLocationId(c);
+  });
+}
+
+/**
  * 書き込み前に countName が欠けている件にのみ付与する（既存の countName は変更しない）。
  * writeInventoryCounts から呼び、確定後バックグラウンドで readInventoryCountsRaw 由来の list を書くときに空白で上書きするのを防ぐ。
  */
@@ -866,7 +923,7 @@ function ensureCountNamesBeforeWrite(counts) {
 /**
  * 棚卸一覧をメタフィールドに保存する。必ず「全件」の配列を渡すこと。
  * 部分的な配列で呼ぶと他棚卸IDが消えるため、呼び出し元は read で取得した全件を更新してから渡すこと。
- * 書き込み前に countName が欠けている件には付与する（空白で上書きしない）。
+ * 書き込み前に (1) 既存データから locationId / productGroupIds / groupItems 等を補完（空白で上書きしない）、(2) countName が欠けている件には付与する。
  */
 export async function writeInventoryCounts(counts) {
   const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
@@ -874,7 +931,27 @@ export async function writeInventoryCounts(counts) {
   const ownerId = d?.currentAppInstallation?.id;
   if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
 
-  const arr = ensureCountNamesBeforeWrite(Array.isArray(counts) ? counts : []);
+  let existing = [];
+  try {
+    existing = await readInventoryCountsRaw();
+  } catch (e) {
+    // 既存読取失敗時はマージせずそのまま書く（新規ショップ等）
+  }
+  const merged = mergeExistingNonBlank(Array.isArray(counts) ? counts : [], existing);
+  const withNames = ensureCountNamesBeforeWrite(merged);
+  const arr = filterInvalidCountsBeforeWrite(withNames);
+  try {
+    const backupList = (existing.length > 0 ? existing : withNames).map(toMinimalCountForList).filter(Boolean);
+    const backupValue = JSON.stringify(backupList);
+    if (backupValue.length <= INVENTORY_COUNTS_BACKUP_MAX_BYTES) {
+      const mutation = `#graphql mutation SetBackup($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
+      await graphql(mutation, {
+        metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_BACKUP_KEY, type: "json", value: backupValue }],
+      });
+    }
+  } catch (e) {
+    // バックアップ失敗時は無視（本体の書き込みは続行）
+  }
   if (arr.length === 0) {
     const gqlCheck = `#graphql query MainKey { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
     const check = await graphql(gqlCheck);

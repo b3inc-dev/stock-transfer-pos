@@ -110,13 +110,29 @@ function mergeCountWithStorage(fromStorage, locallyBuilt) {
   const status =
     locallyBuilt.status === "cancelled" ? (allDone ? "completed" : "cancelled") : allDone ? "completed" : "in_progress";
   const completedAt = allDone ? new Date().toISOString() : undefined;
-  return {
+  const out = {
     ...fromStorage,
     ...locallyBuilt,
     groupItems: mergedGroupItems,
     status,
     completedAt,
   };
+  // 空白で上書きしない：locallyBuilt が countName/locationId を空白にしている場合は fromStorage の値を維持
+  if (fromStorage?.countName != null && String(fromStorage.countName).trim() !== "" && (!out.countName || String(out.countName).trim() === "")) {
+    out.countName = fromStorage.countName;
+  }
+  if (fromStorage?.locationId != null && String(fromStorage.locationId).trim() !== "" && (!out.locationId || String(out.locationId).trim() === "")) {
+    out.locationId = fromStorage.locationId;
+  }
+  if (fromStorage?.locationName != null && String(fromStorage.locationName).trim() !== "" && (!out.locationName || String(out.locationName).trim() === "")) {
+    out.locationName = fromStorage.locationName;
+  }
+  const fromPgIds = Array.isArray(fromStorage?.productGroupIds) && fromStorage.productGroupIds.length > 0;
+  const outPgIds = Array.isArray(out.productGroupIds) && out.productGroupIds.length > 0;
+  if (fromPgIds && !outPgIds) {
+    out.productGroupIds = fromStorage.productGroupIds;
+  }
+  return out;
 }
 
 /**

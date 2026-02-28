@@ -14,6 +14,8 @@ const SETTINGS_KEY = "settings_v1";
 const INVENTORY_COUNTS_LIST_KEY = "inventory_counts_list_v1";
 const INVENTORY_COUNTS_LIST_CHUNK_PREFIX = "inventory_counts_list_v1_c";
 const INVENTORY_COUNT_INDEX_KEY = "inventory_count_index_v1";
+const INVENTORY_COUNTS_BACKUP_KEY = "inventory_counts_backup_v1";
+const INVENTORY_COUNTS_BACKUP_MAX_BYTES = 60_000;
 const PRODUCT_GROUP_IDS_KEY = "product_group_ids_v1";
 const PRODUCT_GROUP_NAMES_KEY = "product_group_names_v1";
 
@@ -360,13 +362,55 @@ function toMinimalCountForList(c: InventoryCount): Record<string, unknown> {
 /**
  * 棚卸メタフィールドをチャンク対応で保存（単体が CHUNK_BYTES を超える場合は groupItems/items をパート分割）。
  * 一覧用軽量メタフィールド（list）と棚卸ID→チャンク番号インデックスも同時に保存。
+ * 書き込み前に既存データから locationId / productGroupIds / groupItems 等を補完し、空白で上書きしない。
  */
 async function writeInventoryCountsChunked(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   counts: InventoryCount[],
   ownerId: string
 ): Promise<{ userErrors: Array<{ message?: string }> }> {
-  const arr = Array.isArray(counts) ? counts : [];
+  let existing: InventoryCount[] = [];
+  try {
+    existing = await readInventoryCountsChunked(admin);
+  } catch {
+    // 既存読取失敗時はマージせずそのまま書く（新規ショップ等）
+  }
+  const merged = mergeExistingNonBlank(Array.isArray(counts) ? counts : [], existing);
+  const withNames = ensureCountNamesOnCounts(merged);
+  const arr = filterInvalidCountsBeforeWrite(withNames);
+  try {
+    const toMinimal = (c: InventoryCount) =>
+      c
+        ? {
+            id: c.id,
+            locationId: c.locationId,
+            status: c.status,
+            countName: c.countName,
+            createdAt: c.createdAt,
+            productGroupIds: Array.isArray(c.productGroupIds) ? c.productGroupIds : c.productGroupId ? [c.productGroupId] : [],
+            productGroupNames: Array.isArray(c.productGroupNames) ? c.productGroupNames : undefined,
+            cancelledGroupIds: Array.isArray(c.cancelledGroupIds) ? c.cancelledGroupIds : undefined,
+          }
+        : null;
+    const backupList = (existing.length > 0 ? existing : arr).map(toMinimal).filter(Boolean);
+    const backupValue = JSON.stringify(backupList);
+    if (backupValue.length <= INVENTORY_COUNTS_BACKUP_MAX_BYTES) {
+      const resp = await admin.graphql(
+        `#graphql
+          mutation SetBackup($metafields: [MetafieldsSetInput!]!) {
+            metafieldsSet(metafields: $metafields) { userErrors { message } }
+          }
+        `,
+        { variables: { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_BACKUP_KEY, type: "json", value: backupValue }] } }
+      );
+      const data = (await resp.json())?.data?.metafieldsSet;
+      if (Array.isArray(data?.userErrors) && data.userErrors.length > 0) {
+        // バックアップの userErrors は無視（本体の書き込みは続行）
+      }
+    }
+  } catch {
+    // バックアップ失敗時は無視（本体の書き込みは続行）
+  }
   const payloads: (InventoryCount | CountPart)[][] = [];
   const countIdToChunkIndices = new Map<string, Set<number>>();
   let current: (InventoryCount | CountPart)[] = [];
@@ -973,6 +1017,59 @@ function parseCountNameNumber(countName: string | null | undefined): number {
 }
 
 /**
+ * 書き込み前に、渡された counts のうち locationId / productGroupIds / groupItems などが
+ * 空白の件について、既存ストレージの値を補完する。何らかのアクション・表示・読み込み・確定時に
+ * 空白で上書きされて「IDだけ残った」レコードが増えるのを防ぐ。
+ */
+function mergeExistingNonBlank(counts: InventoryCount[], existing: InventoryCount[]): InventoryCount[] {
+  if (!Array.isArray(counts) || counts.length === 0) return counts;
+  if (!Array.isArray(existing) || existing.length === 0) return counts;
+  const existingById = new Map<string, InventoryCount>();
+  for (const e of existing) {
+    const id = e?.id ?? (e as { countId?: string }).countId;
+    if (id) existingById.set(String(id), e);
+  }
+  return counts.map((c) => {
+    const id = c?.id ?? (c as { countId?: string }).countId;
+    if (!id) return c;
+    const ex = existingById.get(String(id));
+    if (!ex || typeof ex !== "object") return c;
+    const out = { ...c };
+    if (!out.locationId && ex.locationId) out.locationId = ex.locationId;
+    if (ex.locationName && !out.locationName) out.locationName = ex.locationName;
+    const hasPgIds = Array.isArray(out.productGroupIds) && out.productGroupIds.length > 0;
+    const exPgIds = Array.isArray(ex.productGroupIds) && ex.productGroupIds.length > 0;
+    if (!hasPgIds && exPgIds) out.productGroupIds = ex.productGroupIds;
+    if (!hasPgIds && ex.productGroupId && !exPgIds) out.productGroupIds = [ex.productGroupId];
+    if (!out.productGroupId && ex.productGroupId) out.productGroupId = ex.productGroupId;
+    const exPgNames = Array.isArray(ex.productGroupNames) && ex.productGroupNames.length > 0;
+    if ((!Array.isArray(out.productGroupNames) || out.productGroupNames.length === 0) && exPgNames) out.productGroupNames = ex.productGroupNames;
+    const hasGroupItems = out.groupItems && typeof out.groupItems === "object" && Object.keys(out.groupItems).length > 0;
+    const exGroupItems = ex.groupItems && typeof ex.groupItems === "object" && Object.keys(ex.groupItems).length > 0;
+    if (!hasGroupItems && exGroupItems) out.groupItems = ex.groupItems;
+    const hasItems = Array.isArray(out.items) && out.items.length > 0;
+    const exItems = Array.isArray(ex.items) && ex.items.length > 0;
+    if (!hasItems && exItems) out.items = ex.items;
+    return out;
+  });
+}
+
+/**
+ * 書き込み直前：id があるのに countName または locationId が空白のレコードは保存しない。
+ * 絶対に「空白のID」を新規に永続化しないための最終ガード。
+ */
+function filterInvalidCountsBeforeWrite(counts: InventoryCount[]): InventoryCount[] {
+  if (!Array.isArray(counts) || counts.length === 0) return counts;
+  const hasCountName = (c: InventoryCount) => c?.countName != null && String(c.countName).trim() !== "";
+  const hasLocationId = (c: InventoryCount) => c?.locationId != null && String(c.locationId).trim() !== "";
+  return counts.filter((c) => {
+    const id = c?.id ?? (c as { countId?: string }).countId;
+    if (!id) return true;
+    return hasCountName(c) && hasLocationId(c);
+  });
+}
+
+/**
  * 欠けている countName にのみ番号を付与する（既存の countName は変更しない）。
  * 管理画面の「棚卸IDを修復」で使用。POS の ensureCountNamesBeforeWrite と同様のロジック。
  */
@@ -1205,7 +1302,7 @@ async function getInventoryItemIdsForGroup(
 export async function action({ request }: ActionFunctionArgs) {
   const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
-  const actionType = formData.get("action") as string;
+  const actionType = (formData.get("action") ?? formData.get("actionType")) as string;
 
   try {
   // SKU検索は metafield 不要のため先に実行（ownerId 未取得で早期 return されないようにする）
@@ -1537,7 +1634,8 @@ export async function action({ request }: ActionFunctionArgs) {
     actionType === "reset_stocktake_all" ||
     actionType === "cancel_stocktake_group" ||
     actionType === "cancel_stocktake" ||
-    actionType === "get_count_full";
+    actionType === "get_count_full" ||
+    actionType === "restore_count_as_completed";
   const [currentResp, inventoryCountsFromChunked] = await Promise.all([
     admin.graphql(
       `#graphql
@@ -1559,6 +1657,118 @@ export async function action({ request }: ActionFunctionArgs) {
     try {
       productGroups = JSON.parse(groupsRaw) || [];
     } catch {}
+  }
+
+  // ✅ 欠損した棚卸を「指定の棚卸ID・ロケーション・商品グループ」で復元し、現在在庫で完了確定する（一時対応）
+  if (actionType === "restore_count_as_completed") {
+    const countId = (formData.get("countId") as string)?.trim();
+    const countName = (formData.get("countName") as string)?.trim();
+    const locationIdParam = (formData.get("locationId") as string)?.trim();
+    const productGroupIdsStr = formData.get("productGroupIds") as string;
+    const productGroupNamesStr = formData.get("productGroupNames") as string | null;
+    if (!countId || !countName || !locationIdParam || !productGroupIdsStr) {
+      return { ok: false, error: "countId, countName, locationId, productGroupIds は必須です" as const };
+    }
+    let productGroupIds: string[] = [];
+    let productGroupNames: string[] | undefined;
+    try {
+      productGroupIds = JSON.parse(productGroupIdsStr);
+      if (!Array.isArray(productGroupIds)) productGroupIds = [];
+    } catch {
+      return { ok: false, error: "productGroupIds は JSON 配列で指定してください" as const };
+    }
+    if (productGroupIds.length === 0) {
+      return { ok: false, error: "商品グループを1つ以上指定してください" as const };
+    }
+    if (productGroupNamesStr) {
+      try {
+        const parsed = JSON.parse(productGroupNamesStr);
+        productGroupNames = Array.isArray(parsed) ? parsed : undefined;
+      } catch {}
+    }
+    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    if (!count) return { ok: false, error: "指定された棚卸が見つかりません" as const };
+    const duplicateName = inventoryCounts.find((c) => String(c.countName || "").trim() === String(countName).trim() && String(c.id) !== String(countId));
+    if (duplicateName) return { ok: false, error: `棚卸ID「${countName}」は既に別の棚卸で使用されています` as const };
+    let locationId = locationIdParam;
+    if (!locationId.startsWith("gid://")) {
+      const numMatch = locationId.match(/\d+/);
+      if (numMatch) locationId = `gid://shopify/Location/${numMatch[0]}`;
+    }
+    const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? (count as any).groupItems : {};
+    const itemsLegacy = Array.isArray(count.items) ? count.items : [];
+    const allEntries: Array<{ inventoryItemId: string; [k: string]: unknown }> = [];
+    for (const arr of Object.values(groupItemsMap)) {
+      if (Array.isArray(arr)) allEntries.push(...arr.map((it: any) => ({ ...it, inventoryItemId: String(it?.inventoryItemId ?? "").trim() })));
+    }
+    if (allEntries.length === 0 && itemsLegacy.length > 0) {
+      itemsLegacy.forEach((it: any) => allEntries.push({ ...it, inventoryItemId: String(it?.inventoryItemId ?? "").trim() }));
+    }
+    allEntries.forEach((e, idx) => {
+      if (!(e as any).inventoryItemId && (e as any).id) (e as any).inventoryItemId = (e as any).id;
+    });
+    const BATCH = 5;
+    const DELAY_MS = 200;
+    const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    for (let i = 0; i < allEntries.length; i += BATCH) {
+      if (i > 0) await delay(DELAY_MS);
+      const batch = allEntries.slice(i, i + BATCH);
+      const results = await Promise.all(
+        batch.map(async (it: any) => {
+          const id = String(it?.inventoryItemId ?? it?.id ?? "").trim();
+          if (!id) return { ...it, currentQuantity: 0, actualQuantity: 0, delta: 0 };
+          const gid = id.startsWith("gid://") ? id : `gid://shopify/InventoryItem/${id.replace(/\D/g, "") || id}`;
+          try {
+            const resp = await admin.graphql(
+              `#graphql
+              query ItemLevel($id: ID!, $loc: ID!) {
+                inventoryItem(id: $id) {
+                  id
+                  inventoryLevel(locationId: $loc) {
+                    quantities(names: ["available"]) { name quantity }
+                  }
+                }
+              }
+            `,
+              { variables: { id: gid, loc: locationId } }
+            );
+            const json = await resp.json();
+            const item = json?.data?.inventoryItem;
+            const qty = item?.inventoryLevel?.quantities?.find((x: { name?: string }) => x.name === "available")?.quantity;
+            const currentQuantity = qty != null ? Number(qty) : 0;
+            return { ...it, currentQuantity, actualQuantity: currentQuantity, delta: 0 };
+          } catch {
+            return { ...it, currentQuantity: 0, actualQuantity: 0, delta: 0 };
+          }
+        })
+      );
+      for (let j = 0; j < results.length; j++) {
+        allEntries[i + j] = results[j];
+      }
+    }
+    const firstGroupId = productGroupIds[0];
+    const groupItemsNew: Record<string, unknown[]> = {};
+    groupItemsNew[firstGroupId] = allEntries;
+    const namesFromGroups = productGroupNames && productGroupNames.length > 0
+      ? productGroupNames
+      : productGroupIds.map((id) => productGroups.find((g) => g.id === id)?.name ?? "");
+    const updatedCount: InventoryCount = {
+      ...count,
+      countName: countName.trim(),
+      locationId,
+      productGroupIds,
+      productGroupNames: namesFromGroups,
+      groupItems: groupItemsNew,
+      items: [...allEntries],
+      status: "completed",
+      completedAt: new Date().toISOString(),
+    };
+    const updatedCounts = inventoryCounts.map((c) =>
+      String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
+    );
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
+    return { ok: true, restored: true } as const;
   }
 
   if (actionType === "save_product_group") {
@@ -3271,6 +3481,10 @@ export default function InventoryCountPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalCount, setModalCount] = useState<InventoryCount | null>(null);
   const [modalEditMode, setModalEditMode] = useState(false);
+  // 棚卸「復元して完了確定」フォーム（メタ欠損時のみ表示）
+  const [restoreCountName, setRestoreCountName] = useState("");
+  const [restoreLocationId, setRestoreLocationId] = useState("");
+  const [restoreProductGroupIds, setRestoreProductGroupIds] = useState<string[]>([]);
   const [modalEditedQuantities, setModalEditedQuantities] = useState<Record<string, Record<string, number>>>({});
   const historyActionFetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
@@ -3279,6 +3493,14 @@ export default function InventoryCountPage() {
     const d = fetcher.data;
     if (d && (d as { ok?: boolean }).ok && typeof (d as { repaired?: number }).repaired === "number") {
       revalidator.revalidate();
+    }
+    if (d && (d as { ok?: boolean }).ok && (d as { restored?: boolean }).restored === true) {
+      revalidator.revalidate();
+      setModalOpen(false);
+      setModalCount(null);
+      setRestoreCountName("");
+      setRestoreLocationId("");
+      setRestoreProductGroupIds([]);
     }
   }, [fetcher.data, revalidator]);
   // ✅ list 由来で groupItems がない棚卸のフルデータ取得（モーダルでステータス・完了/未完了を正しく表示するため）
@@ -3821,7 +4043,7 @@ export default function InventoryCountPage() {
       completed: "完了",
       cancelled: "キャンセル",
     };
-    return labels[status] || status;
+    return (status && (labels[status] || status)) || "不明";
   };
 
   // ステータスバッジ用スタイル（アプリと同様のバッチ表示）
@@ -5481,7 +5703,7 @@ export default function InventoryCountPage() {
                           </button>
                           <button
                             type="button"
-                            onClick={() => fetcher.submit({ actionType: "repair_count_names" }, { method: "post" })}
+                            onClick={() => fetcher.submit({ action: "repair_count_names" }, { method: "post" })}
                             disabled={fetcher.state !== "idle"}
                             style={{
                               padding: "8px 16px",
@@ -5507,6 +5729,13 @@ export default function InventoryCountPage() {
                             </s-text>
                             <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
                               POS・履歴タブを再読み込みすると反映されます。
+                            </s-text>
+                          </s-box>
+                        )}
+                        {fetcher.data?.ok && (fetcher.data as { restored?: boolean }).restored === true && (
+                          <s-box padding="base" background="subdued">
+                            <s-text emphasis="bold" tone="success">
+                              棚卸を復元しました（指定のID・ロケーション・グループで現在在庫のまま完了確定）。
                             </s-text>
                           </s-box>
                         )}
@@ -5894,7 +6123,7 @@ export default function InventoryCountPage() {
                                   display: "block",
                                 }}
                               >
-                                ロケーション: {locName}
+                                ロケーション: {locName || "—"}
                               </s-text>
                             </div>
                             <div>
@@ -5908,7 +6137,7 @@ export default function InventoryCountPage() {
                                   display: "block",
                                 }}
                               >
-                                商品グループ: {groupNames}
+                                商品グループ: {(groupNames && groupNames !== "-") ? groupNames : "—"}
                               </s-text>
                             </div>
                             <div
@@ -5965,6 +6194,9 @@ export default function InventoryCountPage() {
               onClick={() => {
                 setModalOpen(false);
                 setModalCount(null);
+                setRestoreCountName("");
+                setRestoreLocationId("");
+                setRestoreProductGroupIds([]);
               }}
             >
               <div
@@ -5987,6 +6219,9 @@ export default function InventoryCountPage() {
                     onClick={() => {
                       setModalOpen(false);
                       setModalCount(null);
+                      setRestoreCountName("");
+                      setRestoreLocationId("");
+                      setRestoreProductGroupIds([]);
                     }}
                     style={{
                       background: "none",
@@ -6006,12 +6241,103 @@ export default function InventoryCountPage() {
                 </div>
 
                 {modalCount && (
+                  <>
+                  {((): boolean => {
+                    const hasMeta = (modalCount.locationId && String(modalCount.locationId).trim() !== "") ||
+                      (Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0) ||
+                      (modalCount.productGroupId && String(modalCount.productGroupId).trim() !== "");
+                    const hasProductData = ((modalCount as any)?.groupItems && typeof (modalCount as any).groupItems === "object" && Object.keys((modalCount as any).groupItems || {}).length > 0) ||
+                      (Array.isArray(modalCount.items) && modalCount.items.length > 0);
+                    return !hasMeta && hasProductData;
+                  })() && (
+                    <>
+                      <div style={{ marginBottom: "12px", padding: "10px 12px", backgroundColor: "#fff4e5", border: "1px solid #ff9800", borderRadius: "6px", fontSize: "13px", color: "#e65100" }}>
+                        <strong>情報の一部が欠損しています。</strong> ロケーション・商品グループ・ステータス・作成日時は、過去の不具合でメタフィールドから失われています。棚卸IDと商品リストのみ表示しています。編集・確定は行わず、参照用としてご利用ください。
+                      </div>
+                      <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#f0f9ff", border: "1px solid #0ea5e9", borderRadius: "6px", fontSize: "13px" }}>
+                        <div style={{ fontWeight: 600, marginBottom: "8px", color: "#0369a1" }}>元の棚卸IDで復元し、現在在庫で完了確定する</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                            <span style={{ minWidth: "120px" }}>復元する棚卸ID:</span>
+                            <input
+                              type="text"
+                              value={restoreCountName}
+                              onChange={(e) => setRestoreCountName(e.target.value)}
+                              placeholder="#C0017"
+                              style={{ padding: "6px 10px", border: "1px solid #e1e3e5", borderRadius: "4px", width: "140px" }}
+                            />
+                          </label>
+                          <label style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                            <span style={{ minWidth: "120px" }}>ロケーション:</span>
+                            <select
+                              value={restoreLocationId}
+                              onChange={(e) => setRestoreLocationId(e.target.value)}
+                              style={{ padding: "6px 10px", border: "1px solid #e1e3e5", borderRadius: "4px", minWidth: "200px" }}
+                            >
+                              <option value="">選択してください</option>
+                              {locations.map((loc) => (
+                                <option key={loc.id} value={loc.id}>{loc.name}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <div style={{ display: "flex", alignItems: "flex-start", gap: "8px", flexWrap: "wrap" }}>
+                            <span style={{ minWidth: "120px", paddingTop: "6px" }}>商品グループ:</span>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "4px", maxHeight: "120px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "4px", padding: "6px", minWidth: "200px" }}>
+                              {productGroups.length === 0 ? (
+                                <span style={{ color: "#6d7175", fontSize: "12px" }}>商品グループがありません</span>
+                              ) : (
+                                productGroups.map((g) => (
+                                  <label key={g.id} style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={restoreProductGroupIds.includes(g.id)}
+                                      onChange={(e) => {
+                                        if (e.target.checked) setRestoreProductGroupIds((prev) => [...prev, g.id]);
+                                        else setRestoreProductGroupIds((prev) => prev.filter((id) => id !== g.id));
+                                      }}
+                                    />
+                                    <span>{g.name || g.id}</span>
+                                  </label>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                          <div style={{ marginTop: "4px" }}>
+                            <button
+                              type="button"
+                              disabled={fetcher.state !== "idle" || !restoreCountName.trim() || !restoreLocationId || restoreProductGroupIds.length === 0}
+                              onClick={() => {
+                                const fd = new FormData();
+                                fd.set("action", "restore_count_as_completed");
+                                fd.set("countId", String(modalCount.id));
+                                fd.set("countName", restoreCountName.trim());
+                                fd.set("locationId", restoreLocationId);
+                                fd.set("productGroupIds", JSON.stringify(restoreProductGroupIds));
+                                fetcher.submit(fd, { method: "post" });
+                              }}
+                              style={{
+                                padding: "8px 16px",
+                                backgroundColor: "#0ea5e9",
+                                color: "white",
+                                border: "none",
+                                borderRadius: "6px",
+                                cursor: fetcher.state !== "idle" ? "not-allowed" : "pointer",
+                                fontSize: "13px",
+                              }}
+                            >
+                              {fetcher.state !== "idle" ? "処理中..." : "復元して完了確定"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
                   <div style={{ marginBottom: "16px", padding: "12px", backgroundColor: "#f5f5f5", borderRadius: "4px" }}>
                     <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                       <strong>棚卸ID:</strong> {modalCount.countName || modalCount.id}
                     </div>
                     <div style={{ fontSize: "14px", marginBottom: "4px" }}>
-                      <strong>ロケーション:</strong> {getLocationName(modalCount.locationId)}
+                      <strong>ロケーション:</strong> {getLocationName(modalCount.locationId) || "—"}
                     </div>
                     <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                       <strong>商品グループ:</strong> {
@@ -6019,7 +6345,7 @@ export default function InventoryCountPage() {
                           const ids = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
                             ? modalCount.productGroupIds
                             : modalCount.productGroupId ? [modalCount.productGroupId] : [];
-                          if (ids.length === 0) return modalCount.productGroupName || modalCount.productGroupId || "-";
+                          if (ids.length === 0) return (modalCount.productGroupName || modalCount.productGroupId || "—") as string;
                           if (Array.isArray(modalCount.productGroupNames) && modalCount.productGroupNames.length > 0)
                             return modalCount.productGroupNames.map((n, i) => n || getGroupDisplayName(ids[i])).join(", ");
                           return ids.map((id) => getGroupDisplayName(id)).join(", ");
@@ -6031,7 +6357,7 @@ export default function InventoryCountPage() {
                       <span style={getStatusBadgeStyle(modalCount.status)}>{getStatusLabel(modalCount.status)}</span>
                     </div>
                     <div style={{ fontSize: "14px", marginBottom: "4px" }}>
-                      <strong>作成日時:</strong> {extractDateFromISO(modalCount.createdAt, shopTimezone)}
+                      <strong>作成日時:</strong> {modalCount.createdAt ? extractDateFromISO(modalCount.createdAt, shopTimezone) : "—"}
                     </div>
                     {modalCount.completedAt && (
                       <div style={{ fontSize: "14px", marginBottom: "4px" }}>
@@ -6119,6 +6445,7 @@ export default function InventoryCountPage() {
                       return null;
                     })()}
                   </div>
+                  </>
                 )}
 
                 {(() => {
