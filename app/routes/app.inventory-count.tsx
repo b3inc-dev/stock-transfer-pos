@@ -501,6 +501,12 @@ async function writeInventoryCountsChunked(
   }
 
   if (payloads.length === 0) {
+    // ✅ 既存の棚卸データがある場合は空で上書きしない（監査 STOCKTAKE_IMPLEMENTATION_AUDIT.md §7）
+    if (existing.length > 0) {
+      throw new Error(
+        "棚卸データを空にすることはできません。既存の棚卸IDが消えるため、空配列での上書きをブロックしました。"
+      );
+    }
     const metafields = [
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" },
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: "[]" },
