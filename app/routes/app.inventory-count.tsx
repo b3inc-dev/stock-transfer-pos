@@ -251,6 +251,95 @@ async function fetchOneChunk(
   return null;
 }
 
+/** 管理者用：メタフィールドの健全性チェック結果（throw しない） */
+export type MetafieldHealthResult = {
+  status: "ok" | "warning" | "error";
+  message?: string;
+  mainKey: "missing" | "single" | "chunked";
+  mainTotalChunks?: number;
+  mainChunksFound?: number;
+  mainMissingChunkIndices?: number[];
+  listKey?: "missing" | "single" | "chunked";
+  listTotalChunks?: number;
+};
+
+/**
+ * 管理者用：棚卸メタフィールドの状態を取得する。例外は出さず結果で返す。
+ */
+export async function getMetafieldHealth(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }
+): Promise<MetafieldHealthResult> {
+  try {
+    const mainGql = `#graphql query InventoryCountMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
+    const mainResp = await admin.graphql(mainGql);
+    const mainJson = (await safeJsonFromResponseForLoader(mainResp, null)) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } } | null;
+    const raw = mainJson?.data?.currentAppInstallation?.metafield?.value;
+    if (raw == null || raw === "") {
+      return { status: "ok", mainKey: "missing", message: "メインキーなし（棚卸データ未登録）" };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { status: "error", mainKey: "single", message: "メインキーの値が不正なJSONです。" };
+    }
+    if (Array.isArray(parsed)) {
+      return { status: "ok", mainKey: "single", message: `単一キー（${(parsed as unknown[]).length}件）` };
+    }
+    const desc = parsed as { _chunked?: boolean; totalChunks?: number };
+    if (!desc?._chunked || typeof desc.totalChunks !== "number" || desc.totalChunks < 1) {
+      return { status: "ok", mainKey: "single", message: "メインキー（非チャンク形式）" };
+    }
+    const totalChunks = desc.totalChunks;
+    const BATCH = 25;
+    const missing: number[] = [];
+    for (let start = 0; start < totalChunks; start += BATCH) {
+      const batch = Array.from({ length: Math.min(BATCH, totalChunks - start) }, (_, j) => start + j);
+      const results = await Promise.all(
+        batch.map((i) => fetchOneChunk(admin, `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`, i))
+      );
+      results.forEach((v, j) => {
+        if (v == null || v === "") missing.push(batch[j]);
+      });
+    }
+    const onlyLastMissing = missing.length === 1 && missing[0] === totalChunks - 1;
+    if (missing.length === 0) {
+      return {
+        status: "ok",
+        mainKey: "chunked",
+        mainTotalChunks: totalChunks,
+        mainChunksFound: totalChunks,
+        message: `チャンク形式（${totalChunks}件すべて存在）`,
+      };
+    }
+    if (onlyLastMissing) {
+      return {
+        status: "warning",
+        mainKey: "chunked",
+        mainTotalChunks: totalChunks,
+        mainChunksFound: totalChunks - 1,
+        mainMissingChunkIndices: missing,
+        message: `最終チャンク（${totalChunks - 1}）が欠落しています。修復可能です。`,
+      };
+    }
+    return {
+      status: "error",
+      mainKey: "chunked",
+      mainTotalChunks: totalChunks,
+      mainChunksFound: totalChunks - missing.length,
+      mainMissingChunkIndices: missing,
+      message: `チャンク ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? " …" : ""} が欠落しています。最終チャンク以外の欠損は自動修復できません。`,
+    };
+  } catch (e) {
+    console.warn("[inventory-count] getMetafieldHealth failed:", e instanceof Error ? e.message : e);
+    return {
+      status: "error",
+      mainKey: "missing",
+      message: "状態の取得に失敗しました: " + (e instanceof Error ? e.message : String(e)),
+    };
+  }
+}
+
 /**
  * 一覧用メタフィールド（list）をチャンク並列で読み込む。list が無い場合は空配列を返す。
  */
@@ -2245,6 +2334,38 @@ export async function action({ request }: ActionFunctionArgs) {
     } catch (e) {
       console.error("[inventory-count] repair_count_names failed:", e);
       return { ok: false, error: "棚卸IDの修復中にエラーが発生しました。時間をおいて再度お試しください。" as const };
+    }
+  }
+
+  if (actionType === "metafield_health") {
+    try {
+      const health = await getMetafieldHealth(admin);
+      return { ok: true, health } as const;
+    } catch (e) {
+      console.error("[inventory-count] metafield_health failed:", e);
+      return { ok: false, error: "状態の取得に失敗しました。" as const };
+    }
+  }
+
+  if (actionType === "metafield_repair") {
+    try {
+      const health = await getMetafieldHealth(admin);
+      if (health.status === "ok" && health.mainKey !== "chunked") {
+        return { ok: true, repaired: false, message: "修復の必要はありません。" } as const;
+      }
+      if (health.status === "error" && health.mainMissingChunkIndices?.length && !health.mainMissingChunkIndices.every((i) => i === (health.mainTotalChunks ?? 0) - 1)) {
+        return { ok: false, error: "最終チャンク以外が欠落しているため自動修復できません。サポートにお問い合わせください。" as const };
+      }
+      const counts = await readInventoryCountsChunked(admin);
+      const version = await getInventoryCountsVersion(admin);
+      const { userErrors } = await writeInventoryCountsChunked(admin, counts, ownerId, version);
+      if (userErrors.length) {
+        return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
+      }
+      return { ok: true, repaired: true, message: "メタフィールドを再書き込みし、不整合を解消しました。" } as const;
+    } catch (e) {
+      console.error("[inventory-count] metafield_repair failed:", e);
+      return { ok: false, error: "修復中にエラーが発生しました: " + (e instanceof Error ? e.message : String(e)) as const };
     }
   }
 
@@ -4413,6 +4534,10 @@ export default function InventoryCountPage() {
   const [csvPreviewSelected, setCsvPreviewSelected] = useState<Set<number>>(new Set());
   const [csvShowOnlySelected, setCsvShowOnlySelected] = useState(false);
   const csvPreviewFetcher = useFetcher<typeof action>();
+  const adminMetafieldFetcher = useFetcher<typeof action>();
+  const [adminMetafieldUnlocked, setAdminMetafieldUnlocked] = useState(false);
+  const [adminUnlockCodeInput, setAdminUnlockCodeInput] = useState("");
+  const ADMIN_UNLOCK_CODE = "metafield";
 
   const editingGroup = editingGroupId
     ? productGroups.find((g) => g.id === editingGroupId)
@@ -5227,35 +5352,145 @@ export default function InventoryCountPage() {
                 padding: "0 16px 8px",
                 borderBottom: "1px solid #e1e3e5",
                 flexWrap: "wrap",
+                alignItems: "center",
+                justifyContent: "space-between",
               }}
             >
-              {[
-                { id: "groups" as const, label: "商品グループ設定" },
-                { id: "create" as const, label: "棚卸ID発行" },
-                { id: "history" as const, label: "履歴" },
-              ].map((tab) => {
-                const selected = activeTab === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setActiveTab(tab.id)}
-                    style={{
-                      border: "none",
-                      backgroundColor: selected ? "#e5e7eb" : "transparent",
-                      borderRadius: 8,
-                      padding: "6px 12px",
-                      cursor: "pointer",
-                      fontSize: 14,
-                      fontWeight: selected ? 600 : 500,
-                    }}
-                  >
-                    {tab.label}
-                  </button>
-                );
-              })}
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                {[
+                  { id: "groups" as const, label: "商品グループ設定" },
+                  { id: "create" as const, label: "棚卸ID発行" },
+                  { id: "history" as const, label: "履歴" },
+                ].map((tab) => {
+                  const selected = activeTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveTab(tab.id)}
+                      style={{
+                        border: "none",
+                        backgroundColor: selected ? "#e5e7eb" : "transparent",
+                        borderRadius: 8,
+                        padding: "6px 12px",
+                        cursor: "pointer",
+                        fontSize: 14,
+                        fontWeight: selected ? 600 : 500,
+                      }}
+                    >
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {/* 管理者用：コード入力＋ボタンでメタフィールド復旧セクションを表示（UIはそのまま） */}
+              <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                <input
+                  type="text"
+                  value={adminUnlockCodeInput}
+                  onChange={(e) => setAdminUnlockCodeInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      if (adminUnlockCodeInput.trim() === ADMIN_UNLOCK_CODE) setAdminMetafieldUnlocked(true);
+                    }
+                  }}
+                  placeholder=""
+                  autoComplete="off"
+                  style={{
+                    width: "72px",
+                    padding: "4px 6px",
+                    fontSize: 12,
+                    border: "1px solid #e1e3e5",
+                    borderRadius: 6,
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (adminUnlockCodeInput.trim() === ADMIN_UNLOCK_CODE) setAdminMetafieldUnlocked(true);
+                  }}
+                  style={{
+                    padding: "4px 8px",
+                    fontSize: 12,
+                    border: "1px solid #d1d5db",
+                    borderRadius: 6,
+                    background: "#f9fafb",
+                    cursor: "pointer",
+                  }}
+                >
+                  表示
+                </button>
+              </div>
             </div>
           </s-box>
+
+          {/* 管理者用：コードで表示したメタフィールド復旧（adminMetafieldUnlocked 時のみ表示） */}
+          {adminMetafieldUnlocked && (
+            <div style={{ margin: "12px 16px", padding: "12px", background: "#f9fafb", borderRadius: "8px", border: "1px solid #e5e7eb" }}>
+              <div style={{ fontSize: "12px", color: "#6d7175", marginBottom: "8px" }}>管理者用：メタフィールド復旧</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "8px" }}>
+                <button
+                  type="button"
+                  onClick={() => adminMetafieldFetcher.submit({ action: "metafield_health" }, { method: "post" })}
+                  disabled={adminMetafieldFetcher.state !== "idle"}
+                  style={{
+                    padding: "6px 12px",
+                    fontSize: "12px",
+                    border: "1px solid #d1d5db",
+                    borderRadius: "6px",
+                    background: "#fff",
+                    cursor: adminMetafieldFetcher.state !== "idle" ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {adminMetafieldFetcher.state !== "idle" ? "確認中…" : "状態を確認"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => adminMetafieldFetcher.submit({ action: "metafield_repair", inventoryCountsVersion: String(inventoryCountsVersion) }, { method: "post" })}
+                  disabled={adminMetafieldFetcher.state !== "idle"}
+                  style={{
+                    padding: "6px 12px",
+                    fontSize: "12px",
+                    border: "1px solid #b45309",
+                    borderRadius: "6px",
+                    background: "#fffbeb",
+                    color: "#b45309",
+                    cursor: adminMetafieldFetcher.state !== "idle" ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {adminMetafieldFetcher.state !== "idle" ? "実行中…" : "修復を実行"}
+                </button>
+              </div>
+              {adminMetafieldFetcher.data?.ok && (adminMetafieldFetcher.data as { health?: MetafieldHealthResult }).health && (
+                <div style={{ fontSize: "12px", marginTop: "8px", padding: "8px", background: "#fff", borderRadius: "6px", border: "1px solid #e5e7eb" }}>
+                  <div style={{ fontWeight: 600, marginBottom: "4px" }}>
+                    状態: {(adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.status === "ok" && "正常"}
+                    {(adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.status === "warning" && "要修復（最終チャンク欠損）"}
+                    {(adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.status === "error" && "エラー"}
+                  </div>
+                  <div style={{ color: "#6d7175" }}>{(adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.message}</div>
+                  {(adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.mainTotalChunks != null && (
+                    <div style={{ marginTop: "4px" }}>
+                      メイン: {(adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.mainKey} / totalChunks={(adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.mainTotalChunks}
+                      {((adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.mainMissingChunkIndices ?? []).length > 0 ? ` / 欠落: [${((adminMetafieldFetcher.data as { health: MetafieldHealthResult }).health.mainMissingChunkIndices ?? []).join(", ")}]` : ""}
+                    </div>
+                  )}
+                </div>
+              )}
+              {adminMetafieldFetcher.data?.ok && typeof (adminMetafieldFetcher.data as { repaired?: boolean }).repaired === "boolean" && (
+                <div style={{ fontSize: "12px", marginTop: "8px", padding: "8px", background: (adminMetafieldFetcher.data as { repaired: boolean }).repaired ? "#ecfdf5" : "#f0fdf4", borderRadius: "6px", border: "1px solid #a7f3d0" }}>
+                  <strong>{(adminMetafieldFetcher.data as { repaired: boolean; message?: string }).repaired ? "修復しました" : "修復不要"}</strong>
+                  {" "}{(adminMetafieldFetcher.data as { message?: string }).message}
+                </div>
+              )}
+              {adminMetafieldFetcher.data && !(adminMetafieldFetcher.data as { ok?: boolean }).ok && (
+                <div style={{ fontSize: "12px", marginTop: "8px", padding: "8px", background: "#fef2f2", borderRadius: "6px", border: "1px solid #fecaca", color: "#b91c1c" }}>
+                  {(adminMetafieldFetcher.data as { error?: string }).error}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* 商品グループ設定 */}
           {activeTab === "groups" && (
@@ -6635,6 +6870,7 @@ export default function InventoryCountPage() {
                             )}
                           </s-box>
                         )}
+
                       </s-stack>
                     </div>
                   </s-stack>
