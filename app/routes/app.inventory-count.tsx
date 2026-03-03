@@ -629,23 +629,43 @@ async function writeInventoryCountsVersion(
   );
 }
 
+/** 修復時などで direct fetch と既存データを渡すオプション（syntax error 回避・再読取スキップ） */
+export type WriteInventoryCountsChunkedOptions = {
+  session?: { shop: string; accessToken: string } | null;
+  /** 渡すと初回の readInventoryCountsChunked をスキップしてこれを使う（修復時に必須） */
+  existingCounts?: InventoryCount[] | null;
+};
+
 /**
  * 棚卸メタフィールドをチャンク対応で保存（単体が CHUNK_BYTES を超える場合は groupItems/items をパート分割）。
  * 一覧用軽量メタフィールド（list）と棚卸ID→チャンク番号インデックスも同時に保存。
  * 書き込み前に既存データから locationId / productGroupIds / groupItems 等を補完し、空白で上書きしない。
  * expectedVersion を渡した場合、現在のバージョンと一致しないと競合として保存しない（楽観ロック）。
+ * options.session を渡すと GraphQL を direct fetch で実行し syntax error を避ける。options.existingCounts を渡すと初回読取をスキップ（修復用）。
  */
 export async function writeInventoryCountsChunked(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   counts: InventoryCount[],
   ownerId: string,
-  expectedVersion?: number
+  expectedVersion?: number,
+  options?: WriteInventoryCountsChunkedOptions | null
 ): Promise<{ userErrors: Array<{ message?: string }> }> {
+  const useDirectFetch = Boolean(options?.session?.shop && options?.session?.accessToken);
+  const shop = options?.session?.shop ?? "";
+  const accessToken = options?.session?.accessToken ?? "";
+  const gql = useDirectFetch
+    ? (query: string, variables?: Record<string, unknown>) => loaderGraphql(shop, accessToken, query, variables)
+    : null;
+
   let existing: InventoryCount[] = [];
-  try {
-    existing = await readInventoryCountsChunked(admin);
-  } catch {
-    // 既存読取失敗時はマージせずそのまま書く（新規ショップ等）
+  if (options?.existingCounts != null && Array.isArray(options.existingCounts)) {
+    existing = options.existingCounts;
+  } else {
+    try {
+      existing = await readInventoryCountsChunked(admin);
+    } catch {
+      // 既存読取失敗時はマージせずそのまま書く（新規ショップ等）
+    }
   }
   // ✅ 読取失敗で existing=[] のとき、実はストアにデータがあるなら上書きしない（チャンク欠落等で読めなかっただけの可能性）
   if (existing.length === 0 && Array.isArray(counts) && counts.length > 0) {
@@ -658,7 +678,7 @@ export async function writeInventoryCountsChunked(
       };
     }
   }
-  const currentVersion = await getInventoryCountsVersion(admin);
+  const currentVersion = await getInventoryCountsVersion(admin, options?.session ?? undefined);
   if (expectedVersion != null && currentVersion !== expectedVersion) {
     return {
       userErrors: [{ message: "他の操作でデータが更新されています。画面を再読み込みしてから再度お試しください。" }],
@@ -684,17 +704,16 @@ export async function writeInventoryCountsChunked(
     const backupList = (existing.length > 0 ? existing : arr).map(toMinimal).filter(Boolean);
     const backupValue = JSON.stringify(backupList);
     if (backupValue.length <= INVENTORY_COUNTS_BACKUP_MAX_BYTES) {
-      const resp = await admin.graphql(
-        `#graphql
-          mutation SetBackup($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) { userErrors { message } }
-          }
-        `,
-        { variables: { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_BACKUP_KEY, type: "json", value: backupValue }] } }
-      );
-      const data = (await resp.json())?.data?.metafieldsSet;
-      if (Array.isArray(data?.userErrors) && data.userErrors.length > 0) {
-        // バックアップの userErrors は無視（本体の書き込みは続行）
+      const backupMutation = `#graphql mutation SetBackup($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
+      const vars = { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_BACKUP_KEY, type: "json", value: backupValue }] };
+      if (gql) {
+        await gql(backupMutation, vars);
+      } else {
+        const resp = await admin.graphql(backupMutation, { variables: vars });
+        const data = (await safeJsonFromResponseForLoader(resp, {})) as Record<string, unknown>;
+        if (Array.isArray((data?.data as { metafieldsSet?: { userErrors?: unknown[] } })?.metafieldsSet?.userErrors)) {
+          // バックアップの userErrors は無視（本体の書き込みは続行）
+        }
       }
     }
   } catch {
@@ -764,12 +783,12 @@ export async function writeInventoryCountsChunked(
       );
     }
     // ✅ read 失敗で existing=[] のときも、実際のメタにデータがあれば空で上書きしない（POS と同様の二重ガード）
+    const mainKeyQuery = `#graphql query MainKey { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
     try {
-      const checkResp = await admin.graphql(
-        `#graphql query MainKey { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`
-      );
-      const checkJson = await checkResp.json();
-      const raw = checkJson?.data?.currentAppInstallation?.metafield?.value;
+      const checkJson = gql
+        ? await gql(mainKeyQuery)
+        : (await safeJsonFromResponseForLoader(await admin.graphql(mainKeyQuery), {})) as Record<string, unknown>;
+      const raw = (checkJson?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation?.metafield?.value;
       if (raw != null && raw !== "" && raw !== "[]") {
         const parsed = JSON.parse(raw);
         const desc = parsed as { _chunked?: boolean; totalChunks?: number } | null;
@@ -789,41 +808,25 @@ export async function writeInventoryCountsChunked(
       { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: "{}" },
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
     ];
-    const resp = await admin.graphql(
-      `#graphql
-        mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            userErrors { field message }
-          }
-        }
-      `,
-      { variables: { metafields } }
-    );
-    const data = (await resp.json())?.data?.metafieldsSet;
+    const emptyMutation = `#graphql mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`;
+    const emptyVars = { metafields };
+    const emptyJson = gql ? await gql(emptyMutation, emptyVars) : (await safeJsonFromResponseForLoader(await admin.graphql(emptyMutation, { variables: emptyVars }), {})) as Record<string, unknown>;
+    const data = (emptyJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
     return { userErrors: data?.userErrors ?? [] };
   }
 
   if (payloads.length === 1 && payloads[0].length === 1 && !(payloads[0][0] as CountPart)._part) {
     const full = JSON.stringify(payloads[0]);
     if (full.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
-      const resp = await admin.graphql(
-        `#graphql
-          mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full },
-              { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
-            ],
-          },
-        }
-      );
-      const data = (await resp.json())?.data?.metafieldsSet;
+      const singleMutation = `#graphql mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`;
+      const singleVars = {
+        metafields: [
+          { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full },
+          { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
+        ],
+      };
+      const singleJson = gql ? await gql(singleMutation, singleVars) : (await safeJsonFromResponseForLoader(await admin.graphql(singleMutation, { variables: singleVars }), {})) as Record<string, unknown>;
+      const data = (singleJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
       return { userErrors: data?.userErrors ?? [] };
     }
   }
@@ -841,19 +844,12 @@ export async function writeInventoryCountsChunked(
     })),
     { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: descriptor },
   ];
+  const chunkMutation = `#graphql mutation SetInventoryCountsChunk($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`;
   for (let i = 0; i < metafields.length; i += METAFIELDS_SET_MAX) {
     const batch = metafields.slice(i, i + METAFIELDS_SET_MAX);
-    const resp = await admin.graphql(
-      `#graphql
-        mutation SetInventoryCountsChunk($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            userErrors { field message }
-          }
-        }
-      `,
-      { variables: { metafields: batch } }
-    );
-    const data = (await resp.json())?.data?.metafieldsSet;
+    const chunkVars = { metafields: batch };
+    const chunkJson = gql ? await gql(chunkMutation, chunkVars) : (await safeJsonFromResponseForLoader(await admin.graphql(chunkMutation, { variables: chunkVars }), {})) as Record<string, unknown>;
+    const data = (chunkJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
     if (data?.userErrors?.length) return { userErrors: data.userErrors };
   }
 
@@ -889,33 +885,27 @@ export async function writeInventoryCountsChunked(
     { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: listDescriptor },
     { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: indexValue },
   ];
+  const listChunkMutation = `#graphql mutation SetInventoryCountsListChunk($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`;
   for (let i = 0; i < listMetafields.length; i += METAFIELDS_SET_MAX) {
     const batch = listMetafields.slice(i, i + METAFIELDS_SET_MAX);
-    const resp = await admin.graphql(
-      `#graphql
-        mutation SetInventoryCountsListChunk($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            userErrors { field message }
-          }
-        }
-      `,
-      { variables: { metafields: batch } }
-    );
-    const data = (await resp.json())?.data?.metafieldsSet;
+    const listVars = { metafields: batch };
+    const listJson = gql ? await gql(listChunkMutation, listVars) : (await safeJsonFromResponseForLoader(await admin.graphql(listChunkMutation, { variables: listVars }), {})) as Record<string, unknown>;
+    const data = (listJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
     if (data?.userErrors?.length) return { userErrors: data.userErrors };
   }
   const nextNum = arr.reduce((max, c) => Math.max(max, parseCountNameNumber(c?.countName)), 0) + 1;
-  await admin.graphql(
-    `#graphql mutation SetNext($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`,
-    {
-      variables: {
-        metafields: [
-          { ownerId, namespace: NS, key: INVENTORY_COUNT_NEXT_KEY, type: "json", value: String(nextNum) },
-          { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
-        ],
-      },
-    }
-  );
+  const setNextMutation = `#graphql mutation SetNext($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
+  const setNextVars = {
+    metafields: [
+      { ownerId, namespace: NS, key: INVENTORY_COUNT_NEXT_KEY, type: "json", value: String(nextNum) },
+      { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
+    ],
+  };
+  if (gql) {
+    await gql(setNextMutation, setNextVars);
+  } else {
+    await admin.graphql(setNextMutation, { variables: setNextVars });
+  }
   return { userErrors: [] };
 }
 
@@ -1588,19 +1578,28 @@ async function readListMainKeyOnly(admin: { graphql: (q: string, opts?: { variab
   }
 }
 
-/** 楽観ロック用。棚卸一覧のバージョン（保存のたびに +1）を取得。無ければ 1 */
-async function getInventoryCountsVersion(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<number> {
+const VERSION_QUERY_INTERNAL = `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`;
+
+/** 楽観ロック用。棚卸一覧のバージョン（保存のたびに +1）を取得。無ければ 1。session を渡すと direct fetch で syntax error を避ける（修復用） */
+async function getInventoryCountsVersion(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  session?: { shop?: string; accessToken?: string } | null
+): Promise<number> {
   try {
-    const resp = await admin.graphql(
-      `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`
-    );
+    if (session?.shop && session?.accessToken) {
+      const json = await loaderGraphql(session.shop, session.accessToken, VERSION_QUERY_INTERNAL);
+      const v = (json?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation?.metafield?.value;
+      if (v == null || v === "") return 1;
+      const n = parseInt(String(v).trim(), 10);
+      return Number.isInteger(n) && n >= 1 ? n : 1;
+    }
+    const resp = await admin.graphql(VERSION_QUERY_INTERNAL);
     const json = (await safeJsonFromResponseForLoader(resp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
     const v = json?.data?.currentAppInstallation?.metafield?.value;
     if (v == null || v === "") return 1;
     const n = parseInt(String(v).trim(), 10);
     return Number.isInteger(n) && n >= 1 ? n : 1;
   } catch (e) {
-    // admin.graphql() 内の Shopify API クライアントが空/不正レスポンスで throw する場合がある（syntax error, unexpected end of file）。loader を落とさないためデフォルトを返す。
     console.warn("[inventory-count] getInventoryCountsVersion failed:", e instanceof Error ? e.message : String(e));
     return 1;
   }
@@ -2413,11 +2412,15 @@ export async function action({ request }: ActionFunctionArgs) {
       if (health.status === "ok" && health.mainKey !== "chunked") {
         return { ok: true, repaired: false, message: "修復の必要はありません。" } as const;
       }
-      // 欠落チャンクがあっても修復を試行する（allowMissingChunksForRepair で読み進め、再書き込みで整合を取る）
       // 修復時のみ欠落チャンクをスキップして読み進める（通常の防御は外す）
       const counts = await readInventoryCountsChunked(admin, { allowMissingChunksForRepair: true });
-      const version = await getInventoryCountsVersion(admin);
-      const { userErrors } = await writeInventoryCountsChunked(admin, counts, ownerId, version);
+      // 修復時の write は session で direct fetch を使い、既読の counts を渡して syntax error を避ける
+      const version = await getInventoryCountsVersion(admin, session);
+      const repairSession = session?.shop && session?.accessToken ? { shop: session.shop, accessToken: session.accessToken } : undefined;
+      const { userErrors } = await writeInventoryCountsChunked(admin, counts, ownerId, version, {
+        session: repairSession ?? undefined,
+        existingCounts: counts,
+      });
       if (userErrors.length) {
         return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
       }
