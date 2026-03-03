@@ -1,5 +1,39 @@
 # 棚卸メタフィールド更新処理で処理ができない／不具合になる可能性の洗い出し
 
+## 管理画面で履歴が出ない・「状態を確認」で syntax error になる原因
+
+### 共通の要因
+
+**Shopify の `admin.graphql()`（アプリ内の GraphQL クライアント）が、レスポンス body が空や不正なときに内部で `response.json()` 相当を実行し、`syntax error, unexpected end of file` を throw する**ため。
+
+- 元々読み取れていた時との差分: 以前はメタデータが少なく GraphQL が正常な body を返していた。データ増加・Shopfiy 側のタイムアウト／切り詰めなどで **空や不正な body が返るケース** が増えると、クライアントがパースで落ちる。
+- メタフィールド用のクエリ（list / main / version）は、**`admin.graphql()` を経由しない「直接 fetch + safeJson」** にすると throw しない。
+
+### 履歴が出ない理由
+
+1. **loader** で棚卸一覧用に list / main / version の 3 本を取得している。
+2. **session.shop が null** になるリクエストがあると、`useDirectFetch` が false になり、list/main/version は **空で返す** フォールバックになる → 画面上は履歴 0 件。
+3. あるいは direct fetch でも、Shopfiy が空 body を返すと `safeJsonFromResponseForLoader` は落ちないが、中身が空なので履歴は 0 件になる。
+
+**対応**: loader で `session.shop` が空のとき、**URL の `?shop=` から shop を補完**して direct fetch を使うようにした。また、list/main/version は当初から **loader では direct fetch + safeJson** にしている。
+
+**原因をログで確定する**: サーバーログに次の2行が出る。
+
+- `[inventory-count] loader directFetch: ...`  
+  - `ok shopSource=session` または `ok shopSource=url` → direct fetch 有効（shop と accessToken が取れている）。  
+  - `no shop=empty accessToken=...` → **shop が無い**（session も URL も）。  
+  - `no shop=set accessToken=empty` → **accessToken が無い**（session 不備）。
+- `[inventory-count] loader result: useDirectFetch=... inventoryCounts=... source=...`  
+  - `useDirectFetch=false` かつ `inventoryCounts=0` → 上記の「shop/accessToken 不足」でフォールバックしたと確定。  
+  - `useDirectFetch=true` かつ `inventoryCounts=0` → direct fetch は動いているが **Shopfiy の list/main の応答が空**と確定。
+
+### 「状態を確認」で syntax error になる理由
+
+- **getMetafieldHealth** が従来どおり **`admin.graphql()`** のみ使っていたため、メインキー取得の段階で上記の throw が発生していた。
+- **対応**: `getMetafieldHealth(admin, session)` で **session を渡すと、メインキー・チャンク取得をすべて「直接 fetch」（graphqlMetafieldValueDirect）で行う**ように変更。action からは常に session を渡すため、状態確認で syntax error は出ない。
+
+---
+
 ## 「棚卸チャンク338が存在しません」について
 
 ### チャンク338がない理由（想定される原因）
@@ -28,7 +62,7 @@
 
 - **表示の出し方**: 棚卸画面で、タブ（商品グループ設定・棚卸ID発行・履歴）の右端にある**入力欄に `metafield` と入力し「表示」ボタンを押す**と、その下に「管理者用：メタフィールド復旧」が表示される。通常利用では入力しないためユーザーには見えない。
 - **状態を確認**: メインキー（単一/チャンク）、totalChunks、欠落しているチャンク番号を表示。`ok` / `warning`（最終チャンクのみ欠損） / `error` で判定。
-- **修復を実行**: 全チャンクを読み直し、その内容で再書き込みする。最終チャンクのみ欠けている場合は修復可能。途中のチャンク欠損の場合は自動修復できずエラーを返す。
+- **修復を実行**: 全チャンクを読み直し、その内容で再書き込みする。**修復時だけ** `readInventoryCountsChunked` に `allowMissingChunksForRepair: true` を渡し、欠落チャンクがあってもスキップして読み進める（通常運用の「欠落時は読み取り中断」の防御からは外す）。これにより「棚卸チャンク338が存在しません…」で修復が止まることを防ぐ。
 
 ### メタを復旧するには
 

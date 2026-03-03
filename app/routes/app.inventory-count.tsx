@@ -251,6 +251,22 @@ async function fetchOneChunk(
   return null;
 }
 
+/** 管理者用：セッションで GraphQL を直接 fetch し、metafield.value のみ返す（admin.graphql の syntax error を避ける） */
+async function graphqlMetafieldValueDirect(
+  shop: string,
+  accessToken: string,
+  key: string
+): Promise<string | null> {
+  const gql = `#graphql query MetafieldByKey($key: String!) { currentAppInstallation { metafield(namespace: "${NS}", key: $key) { value } } }`;
+  const resp = await fetch(`https://${shop}/admin/api/${ADMIN_GRAPHQL_API_VERSION}/graphql.json`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+    body: JSON.stringify({ query: gql.replace(/^#graphql\s*/m, "").trim(), variables: { key } }),
+  });
+  const data = (await safeJsonFromResponseForLoader(resp, {})) as Record<string, unknown>;
+  return getMetafieldValueFromData(data ?? {});
+}
+
 /** 管理者用：メタフィールドの健全性チェック結果（throw しない） */
 export type MetafieldHealthResult = {
   status: "ok" | "warning" | "error";
@@ -265,15 +281,29 @@ export type MetafieldHealthResult = {
 
 /**
  * 管理者用：棚卸メタフィールドの状態を取得する。例外は出さず結果で返す。
+ * session を渡すと GraphQL を直接 fetch し、admin.graphql の「syntax error, unexpected end of file」を避ける。
  */
 export async function getMetafieldHealth(
-  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  session?: { shop?: string; accessToken?: string } | null
 ): Promise<MetafieldHealthResult> {
+  const shop = session?.shop ?? "";
+  const accessToken = session?.accessToken ?? "";
+  const useDirectFetch = Boolean(shop && accessToken);
+  const getMainValue = useDirectFetch
+    ? () => graphqlMetafieldValueDirect(shop, accessToken, INVENTORY_COUNTS_KEY)
+    : async () => {
+        const mainGql = `#graphql query InventoryCountMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
+        const mainResp = await admin.graphql(mainGql);
+        const mainJson = (await safeJsonFromResponseForLoader(mainResp, null)) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } } | null;
+        return mainJson?.data?.currentAppInstallation?.metafield?.value ?? null;
+      };
+  const getChunkValue = useDirectFetch
+    ? (i: number) => graphqlMetafieldValueDirect(shop, accessToken, `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`)
+    : (i: number) => fetchOneChunk(admin, `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`, i);
+
   try {
-    const mainGql = `#graphql query InventoryCountMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
-    const mainResp = await admin.graphql(mainGql);
-    const mainJson = (await safeJsonFromResponseForLoader(mainResp, null)) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } } | null;
-    const raw = mainJson?.data?.currentAppInstallation?.metafield?.value;
+    const raw = await getMainValue();
     if (raw == null || raw === "") {
       return { status: "ok", mainKey: "missing", message: "メインキーなし（棚卸データ未登録）" };
     }
@@ -295,9 +325,7 @@ export async function getMetafieldHealth(
     const missing: number[] = [];
     for (let start = 0; start < totalChunks; start += BATCH) {
       const batch = Array.from({ length: Math.min(BATCH, totalChunks - start) }, (_, j) => start + j);
-      const results = await Promise.all(
-        batch.map((i) => fetchOneChunk(admin, `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`, i))
-      );
+      const results = await Promise.all(batch.map((i) => getChunkValue(i)));
       results.forEach((v, j) => {
         if (v == null || v === "") missing.push(batch[j]);
       });
@@ -390,13 +418,23 @@ async function readInventoryCountsListChunked(admin: { graphql: (q: string, opts
   return counts;
 }
 
+/** readInventoryCountsChunked のオプション（修復時のみ使用） */
+export type ReadInventoryCountsChunkedOptions = {
+  /** true のときは欠落チャンクがあってもスキップして読み続ける（メタフィールド修復用。通常運用では使わない） */
+  allowMissingChunksForRepair?: boolean;
+};
+
 /**
  * 棚卸メタフィールドをチャンク対応で読み込む（管理画面・応答サイズ制限で明細が欠ける問題を解消）。
  * 単一 key の場合は従来どおり。_chunked の場合は複数 key を並列取得して結合する（502/タイムアウト対策）。
  * チャンク内に「パート」形式（_part: true）が含まれる場合は countId ごとに結合してから返す。
  * メイン読み取り・チャンク取得は Throttle/一時失敗時にリトライし、発行できないエラーを減らす。
  */
-export async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
+export async function readInventoryCountsChunked(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  options?: ReadInventoryCountsChunkedOptions
+): Promise<InventoryCount[]> {
+  const allowMissingChunksForRepair = options?.allowMissingChunksForRepair === true;
   const mainGql = `#graphql
       query InventoryCountMain {
         currentAppInstallation {
@@ -448,9 +486,9 @@ export async function readInventoryCountsChunked(admin: { graphql: (q: string, o
       chunkRaws[i] = chunkRaw;
     }
     if (chunkRaw == null) {
-      // 最後の1チャンクだけ欠けている場合（過去の空上書き修復などでディスクリプタだけ残った状態）：空として扱い読み続け、後続の write でメタを正しい状態に直せるようにする
-      if (i === totalChunks - 1) {
-        console.warn(`[inventory-count] 棚卸チャンク${i}（最終）が存在しません。空として扱い読み取りを続行します。`);
+      // 最後の1チャンクだけ欠けている場合、または修復モード時：欠落を空として扱い読み続け、後続の write でメタを正しい状態に直せるようにする
+      if (i === totalChunks - 1 || allowMissingChunksForRepair) {
+        console.warn(`[inventory-count] 棚卸チャンク${i}が存在しません。${allowMissingChunksForRepair ? "修復モードのため" : "最終チャンクのため"}空として読み取りを続行します。`);
         continue;
       }
       throw new Error(
@@ -1158,9 +1196,27 @@ export async function loader({ request }: LoaderFunctionArgs) {
     shopTimezone = "UTC";
   }
 
-  const shop = session?.shop ?? "";
+  // session.shop が null になるリクエストがあるため、URL の shop パラメータで補完（履歴が出ない原因の回避）
+  let shop = session?.shop ?? "";
+  let shopSource: "session" | "url" | "none" = shop ? "session" : "none";
+  if (!shop) {
+    try {
+      const urlShop = new URL(request.url).searchParams.get("shop") ?? "";
+      if (urlShop) {
+        shop = urlShop;
+        shopSource = "url";
+      }
+    } catch {
+      shop = "";
+    }
+  }
   const accessToken = session?.accessToken ?? "";
   const useDirectFetch = Boolean(shop && accessToken);
+  // 履歴が出ない原因をログで確定できるようにする（useDirectFetch が false の理由を明示）
+  const directFetchReason = useDirectFetch
+    ? `ok shopSource=${shopSource}`
+    : `no shop=${shop ? "set" : "empty"} accessToken=${accessToken ? "set" : "empty"}`;
+  console.log("[inventory-count] loader directFetch:", directFetchReason);
 
   const LOCATIONS_QUERY = `#graphql query Locations($first: Int!) { locations(first: $first) { nodes { id name } } }`;
   const APP_QUERY = `#graphql query InventoryCountData { currentAppInstallation { productGroupsMetafield: metafield(namespace: "${NS}", key: "${PRODUCT_GROUPS_KEY}") { value } } }`;
@@ -1217,6 +1273,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const inventoryCountsRaw: InventoryCount[] = usedListMetafield
     ? listCountsOnly
     : (mainKeyResult && !mainKeyResult.chunked ? mainKeyResult.array : []);
+
+  // 履歴件数と取得経路をログで確定（「履歴が出ない」時の原因切り分け用）
+  const sourceLabel = usedListMetafield ? "list" : (mainKeyResult?.chunked ? "mainChunked" : mainKeyResult ? "main" : "none");
+  console.log("[inventory-count] loader result: useDirectFetch=" + useDirectFetch + " inventoryCounts=" + inventoryCountsRaw.length + " source=" + sourceLabel);
 
   const locations: LocationNode[] = ((locData?.data as { locations?: { nodes?: LocationNode[] } })?.locations?.nodes) ?? [];
 
@@ -2339,7 +2399,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (actionType === "metafield_health") {
     try {
-      const health = await getMetafieldHealth(admin);
+      const health = await getMetafieldHealth(admin, session);
       return { ok: true, health } as const;
     } catch (e) {
       console.error("[inventory-count] metafield_health failed:", e);
@@ -2349,14 +2409,15 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (actionType === "metafield_repair") {
     try {
-      const health = await getMetafieldHealth(admin);
+      const health = await getMetafieldHealth(admin, session);
       if (health.status === "ok" && health.mainKey !== "chunked") {
         return { ok: true, repaired: false, message: "修復の必要はありません。" } as const;
       }
       if (health.status === "error" && health.mainMissingChunkIndices?.length && !health.mainMissingChunkIndices.every((i) => i === (health.mainTotalChunks ?? 0) - 1)) {
         return { ok: false, error: "最終チャンク以外が欠落しているため自動修復できません。サポートにお問い合わせください。" as const };
       }
-      const counts = await readInventoryCountsChunked(admin);
+      // 修復時のみ欠落チャンクをスキップして読み進める（通常の防御は外す）
+      const counts = await readInventoryCountsChunked(admin, { allowMissingChunksForRepair: true });
       const version = await getInventoryCountsVersion(admin);
       const { userErrors } = await writeInventoryCountsChunked(admin, counts, ownerId, version);
       if (userErrors.length) {
