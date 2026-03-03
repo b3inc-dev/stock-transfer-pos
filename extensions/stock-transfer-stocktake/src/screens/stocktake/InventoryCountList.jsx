@@ -62,7 +62,12 @@ async function logInventoryCountToApi({ locationId, locationName, items, sourceI
     console.warn(`[InventoryCountList] deltas.length is 0, skipping logInventoryChangeToApi call`);
     return;
   }
-  console.log(`[InventoryCountList] Calling logInventoryChangeToApi: activity=inventory_count, locationId=${locationId}, deltas.length=${deltas.length}, sourceId=${sourceId}`);
+  // 在庫調整後に await して履歴送信する場合の「処理中」延び目安の計測用。
+  // 目安: 50件/リクエスト・1リクエストあたり約0.3〜1.5秒 → 50件で約0.3〜1.5秒、100件で約0.6〜3秒、200件で約1.2〜6秒（ネットワーク・サーバー負荷により変動）
+  const chunkCount = Math.ceil(deltas.length / 50) || 1; // 共通モジュールの LOG_INVENTORY_CHANGE_CHUNK_SIZE=50 と一致
+  const getNow = typeof performance !== "undefined" && typeof performance.now === "function" ? () => performance.now() : () => Date.now();
+  const startMs = getNow();
+  console.log(`[InventoryCountList] Calling logInventoryChangeToApi: activity=inventory_count, deltas=${deltas.length}, chunks=${chunkCount}, sourceId=${sourceId}`);
   await logInventoryChangeToApi({
     activity: "inventory_count",
     locationId,
@@ -70,7 +75,8 @@ async function logInventoryCountToApi({ locationId, locationName, items, sourceI
     deltas,
     sourceId: sourceId || null,
   });
-  console.log(`[InventoryCountList] logInventoryChangeToApi call completed`);
+  const elapsedMs = getNow() - startMs;
+  console.log(`[InventoryCountList] logInventoryCountToApi completed: ${Math.round(elapsedMs)}ms for ${deltas.length} deltas (${chunkCount} chunk(s))`);
 }
 
 const SCAN_QUEUE_KEY = "stock_transfer_pos_inventory_count_scan_queue_v1";
@@ -2151,6 +2157,13 @@ export function InventoryCountList({
           console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
           toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
         }
+        // ✅ 在庫調整の直後に履歴送信を await し、タイルを閉じても在庫履歴に確実に反映されるようにする
+        await logInventoryCountToApi({
+          locationId: count.locationId,
+          locationName: locationName || count.locationName || "",
+          items: allItemsToAdjust,
+          sourceId: count.id,
+        }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e));
         // ✅ ローカル状態で更新後 count を組み立て。要件どおり「UIを先に完了→read/write/clearはバックグラウンド」で処理中が1分以上続くのを防ぐ
         const locallyBuiltAdjust = buildUpdatedCountFromLocalState(count, lines, {
           isMultipleMode: true,
@@ -2161,17 +2174,10 @@ export function InventoryCountList({
         toast("棚卸を完了しました");
         onAfterConfirm?.(locallyBuiltAdjust);
         setSubmitting(false);
-        // 同一棚卸で連続確定した場合に後者の read が前者の write 完了前に走ると上書きされるのを防ぐため、count 単位で直列化
+        // 同一棚卸で連続確定した場合に後者の read が前者の write 完了前に走ると上書きされるのを防ぐため、count 単位で直列化（履歴送信は上で完了済みのため write のみ）
         const countIdKey = normalizeIdForMatch(count?.id ?? "");
         const runThisWrite = () =>
-          Promise.all([
-            logInventoryCountToApi({
-              locationId: count.locationId,
-              locationName: locationName || count.locationName || "",
-              items: allItemsToAdjust,
-              sourceId: count.id,
-            }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
-            runWithBackgroundWriteRetry(() => {
+          runWithBackgroundWriteRetry(() => {
               const idNorm = normalizeIdForMatch(count?.id ?? "");
               const doMergeAndWrite = (list, base) => {
                 const toWrite = mergeCountWithStorage(base, locallyBuiltAdjust);
@@ -2190,13 +2196,11 @@ export function InventoryCountList({
                   return doMergeAndWrite(list2, fromStorage2 ?? count);
                 });
               });
-            }),
-          ]);
+            });
         const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
         const next = prev.then(runThisWrite, runThisWrite);
         pendingBackgroundWriteByCountId.set(countIdKey, next);
-        next.then((results) => {
-          const writeResult = results?.[1];
+        next.then((writeResult) => {
           if (writeResult) {
             clearAllInventoryCountDraftsForCount({
               countId: count.id,
@@ -2343,6 +2347,14 @@ export function InventoryCountList({
           return false;
         }
 
+        // ✅ 在庫調整の直後に履歴送信を await し、タイルを閉じても在庫履歴に確実に反映されるようにする
+        await logInventoryCountToApi({
+          locationId: count.locationId,
+          locationName: locationName || count.locationName || "",
+          items: itemsToAdjust,
+          sourceId: count.id,
+        }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e));
+
         // ✅ ローカル状態で更新後 count を組み立て。要件どおり「UIを先に完了→read/write/clearはバックグラウンド」で処理中が1分以上続くのを防ぐ
         const locallyBuiltResult = buildUpdatedCountFromLocalState(count, lines, {
           isMultipleMode,
@@ -2357,18 +2369,11 @@ export function InventoryCountList({
         toast("棚卸を完了しました");
         onAfterConfirm?.(locallyBuiltResult);
         setSubmitting(false);
-        // 同一棚卸で連続確定した場合に後者の read が前者の write 完了前に走ると上書きされるのを防ぐため、count 単位で直列化
+        // 同一棚卸で連続確定した場合に後者の read が前者の write 完了前に走ると上書きされるのを防ぐため、count 単位で直列化（履歴送信は上で完了済みのため write のみ）
         const countIdKey = normalizeIdForMatch(count?.id ?? "");
         const runThisWrite = () =>
-          Promise.all([
-            logInventoryCountToApi({
-              locationId: count.locationId,
-              locationName: locationName || count.locationName || "",
-              items: itemsToAdjust,
-              sourceId: count.id,
-            }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e)),
-            runWithBackgroundWriteRetry(() => {
-              const idNorm = normalizeIdForMatch(count?.id ?? "");
+          runWithBackgroundWriteRetry(() => {
+            const idNorm = normalizeIdForMatch(count?.id ?? "");
               const doMergeAndWrite = (list, base) => {
                 const toWrite = mergeCountWithStorage(base, locallyBuiltResult);
                 const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
@@ -2386,13 +2391,11 @@ export function InventoryCountList({
                   return doMergeAndWrite(list2, fromStorage2 ?? count);
                 });
               });
-            }),
-          ]);
+            });
         const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
         const next = prev.then(runThisWrite, runThisWrite);
         pendingBackgroundWriteByCountId.set(countIdKey, next);
-        next.then((results) => {
-          const writeResult = results?.[1];
+        next.then((writeResult) => {
           if (writeResult) {
             clearAllInventoryCountDraftsForCount({
               countId: count.id,
@@ -2419,7 +2422,7 @@ export function InventoryCountList({
       setSubmitting(false);
       return false;
     }
-    // ※ 差異ありは要件どおり「UIを先に完了（toast/onAfterConfirm/setSubmitting(false)）→ read/write/clear はバックグラウンド」のため、adjust 成功直後に setSubmitting(false) を実行している
+    // ※ 差異ありは要件どおり「UIを先に完了（toast/onAfterConfirm/setSubmitting(false)）→ read/write/clear はバックグラウンド」のため、adjust 成功直後に setSubmitting(false) を実行している。履歴送信は adjust 直後に await 済み。
   }, [count, itemsToAdjust, lines, onAfterConfirm, productGroupId, targetProductGroupIds, buildGroupItemsEntry]);
 
   // Header

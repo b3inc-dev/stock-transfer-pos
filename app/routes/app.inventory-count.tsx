@@ -3621,7 +3621,17 @@ export async function action({ request }: ActionFunctionArgs) {
       console.error("[inventory-count] action error graphQLErrors (body):", JSON.stringify(err.body.errors.graphQLErrors));
     }
     console.error("[inventory-count] action error:", err?.message ?? e);
-    return { ok: false, error: "処理中にエラーが発生しました。しばらくしてからお試しください。" as const };
+    // 棚卸チャンク欠落・パース失敗など既知のメッセージはそのまま返し、原因を把握しやすくする
+    const msg = String(err?.message ?? e ?? "").trim();
+    const isKnownError =
+      msg.includes("棚卸チャンク") ||
+      msg.includes("棚卸一覧チャンク") ||
+      msg.includes("パースに失敗") ||
+      msg.includes("配列ではありません");
+    const errorText = isKnownError
+      ? `${msg} 棚卸IDを修復するか、しばらくしてから再試行してください。`
+      : "処理中にエラーが発生しました。しばらくしてからお試しください。";
+    return { ok: false, error: errorText as const };
   }
 }
 
