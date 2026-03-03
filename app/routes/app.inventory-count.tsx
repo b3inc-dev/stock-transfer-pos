@@ -1189,6 +1189,51 @@ async function fetchListChunksViaLoader(
   return counts;
 }
 
+/** direct fetch で main チャンクを並列取得して結合（loader 用。list が空で main がチャンク形式のとき一覧を表示するため） */
+const MAIN_CHUNK_QUERY = `#graphql query MainChunk($key: String!) { currentAppInstallation { metafield(namespace: "${NS}", key: $key) { value } } }`;
+async function fetchMainChunksViaLoader(
+  shop: string,
+  accessToken: string,
+  totalChunks: number
+): Promise<InventoryCount[]> {
+  const fullCounts: InventoryCount[] = [];
+  const partsByCountId = new Map<string, CountPart[]>();
+  for (let start = 0; start < totalChunks; start += CHUNK_FETCH_CONCURRENCY) {
+    const batch = Array.from({ length: Math.min(CHUNK_FETCH_CONCURRENCY, totalChunks - start) }, (_, j) => start + j);
+    const results = await Promise.all(
+      batch.map(async (i) => {
+        const key = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`;
+        const json = await loaderGraphql(shop, accessToken, MAIN_CHUNK_QUERY, { key });
+        const value = (json?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation?.metafield?.value;
+        return value ?? null;
+      })
+    );
+    for (const chunkRaw of results) {
+      if (chunkRaw == null || chunkRaw === "") continue;
+      try {
+        const chunk = JSON.parse(chunkRaw) as unknown[];
+        if (!Array.isArray(chunk)) continue;
+        for (const el of chunk) {
+          if (el && typeof el === "object" && (el as CountPart)._part === true) {
+            const part = el as CountPart;
+            const list = partsByCountId.get(part.countId) ?? [];
+            list.push(part);
+            partsByCountId.set(part.countId, list);
+          } else {
+            fullCounts.push(el as InventoryCount);
+          }
+        }
+      } catch {
+        // スキップ
+      }
+    }
+  }
+  for (const parts of partsByCountId.values()) {
+    fullCounts.push(mergeCountParts(parts));
+  }
+  return fullCounts;
+}
+
 /** GraphQL の metafield.value を main 用にパース → { chunked, array } | { chunked, totalChunks } | null */
 function parseMainMetafieldValue(raw: string | null | undefined): { chunked: false; array: InventoryCount[] } | { chunked: true; totalChunks: number } | null {
   if (raw == null || raw === "") return null;
@@ -1290,6 +1335,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
         } catch (e) {
           console.warn("[inventory-count] loader list chunks fetch failed:", e instanceof Error ? e.message : e);
         }
+      }
+    }
+    // list が空で main がチャンク形式のときは main チャンクから一覧を表示（ID発行で list 未更新でも表示される）
+    if (listCountsOnly.length === 0 && mainKeyResult?.chunked) {
+      try {
+        listCountsOnly = await fetchMainChunksViaLoader(shop, accessToken, mainKeyResult.totalChunks);
+      } catch (e) {
+        console.warn("[inventory-count] loader main chunks fallback failed:", e instanceof Error ? e.message : e);
       }
     }
   } else {
@@ -1783,18 +1836,15 @@ async function appendNewCountToChunked(
   const minimalItem = toMinimal(newCount) as Record<string, unknown>;
 
   // 履歴一覧は list メタから表示するため、新規1件を list にも追加する（追加しないと発行直後に履歴に表示されない）
+  // main がチャンクのとき list が空なら上書きしない（list=[新規1件]にすると既存一覧が消える。loader の main フォールバックで表示される）
   try {
     const listMainJson = gql
       ? await gql(LIST_MAIN_KEY_QUERY)
       : (await safeJsonFromResponseForLoader(await admin.graphql(LIST_MAIN_KEY_QUERY), {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
     const listRaw = (listMainJson?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation?.metafield?.value ?? "";
-    if (listRaw === "" || listRaw === "[]" || !listRaw.trim()) {
-      const listValue = JSON.stringify([minimalItem]);
-      const listSet = [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json" as const, value: listValue }];
-      const listRes = gql ? await gql(SET_COUNTS_MUTATION, { metafields: listSet }) : (await safeJsonFromResponse(await admin.graphql(SET_COUNTS_MUTATION, { variables: { metafields: listSet } }))) as Record<string, unknown>;
-      if (Array.isArray((listRes?.data as { metafieldsSet?: { userErrors?: unknown[] } })?.metafieldsSet?.userErrors) && (listRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet!.userErrors.length > 0) {
-        console.warn("[inventory-count] appendNewCount: list (empty) write userErrors", (listRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet?.userErrors);
-      }
+    const listEmpty = listRaw === "" || listRaw === "[]" || !listRaw.trim();
+    if (listEmpty) {
+      // main はチャンクなので list を [新規1件] で上書きすると既存が消える。スキップ。loader が main チャンクから表示する。
     } else {
       let parsed: unknown;
       try {

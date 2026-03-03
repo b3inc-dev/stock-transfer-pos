@@ -14,8 +14,9 @@
 1. **loader** で棚卸一覧用に list / main / version の 3 本を取得している。
 2. **session.shop が null** になるリクエストがあると、`useDirectFetch` が false になり、list/main/version は **空で返す** フォールバックになる → 画面上は履歴 0 件。
 3. あるいは direct fetch でも、Shopfiy が空 body を返すと `safeJsonFromResponseForLoader` は落ちないが、中身が空なので履歴は 0 件になる。
+4. **list が空で main がチャンク形式**のとき、従来は main を読まず一覧が空だった。ID発行で list に追記し損ねた場合も同様。
 
-**対応**: loader で `session.shop` が空のとき、**URL の `?shop=` から shop を補完**して direct fetch を使うようにした。また、list/main/version は当初から **loader では direct fetch + safeJson** にしている。
+**対応**: loader で `session.shop` が空のとき、**URL の `?shop=` から shop を補完**して direct fetch を使うようにした。また、list/main/version は当初から **loader では direct fetch + safeJson** にしている。**list が空かつ main がチャンクのときは main チャンクから一覧を取得するフォールバック**を追加し、ID発行直後や list 未更新時も履歴に表示されるようにした。
 
 **原因をログで確定する**: サーバーログに次の2行が出る。
 
