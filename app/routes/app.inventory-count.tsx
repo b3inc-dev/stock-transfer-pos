@@ -1001,8 +1001,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // ショップのタイムゾーンを取得
   const shopTimezone = await getShopTimezone(admin);
 
-  // ロケーション・メタフィールド・設定・棚卸一覧（list 優先）・楽観ロック用バージョンを並列取得
-  const [locResp, appResp, settingsResp, inventoryCountsFromList, inventoryCountsVersion] = await Promise.all([
+  // 案A: loader はチャンクを読まない。list の単一キー or メインの単一キーのみ読み（syntax error を防ぐ）
+  const [locResp, appResp, settingsResp, listCountsOnly, mainKeyResult, inventoryCountsVersion] = await Promise.all([
     admin.graphql(
       `#graphql
         query Locations($first: Int!) {
@@ -1029,13 +1029,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
       `
     ),
-    readInventoryCountsListChunked(admin),
+    readListMainKeyOnly(admin),
+    readMainKeyOnly(admin),
     getInventoryCountsVersion(admin),
   ]);
-  const usedListMetafield = inventoryCountsFromList.length > 0;
-  const inventoryCountsRaw = usedListMetafield
-    ? inventoryCountsFromList
-    : await readInventoryCountsChunked(admin);
+  const usedListMetafield = (listCountsOnly?.length ?? 0) > 0;
+  const inventoryCountsRaw: InventoryCount[] = usedListMetafield
+    ? (listCountsOnly ?? [])
+    : (mainKeyResult && !mainKeyResult.chunked ? mainKeyResult.array : []);
 
   const locData = (await safeJsonFromResponseForLoader(locResp, {})) as { data?: { locations?: { nodes?: LocationNode[] } } };
   const appData = (await safeJsonFromResponseForLoader(appResp, {})) as { data?: { currentAppInstallation?: { productGroupsMetafield?: { value?: string } } } };
@@ -1240,10 +1241,11 @@ function parseCountNameNumber(countName: string | null | undefined): number {
 }
 
 /**
- * チャンクを読まずに「次の棚卸番号」を取得する。
+ * チャンクを読まずに「次の棚卸番号」（名称＋1）を確実に取得する。
  * 1) inventory_count_next_v1 メタがあればその値を使用
  * 2) なければバックアップから max(countName の数値)+1
- * 3) どちらも無ければ 1
+ * 3) どちらも無ければ list/main の単一キーのみ読んで max(countName)+1（チャンクは読まない）
+ * 4) それでも無ければ 1
  */
 async function getNextCountNumber(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<number> {
   const nextResp = await admin.graphql(
@@ -1260,16 +1262,29 @@ async function getNextCountNumber(admin: { graphql: (q: string, opts?: { variabl
   );
   const backupJson = await safeJsonFromResponse(backupResp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
   const backupRaw = backupJson?.data?.currentAppInstallation?.metafield?.value;
-  if (backupRaw == null || backupRaw === "") return 1;
-  let list: Array<{ countName?: string | null }>;
-  try {
-    list = JSON.parse(backupRaw);
-  } catch {
-    return 1;
+  if (backupRaw != null && backupRaw !== "") {
+    try {
+      const list = JSON.parse(backupRaw) as Array<{ countName?: string | null }>;
+      if (Array.isArray(list) && list.length > 0) {
+        const maxNum = list.reduce((max, c) => Math.max(max, parseCountNameNumber(c?.countName)), 0);
+        if (maxNum >= 0) return maxNum + 1;
+      }
+    } catch {
+      // バックアップパース失敗は次へ
+    }
   }
-  if (!Array.isArray(list) || list.length === 0) return 1;
-  const maxNum = list.reduce((max, c) => Math.max(max, parseCountNameNumber(c?.countName)), 0);
-  return maxNum + 1;
+  // 3) list または main の単一キーのみから max(countName)+1 を算出（チャンクは読まない）
+  try {
+    const [listArr, mainResult] = await Promise.all([readListMainKeyOnly(admin), readMainKeyOnly(admin)]);
+    const candidates = listArr?.length ? listArr : (mainResult && !mainResult.chunked ? mainResult.array : []);
+    if (Array.isArray(candidates) && candidates.length > 0) {
+      const maxNum = candidates.reduce((max, c) => Math.max(max, parseCountNameNumber((c as { countName?: string }).countName)), 0);
+      return maxNum + 1;
+    }
+  } catch {
+    // 単一キー取得失敗時は 1
+  }
+  return 1;
 }
 
 /**
@@ -1295,6 +1310,29 @@ async function readMainKeyOnly(admin: { graphql: (q: string, opts?: { variables?
     return { chunked: true, totalChunks: desc.totalChunks };
   }
   return null;
+}
+
+/**
+ * 一覧用キー（inventory_counts_list_v1）の値だけを取得。チャンクは読まない。
+ * loader 用。パース失敗・チャンク形式のときは [] を返し、ページを落とさない。
+ */
+async function readListMainKeyOnly(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
+  const listResp = await admin.graphql(
+    `#graphql query InventoryCountListMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_LIST_KEY}") { value } } }`
+  );
+  const listJson = (await safeJsonFromResponseForLoader(listResp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+  const raw = listJson?.data?.currentAppInstallation?.metafield?.value;
+  if (raw == null || raw === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (Array.isArray(parsed)) return parsed as InventoryCount[];
+  const desc = parsed as { _chunked?: boolean; totalChunks?: number };
+  if (desc?._chunked && typeof desc.totalChunks === "number") return [];
+  return [];
 }
 
 /** 楽観ロック用。棚卸一覧のバージョン（保存のたびに +1）を取得。無ければ 1 */
