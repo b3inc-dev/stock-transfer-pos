@@ -102,11 +102,18 @@ export async function getShopPlan(
       `,
       { variables: { first: 250 } }
     );
-    const data = await resp.json();
-    locationsCount = data?.data?.locations?.nodes?.length ?? 0;
-    isDevelopmentStore = data?.data?.shop?.plan?.partnerDevelopment === true;
-    activeSubscriptions = data?.data?.currentAppInstallation?.activeSubscriptions ?? [];
-    planFromBilling = getPlanFromActiveSubscriptions(activeSubscriptions);
+    const text = typeof resp?.text === "function" ? await resp.text() : "";
+    if (text && String(text).trim()) {
+      try {
+        const data = JSON.parse(text) as { data?: { locations?: { nodes?: unknown[] }; shop?: { plan?: { partnerDevelopment?: boolean } }; currentAppInstallation?: { activeSubscriptions?: unknown[] } } };
+        locationsCount = data?.data?.locations?.nodes?.length ?? 0;
+        isDevelopmentStore = data?.data?.shop?.plan?.partnerDevelopment === true;
+        activeSubscriptions = data?.data?.currentAppInstallation?.activeSubscriptions ?? [];
+        planFromBilling = getPlanFromActiveSubscriptions(activeSubscriptions);
+      } catch {
+        // ignore parse error (syntax error, unexpected end of file 等を出さない)
+      }
+    }
   } catch {
     // ignore
   }

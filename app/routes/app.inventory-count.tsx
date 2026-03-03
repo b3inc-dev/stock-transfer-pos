@@ -998,8 +998,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
   try {
   const { admin } = await authenticate.admin(request);
 
-  // ショップのタイムゾーンを取得
-  const shopTimezone = await getShopTimezone(admin);
+  // ショップのタイムゾーンを取得（失敗時は必ず "UTC" にし、loader が落ちないようにする）
+  let shopTimezone = "UTC";
+  try {
+    shopTimezone = await getShopTimezone(admin) || "UTC";
+  } catch {
+    shopTimezone = "UTC";
+  }
 
   // 案A: loader はチャンクを読まない。list の単一キー or メインの単一キーのみ読み（syntax error を防ぐ）
   const [locResp, appResp, settingsResp, listCountsOnly, mainKeyResult, inventoryCountsVersion] = await Promise.all([

@@ -102,7 +102,7 @@ export function getHourInShopTimezone(date: Date = new Date(), timezone: string 
 export async function getShopTimezone(admin: { graphql: (q: string, v?: any) => Promise<any> }): Promise<string> {
   try {
     const resp = await admin.graphql(GET_SHOP_TIMEZONE_QUERY);
-    const text = await resp.text();
+    const text = typeof (resp as Response)?.text === "function" ? await (resp as Response).text() : "";
     if (text == null || String(text).trim() === "") return "UTC";
     try {
       const data = JSON.parse(text) as { data?: { shop?: { ianaTimezone?: string } } };

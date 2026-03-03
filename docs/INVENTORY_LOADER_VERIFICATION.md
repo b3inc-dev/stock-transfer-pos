@@ -3,6 +3,7 @@
 ## 結論
 
 - **loader 経路で「syntax error, unexpected end of file」を起こす箇所は、すべて throw しない実装に揃えた。**
+- **親レイアウト `app.tsx` の getShopPlan** も `resp.json()` を使っていたため、空応答で throw する可能性があった。**`resp.text()` + `JSON.parse` の try/catch に変更済み。**
 - **「他に絶対に問題がない」とは言い切れない**理由（ネットワーク・認証・他モジュール）を下に記載する。
 
 ---
@@ -26,7 +27,12 @@
 
 ---
 
-## 2. その他の loader 内の例外の可能性
+## 2. 親レイアウト（app.tsx）の getShopPlan
+
+- 棚卸ページを開くとき、**先に app.tsx の loader が実行される**。その中で `getShopPlan(admin)` が呼ばれ、`resp.json()` をそのまま使っていた。
+- 空・不正な GraphQL 応答だと `resp.json()` が **syntax error** を throw する。getShopPlan 内は try/catch で握りつぶしていたが、**念のため `resp.text()` + `JSON.parse` の try/catch に変更**し、パース失敗時も throw しないようにした。
+
+## 3. その他の loader 内の例外の可能性
 
 | 要因 | 挙動 | 備考 |
 |------|------|------|
@@ -39,7 +45,7 @@
 
 ---
 
-## 3. 「絶対に問題がない」と言い切れない理由
+## 4. 「絶対に問題がない」と言い切れない理由
 
 - **認証・ネットワーク**: 上記のとおり、認証失敗やネットワークエラーでは別のメッセージで `loadError: true` になる可能性はある。
 - **action や他ルート**: 棚卸の **action**（保存・確定・修復など）や **api.pos-stocktake-complete** など、loader 以外の経路はこの検証の対象外。そこでの `.json()` や `JSON.parse` が未対策の場合は、同様の syntax error が出る余地がある。
@@ -47,7 +53,7 @@
 
 ---
 
-## 4. まとめ（根拠付き）
+## 5. まとめ（根拠付き）
 
 - **loader 経路で「syntax error, unexpected end of file」を出す箇所は、コード上すべて「throw しない」実装に変更済み。**  
   根拠: 上記 1 の一覧（各箇所で `safeJsonFromResponseForLoader` または try/catch を利用）。

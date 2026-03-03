@@ -47,6 +47,12 @@
    - デプロイ後に `curl -X OPTIONS https://(あなたのドメイン)/api/pos-stocktake-complete` で 204 が返るか確認。
    - 204 が返れば OPTIONS は届いているので、続けて POST（Authorization 付き）で確認。
 
+4. **POS が参照している appUrl とデプロイ先が一致しているか**
+   - POS 拡張は `extensions/common/appUrl.js` の `getAppUrl()` でベース URL を取得している。
+   - `APP_MODE = "public"` → 本番 URL は `https://pos-stock.onrender.com`
+   - `APP_MODE = "inhouse"` → 本番 URL は `https://stock-transfer-pos.onrender.com`
+   - **実際にアプリ（Remix）をデプロイしているドメイン** と上記が一致していないと、確定APIは別ホストに送られて届かない。履歴APIも同じ `getAppUrl()` を使うので、履歴が成功しているなら appUrl は合っている。履歴も送れない場合は APP_MODE とデプロイ先の対応を確認する。
+
 ---
 
 ## まとめ
