@@ -40,10 +40,9 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
   }
 
   try {
+    // 履歴送信（logInventoryChangeToApi）と同じ送信方法：mode/credentials は指定しない（Bearer のみで認証。* の CORS と credentials は併用不可のため）
     const resp = await fetch(apiUrl, {
       method: "POST",
-      mode: "cors",
-      credentials: "include",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
