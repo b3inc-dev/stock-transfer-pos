@@ -237,7 +237,7 @@ async function fetchOneChunk(
         await new Promise<void>((r) => setTimeout(r, CHUNK_FETCH_RETRY_DELAY_MS));
       }
       const resp = await admin.graphql(gql, { variables: { key } });
-      const json = await resp.json() as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+      const json = (await safeJsonFromResponseForLoader(resp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
       const chunkRaw = json?.data?.currentAppInstallation?.metafield?.value;
       if (chunkRaw != null && chunkRaw !== "") return chunkRaw;
     } catch (e) {
