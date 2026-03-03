@@ -1780,6 +1780,75 @@ async function appendNewCountToChunked(
           cancelledGroupIds: Array.isArray((c as any).cancelledGroupIds) ? (c as any).cancelledGroupIds : undefined,
         }
       : null;
+  const minimalItem = toMinimal(newCount) as Record<string, unknown>;
+
+  // 履歴一覧は list メタから表示するため、新規1件を list にも追加する（追加しないと発行直後に履歴に表示されない）
+  try {
+    const listMainJson = gql
+      ? await gql(LIST_MAIN_KEY_QUERY)
+      : (await safeJsonFromResponseForLoader(await admin.graphql(LIST_MAIN_KEY_QUERY), {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+    const listRaw = (listMainJson?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation?.metafield?.value ?? "";
+    if (listRaw === "" || listRaw === "[]" || !listRaw.trim()) {
+      const listValue = JSON.stringify([minimalItem]);
+      const listSet = [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json" as const, value: listValue }];
+      const listRes = gql ? await gql(SET_COUNTS_MUTATION, { metafields: listSet }) : (await safeJsonFromResponse(await admin.graphql(SET_COUNTS_MUTATION, { variables: { metafields: listSet } }))) as Record<string, unknown>;
+      if (Array.isArray((listRes?.data as { metafieldsSet?: { userErrors?: unknown[] } })?.metafieldsSet?.userErrors) && (listRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet!.userErrors.length > 0) {
+        console.warn("[inventory-count] appendNewCount: list (empty) write userErrors", (listRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet?.userErrors);
+      }
+    } else {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(listRaw);
+      } catch {
+        parsed = null;
+      }
+      const desc = parsed as { _chunked?: boolean; totalChunks?: number } | null;
+      if (desc?._chunked && typeof desc.totalChunks === "number" && desc.totalChunks >= 1) {
+        const totalChunks = desc.totalChunks;
+        const lastIndex = totalChunks - 1;
+        const lastKey = `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${lastIndex}`;
+        const lastRaw = await fetchChunk(lastKey, lastIndex);
+        let lastChunk: Record<string, unknown>[] = [];
+        if (lastRaw) try {
+          const a = JSON.parse(lastRaw);
+          if (Array.isArray(a)) lastChunk = a as Record<string, unknown>[];
+        } catch {}
+        lastChunk.push(minimalItem);
+        const newChunkValue = JSON.stringify(lastChunk);
+        if (newChunkValue.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
+          const listChunkSet = [{ ownerId, namespace: NS, key: lastKey, type: "json" as const, value: newChunkValue }];
+          const listChunkRes = gql ? await gql(SET_COUNTS_MUTATION, { metafields: listChunkSet }) : (await safeJsonFromResponse(await admin.graphql(SET_COUNTS_MUTATION, { variables: { metafields: listChunkSet } }))) as Record<string, unknown>;
+          if (Array.isArray((listChunkRes?.data as { metafieldsSet?: { userErrors?: unknown[] } })?.metafieldsSet?.userErrors) && (listChunkRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet!.userErrors.length > 0) {
+            console.warn("[inventory-count] appendNewCount: list chunk write userErrors", (listChunkRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet?.userErrors);
+          }
+        } else {
+          lastChunk.pop();
+          const listChunkSet = [
+            { ownerId, namespace: NS, key: lastKey, type: "json" as const, value: JSON.stringify(lastChunk) },
+            { ownerId, namespace: NS, key: `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${totalChunks}`, type: "json" as const, value: JSON.stringify([minimalItem]) },
+            { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json" as const, value: JSON.stringify({ _chunked: true, totalChunks: totalChunks + 1 }) },
+          ];
+          const listChunkRes = gql ? await gql(SET_COUNTS_MUTATION, { metafields: listChunkSet }) : (await safeJsonFromResponse(await admin.graphql(SET_COUNTS_MUTATION, { variables: { metafields: listChunkSet } }))) as Record<string, unknown>;
+          if (Array.isArray((listChunkRes?.data as { metafieldsSet?: { userErrors?: unknown[] } })?.metafieldsSet?.userErrors) && (listChunkRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet!.userErrors.length > 0) {
+            console.warn("[inventory-count] appendNewCount: list new chunk write userErrors", (listChunkRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet?.userErrors);
+          }
+        }
+      } else if (Array.isArray(parsed)) {
+        const arr = [...(parsed as Record<string, unknown>[]), minimalItem];
+        const listValue = JSON.stringify(arr);
+        if (listValue.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
+          const listSet = [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json" as const, value: listValue }];
+          const listRes = gql ? await gql(SET_COUNTS_MUTATION, { metafields: listSet }) : (await safeJsonFromResponse(await admin.graphql(SET_COUNTS_MUTATION, { variables: { metafields: listSet } }))) as Record<string, unknown>;
+          if (Array.isArray((listRes?.data as { metafieldsSet?: { userErrors?: unknown[] } })?.metafieldsSet?.userErrors) && (listRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet!.userErrors.length > 0) {
+            console.warn("[inventory-count] appendNewCount: list (array) write userErrors", (listRes?.data as { metafieldsSet?: { userErrors: unknown[] } }).metafieldsSet?.userErrors);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[inventory-count] appendNewCount: list metafield append failed (history may not show new count until next save):", e instanceof Error ? e.message : e);
+  }
+
   const backupQuery = `#graphql query Backup { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_BACKUP_KEY}") { value } } }`;
   const backupJson = gql ? await gql(backupQuery) : (await safeJsonFromResponse(await admin.graphql(backupQuery))) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
   const backupRaw = (backupJson?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation?.metafield?.value;
@@ -1788,7 +1857,7 @@ async function appendNewCountToChunked(
     list = JSON.parse(backupRaw);
   } catch {}
   if (!Array.isArray(list)) list = [];
-  list.push(toMinimal(newCount) as Record<string, unknown>);
+  list.push(minimalItem);
   const backupValue = JSON.stringify(list);
   if (backupValue.length <= INVENTORY_COUNTS_BACKUP_MAX_BYTES) {
     const backupMetafields = [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_BACKUP_KEY, type: "json", value: backupValue }];
