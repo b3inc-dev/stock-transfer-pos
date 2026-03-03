@@ -1295,7 +1295,8 @@ async function readMainKeyOnly(admin: { graphql: (q: string, opts?: { variables?
   const mainResp = await admin.graphql(
     `#graphql query InventoryCountMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`
   );
-  const mainJson = await safeJsonFromResponse(mainResp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+  // loader 経路で使うため throw しない（空・不正 JSON 時は null を返す）
+  const mainJson = (await safeJsonFromResponseForLoader(mainResp, null)) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } } | null;
   const raw = mainJson?.data?.currentAppInstallation?.metafield?.value;
   if (raw == null || raw === "") return null;
   let parsed: unknown;

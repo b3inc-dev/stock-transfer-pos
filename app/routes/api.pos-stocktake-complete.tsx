@@ -61,13 +61,16 @@ function jsonResponse(body: object, status: number, headers?: Record<string, str
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
+  // 履歴API と同様: CORS プリフライトが届いているかログで確認できるようにする
   if (request.method === "OPTIONS") {
+    console.log("[api.pos-stocktake-complete] CORS preflight (OPTIONS) received");
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
   return new Response(null, { status: 405, headers: CORS_HEADERS });
 }
 
 export async function action({ request }: ActionFunctionArgs) {
+  console.log("[api.pos-stocktake-complete] Action called: method=" + request.method);
   if (request.method !== "POST") {
     return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
   }
@@ -133,7 +136,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const appInstResp = await admin.graphql(
       `#graphql query GetAppInstallation { currentAppInstallation { id } }`
     );
-    const appInstJson = (await appInstResp.json()) as { data?: { currentAppInstallation?: { id?: string } } };
+    const appInstJson = (await appInstResp.json().catch(() => ({}))) as { data?: { currentAppInstallation?: { id?: string } } };
     ownerId = appInstJson?.data?.currentAppInstallation?.id ?? "";
   } catch (e) {
     console.warn("[api.pos-stocktake-complete] get ownerId failed:", e instanceof Error ? e.message : String(e));

@@ -40,13 +40,10 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
   }
 
   try {
-    // 履歴送信（logInventoryChangeToApi）と同じ送信方法：mode/credentials は指定しない（Bearer のみで認証。* の CORS と credentials は併用不可のため）
+    // 履歴送信（sendChunkWithRetry）と完全に同一の fetch オプション：ヘッダー順・キーも揃える
     const resp = await fetch(apiUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => ({}));

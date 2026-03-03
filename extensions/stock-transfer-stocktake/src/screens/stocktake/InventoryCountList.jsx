@@ -2120,27 +2120,23 @@ export function InventoryCountList({
         return true;
       }
       
-      // 在庫調整が必要な場合：全グループの編集可能な商品を一度に調整
+      // 在庫調整が必要な場合：API（メタ更新）成功後にのみ在庫調整と履歴を送る（失敗時は在庫・履歴を送らない）
       setSubmitting(true);
-      let inventoryAdjustmentSuccess = false;
-      
-      // ✅ 在庫調整前にlinesのスナップショットを作成
-      const linesSnapshot = editableLines.map((l) => ({
-        inventoryItemId: l.inventoryItemId,
-        variantId: l.variantId,
-        sku: l.sku ?? "",
-        barcode: l.barcode ?? "", // ✅ barcodeを追加
-        productTitle: l.productTitle ?? "",
-        variantTitle: l.variantTitle ?? "",
-        productGroupId: l.productGroupId,
-        currentQuantity: Number(l.currentQuantity ?? 0),
-        actualQuantity: Number(l.actualQuantity ?? 0),
-        isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-      }));
-      
       try {
-        // ✅ エラー要因を先に確認：在庫調整APIが失敗したらここで止める
-        const result = await adjustInventoryToActual({
+        const locallyBuiltAdjust = buildUpdatedCountFromLocalState(count, lines, {
+          isMultipleMode: true,
+          targetProductGroupIds,
+          productGroupId,
+        });
+        const payloadAdjust = buildCompletedGroupsPayload(count, locallyBuiltAdjust);
+        const resultAdjust = await reportStocktakeCompleteToApi(payloadAdjust);
+        if (!resultAdjust.ok) {
+          toast(resultAdjust.error || "メタの更新に失敗しました。再読み込みしてから再度確定してください。");
+          setSubmitting(false);
+          return false;
+        }
+        // ✅ API成功後のみ在庫調整と履歴送信（API失敗時は在庫・履歴を送らず一貫性を保つ）
+        const adjustResult = await adjustInventoryToActual({
           locationId: count.locationId,
           items: allItemsToAdjust.map((l) => ({
             inventoryItemId: l.inventoryItemId,
@@ -2149,46 +2145,32 @@ export function InventoryCountList({
           })),
           referenceDocumentUri: count.id,
         });
-        inventoryAdjustmentSuccess = true;
-        if (result?.invalidCount > 0) {
-          console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
-          toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
+        if (adjustResult?.invalidCount > 0) {
+          console.warn(`${adjustResult.invalidCount}件の商品が不正なIDのため除外されました`);
+          toast(`⚠️ ${adjustResult.invalidCount}件の商品が不正なIDのため除外されました`);
         }
-        // ✅ 在庫調整の直後に履歴送信を await し、タイルを閉じても在庫履歴に確実に反映されるようにする
         await logInventoryCountToApi({
           locationId: count.locationId,
           locationName: locationName || count.locationName || "",
           items: allItemsToAdjust,
           sourceId: count.id,
         }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e));
-        // ✅ ローカル状態で更新後 count を組み立て。要件どおり「UIを先に完了→read/write/clearはバックグラウンド」で処理中が1分以上続くのを防ぐ
-        const locallyBuiltAdjust = buildUpdatedCountFromLocalState(count, lines, {
-          isMultipleMode: true,
-          targetProductGroupIds,
-          productGroupId,
-        });
-        const payloadAdjust = buildCompletedGroupsPayload(count, locallyBuiltAdjust);
-        const resultAdjust = await reportStocktakeCompleteToApi(payloadAdjust);
-        if (resultAdjust.ok) {
-          toast("棚卸を完了しました");
-          onAfterConfirm?.(locallyBuiltAdjust);
-          clearAllInventoryCountDraftsForCount({
-            countId: count.id,
-            locationId: count.locationId,
-            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-          }).catch((e) => console.error("Failed to clear inventory count draft:", e));
-        } else {
-          toast(resultAdjust.error || "メタの更新に失敗しました。再読み込みしてから再度確定してください。");
-        }
+        toast("棚卸を完了しました");
+        onAfterConfirm?.(locallyBuiltAdjust);
+        clearAllInventoryCountDraftsForCount({
+          countId: count.id,
+          locationId: count.locationId,
+          productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+        }).catch((e) => console.error("Failed to clear inventory count draft:", e));
         setSubmitting(false);
         return true;
-        } catch (updateError) {
-          const updateMsg = String(updateError?.message ?? updateError);
-          console.error("[InventoryCountList] build updated error:", updateError);
-          toast(`エラー: ${updateMsg}`);
-        }
-      setSubmitting(false);
-      return false;
+      } catch (updateError) {
+        const updateMsg = String(updateError?.message ?? updateError);
+        console.error("[InventoryCountList] confirm (with adjustment) error:", updateError);
+        toast(`エラー: ${updateMsg}`);
+        setSubmitting(false);
+        return false;
+      }
     }
 
     const currentGroupId = productGroupId || (targetProductGroupIds && targetProductGroupIds[0]) || null;
@@ -2228,105 +2210,56 @@ export function InventoryCountList({
     }
 
     setSubmitting(true);
-    let inventoryAdjustmentSuccess = false;
-    // ✅ 在庫調整前にlinesのスナップショットを作成（在庫調整後にcurrentQuantityが更新されるのを防ぐため）
-    // linesの値を直接コピーして保存（参照ではなく値のコピー）
-    // ✅ まとめて表示モードでは、編集可能な商品のみを対象とする
-    const targetLines = isMultipleMode ? lines.filter((l) => !l.isReadOnly) : lines;
-    const linesSnapshot = targetLines.map((l) => ({
-      inventoryItemId: l.inventoryItemId,
-      variantId: l.variantId,
-      sku: l.sku ?? "",
-      barcode: l.barcode ?? "", // ✅ barcodeを追加
-      productTitle: l.productTitle ?? "",
-      variantTitle: l.variantTitle ?? "",
-      imageUrl: l.imageUrl ?? "", // ✅ 画像URLを追加（予定外商品の画像表示用）
-      productGroupId: l.productGroupId, // ✅ まとめて表示モード用
-      // ✅ 在庫調整前の値を保存（棚卸時の在庫数）
-      currentQuantity: Number(l.currentQuantity ?? 0),
-      // ✅ 確定した在庫数（実数）
-      actualQuantity: Number(l.actualQuantity ?? 0),
-      isExtra: Boolean(l.isExtra), // ✅ 予定外商品フラグを追加
-    }));
-    // ✅ スナップショットからgroupItemsエントリを作成
-    const entryBeforeAdjustment = linesSnapshot.map((l) => ({
-      inventoryItemId: l.inventoryItemId,
-      variantId: l.variantId,
-      sku: l.sku,
-      barcode: l.barcode, // ✅ barcodeを追加
-      title: [l.productTitle, l.variantTitle].filter(Boolean).join(" / ") || l.sku || "-",
-      imageUrl: l.imageUrl, // ✅ 画像URLを追加（予定外商品の画像表示用）
-      // ✅ 在庫は棚卸時の在庫数（currentQuantity）、実数は確定した在庫数（actualQuantity）
-      currentQuantity: l.currentQuantity,
-      isExtra: l.isExtra, // ✅ 予定外商品フラグを追加
-      actualQuantity: l.actualQuantity,
-      delta: l.actualQuantity - l.currentQuantity,
-    }));
     try {
-      try {
-        // ✅ エラー要因を先に確認：在庫調整APIが失敗したらここで止める
-        try {
-          const result = await adjustInventoryToActual({
-            locationId: count.locationId,
-            items: itemsToAdjust.map((l) => ({
-              inventoryItemId: l.inventoryItemId,
-              currentQuantity: l.currentQuantity,
-              actualQuantity: l.actualQuantity,
-            })),
-            referenceDocumentUri: count.id,
-          });
-          inventoryAdjustmentSuccess = true;
-          if (result?.invalidCount > 0) {
-            console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
-            toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
-          }
-        } catch (adjustError) {
-          const adjustMsg = String(adjustError?.message ?? adjustError);
-          console.error("[InventoryCountList] adjustInventoryToActual error:", adjustError);
-          toast(`在庫調整エラー: ${adjustMsg}`);
-          setSubmitting(false);
-          return false;
-        }
-
-        // ✅ 在庫調整の直後に履歴送信を await し、タイルを閉じても在庫履歴に確実に反映されるようにする
-        await logInventoryCountToApi({
-          locationId: count.locationId,
-          locationName: locationName || count.locationName || "",
-          items: itemsToAdjust,
-          sourceId: count.id,
-        }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e));
-
-        const locallyBuiltResult = buildUpdatedCountFromLocalState(count, lines, {
-          isMultipleMode,
-          targetProductGroupIds,
-          productGroupId,
-        });
-        if (!inventoryAdjustmentSuccess || !locallyBuiltResult) {
-          setSubmitting(false);
-          return false;
-        }
-        const payloadResult = buildCompletedGroupsPayload(count, locallyBuiltResult);
-        const resultResult = await reportStocktakeCompleteToApi(payloadResult);
-        if (resultResult.ok) {
-          toast("棚卸を完了しました");
-          onAfterConfirm?.(locallyBuiltResult);
-          clearAllInventoryCountDraftsForCount({
-            countId: count.id,
-            locationId: count.locationId,
-            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
-          }).catch((e) => console.error("Failed to clear inventory count draft:", e));
-        } else {
-          toast(resultResult.error || "メタの更新に失敗しました。再読み込みしてから再度確定してください。");
-        }
-        setSubmitting(false);
-        return true;
-      } catch (updateError) {
-        const updateMsg = String(updateError?.message ?? updateError);
-        console.error("[InventoryCountList] handleComplete error:", updateError);
-        toast(`エラー: ${updateMsg}`);
+      const locallyBuiltResult = buildUpdatedCountFromLocalState(count, lines, {
+        isMultipleMode,
+        targetProductGroupIds,
+        productGroupId,
+      });
+      const payloadResult = buildCompletedGroupsPayload(count, locallyBuiltResult);
+      const resultResult = await reportStocktakeCompleteToApi(payloadResult);
+      if (!resultResult.ok) {
+        toast(resultResult.error || "メタの更新に失敗しました。再読み込みしてから再度確定してください。");
         setSubmitting(false);
         return false;
       }
+      // ✅ API成功後のみ在庫調整と履歴送信（API失敗時は在庫・履歴を送らず一貫性を保つ）
+      try {
+        const result = await adjustInventoryToActual({
+          locationId: count.locationId,
+          items: itemsToAdjust.map((l) => ({
+            inventoryItemId: l.inventoryItemId,
+            currentQuantity: l.currentQuantity,
+            actualQuantity: l.actualQuantity,
+          })),
+          referenceDocumentUri: count.id,
+        });
+        if (result?.invalidCount > 0) {
+          console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
+          toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
+        }
+      } catch (adjustError) {
+        const adjustMsg = String(adjustError?.message ?? adjustError);
+        console.error("[InventoryCountList] adjustInventoryToActual error:", adjustError);
+        toast(`在庫調整エラー: ${adjustMsg}`);
+        setSubmitting(false);
+        return false;
+      }
+      await logInventoryCountToApi({
+        locationId: count.locationId,
+        locationName: locationName || count.locationName || "",
+        items: itemsToAdjust,
+        sourceId: count.id,
+      }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e));
+      toast("棚卸を完了しました");
+      onAfterConfirm?.(locallyBuiltResult);
+      clearAllInventoryCountDraftsForCount({
+        countId: count.id,
+        locationId: count.locationId,
+        productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+      }).catch((e) => console.error("Failed to clear inventory count draft:", e));
+      setSubmitting(false);
+      return true;
     } catch (e) {
       const msg = String(e?.message ?? e);
       toast(`エラー: ${msg}`);
@@ -2334,7 +2267,6 @@ export function InventoryCountList({
       setSubmitting(false);
       return false;
     }
-    // ※ 差異ありは要件どおり「UIを先に完了（toast/onAfterConfirm/setSubmitting(false)）→ read/write/clear はバックグラウンド」のため、adjust 成功直後に setSubmitting(false) を実行している。履歴送信は adjust 直後に await 済み。
   }, [count, itemsToAdjust, lines, onAfterConfirm, productGroupId, targetProductGroupIds, buildGroupItemsEntry]);
 
   // Header
