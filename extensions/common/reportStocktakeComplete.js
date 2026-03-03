@@ -46,13 +46,19 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
     return { ok: false, error: "countId と groupId/items または completedGroups が必要です" };
   }
 
+  // 確定API はサーバー側で read/write 全チャンクを行うため時間がかかることがある。履歴API との違い（「返ってこない」対策）。
+  const STOCKTAKE_COMPLETE_TIMEOUT_MS = 90000; // 90秒
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), STOCKTAKE_COMPLETE_TIMEOUT_MS);
+
   try {
-    // 履歴送信（sendChunkWithRetry）と完全に同一の fetch オプション：ヘッダー順・キーも揃える
     const resp = await fetch(apiUrl, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       const msg = data?.error ?? `HTTP ${resp.status}`;
@@ -66,12 +72,17 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
     }
     return { ok: true };
   } catch (e) {
+    clearTimeout(timeoutId);
     const msg = e?.message ?? String(e);
     const name = e?.name ?? "";
     const cause = e?.cause != null ? String(e.cause) : "";
+    const isAbort = name === "AbortError" || /abort|timeout/i.test(String(msg));
     console.error("[reportStocktakeCompleteToApi] Request failed:", msg);
     // 原因特定用: fetch が throw した内容をそのまま記録（仮説ではなく事実）
-    console.error("STOCKTAKE_API_ORIGIN [client] fetch threw:", { message: msg, name, cause: cause || "(none)" });
+    console.error("STOCKTAKE_API_ORIGIN [client] fetch threw:", { message: msg, name, cause: cause || "(none)", isAbort });
+    if (isAbort) {
+      return { ok: false, error: "応答が返ってくるまでに時間がかかりすぎました（90秒）。棚卸データが大きい場合があります。しばらくしてから再度確定してください。" };
+    }
     // ブラウザの fetch がレスポンスを受け取る前に失敗した場合（接続不可・CORS・ネットワーク）は「Load failed」等になる
     const isNetworkFailure = /load failed|failed to fetch|network error|connection refused|net::/i.test(String(msg));
     const userMessage = isNetworkFailure

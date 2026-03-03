@@ -53,7 +53,20 @@
 
 ---
 
-## 5. まだエラーが出る場合の原因特定（仮説に頼らない方法）
+## 5. 実ログで判明した原因（2026-03 本番ログ）
+
+Render ログの **SYNTAX_ERROR_ORIGIN** のスタックから、以下が確定した。
+
+- **発生箇所**: `admin.graphql()` の**内側**。Shopify API クライアント（`lib/clients/common.ts` の `throwFailedRequest` → `NewGraphqlClient.request`）が、GraphQL レスポンスをパースする際に「syntax error, unexpected end of file」を **throw** している。
+- **呼び出し元**: loader の `Promise.all` 内の **getInventoryCountsVersion** および **readMainKeyOnly**。いずれも `admin.graphql()` を 1 回呼ぶだけだが、その**前**にクライアント側でレスポンスをパースしており、当プロジェクトの `safeJsonFromResponseForLoader` には到達していない。
+- **対応**:  
+  - **getInventoryCountsVersion** / **readMainKeyOnly** / **readListMainKeyOnly** の関数全体を try/catch で囲み、throw 時はそれぞれ **1** / **null** / **[]** を返す。  
+  - loader 内の locations / app / settings 用の **admin.graphql()** 3 本も、**graphqlOrEmpty** で try/catch し、失敗時は `{ data: {} }` の Response を返す。  
+  これにより、Shopify API が空・不正レスポンスを返しても loader は落ちず、画面は空データで表示される。
+
+---
+
+## 6. まだエラーが出る場合の原因特定（仮説に頼らない方法）
 
 **「syntax error, unexpected end of file」がまだ出る場合**、コード上で「ここは安全」としている箇所の外で throw している可能性がある（例: 認証ライブラリ内部の `.json()`、別ルートの実行順など）。
 
@@ -71,7 +84,7 @@
 
 ---
 
-## 6. まとめ（根拠付き）
+## 7. まとめ（根拠付き）
 
 - **loader 経路で「syntax error, unexpected end of file」を出す箇所は、コード上すべて「throw しない」実装に変更済み。**  
   根拠: 上記 1 の一覧（各箇所で `safeJsonFromResponseForLoader` または try/catch を利用）。

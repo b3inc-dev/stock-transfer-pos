@@ -201,7 +201,15 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     inventoryCounts = await readInventoryCountsChunked(admin);
   } catch (e) {
-    console.error("[api.pos-stocktake-complete] readInventoryCountsChunked failed:", e instanceof Error ? e.message : String(e));
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[api.pos-stocktake-complete] readInventoryCountsChunked failed:", msg);
+    // チャンク欠損のときはメッセージをそのまま返し、管理画面での修復を促す
+    if (/棚卸チャンク\d+が存在しません/.test(msg)) {
+      return jsonResponse(
+        { ok: false, error: "棚卸データの一部（メタフィールド）が欠落しています。管理画面の棚卸一覧で「修復」を実行するか、サポートにお問い合わせください。" },
+        500
+      );
+    }
     return jsonResponse({ ok: false, error: "棚卸データの読み取りに失敗しました。しばらくしてから再試行してください。" }, 500);
   }
 

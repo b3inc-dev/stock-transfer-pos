@@ -358,6 +358,11 @@ export async function readInventoryCountsChunked(admin: { graphql: (q: string, o
       chunkRaws[i] = chunkRaw;
     }
     if (chunkRaw == null) {
+      // 最後の1チャンクだけ欠けている場合（過去の空上書き修復などでディスクリプタだけ残った状態）：空として扱い読み続け、後続の write でメタを正しい状態に直せるようにする
+      if (i === totalChunks - 1) {
+        console.warn(`[inventory-count] 棚卸チャンク${i}（最終）が存在しません。空として扱い読み取りを続行します。`);
+        continue;
+      }
       throw new Error(
         `棚卸チャンク${i}が存在しません。メタフィールドが欠落している可能性があります（上書きで他データが消えるのを防ぐため読み取りを中断します）。`
       );
@@ -1007,8 +1012,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   // 案A: loader はチャンクを読まない。list の単一キー or メインの単一キーのみ読み（syntax error を防ぐ）
+  // admin.graphql() 内の Shopify API クライアントが空/不正レスポンスで throw することがあるため、各取得を try/catch で囲み loader を落とさない
+  const graphqlOrEmpty = async (query: string, vars?: { variables?: Record<string, unknown> }): Promise<Response> => {
+    try {
+      return await admin.graphql(query, vars);
+    } catch (e) {
+      console.warn("[inventory-count] loader graphql failed:", e instanceof Error ? e.message : String(e));
+      return new Response(JSON.stringify({ data: {} }));
+    }
+  };
   const [locResp, appResp, settingsResp, listCountsOnly, mainKeyResult, inventoryCountsVersion] = await Promise.all([
-    admin.graphql(
+    graphqlOrEmpty(
       `#graphql
         query Locations($first: Int!) {
           locations(first: $first) { nodes { id name } }
@@ -1016,7 +1030,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       `,
       { variables: { first: 250 } }
     ),
-    admin.graphql(
+    graphqlOrEmpty(
       `#graphql
         query InventoryCountData {
           currentAppInstallation {
@@ -1025,7 +1039,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
       `
     ),
-    admin.graphql(
+    graphqlOrEmpty(
       `#graphql
         query StocktakeSettings {
           currentAppInstallation {
@@ -1301,25 +1315,31 @@ async function getNextCountNumber(admin: { graphql: (q: string, opts?: { variabl
  * 戻り: { chunked: false, array: InventoryCount[] } | { chunked: true, totalChunks: number } | null
  */
 async function readMainKeyOnly(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<{ chunked: false; array: InventoryCount[] } | { chunked: true; totalChunks: number } | null> {
-  const mainResp = await admin.graphql(
-    `#graphql query InventoryCountMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`
-  );
-  // loader 経路で使うため throw しない（空・不正 JSON 時は null を返す）
-  const mainJson = (await safeJsonFromResponseForLoader(mainResp, null)) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } } | null;
-  const raw = mainJson?.data?.currentAppInstallation?.metafield?.value;
-  if (raw == null || raw === "") return null;
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
-  } catch {
+    const mainResp = await admin.graphql(
+      `#graphql query InventoryCountMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`
+    );
+    // loader 経路で使うため throw しない（空・不正 JSON 時は null を返す）
+    const mainJson = (await safeJsonFromResponseForLoader(mainResp, null)) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } } | null;
+    const raw = mainJson?.data?.currentAppInstallation?.metafield?.value;
+    if (raw == null || raw === "") return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (Array.isArray(parsed)) return { chunked: false, array: parsed as InventoryCount[] };
+    const desc = parsed as { _chunked?: boolean; totalChunks?: number };
+    if (desc?._chunked && typeof desc.totalChunks === "number" && desc.totalChunks >= 1) {
+      return { chunked: true, totalChunks: desc.totalChunks };
+    }
+    return null;
+  } catch (e) {
+    // admin.graphql() 内の Shopify API クライアントが空/不正レスポンスで throw する場合がある（syntax error, unexpected end of file）。loader を落とさないため null を返す。
+    console.warn("[inventory-count] readMainKeyOnly failed:", e instanceof Error ? e.message : String(e));
     return null;
   }
-  if (Array.isArray(parsed)) return { chunked: false, array: parsed as InventoryCount[] };
-  const desc = parsed as { _chunked?: boolean; totalChunks?: number };
-  if (desc?._chunked && typeof desc.totalChunks === "number" && desc.totalChunks >= 1) {
-    return { chunked: true, totalChunks: desc.totalChunks };
-  }
-  return null;
 }
 
 /**
@@ -1327,34 +1347,46 @@ async function readMainKeyOnly(admin: { graphql: (q: string, opts?: { variables?
  * loader 用。パース失敗・チャンク形式のときは [] を返し、ページを落とさない。
  */
 async function readListMainKeyOnly(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
-  const listResp = await admin.graphql(
-    `#graphql query InventoryCountListMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_LIST_KEY}") { value } } }`
-  );
-  const listJson = (await safeJsonFromResponseForLoader(listResp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
-  const raw = listJson?.data?.currentAppInstallation?.metafield?.value;
-  if (raw == null || raw === "") return [];
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
-  } catch {
+    const listResp = await admin.graphql(
+      `#graphql query InventoryCountListMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_LIST_KEY}") { value } } }`
+    );
+    const listJson = (await safeJsonFromResponseForLoader(listResp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+    const raw = listJson?.data?.currentAppInstallation?.metafield?.value;
+    if (raw == null || raw === "") return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    if (Array.isArray(parsed)) return parsed as InventoryCount[];
+    const desc = parsed as { _chunked?: boolean; totalChunks?: number };
+    if (desc?._chunked && typeof desc.totalChunks === "number") return [];
+    return [];
+  } catch (e) {
+    // admin.graphql() 内の Shopify API クライアントが空/不正レスポンスで throw する場合がある（syntax error, unexpected end of file）。loader を落とさないため [] を返す。
+    console.warn("[inventory-count] readListMainKeyOnly failed:", e instanceof Error ? e.message : String(e));
     return [];
   }
-  if (Array.isArray(parsed)) return parsed as InventoryCount[];
-  const desc = parsed as { _chunked?: boolean; totalChunks?: number };
-  if (desc?._chunked && typeof desc.totalChunks === "number") return [];
-  return [];
 }
 
 /** 楽観ロック用。棚卸一覧のバージョン（保存のたびに +1）を取得。無ければ 1 */
 async function getInventoryCountsVersion(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<number> {
-  const resp = await admin.graphql(
-    `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`
-  );
-  const json = (await safeJsonFromResponseForLoader(resp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
-  const v = json?.data?.currentAppInstallation?.metafield?.value;
-  if (v == null || v === "") return 1;
-  const n = parseInt(String(v).trim(), 10);
-  return Number.isInteger(n) && n >= 1 ? n : 1;
+  try {
+    const resp = await admin.graphql(
+      `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`
+    );
+    const json = (await safeJsonFromResponseForLoader(resp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+    const v = json?.data?.currentAppInstallation?.metafield?.value;
+    if (v == null || v === "") return 1;
+    const n = parseInt(String(v).trim(), 10);
+    return Number.isInteger(n) && n >= 1 ? n : 1;
+  } catch (e) {
+    // admin.graphql() 内の Shopify API クライアントが空/不正レスポンスで throw する場合がある（syntax error, unexpected end of file）。loader を落とさないためデフォルトを返す。
+    console.warn("[inventory-count] getInventoryCountsVersion failed:", e instanceof Error ? e.message : String(e));
+    return 1;
+  }
 }
 
 /**
