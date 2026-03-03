@@ -1135,7 +1135,7 @@ async function loaderGraphql(
   return out ?? {};
 }
 
-/** GraphQL の metafield.value を list 用にパース → InventoryCount[] */
+/** GraphQL の metafield.value を list 用にパース → InventoryCount[]（配列でなければ []） */
 function parseListMetafieldValue(raw: string | null | undefined): InventoryCount[] {
   if (raw == null || raw === "") return [];
   try {
@@ -1144,6 +1144,49 @@ function parseListMetafieldValue(raw: string | null | undefined): InventoryCount
   } catch {
     return [];
   }
+}
+
+/** list の value がチャンク用ディスクリプタかどうかと totalChunks を返す */
+function parseListDescriptor(raw: string | null | undefined): { chunked: true; totalChunks: number } | null {
+  if (raw == null || raw === "") return null;
+  try {
+    const parsed = JSON.parse(raw) as { _chunked?: boolean; totalChunks?: number };
+    if (parsed?._chunked && typeof parsed.totalChunks === "number" && parsed.totalChunks >= 1) return { chunked: true, totalChunks: parsed.totalChunks };
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** direct fetch で list チャンクを並列取得して結合（loader 用。list がチャンク形式のとき一覧を表示するため） */
+async function fetchListChunksViaLoader(
+  shop: string,
+  accessToken: string,
+  totalChunks: number
+): Promise<InventoryCount[]> {
+  const LIST_CHUNK_QUERY = `#graphql query ListChunk($key: String!) { currentAppInstallation { metafield(namespace: "${NS}", key: $key) { value } } }`;
+  const counts: InventoryCount[] = [];
+  for (let start = 0; start < totalChunks; start += CHUNK_FETCH_CONCURRENCY) {
+    const batch = Array.from({ length: Math.min(CHUNK_FETCH_CONCURRENCY, totalChunks - start) }, (_, i) => start + i);
+    const results = await Promise.all(
+      batch.map(async (i) => {
+        const key = `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${i}`;
+        const json = await loaderGraphql(shop, accessToken, LIST_CHUNK_QUERY, { key });
+        const value = (json?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation?.metafield?.value;
+        return value ?? null;
+      })
+    );
+    for (const chunkRaw of results) {
+      if (chunkRaw == null || chunkRaw === "") continue;
+      try {
+        const chunk = JSON.parse(chunkRaw) as unknown;
+        if (Array.isArray(chunk)) counts.push(...(chunk as InventoryCount[]));
+      } catch {
+        // スキップ
+      }
+    }
+  }
+  return counts;
 }
 
 /** GraphQL の metafield.value を main 用にパース → { chunked, array } | { chunked, totalChunks } | null */
@@ -1234,9 +1277,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
     locData = loc;
     appData = app;
     settingsData = set;
-    listCountsOnly = parseListMetafieldValue(getMetafieldValueFromData(list));
+    const listRaw = getMetafieldValueFromData(list);
+    listCountsOnly = parseListMetafieldValue(listRaw);
     mainKeyResult = parseMainMetafieldValue(getMetafieldValueFromData(main));
     inventoryCountsVersion = parseVersionMetafieldValue(getMetafieldValueFromData(ver));
+    // list がチャンク形式（ディスクリプタのみ）のときは list チャンクを取得して一覧を表示する
+    if (listCountsOnly.length === 0) {
+      const listDesc = parseListDescriptor(listRaw);
+      if (listDesc) {
+        try {
+          listCountsOnly = await fetchListChunksViaLoader(shop, accessToken, listDesc.totalChunks);
+        } catch (e) {
+          console.warn("[inventory-count] loader list chunks fetch failed:", e instanceof Error ? e.message : e);
+        }
+      }
+    }
   } else {
     const graphqlOrEmpty = async (query: string, vars?: { variables?: Record<string, unknown> }): Promise<Response> => {
       try {
