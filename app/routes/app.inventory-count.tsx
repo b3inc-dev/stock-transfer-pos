@@ -1177,9 +1177,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
     todayInShopTimezone,
     stocktakeCsvExportColumns,
     loadError: false as const,
+    loadErrorMessage: undefined,
   };
   } catch (e) {
-    console.error("[inventory-count] loader error:", e);
+    const message = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : undefined;
+    console.error("[inventory-count] loader error:", message, stack ?? "");
     return {
       locations: [] as LocationNode[],
       collections: [],
@@ -1192,6 +1195,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       todayInShopTimezone: new Date().toISOString().slice(0, 10),
       stocktakeCsvExportColumns: DEFAULT_STOCKTAKE_CSV_COLUMNS,
       loadError: true as const,
+      loadErrorMessage: message,
     };
   }
 }
@@ -4031,7 +4035,7 @@ export type SkuSearchVariant = {
 
 export default function InventoryCountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, collections, collectionDisplayMap = {}, productGroups, inventoryCounts, inventoryCountsVersion = 1, skuVariantList, shopTimezone, todayInShopTimezone, stocktakeCsvExportColumns, loadError = false } = loaderData || {
+  const { locations, collections, collectionDisplayMap = {}, productGroups, inventoryCounts, inventoryCountsVersion = 1, skuVariantList, shopTimezone, todayInShopTimezone, stocktakeCsvExportColumns, loadError = false, loadErrorMessage } = loaderData || {
     locations: [],
     collections: [],
     collectionDisplayMap: {} as Record<string, CollectionNode>,
@@ -5034,6 +5038,11 @@ export default function InventoryCountPage() {
             <div style={{ padding: "12px 16px", background: "#fff4e5", border: "1px solid #e0b252", borderRadius: "8px", marginBottom: "8px" }}>
               <strong>データの読み込みに失敗しました。</strong>
               <span style={{ marginLeft: "4px" }}>ページを再読み込みしてください。</span>
+              {loadErrorMessage && (
+                <div style={{ marginTop: "8px", fontSize: "12px", wordBreak: "break-all", color: "#5c5c5c" }}>
+                  原因: {loadErrorMessage}
+                </div>
+              )}
             </div>
           )}
           {/* 上部タブナビゲーション（設定画面とトンマナを揃える） */}
