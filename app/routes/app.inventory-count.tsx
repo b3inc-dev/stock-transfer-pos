@@ -1214,6 +1214,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const message = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : undefined;
     console.error("[inventory-count] loader error:", message, stack ?? "");
+    // 原因特定のため: 「syntax error」系のときはスタックを必ず記録（Render ログで SYNTAX_ERROR_ORIGIN を検索）
+    if (/syntax\s*error|unexpected\s*end\s*of\s*file/i.test(String(message))) {
+      console.error("SYNTAX_ERROR_ORIGIN [inventory-count loader] 上記の stack の先頭が発生箇所です:", stack ?? "no stack");
+    }
     return {
       locations: [] as LocationNode[],
       collections: [],

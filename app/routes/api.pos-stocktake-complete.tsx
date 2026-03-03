@@ -70,7 +70,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  console.log("[api.pos-stocktake-complete] Action called: method=" + request.method);
+  // 原因特定用: POST が届いたかどうかで「クライアントで失敗」vs「サーバーで失敗」を切り分け（Render ログで STOCKTAKE_API_ORIGIN を検索）
+  const origin = request.headers.get("origin") ?? "(no origin)";
+  console.warn("STOCKTAKE_API_ORIGIN [server] request received: method=" + request.method + " origin=" + origin);
   if (request.method !== "POST") {
     return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
   }
@@ -78,6 +80,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const authHeader = request.headers.get("authorization");
   const hasAuth = authHeader?.startsWith("Bearer ");
   if (!hasAuth) {
+    console.warn("STOCKTAKE_API_ORIGIN [server] response 401: Missing session token");
     return jsonResponse({ ok: false, error: "Missing session token" }, 401);
   }
   const token = (authHeader ?? "").replace(/^Bearer\s+/i, "").trim();
@@ -89,11 +92,13 @@ export async function action({ request }: ActionFunctionArgs) {
       sessionToken = auth.sessionToken as { dest?: string } | null;
     } catch (err) {
       console.warn("[api.pos-stocktake-complete] POS auth failed:", err instanceof Error ? err.message : String(err));
+      console.warn("STOCKTAKE_API_ORIGIN [server] response 401: Invalid session token (decode or authenticate.pos failed)");
       return jsonResponse({ ok: false, error: "Invalid session token" }, 401);
     }
   }
   const dest = sessionToken?.dest;
   if (!dest || typeof dest !== "string") {
+    console.warn("STOCKTAKE_API_ORIGIN [server] response 401: No shop in session token");
     return jsonResponse({ ok: false, error: "No shop in session token" }, 401);
   }
   const shop = shopFromDest(dest);
@@ -110,6 +115,7 @@ export async function action({ request }: ActionFunctionArgs) {
     session = sessionsAfter?.find((s) => s.isOnline === false) ?? sessionsAfter?.[0];
   }
   if (!session?.accessToken) {
+    console.warn("STOCKTAKE_API_ORIGIN [server] response 401: Shop session not found (shop=" + shop + ")");
     return jsonResponse({ ok: false, error: "Shop session not found" }, 401);
   }
 
@@ -248,8 +254,10 @@ export async function action({ request }: ActionFunctionArgs) {
   const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts, ownerId);
   if (userErrors.length > 0) {
     const message = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "保存に失敗しました";
+    console.warn("STOCKTAKE_API_ORIGIN [server] response 200 ok:false (write userErrors):", message);
     return jsonResponse({ ok: false, error: message }, 200);
   }
 
+  console.warn("STOCKTAKE_API_ORIGIN [server] response 200 ok:true (success)");
   return jsonResponse({ ok: true }, 200);
 }

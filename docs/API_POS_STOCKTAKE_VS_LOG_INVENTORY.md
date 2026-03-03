@@ -1,5 +1,37 @@
 # 棚卸完了API と 履歴API の差分一覧（通信で失敗する場合の確認用）
 
+## 公式情報に基づく検証（履歴API が成功している前提）
+
+以下は **仮説ではなく Shopify 公式ドキュメント** に基づく整理です。
+
+### 1. POS 拡張からサーバーへ通信する際の公式要件
+
+| 要件 | 公式ソース | 履歴API / 確定API の扱い |
+|------|------------|---------------------------|
+| **認証** | [Session API](https://shopify.dev/docs/api/pos-ui-extensions/latest/target-apis/standard-apis/session-api): `getSessionToken()` でトークンを取得し、**`Authorization: Bearer <token>`** でバックエンドに渡す。 | 両方とも `session.getSessionToken()` → `Authorization: Bearer ${token}` を使用。**同一**。 |
+| **CORS** | [Communicate with a server](https://shopify.dev/docs/api/pos-ui-extensions/latest/server-communication): 「Requests originating from an extension will be of origin **cdn.shopify.com** and **extensions.shopifycdn.com**. Your server needs to **allow requests from both origins**.」 | 両ルートとも `Access-Control-Allow-Origin: *` を返しており、上記オリジンを含む全オリジンを許可。**同一**。 |
+| **HTTPS** | 同上: 「Shopify POS will **refuse to fetch any non-HTTPS requests**.」 | 両方とも同じ `getAppUrl()` のベース URL を使用。本番は HTTPS。**同一**。 |
+| **トークン検証** | [Session tokens (getting started)](https://shopify.dev/docs/apps/auth/session-tokens/getting-started): 署名は **HS256**、アプリの **共有シークレット** で検証。 | 両ルートとも `jose` の `jwtVerify(token, key, { algorithms: ["HS256"] })` と `SHOPIFY_API_SECRET` を使用。**同一**。 |
+
+公式の [Communicate with a server](https://shopify.dev/docs/api/pos-ui-extensions/latest/server-communication) の例では `mode: 'cors'` と `credentials: 'include'` を使っていますが、サーバーが `Access-Control-Allow-Origin: *` の場合、`credentials: 'include'` はブラウザ仕様上使えません。当プロジェクトでは **Bearer トークンだけで認証** しているため、`credentials` は付けず、履歴・確定の両方で同じ fetch オプション（method, headers, body のみ）にしており、公式の「Authorization: Bearer で渡す」「CORS でオリジンを許可する」は満たしています。
+
+### 2. 結論（公式に照らした整理）
+
+- **履歴API が成功している** ＝ 次の条件はすでに満たされている：
+  - POS 側: `getSessionToken()` が取得できている
+  - 同一の `getAppUrl()` でリクエストが届いている（ベースURL・HTTPS）
+  - サーバー側: CORS が許可され、Bearer 検証とセッション取得ができている
+
+- 履歴と確定で **仕様上違うのは「パス」だけ**：
+  - 履歴: `${appUrl}/api/log-inventory-change` → ルートファイル `api.log-inventory-change.tsx`
+  - 確定: `${appUrl}/api/pos-stocktake-complete` → ルートファイル `api.pos-stocktake-complete.tsx`
+
+- [React Router のファイル命名](https://reactrouter.com/how-to/file-route-conventions): ドットは URL のスラッシュに対応。`api.log-inventory-change` → `/api/log-inventory-change`、`api.pos-stocktake-complete` → `/api/pos-stocktake-complete` となる。
+
+したがって、**履歴API が成功している限り、認証・CORS・ベースURL・トークン検証に問題はない**。確定API だけ失敗する場合は、**本番で `/api/pos-stocktake-complete` が存在するか（ルートがデプロイされているか）** を確認するのが公式仕様に沿った切り分けになります。
+
+---
+
 ## クライアント（POS 拡張）
 
 | 項目 | 履歴 (logInventoryChangeToApi / sendChunkWithRetry) | 棚卸完了 (reportStocktakeCompleteToApi) | 備考 |
@@ -43,15 +75,41 @@
      `${appUrl}/api/log-inventory-change` にし、body を `{ entries: [{ activity: "inventory_count", ... }] }` のような最小限の1件にして送信。
    - これで 200 や 401 など「レスポンスが返る」なら、**履歴のルートには届いている**ので、パスを元に戻したうえで「pos-stocktake-complete だけ届いていない」と判断できる。
 
-3. **本番でルートが有効か**
+3. **本番でルートが有効か（公式の「サーバーがリクエストを許可しているか」の確認）**
    - デプロイ後に `curl -X OPTIONS https://(あなたのドメイン)/api/pos-stocktake-complete` で 204 が返るか確認。
    - 204 が返れば OPTIONS は届いているので、続けて POST（Authorization 付き）で確認。
+   - 履歴が成功している同じドメインで、`curl -X OPTIONS https://(同じドメイン)/api/log-inventory-change` と比較すると、同じ CORS 設定なら同様に 204 になるはず。
 
 4. **POS が参照している appUrl とデプロイ先が一致しているか**
    - POS 拡張は `extensions/common/appUrl.js` の `getAppUrl()` でベース URL を取得している。
    - `APP_MODE = "public"` → 本番 URL は `https://pos-stock.onrender.com`
    - `APP_MODE = "inhouse"` → 本番 URL は `https://stock-transfer-pos.onrender.com`
    - **実際にアプリ（Remix）をデプロイしているドメイン** と上記が一致していないと、確定APIは別ホストに送られて届かない。履歴APIも同じ `getAppUrl()` を使うので、履歴が成功しているなら appUrl は合っている。履歴も送れない場合は APP_MODE とデプロイ先の対応を確認する。
+
+---
+
+## 確定API の失敗原因をログで特定する（仮説に頼らない）
+
+コード側で **`STOCKTAKE_API_ORIGIN`** という固定文字列をログに出すようにしてある。デプロイ後に「棚卸確定」で失敗したタイミングで **Render のログ** と **POS 側のコンソール** を確認すると、原因を事実ベースで切り分けられる。
+
+### サーバー側（Render ログで `STOCKTAKE_API_ORIGIN` を検索）
+
+| ログに出す内容 | 意味 |
+|----------------|------|
+| `[server] request received: method=POST` | **POST がサーバーに届いている**。この後の 401/500 等の理由が原因。 |
+| `[server] request received: method=OPTIONS` のみで POST が出ない | プリフライトは届いているが **POST が届いていない** → クライアント側で fetch が失敗している（CORS でブロック、または送信前のエラー）。 |
+| `[server] response 401: Missing session token` | リクエストに Authorization ヘッダーがない。 |
+| `[server] response 401: Invalid session token` | トークンの検証失敗（decode または authenticate.pos）。 |
+| `[server] response 401: No shop in session token` | トークンの payload に dest がない。 |
+| `[server] response 401: Shop session not found` | ショップのオフラインセッションが DB にない（管理画面を一度開いていない等）。 |
+| `[server] response 200 ok:true` | 確定API は正常に完了している。 |
+
+**POST が一度もログに出ない**（`request received: method=POST` がない）場合、**リクエストがサーバーに届いていない**。原因候補は「送信先 URL の違い」「ネットワーク」「クライアント側で fetch が throw している」のいずれか。そのときは POS 側の `STOCKTAKE_API_ORIGIN [client] fetch threw:` の内容（message / name / cause）を見れば、**実際に fetch が投げたエラー**が分かる（仮説ではなく事実）。
+
+### クライアント側（POS 拡張のコンソール）
+
+- `STOCKTAKE_API_ORIGIN [client] sending POST to` → 実際に送信しようとしている URL（origin + path）。
+- `STOCKTAKE_API_ORIGIN [client] fetch threw:` → fetch が例外を投げた場合の `message` / `name` / `cause`。ここに「Load failed」「Failed to fetch」等が出ていれば、**レスポンスを受け取る前に失敗している**（ネットワーク・CORS・接続先の違いなど）。
 
 ---
 

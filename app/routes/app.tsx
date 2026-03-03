@@ -203,22 +203,31 @@ export async function getShopPlan(
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
-  const shopPlan = await getShopPlan(admin, session?.shop);
-  const storeHandle =
-    session?.shop?.replace(/\.myshopify\.com$/i, "") ?? "";
+  try {
+    const { admin, session } = await authenticate.admin(request);
+    const shopPlan = await getShopPlan(admin, session?.shop);
+    const storeHandle =
+      session?.shop?.replace(/\.myshopify\.com$/i, "") ?? "";
 
-  // ロケーション数とプランが一致していない場合は、ホームと料金プラン以外へはアクセスさせずプラン変更を促す
-  if (shopPlan.locationPlanMismatch) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-    if (path !== "/app" && path !== "/app/plan" && !path.startsWith("/app/plan?")) {
-      return redirect("/app/plan?mismatch=1");
+    // ロケーション数とプランが一致していない場合は、ホームと料金プラン以外へはアクセスさせずプラン変更を促す
+    if (shopPlan.locationPlanMismatch) {
+      const url = new URL(request.url);
+      const path = url.pathname;
+      if (path !== "/app" && path !== "/app/plan" && !path.startsWith("/app/plan?")) {
+        return redirect("/app/plan?mismatch=1");
+      }
     }
-  }
 
-  // eslint-disable-next-line no-undef
-  return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle };
+    // eslint-disable-next-line no-undef
+    return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : undefined;
+    if (/syntax\s*error|unexpected\s*end\s*of\s*file/i.test(String(msg))) {
+      console.error("SYNTAX_ERROR_ORIGIN [app layout loader] 親レイアウトで発生。上記 stack の先頭が発生箇所:", stack ?? "no stack");
+    }
+    throw e;
+  }
 };
 
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000; // 5分（有料プランでも LB/プロキシのアイドル切断を防ぐ）

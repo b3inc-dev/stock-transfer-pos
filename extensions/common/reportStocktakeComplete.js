@@ -28,6 +28,13 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
   const { getAppUrl } = await import("./appUrl.js");
   const appUrl = getAppUrl();
   const apiUrl = `${appUrl}/api/pos-stocktake-complete`;
+  // 原因特定用: 送信先を記録（Render ログと突き合わせ可能。本番で STOCKTAKE_API_ORIGIN を検索）
+  try {
+    const urlObj = new URL(apiUrl);
+    console.warn("STOCKTAKE_API_ORIGIN [client] sending POST to", urlObj.origin + urlObj.pathname);
+  } catch (_) {
+    console.warn("STOCKTAKE_API_ORIGIN [client] apiUrl invalid:", apiUrl);
+  }
 
   const body =
     Array.isArray(completedGroups) && completedGroups.length > 0
@@ -60,7 +67,11 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
     return { ok: true };
   } catch (e) {
     const msg = e?.message ?? String(e);
+    const name = e?.name ?? "";
+    const cause = e?.cause != null ? String(e.cause) : "";
     console.error("[reportStocktakeCompleteToApi] Request failed:", msg);
+    // 原因特定用: fetch が throw した内容をそのまま記録（仮説ではなく事実）
+    console.error("STOCKTAKE_API_ORIGIN [client] fetch threw:", { message: msg, name, cause: cause || "(none)" });
     // ブラウザの fetch がレスポンスを受け取る前に失敗した場合（接続不可・CORS・ネットワーク）は「Load failed」等になる
     const isNetworkFailure = /load failed|failed to fetch|network error|connection refused|net::/i.test(String(msg));
     const userMessage = isNetworkFailure
