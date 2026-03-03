@@ -154,7 +154,8 @@ function mergeCountParts(parts: CountPart[]): InventoryCount {
 }
 
 const CHUNK_FETCH_CONCURRENCY = 8; // チャンク並列取得数（502/タイムアウト・レート制限のバランス）
-const CHUNK_FETCH_RETRY = 1; // 1回リトライ（502/499の一時的失敗対策）
+const CHUNK_FETCH_RETRY = 2; // 2回リトライ（計3回）。Throttle・一時的な502を拾い直す
+const CHUNK_FETCH_RETRY_DELAY_MS = 2000; // リトライ前の待機（Throttle 解消を待つ）
 
 async function fetchOneChunk(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
@@ -170,6 +171,9 @@ async function fetchOneChunk(
   `;
   for (let attempt = 0; attempt <= CHUNK_FETCH_RETRY; attempt++) {
     try {
+      if (attempt > 0) {
+        await new Promise<void>((r) => setTimeout(r, CHUNK_FETCH_RETRY_DELAY_MS));
+      }
       const resp = await admin.graphql(gql, { variables: { key } });
       const json = await resp.json();
       const chunkRaw = json?.data?.currentAppInstallation?.metafield?.value;
@@ -237,18 +241,28 @@ async function readInventoryCountsListChunked(admin: { graphql: (q: string, opts
  * 棚卸メタフィールドをチャンク対応で読み込む（管理画面・応答サイズ制限で明細が欠ける問題を解消）。
  * 単一 key の場合は従来どおり。_chunked の場合は複数 key を並列取得して結合する（502/タイムアウト対策）。
  * チャンク内に「パート」形式（_part: true）が含まれる場合は countId ごとに結合してから返す。
+ * メイン読み取り・チャンク取得は Throttle/一時失敗時にリトライし、発行できないエラーを減らす。
  */
 async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
-  const mainResp = await admin.graphql(
-    `#graphql
+  const mainGql = `#graphql
       query InventoryCountMain {
         currentAppInstallation {
           metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value }
         }
       }
-    `
-  );
-  const mainJson = await mainResp.json();
+    `;
+  let mainJson: { data?: { currentAppInstallation?: { metafield?: { value?: string | null } } } } | null = null;
+  for (let attempt = 0; attempt <= 1; attempt++) {
+    try {
+      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, CHUNK_FETCH_RETRY_DELAY_MS));
+      const mainResp = await admin.graphql(mainGql);
+      mainJson = await mainResp.json();
+      break;
+    } catch (e) {
+      if (attempt === 1) throw e;
+      console.warn("[inventory-count] readInventoryCountsChunked main read failed, retrying:", (e as Error)?.message ?? e);
+    }
+  }
   const raw = mainJson?.data?.currentAppInstallation?.metafield?.value;
   if (raw == null || raw === "") return [];
   let parsed: unknown;
@@ -273,7 +287,13 @@ async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: {
     chunkRaws.push(...batchResults);
   }
   for (let i = 0; i < chunkRaws.length; i++) {
-    const chunkRaw = chunkRaws[i];
+    let chunkRaw = chunkRaws[i];
+    // チャンクが null のときは一時的な Throttle/取得失敗の可能性があるため、1回だけ再取得を試す
+    if (chunkRaw == null) {
+      await new Promise<void>((r) => setTimeout(r, CHUNK_FETCH_RETRY_DELAY_MS));
+      chunkRaw = await fetchOneChunk(admin, `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`, i);
+      chunkRaws[i] = chunkRaw;
+    }
     if (chunkRaw == null) {
       throw new Error(
         `棚卸チャンク${i}が存在しません。メタフィールドが欠落している可能性があります（上書きで他データが消えるのを防ぐため読み取りを中断します）。`
