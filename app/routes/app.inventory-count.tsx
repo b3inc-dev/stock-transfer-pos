@@ -131,6 +131,27 @@ function getGroupItemsByKey(
   return key && Array.isArray(groupItemsMap[key]) ? groupItemsMap[key] : [];
 }
 
+/**
+ * 表示用ステータス（保存はしない）。
+ * 元の「完了なのに1グループ未完了」の誤表示を防ぐ：status=completed でも groupItems で未完了なら in_progress を返す。
+ */
+function getDisplayStatusForCount(c: InventoryCount | null | undefined): "draft" | "in_progress" | "completed" | "cancelled" {
+  if (!c?.status) return "in_progress";
+  if (c.status === "cancelled") return "cancelled";
+  if (c.status !== "completed") return c.status as "draft" | "in_progress";
+  const groupItemsMap = (c as any)?.groupItems && typeof (c as any).groupItems === "object" ? (c as any).groupItems as Record<string, unknown[]> : {};
+  if (Object.keys(groupItemsMap).length === 0) return "completed";
+  const allIds = Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0 ? c.productGroupIds : (c.productGroupId ? [c.productGroupId] : []);
+  if (allIds.length === 0) return "completed";
+  const cancelledSet = new Set((Array.isArray((c as any).cancelledGroupIds) ? (c as any).cancelledGroupIds : []).map((id: string) => normalizeIdForMatch(id)));
+  const allDone = allIds.every((id) => {
+    if (cancelledSet.has(normalizeIdForMatch(id))) return true;
+    const items = getGroupItemsByKey(groupItemsMap, id);
+    return Array.isArray(items) && items.length > 0;
+  });
+  return allDone ? "completed" : "in_progress";
+}
+
 /** パート配列を1件の棚卸に結合する */
 function mergeCountParts(parts: CountPart[]): InventoryCount {
   const sorted = [...parts].sort((a, b) => a.partIndex - b.partIndex);
@@ -1003,9 +1024,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         });
         
         const isCompleted = allDone;
-        if (!isCompleted && c.status === "completed") {
-          return { ...c, status: "in_progress", completedAt: undefined };
-        }
+        // ✅ 完了を未処理に戻さない：groupItems のキー/構造で allDone が false になっても downgrade しない（多発していた不具合防止）
         if (isCompleted && c.status !== "completed") {
           return { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
         }
@@ -1363,10 +1382,22 @@ function mergeExistingNonBlank(counts: InventoryCount[], existing: InventoryCoun
     if ((!Array.isArray(out.productGroupNames) || out.productGroupNames.length === 0) && exPgNames) out.productGroupNames = ex.productGroupNames;
     const hasGroupItems = out.groupItems && typeof out.groupItems === "object" && Object.keys(out.groupItems).length > 0;
     const exGroupItems = ex.groupItems && typeof ex.groupItems === "object" && Object.keys(ex.groupItems).length > 0;
-    if (!hasGroupItems && exGroupItems) out.groupItems = ex.groupItems;
+    if (!hasGroupItems && exGroupItems) {
+      out.groupItems = ex.groupItems;
+    } else if (hasGroupItems && exGroupItems) {
+      // ✅ 1グループだけ更新したときに他グループを消さない（既存をベースに payload で上書き）
+      out.groupItems = { ...exGroupItems, ...out.groupItems };
+    }
     const hasItems = Array.isArray(out.items) && out.items.length > 0;
     const exItems = Array.isArray(ex.items) && ex.items.length > 0;
     if (!hasItems && exItems) out.items = ex.items;
+    // ✅ 完了・キャンセルを未処理に戻さない：payload に status が含まれていないときは既存を維持（部分書き・一覧由来で status が欠けることがあるため）
+    if (!out.status) {
+      if (ex.status) out.status = ex.status;
+      if (ex.completedAt) out.completedAt = ex.completedAt;
+    } else if ((ex.status === "completed" || ex.status === "cancelled") && !out.completedAt && ex.completedAt) {
+      out.completedAt = ex.completedAt;
+    }
     return out;
   });
 }
@@ -2841,11 +2872,13 @@ export async function action({ request }: ActionFunctionArgs) {
         countName: assignedCountName,
         inventoryItemIdsOmittedDueToSize,
       };
-    } catch (e) {
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
       console.error("[inventory-count] create_inventory_count failed:", e);
+      // 要因の例: getNextCountNumber の GraphQL 失敗、appendNewCountToChunked 内の updateNextNumberAndBackupAfterAppend 失敗、main 非チャンク時の writeInventoryCountsChunked 内で read がスローした場合など
       return {
         ok: false,
-        error: "棚卸IDの発行中にエラーが発生しました。時間をおいて再度お試しください。" as const,
+        error: msg && msg.length > 0 && msg.length <= 200 ? `棚卸IDの発行中にエラーが発生しました: ${msg}` as const : "棚卸IDの発行中にエラーが発生しました。時間をおいて再度お試しください。" as const,
       };
     }
   }
@@ -4831,7 +4864,7 @@ export default function InventoryCountPage() {
     const rows: string[][] = [];
     selectedCounts.forEach((c) => {
       const locName = getLocationName(c.locationId);
-      const statusLabel = getStatusLabel(c.status);
+      const statusLabel = getStatusLabel(getDisplayStatusForCount(c));
       const countName = c.countName || c.id;
 
       const groupNames = Array.isArray(c.productGroupNames) && c.productGroupNames.length > 0
@@ -6373,7 +6406,7 @@ export default function InventoryCountPage() {
                               >
                                 <div style={{ fontWeight: 600 }}>{c.countName ?? c.id}</div>
                                 <div style={{ color: "#6d7175", fontSize: "12px", marginTop: "2px" }}>
-                                  {locations.find((l) => l.id === c.locationId)?.name ?? c.locationId} · {getStatusLabel(c.status)} · {formatDateTimeInShopTimezone(c.createdAt, shopTimezone)}
+                                  {locations.find((l) => l.id === c.locationId)?.name ?? c.locationId} · {getStatusLabel(getDisplayStatusForCount(c))} · {formatDateTimeInShopTimezone(c.createdAt, shopTimezone)}
                                 </div>
                               </div>
                             ))}
@@ -6619,7 +6652,7 @@ export default function InventoryCountPage() {
                     const isDetailLoading = loadingListDetailIds.has(c.id);
                     const isSelected = selectedIds.has(c.id);
                     const locName = getLocationName(displayCount.locationId);
-                    const statusLabel = getStatusLabel(displayCount.status);
+                    const statusLabel = getStatusLabel(getDisplayStatusForCount(displayCount));
                     const countName = displayCount.countName || displayCount.id;
                     const date = extractDateFromISO(displayCount.createdAt, shopTimezone);
                     // ✅ 複数商品グループがある場合はgroupItemsを優先、単一グループの場合はitemsフィールドを後方互換性として使用
@@ -6767,7 +6800,7 @@ export default function InventoryCountPage() {
                               }}
                             >
                               <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
-                                <span style={getStatusBadgeStyle(displayCount.status)}>{statusLabel}</span>
+                                <span style={getStatusBadgeStyle(getDisplayStatusForCount(displayCount))}>{statusLabel}</span>
                               </s-text>
                               <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
                                 {isDetailLoading ? "…" : `${itemCount}件・実数${totalQty}${hasIncompleteGroup ? "/-" : currentQty > 0 ? `/${currentQty}` : "/-"}`}
@@ -7042,7 +7075,7 @@ export default function InventoryCountPage() {
                     </div>
                     <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                       <strong>ステータス:</strong>{" "}
-                      <span style={getStatusBadgeStyle(modalCount.status)}>{getStatusLabel(modalCount.status)}</span>
+                      <span style={getStatusBadgeStyle(getDisplayStatusForCount(modalCount))}>{getStatusLabel(getDisplayStatusForCount(modalCount))}</span>
                     </div>
                     <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                       <strong>作成日時:</strong> {modalCount.createdAt ? extractDateFromISO(modalCount.createdAt, shopTimezone) : "—"}

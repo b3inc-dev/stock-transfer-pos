@@ -108,6 +108,27 @@ function cancelledGroupIdSet(c) {
 }
 
 /**
+ * 表示用ステータスラベル（保存はしない）。
+ * 元の「完了なのに1グループ未完了」の誤表示を防ぐ：status=completed でも groupItems で未完了なら「未完了」表示にする。
+ */
+function getDisplayStatusLabel(count) {
+  if (!count) return "未完了";
+  if (count.status === "cancelled") return "キャンセル";
+  if (count.status !== "completed") return count.status === "in_progress" ? "未完了" : "未完了";
+  const groupItemsMap = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
+  if (Object.keys(groupItemsMap).length === 0) return "完了";
+  const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : (count.productGroupId ? [count.productGroupId] : []);
+  if (allIds.length === 0) return "完了";
+  const cancelledSet = cancelledGroupIdSet(count);
+  const allDone = allIds.every((id) => {
+    if (cancelledSet.has(normalizeIdForMatch(id))) return true;
+    const items = getGroupItemsByKey(groupItemsMap, id);
+    return Array.isArray(items) && items.length > 0;
+  });
+  return allDone ? "完了" : "未完了";
+}
+
+/**
  * ストレージから読んだ count とローカルで組み立てた count をマージする。
  * 親の count が一覧由来で groupItems が無い場合に、ストレージの他グループを上書きで消さないため。
  * 戻り値: マージ済みの count（groupItems = ストレージをベースに locallyBuilt で上書き、status/completedAt は再計算）。
@@ -2648,7 +2669,7 @@ export function InventoryCountList({
   }, [lines]);
 
   useEffect(() => {
-    const statusLabel = count?.status === "completed" ? "完了" : count?.status === "cancelled" ? "キャンセル" : "未完了";
+    const statusLabel = getDisplayStatusLabel(count);
     const footerStatusTone = getStatusBadgeTone(statusLabel);
     const summaryCenter = (
       <s-stack direction="inline" gap="base" alignItems="center">
@@ -2688,7 +2709,7 @@ export function InventoryCountList({
       />
     );
     return () => setFooter?.(null);
-  }, [setFooter, onBack, submitting, currentTotal, actualTotal, extraCount, overTotal, shortageTotal, lines.length, handleComplete, itemsToAdjust.length, isReadOnly, count?.status]);
+  }, [setFooter, onBack, submitting, currentTotal, actualTotal, extraCount, overTotal, shortageTotal, lines.length, handleComplete, itemsToAdjust.length, isReadOnly, count]);
 
   // 入庫と同じUI構造にするためのヘルパー関数とコンポーネント
   const toSafeId = (s) => String(s || "x").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60);

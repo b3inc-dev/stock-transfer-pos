@@ -374,10 +374,7 @@ function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
       if (c?.status === "completed") return c;
       return c;
     }
-    // ✅ 完了なのに1つでもグループの groupItems が欠けている不整合を修復（「棚卸は完了だが1グループだけ未完了」表示を防ぐ）
-    if (c?.status === "completed" && allIds.length > 0 && !allDone) {
-      return { ...c, status: "in_progress", completedAt: undefined };
-    }
+    // ✅ 完了を未処理に戻さない：部分取得・チャンク欠けで allDone が false になっても downgrade しない（多発していた不具合防止）
     if (!allDone && c.status === "completed") return c;
     if (allDone && c.status !== "completed") {
       return { ...c, status: "completed", completedAt: c.completedAt || new Date().toISOString() };
@@ -748,13 +745,8 @@ export async function readInventoryCounts() {
         return items.length > 0;
       });
       const isCompleted = allDone;
-      const hasGroupItems = groupItemsMap && Object.keys(groupItemsMap).length > 0;
 
-      // ✅ 完了なのに1つでもグループの groupItems が欠けている不整合を修復（「棚卸は完了だが1グループだけ未完了」表示を防ぐ）。修復時は needsUpdate で保存する。
-      if (c?.status === "completed" && hasGroupItems && !allDone) {
-        needsUpdate = true;
-        return { ...c, status: "in_progress", completedAt: undefined };
-      }
+      // ✅ 完了を未処理に戻さない：部分取得で allDone が false でも downgrade しない（保存で上書きされて多発していた不具合防止）
       if (c?.status === "completed") return c;
 
       if (isCompleted && c.status !== "completed") {
