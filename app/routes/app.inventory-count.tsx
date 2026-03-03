@@ -216,7 +216,7 @@ async function fetchOneChunk(
         await new Promise<void>((r) => setTimeout(r, CHUNK_FETCH_RETRY_DELAY_MS));
       }
       const resp = await admin.graphql(gql, { variables: { key } });
-      const json = await safeJsonFromResponse(resp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+      const json = await resp.json() as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
       const chunkRaw = json?.data?.currentAppInstallation?.metafield?.value;
       if (chunkRaw != null && chunkRaw !== "") return chunkRaw;
     } catch (e) {
@@ -1273,7 +1273,7 @@ async function getInventoryCountsVersion(admin: { graphql: (q: string, opts?: { 
   const resp = await admin.graphql(
     `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`
   );
-  const json = await safeJsonFromResponse(resp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+  const json = await resp.json() as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
   const v = json?.data?.currentAppInstallation?.metafield?.value;
   if (v == null || v === "") return 1;
   const n = parseInt(String(v).trim(), 10);
