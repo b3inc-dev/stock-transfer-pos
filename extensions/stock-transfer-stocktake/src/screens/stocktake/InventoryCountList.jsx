@@ -2120,7 +2120,10 @@ export function InventoryCountList({
                     return readInventoryCountsRaw().then((counts2) => {
                       const list2 = Array.isArray(counts2) ? counts2 : [];
                       const fromStorage2 = list2.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                      return doMergeAndWrite(list2, fromStorage2 ?? count);
+                      if (fromStorage2 === undefined) {
+                        return Promise.reject(new Error("該当棚卸が取得できません。再読み込みしてから再度確定してください。"));
+                      }
+                      return doMergeAndWrite(list2, fromStorage2);
                     });
                   });
               })
@@ -2219,7 +2222,10 @@ export function InventoryCountList({
                   return readInventoryCountsRaw().then((counts2) => {
                     const list2 = Array.isArray(counts2) ? counts2 : [];
                     const fromStorage2 = list2.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                    return doMergeAndWrite(list2, fromStorage2 ?? count);
+                    if (fromStorage2 === undefined) {
+                      return Promise.reject(new Error("該当棚卸が取得できません。再読み込みしてから再度確定してください。"));
+                    }
+                    return doMergeAndWrite(list2, fromStorage2);
                   });
                 });
               })
@@ -2287,7 +2293,10 @@ export function InventoryCountList({
                 return readInventoryCountsRaw().then((counts2) => {
                   const list2 = Array.isArray(counts2) ? counts2 : [];
                   const fromStorage2 = list2.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                  return doMergeAndWrite(list2, fromStorage2 ?? count);
+                  if (fromStorage2 === undefined) {
+                    return Promise.reject(new Error("該当棚卸が取得できません。再読み込みしてから再度確定してください。"));
+                  }
+                  return doMergeAndWrite(list2, fromStorage2);
                 });
               });
             })
@@ -2418,7 +2427,10 @@ export function InventoryCountList({
                 return readInventoryCountsRaw().then((counts2) => {
                   const list2 = Array.isArray(counts2) ? counts2 : [];
                   const fromStorage2 = list2.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                  return doMergeAndWrite(list2, fromStorage2 ?? count);
+                  if (fromStorage2 === undefined) {
+                    return Promise.reject(new Error("該当棚卸が取得できません。再読み込みしてから再度確定してください。"));
+                  }
+                  return doMergeAndWrite(list2, fromStorage2);
                 });
               });
             })

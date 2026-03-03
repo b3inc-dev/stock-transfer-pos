@@ -198,6 +198,27 @@ async function safeJsonFromResponse(resp: Response): Promise<unknown> {
   }
 }
 
+/**
+ * ローダー用：.json() の代わりに使う。空 body やパース失敗時は throw せず defaultVal を返し、ページが落ちないようにする。
+ * 「syntax error, unexpected end of file」の原因（空/不正な API 応答の .json()）を潰す。
+ */
+async function safeJsonFromResponseForLoader<T>(resp: Response, defaultVal: T): Promise<T | unknown> {
+  let text: string;
+  try {
+    text = await resp.text();
+  } catch {
+    return defaultVal;
+  }
+  if (text == null || String(text).trim() === "") {
+    return defaultVal;
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return defaultVal;
+  }
+}
+
 async function fetchOneChunk(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   key: string,
@@ -242,7 +263,7 @@ async function readInventoryCountsListChunked(admin: { graphql: (q: string, opts
       }
     `
   );
-  const listJson = await listResp.json();
+  const listJson = (await safeJsonFromResponseForLoader(listResp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
   const listRaw = listJson?.data?.currentAppInstallation?.metafield?.value;
   if (listRaw == null || listRaw === "") return [];
   let listParsed: { _chunked?: boolean; totalChunks?: number };
@@ -297,7 +318,7 @@ async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: {
     try {
       if (attempt > 0) await new Promise<void>((r) => setTimeout(r, CHUNK_FETCH_RETRY_DELAY_MS));
       const mainResp = await admin.graphql(mainGql);
-      mainJson = await mainResp.json();
+      mainJson = (await safeJsonFromResponseForLoader(mainResp, null)) as { data?: { currentAppInstallation?: { metafield?: { value?: string | null } } } } | null;
       break;
     } catch (e) {
       if (attempt === 1) throw e;
@@ -1012,9 +1033,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     ? inventoryCountsFromList
     : await readInventoryCountsChunked(admin);
 
-  const locData = await locResp.json();
-  const appData = await appResp.json();
-  const settingsData = await settingsResp.json();
+  const locData = (await safeJsonFromResponseForLoader(locResp, {})) as { data?: { locations?: { nodes?: LocationNode[] } } };
+  const appData = (await safeJsonFromResponseForLoader(appResp, {})) as { data?: { currentAppInstallation?: { productGroupsMetafield?: { value?: string } } } };
+  const settingsData = (await safeJsonFromResponseForLoader(settingsResp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
 
   const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
 
@@ -1132,7 +1153,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         `,
         { variables: { ids } }
       );
-      const nodesJson = await nodesResp.json();
+      const nodesJson = (await safeJsonFromResponseForLoader(nodesResp, {})) as { data?: { nodes?: Array<{ id?: string; title?: string; image?: { url?: string; altText?: string } | null }> } };
       const nodes = nodesJson?.data?.nodes ?? [];
       for (const n of nodes) {
         if (n?.id) collectionDisplayMap[n.id] = { id: n.id, title: n.title ?? "", image: n.image ?? null };
@@ -1277,7 +1298,7 @@ async function getInventoryCountsVersion(admin: { graphql: (q: string, opts?: { 
   const resp = await admin.graphql(
     `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`
   );
-  const json = await resp.json() as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+  const json = (await safeJsonFromResponseForLoader(resp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
   const v = json?.data?.currentAppInstallation?.metafield?.value;
   if (v == null || v === "") return 1;
   const n = parseInt(String(v).trim(), 10);

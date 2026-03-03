@@ -251,13 +251,13 @@ export async function readInventoryCountsRaw() {
         metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { id value type }
       }
     }`;
-  const d = await graphql(gql);
+  const d = await runWithThrottleRetry(() => graphql(gql));
   const raw = d?.currentAppInstallation?.metafield?.value ?? "[]";
   let parsed;
   try {
     parsed = JSON.parse(raw);
-  } catch {
-    return [];
+  } catch (e) {
+    throw new Error(`棚卸メタフィールドのJSON解析に失敗しました（空で上書きして他データが消えるのを防ぐため中断）: ${e?.message ?? e}`);
   }
   if (Array.isArray(parsed)) return parsed;
   if (!parsed?._chunked || typeof parsed.totalChunks !== "number" || parsed.totalChunks < 1) return [];
@@ -925,7 +925,12 @@ function mergeExistingNonBlank(counts, existing) {
     if ((!Array.isArray(out.productGroupNames) || out.productGroupNames.length === 0) && exPgNames) out.productGroupNames = ex.productGroupNames;
     const hasGroupItems = out.groupItems && typeof out.groupItems === "object" && Object.keys(out.groupItems).length > 0;
     const exGroupItems = ex.groupItems && typeof ex.groupItems === "object" && Object.keys(ex.groupItems).length > 0;
-    if (!hasGroupItems && exGroupItems) out.groupItems = ex.groupItems;
+    if (!hasGroupItems && exGroupItems) {
+      out.groupItems = ex.groupItems;
+    } else if (hasGroupItems && exGroupItems) {
+      // 1グループだけ更新したときに他グループを消さない（既存をベースに payload で上書き）
+      out.groupItems = { ...exGroupItems, ...out.groupItems };
+    }
     const hasItems = Array.isArray(out.items) && out.items.length > 0;
     const exItems = Array.isArray(ex.items) && ex.items.length > 0;
     if (!hasItems && exItems) out.items = ex.items;
@@ -1005,7 +1010,18 @@ export async function writeInventoryCounts(counts, expectedVersion) {
   try {
     existing = await runWithThrottleRetry(() => readInventoryCountsRaw());
   } catch (e) {
-    // 既存読取失敗時はマージせずそのまま書く（新規ショップ等）
+    // 既存読取失敗時は1回だけ再読（Throttle 等の一時失敗を吸収）
+    if (Array.isArray(counts) && counts.length > 0) {
+      try {
+        existing = await runWithThrottleRetry(() => readInventoryCountsRaw());
+      } catch {
+        // 再読も失敗した場合は新規ショップ等とみなし existing = [] のまま
+      }
+    }
+  }
+  // existing が空のまま counts が 1 件だけのときは「読取失敗で list が空→1件だけ渡された」経路の可能性があり上書きすると他棚卸が消えるためブロック
+  if (existing.length === 0 && Array.isArray(counts) && counts.length === 1) {
+    throw new Error("棚卸データの読み取りに失敗している可能性があります。しばらくしてから再試行するか、管理画面で修復を試してください。");
   }
   let merged = mergeExistingNonBlank(Array.isArray(counts) ? counts : [], existing);
   // ✅ 呼び出し元の read が空を返した場合に既存棚卸IDを消さないよう、existing にあり merged に無い件を足す
