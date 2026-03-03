@@ -103,7 +103,7 @@ function parseTitleToProductAndOptions(
 }
 
 // POS と同一の正規化：groupItems キー照合で管理画面とタイルの表示を一致させる
-function normalizeIdForMatch(id: string | number | undefined | null): string {
+export function normalizeIdForMatch(id: string | number | undefined | null): string {
   const s = String(id ?? "").trim();
   const lastSegment = s.split("/").pop() || s;
   return lastSegment;
@@ -122,7 +122,7 @@ function invalidateIncompleteGroupProductsCacheForCount(shop: string, countId: s
     if (key.startsWith(prefix)) incompleteGroupProductsCache.delete(key);
   }
 }
-function getGroupItemsByKey(
+export function getGroupItemsByKey(
   groupItemsMap: Record<string, unknown[]> | undefined,
   groupId: string
 ): unknown[] {
@@ -305,7 +305,7 @@ async function readInventoryCountsListChunked(admin: { graphql: (q: string, opts
  * チャンク内に「パート」形式（_part: true）が含まれる場合は countId ごとに結合してから返す。
  * メイン読み取り・チャンク取得は Throttle/一時失敗時にリトライし、発行できないエラーを減らす。
  */
-async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
+export async function readInventoryCountsChunked(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<InventoryCount[]> {
   const mainGql = `#graphql
       query InventoryCountMain {
         currentAppInstallation {
@@ -498,7 +498,7 @@ async function writeInventoryCountsVersion(
  * 書き込み前に既存データから locationId / productGroupIds / groupItems 等を補完し、空白で上書きしない。
  * expectedVersion を渡した場合、現在のバージョンと一致しないと競合として保存しない（楽観ロック）。
  */
-async function writeInventoryCountsChunked(
+export async function writeInventoryCountsChunked(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   counts: InventoryCount[],
   ownerId: string,
