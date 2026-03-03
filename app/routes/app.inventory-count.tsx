@@ -2413,9 +2413,7 @@ export async function action({ request }: ActionFunctionArgs) {
       if (health.status === "ok" && health.mainKey !== "chunked") {
         return { ok: true, repaired: false, message: "修復の必要はありません。" } as const;
       }
-      if (health.status === "error" && health.mainMissingChunkIndices?.length && !health.mainMissingChunkIndices.every((i) => i === (health.mainTotalChunks ?? 0) - 1)) {
-        return { ok: false, error: "最終チャンク以外が欠落しているため自動修復できません。サポートにお問い合わせください。" as const };
-      }
+      // 欠落チャンクがあっても修復を試行する（allowMissingChunksForRepair で読み進め、再書き込みで整合を取る）
       // 修復時のみ欠落チャンクをスキップして読み進める（通常の防御は外す）
       const counts = await readInventoryCountsChunked(admin, { allowMissingChunksForRepair: true });
       const version = await getInventoryCountsVersion(admin);
