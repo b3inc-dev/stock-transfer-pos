@@ -10,6 +10,7 @@ import {
   readInventoryCountsRaw,
   readInventoryCountById,
   writeInventoryCounts,
+  getInventoryCountsVersion,
   getLocationName,
   getProductGroupName,
   readProductGroups,
@@ -620,7 +621,8 @@ export function InventoryCountList({
             const updated = (Array.isArray(allCounts) ? allCounts : []).map((c) =>
               String(c?.id ?? "") === countIdStr ? { ...c, status: "in_progress" } : c
             );
-            await writeInventoryCounts(updated);
+            const version = await getInventoryCountsVersion();
+            await writeInventoryCounts(updated, version);
             fetched = { ...fetched, status: "in_progress" };
           } catch (e) {
             console.error("Failed to update count status:", e);
@@ -2100,27 +2102,29 @@ export function InventoryCountList({
           setSubmitting(false);
           const countIdKey = normalizeIdForMatch(count?.id ?? "");
           const runThisWrite = () =>
-            runWithBackgroundWriteRetry(() => {
-              const idNorm = normalizeIdForMatch(count?.id ?? "");
-              const doMergeAndWrite = (list, base) => {
-                const toWrite = mergeCountWithStorage(base, locallyBuilt);
-                const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-                  ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-                  : [...list, toWrite];
-                return writeInventoryCounts(merged).then(() => toWrite);
-              };
-              return readInventoryCountsRaw()
-                .then((counts) => {
-                  const list = Array.isArray(counts) ? counts : [];
-                  const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                  if (fromStorage !== undefined) return doMergeAndWrite(list, fromStorage);
-                  return readInventoryCountsRaw().then((counts2) => {
-                    const list2 = Array.isArray(counts2) ? counts2 : [];
-                    const fromStorage2 = list2.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                    return doMergeAndWrite(list2, fromStorage2 ?? count);
+            runWithBackgroundWriteRetry(() =>
+              getInventoryCountsVersion().then((expectedVersion) => {
+                const idNorm = normalizeIdForMatch(count?.id ?? "");
+                const doMergeAndWrite = (list, base) => {
+                  const toWrite = mergeCountWithStorage(base, locallyBuilt);
+                  const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                    ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+                    : [...list, toWrite];
+                  return writeInventoryCounts(merged, expectedVersion).then(() => toWrite);
+                };
+                return readInventoryCountsRaw()
+                  .then((counts) => {
+                    const list = Array.isArray(counts) ? counts : [];
+                    const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+                    if (fromStorage !== undefined) return doMergeAndWrite(list, fromStorage);
+                    return readInventoryCountsRaw().then((counts2) => {
+                      const list2 = Array.isArray(counts2) ? counts2 : [];
+                      const fromStorage2 = list2.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+                      return doMergeAndWrite(list2, fromStorage2 ?? count);
+                    });
                   });
-                });
-            });
+              })
+            );
           const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
           const next = prev.then(runThisWrite, runThisWrite);
           pendingBackgroundWriteByCountId.set(countIdKey, next);
@@ -2198,26 +2202,28 @@ export function InventoryCountList({
         // 同一棚卸で連続確定した場合に後者の read が前者の write 完了前に走ると上書きされるのを防ぐため、count 単位で直列化（履歴送信は上で完了済みのため write のみ）
         const countIdKey = normalizeIdForMatch(count?.id ?? "");
         const runThisWrite = () =>
-          runWithBackgroundWriteRetry(() => {
-              const idNorm = normalizeIdForMatch(count?.id ?? "");
-              const doMergeAndWrite = (list, base) => {
-                const toWrite = mergeCountWithStorage(base, locallyBuiltAdjust);
-                const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-                  ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-                  : [...list, toWrite];
-                return writeInventoryCounts(merged).then(() => toWrite);
-              };
-              return readInventoryCountsRaw().then((counts) => {
-                const list = Array.isArray(counts) ? counts : [];
-                const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                if (fromStorage !== undefined) return doMergeAndWrite(list, fromStorage);
-                return readInventoryCountsRaw().then((counts2) => {
-                  const list2 = Array.isArray(counts2) ? counts2 : [];
-                  const fromStorage2 = list2.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
-                  return doMergeAndWrite(list2, fromStorage2 ?? count);
+          runWithBackgroundWriteRetry(() =>
+              getInventoryCountsVersion().then((expectedVersion) => {
+                const idNorm = normalizeIdForMatch(count?.id ?? "");
+                const doMergeAndWrite = (list, base) => {
+                  const toWrite = mergeCountWithStorage(base, locallyBuiltAdjust);
+                  const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                    ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+                    : [...list, toWrite];
+                  return writeInventoryCounts(merged, expectedVersion).then(() => toWrite);
+                };
+                return readInventoryCountsRaw().then((counts) => {
+                  const list = Array.isArray(counts) ? counts : [];
+                  const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+                  if (fromStorage !== undefined) return doMergeAndWrite(list, fromStorage);
+                  return readInventoryCountsRaw().then((counts2) => {
+                    const list2 = Array.isArray(counts2) ? counts2 : [];
+                    const fromStorage2 = list2.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
+                    return doMergeAndWrite(list2, fromStorage2 ?? count);
+                  });
                 });
-              });
-            });
+              })
+            );
         const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
         const next = prev.then(runThisWrite, runThisWrite);
         pendingBackgroundWriteByCountId.set(countIdKey, next);
@@ -2263,16 +2269,17 @@ export function InventoryCountList({
         setSubmitting(false);
         const countIdKey = normalizeIdForMatch(count?.id ?? "");
         const runThisWrite = () =>
-          runWithBackgroundWriteRetry(() => {
-            const idNorm = normalizeIdForMatch(count?.id ?? "");
-            const doMergeAndWrite = (list, base) => {
-              const toWrite = mergeCountWithStorage(base, locallyBuiltNoAdjust);
-              const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
-                ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
-                : [...list, toWrite];
-              return writeInventoryCounts(merged).then(() => toWrite);
-            };
-            return readInventoryCountsRaw()
+          runWithBackgroundWriteRetry(() =>
+            getInventoryCountsVersion().then((expectedVersion) => {
+              const idNorm = normalizeIdForMatch(count?.id ?? "");
+              const doMergeAndWrite = (list, base) => {
+                const toWrite = mergeCountWithStorage(base, locallyBuiltNoAdjust);
+                const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
+                  ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
+                  : [...list, toWrite];
+                return writeInventoryCounts(merged, expectedVersion).then(() => toWrite);
+              };
+              return readInventoryCountsRaw()
               .then((counts) => {
                 const list = Array.isArray(counts) ? counts : [];
                 const fromStorage = list.find((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm);
@@ -2283,7 +2290,8 @@ export function InventoryCountList({
                   return doMergeAndWrite(list2, fromStorage2 ?? count);
                 });
               });
-          });
+            })
+          );
         const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
         const next = prev.then(runThisWrite, runThisWrite);
         pendingBackgroundWriteByCountId.set(countIdKey, next);
@@ -2393,14 +2401,15 @@ export function InventoryCountList({
         // 同一棚卸で連続確定した場合に後者の read が前者の write 完了前に走ると上書きされるのを防ぐため、count 単位で直列化（履歴送信は上で完了済みのため write のみ）
         const countIdKey = normalizeIdForMatch(count?.id ?? "");
         const runThisWrite = () =>
-          runWithBackgroundWriteRetry(() => {
-            const idNorm = normalizeIdForMatch(count?.id ?? "");
+          runWithBackgroundWriteRetry(() =>
+            getInventoryCountsVersion().then((expectedVersion) => {
+              const idNorm = normalizeIdForMatch(count?.id ?? "");
               const doMergeAndWrite = (list, base) => {
                 const toWrite = mergeCountWithStorage(base, locallyBuiltResult);
                 const merged = list.some((c) => normalizeIdForMatch(c?.id ?? c?.countId) === idNorm)
                   ? list.map((c) => (normalizeIdForMatch(c?.id ?? c?.countId) === idNorm ? toWrite : c))
                   : [...list, toWrite];
-                return writeInventoryCounts(merged).then(() => toWrite);
+                return writeInventoryCounts(merged, expectedVersion).then(() => toWrite);
               };
               return readInventoryCountsRaw().then((counts) => {
                 const list = Array.isArray(counts) ? counts : [];
@@ -2412,7 +2421,8 @@ export function InventoryCountList({
                   return doMergeAndWrite(list2, fromStorage2 ?? count);
                 });
               });
-            });
+            })
+          );
         const prev = pendingBackgroundWriteByCountId.get(countIdKey) ?? Promise.resolve();
         const next = prev.then(runThisWrite, runThisWrite);
         pendingBackgroundWriteByCountId.set(countIdKey, next);

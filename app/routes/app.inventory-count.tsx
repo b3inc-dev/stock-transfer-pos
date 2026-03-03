@@ -18,6 +18,8 @@ const INVENTORY_COUNTS_BACKUP_KEY = "inventory_counts_backup_v1";
 const INVENTORY_COUNTS_BACKUP_MAX_BYTES = 60_000;
 /** 次の棚卸番号（#C0001 の 1 部分）。チャンクを読まずに新規発行するために使用 */
 const INVENTORY_COUNT_NEXT_KEY = "inventory_count_next_v1";
+/** 楽観ロック用。保存のたびに +1 し、同時編集で競合検出に使う */
+const INVENTORY_COUNTS_VERSION_KEY = "inventory_counts_version_v1";
 const PRODUCT_GROUP_IDS_KEY = "product_group_ids_v1";
 const PRODUCT_GROUP_NAMES_KEY = "product_group_names_v1";
 
@@ -180,6 +182,22 @@ const CHUNK_FETCH_CONCURRENCY = 8; // チャンク並列取得数（502/タイ�
 const CHUNK_FETCH_RETRY = 2; // 2回リトライ（計3回）。Throttle・一時的な502を拾い直す
 const CHUNK_FETCH_RETRY_DELAY_MS = 2000; // リトライ前の待機（Throttle 解消を待つ）
 
+/**
+ * GraphQL レスポンスを安全に JSON パースする。空や不正な body で「syntax error, unexpected end of file」等を防ぐ。
+ */
+async function safeJsonFromResponse(resp: Response): Promise<unknown> {
+  const text = await resp.text();
+  if (text == null || String(text).trim() === "") {
+    throw new Error("API が空の応答を返しました。しばらくしてから再試行してください。");
+  }
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`API の応答の解析に失敗しました（${msg}）。しばらくしてから再試行してください。`);
+  }
+}
+
 async function fetchOneChunk(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   key: string,
@@ -198,7 +216,7 @@ async function fetchOneChunk(
         await new Promise<void>((r) => setTimeout(r, CHUNK_FETCH_RETRY_DELAY_MS));
       }
       const resp = await admin.graphql(gql, { variables: { key } });
-      const json = await resp.json();
+      const json = await safeJsonFromResponse(resp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
       const chunkRaw = json?.data?.currentAppInstallation?.metafield?.value;
       if (chunkRaw != null && chunkRaw !== "") return chunkRaw;
     } catch (e) {
@@ -435,21 +453,58 @@ function toMinimalCountForList(c: InventoryCount): Record<string, unknown> {
   };
 }
 
+/** 楽観ロック用。保存成功時にバージョンメタを更新する */
+async function writeInventoryCountsVersion(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  ownerId: string,
+  newVersion: number
+): Promise<void> {
+  await admin.graphql(
+    `#graphql mutation SetVersion($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`,
+    {
+      variables: {
+        metafields: [
+          { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(newVersion) },
+        ],
+      },
+    }
+  );
+}
+
 /**
  * 棚卸メタフィールドをチャンク対応で保存（単体が CHUNK_BYTES を超える場合は groupItems/items をパート分割）。
  * 一覧用軽量メタフィールド（list）と棚卸ID→チャンク番号インデックスも同時に保存。
  * 書き込み前に既存データから locationId / productGroupIds / groupItems 等を補完し、空白で上書きしない。
+ * expectedVersion を渡した場合、現在のバージョンと一致しないと競合として保存しない（楽観ロック）。
  */
 async function writeInventoryCountsChunked(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   counts: InventoryCount[],
-  ownerId: string
+  ownerId: string,
+  expectedVersion?: number
 ): Promise<{ userErrors: Array<{ message?: string }> }> {
   let existing: InventoryCount[] = [];
   try {
     existing = await readInventoryCountsChunked(admin);
   } catch {
     // 既存読取失敗時はマージせずそのまま書く（新規ショップ等）
+  }
+  // ✅ 読取失敗で existing=[] のとき、実はストアにデータがあるなら上書きしない（チャンク欠落等で読めなかっただけの可能性）
+  if (existing.length === 0 && Array.isArray(counts) && counts.length > 0) {
+    const main = await readMainKeyOnly(admin);
+    if (main !== null) {
+      return {
+        userErrors: [
+          { message: "棚卸データの読み取りに一時的に失敗しています。しばらくしてから再試行するか、修復を試してください。" },
+        ],
+      };
+    }
+  }
+  const currentVersion = await getInventoryCountsVersion(admin);
+  if (expectedVersion != null && currentVersion !== expectedVersion) {
+    return {
+      userErrors: [{ message: "他の操作でデータが更新されています。画面を再読み込みしてから再度お試しください。" }],
+    };
   }
   const merged = mergeExistingNonBlank(Array.isArray(counts) ? counts : [], existing);
   const withNames = ensureCountNamesOnCounts(merged);
@@ -574,6 +629,7 @@ async function writeInventoryCountsChunked(
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" },
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: "[]" },
       { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: "{}" },
+      { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
     ];
     const resp = await admin.graphql(
       `#graphql
@@ -600,7 +656,14 @@ async function writeInventoryCountsChunked(
             }
           }
         `,
-        { variables: { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full }] } }
+        {
+          variables: {
+            metafields: [
+              { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full },
+              { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
+            ],
+          },
+        }
       );
       const data = (await resp.json())?.data?.metafieldsSet;
       return { userErrors: data?.userErrors ?? [] };
@@ -684,7 +747,14 @@ async function writeInventoryCountsChunked(
   const nextNum = arr.reduce((max, c) => Math.max(max, parseCountNameNumber(c?.countName)), 0) + 1;
   await admin.graphql(
     `#graphql mutation SetNext($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`,
-    { variables: { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNT_NEXT_KEY, type: "json", value: String(nextNum) }] } }
+    {
+      variables: {
+        metafields: [
+          { ownerId, namespace: NS, key: INVENTORY_COUNT_NEXT_KEY, type: "json", value: String(nextNum) },
+          { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
+        ],
+      },
+    }
   );
   return { userErrors: [] };
 }
@@ -906,8 +976,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // ショップのタイムゾーンを取得
   const shopTimezone = await getShopTimezone(admin);
 
-  // ロケーション・メタフィールド・設定・棚卸一覧（list 優先）を並列取得。list が無い場合のみフルチャンク取得
-  const [locResp, appResp, settingsResp, inventoryCountsFromList] = await Promise.all([
+  // ロケーション・メタフィールド・設定・棚卸一覧（list 優先）・楽観ロック用バージョンを並列取得
+  const [locResp, appResp, settingsResp, inventoryCountsFromList, inventoryCountsVersion] = await Promise.all([
     admin.graphql(
       `#graphql
         query Locations($first: Int!) {
@@ -935,6 +1005,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       `
     ),
     readInventoryCountsListChunked(admin),
+    getInventoryCountsVersion(admin),
   ]);
   const usedListMetafield = inventoryCountsFromList.length > 0;
   const inventoryCountsRaw = usedListMetafield
@@ -1100,6 +1171,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     collectionDisplayMap,
     productGroups,
     inventoryCounts: inventoryCountsForClient,
+    inventoryCountsVersion: Number(inventoryCountsVersion) || 1,
     skuVariantList,
     shopTimezone,
     todayInShopTimezone,
@@ -1114,6 +1186,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       collectionDisplayMap: {} as Record<string, CollectionNode>,
       productGroups: [] as ProductGroup[],
       inventoryCounts: [] as InventoryCount[],
+      inventoryCountsVersion: 1,
       skuVariantList: [],
       shopTimezone: "Asia/Tokyo",
       todayInShopTimezone: new Date().toISOString().slice(0, 10),
@@ -1147,7 +1220,7 @@ async function getNextCountNumber(admin: { graphql: (q: string, opts?: { variabl
   const nextResp = await admin.graphql(
     `#graphql query NextKey { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNT_NEXT_KEY}") { value } } }`
   );
-  const nextJson = await nextResp.json();
+  const nextJson = await safeJsonFromResponse(nextResp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
   const nextVal = nextJson?.data?.currentAppInstallation?.metafield?.value;
   if (nextVal != null && nextVal !== "") {
     const n = parseInt(String(nextVal).trim(), 10);
@@ -1156,7 +1229,7 @@ async function getNextCountNumber(admin: { graphql: (q: string, opts?: { variabl
   const backupResp = await admin.graphql(
     `#graphql query BackupKey { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_BACKUP_KEY}") { value } } }`
   );
-  const backupJson = await backupResp.json();
+  const backupJson = await safeJsonFromResponse(backupResp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
   const backupRaw = backupJson?.data?.currentAppInstallation?.metafield?.value;
   if (backupRaw == null || backupRaw === "") return 1;
   let list: Array<{ countName?: string | null }>;
@@ -1178,7 +1251,7 @@ async function readMainKeyOnly(admin: { graphql: (q: string, opts?: { variables?
   const mainResp = await admin.graphql(
     `#graphql query InventoryCountMain { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`
   );
-  const mainJson = await mainResp.json();
+  const mainJson = await safeJsonFromResponse(mainResp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
   const raw = mainJson?.data?.currentAppInstallation?.metafield?.value;
   if (raw == null || raw === "") return null;
   let parsed: unknown;
@@ -1195,15 +1268,29 @@ async function readMainKeyOnly(admin: { graphql: (q: string, opts?: { variables?
   return null;
 }
 
+/** 楽観ロック用。棚卸一覧のバージョン（保存のたびに +1）を取得。無ければ 1 */
+async function getInventoryCountsVersion(admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> }): Promise<number> {
+  const resp = await admin.graphql(
+    `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`
+  );
+  const json = await safeJsonFromResponse(resp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+  const v = json?.data?.currentAppInstallation?.metafield?.value;
+  if (v == null || v === "") return 1;
+  const n = parseInt(String(v).trim(), 10);
+  return Number.isInteger(n) && n >= 1 ? n : 1;
+}
+
 /**
  * チャンクを全て読まずに、新規棚卸1件だけを末尾に追加する。
  * メインキーがチャンク形式のとき、最後のチャンクがあるならそこに追加、無ければ欠けているチャンクに書き足す。
  * 次の番号メタとバックアップも更新する。
+ * expectedVersion を渡すと楽観ロックで競合時は保存しない。
  */
 async function appendNewCountToChunked(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   newCount: InventoryCount,
-  ownerId: string
+  ownerId: string,
+  expectedVersion?: number
 ): Promise<{ userErrors: Array<{ message?: string }> }> {
   const main = await readMainKeyOnly(admin);
   if (!main) {
@@ -1213,14 +1300,14 @@ async function appendNewCountToChunked(
       `#graphql mutation SetCounts($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`,
       { variables: { metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value }] } }
     );
-    const data = (await resp.json())?.data?.metafieldsSet;
+    const data = (await safeJsonFromResponse(resp) as { data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } } })?.data?.metafieldsSet;
     if (data?.userErrors?.length) return { userErrors: data.userErrors };
     return updateNextNumberAndBackupAfterAppend(admin, newCount, ownerId, single);
   }
   if (!main.chunked) {
     const fullList = [...main.array, newCount];
     const withNames = ensureCountNamesOnCounts(fullList);
-    const { userErrors } = await writeInventoryCountsChunked(admin, withNames as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, withNames as InventoryCount[], ownerId, expectedVersion);
     return userErrors.length ? { userErrors } : updateNextNumberAndBackupAfterAppend(admin, newCount, ownerId, fullList);
   }
   const N = main.totalChunks;
@@ -1239,7 +1326,7 @@ async function appendNewCountToChunked(
       `#graphql mutation SetChunk($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`,
       { variables: { metafields: [{ ownerId, namespace: NS, key: `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${gapChunkIndex}`, type: "json", value: JSON.stringify([newCount]) }] } }
     );
-    const data = (await resp.json())?.data?.metafieldsSet;
+    const data = (await safeJsonFromResponse(resp) as { data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } } })?.data?.metafieldsSet;
     if (data?.userErrors?.length) return { userErrors: data.userErrors };
   } else {
     let lastChunk: (InventoryCount | CountPart)[];
@@ -1266,14 +1353,14 @@ async function appendNewCountToChunked(
         `#graphql mutation SetChunk($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`,
         { variables: { metafields: batch } }
       );
-      const data = (await resp.json())?.data?.metafieldsSet;
+      const data = (await safeJsonFromResponse(resp) as { data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } } })?.data?.metafieldsSet;
       if (data?.userErrors?.length) return { userErrors: data.userErrors };
     } else {
       const resp = await admin.graphql(
         `#graphql mutation SetChunk($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`,
         { variables: { metafields: [{ ownerId, namespace: NS, key: `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${lastExistingIndex}`, type: "json", value: newChunkValue }] } }
       );
-      const data = (await resp.json())?.data?.metafieldsSet;
+      const data = (await safeJsonFromResponse(resp) as { data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } } })?.data?.metafieldsSet;
       if (data?.userErrors?.length) return { userErrors: data.userErrors };
     }
   }
@@ -1298,7 +1385,8 @@ async function appendNewCountToChunked(
   const backupResp = await admin.graphql(
     `#graphql query Backup { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_BACKUP_KEY}") { value } } }`
   );
-  const backupRaw = (await backupResp.json())?.data?.currentAppInstallation?.metafield?.value;
+  const backupJson = await safeJsonFromResponse(backupResp) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
+  const backupRaw = backupJson?.data?.currentAppInstallation?.metafield?.value;
   let list: Array<Record<string, unknown>> = [];
   if (backupRaw) try {
     list = JSON.parse(backupRaw);
@@ -1620,15 +1708,20 @@ async function getInventoryItemIdsForGroup(
           `,
           { variables: { id: collectionId, first: 250 } }
         );
-        const productsData = await productsResp.json();
-        const collection = productsData?.data?.collection;
+        const productsData = (await safeJsonFromResponse(productsResp)) as Record<string, unknown>;
+        const collection = (productsData?.data as Record<string, unknown>)?.collection as Record<string, unknown> | undefined;
         if (collection) {
-          for (const product of collection.products?.nodes ?? []) {
-            for (const variant of product.variants?.nodes ?? []) {
-              if (variant.inventoryItem?.id) {
-                if (selectedVariantIds.length === 0 || selectedVariantIds.includes(variant.id)) {
-                  if (!ids.includes(variant.inventoryItem.id)) {
-                    ids.push(variant.inventoryItem.id);
+          const nodes = (collection.products as Record<string, unknown> | undefined)?.nodes as Array<Record<string, unknown>> | undefined;
+          for (const product of nodes ?? []) {
+            const variantNodes = (product.variants as Record<string, unknown> | undefined)?.nodes as Array<Record<string, unknown>> | undefined;
+            for (const variant of variantNodes ?? []) {
+              const invItem = (variant as Record<string, unknown>)?.inventoryItem as Record<string, unknown> | undefined;
+              const invId = invItem?.id as string | undefined;
+              if (invId) {
+                const vId = (variant as Record<string, unknown>).id as string | undefined;
+                if (selectedVariantIds.length === 0 || (vId && selectedVariantIds.includes(vId))) {
+                  if (!ids.includes(invId)) {
+                    ids.push(invId);
                   }
                 }
               }
@@ -1651,6 +1744,12 @@ export async function action({ request }: ActionFunctionArgs) {
   const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
   const actionType = (formData.get("action") ?? formData.get("actionType")) as string;
+  const expectedVersionRaw = formData.get("inventoryCountsVersion");
+  const expectedVersion =
+    expectedVersionRaw != null && String(expectedVersionRaw).trim() !== ""
+      ? parseInt(String(expectedVersionRaw).trim(), 10)
+      : undefined;
+  const expectedVersionNum = Number.isInteger(expectedVersion) ? expectedVersion : undefined;
 
   try {
   // SKU検索は metafield 不要のため先に実行（ownerId 未取得で早期 return されないようにする）
@@ -1961,7 +2060,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const repairedCount = countsWithName.filter(
         (c, i) => !counts[i]?.countName || String(counts[i].countName).trim() === ""
       ).length;
-      const { userErrors } = await writeInventoryCountsChunked(admin, countsWithName, ownerId);
+      const { userErrors } = await writeInventoryCountsChunked(admin, countsWithName, ownerId, expectedVersionNum);
       if (userErrors.length) {
         return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
       }
@@ -2146,7 +2245,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, restored: true } as const;
   }
@@ -2213,7 +2312,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, redistributed: true } as const;
   }
@@ -2329,7 +2428,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, groupsCompleted: true } as const;
   }
@@ -2341,7 +2440,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const nb = parseCountNameNumber((b as { countName?: string }).countName);
       return na - nb;
     });
-    const { userErrors } = await writeInventoryCountsChunked(admin, sorted as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, sorted as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, sortedByCountName: true } as const;
   }
@@ -2799,7 +2898,7 @@ export async function action({ request }: ActionFunctionArgs) {
         `,
         { variables: { first: 250 } }
       );
-      const locData = await locResp.json();
+      const locData = await safeJsonFromResponse(locResp) as { data?: { locations?: { nodes?: LocationNode[] } } };
       const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
 
       // 商品グループ名とinventoryItemIdsを取得（全グループ分を取得してPOSのまとめて表示で読めるようにする）
@@ -2861,7 +2960,7 @@ export async function action({ request }: ActionFunctionArgs) {
         createdAt: new Date().toISOString(),
       };
 
-      const { userErrors: saveErrs } = await appendNewCountToChunked(admin, newCount, ownerId);
+      const { userErrors: saveErrs } = await appendNewCountToChunked(admin, newCount, ownerId, expectedVersionNum);
       if (saveErrs.length) {
         return { ok: false, error: saveErrs.map((e: { message?: string }) => e.message).join(" / ") as const };
       }
@@ -3560,7 +3659,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: groupItemsMap }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -3630,7 +3729,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     return { ok: true };
   }
@@ -3685,7 +3784,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -3767,7 +3866,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -3814,7 +3913,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: {}, status: "in_progress" as const, completedAt: undefined }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -3843,7 +3942,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, cancelledGroupIds, status: nextStatus, completedAt: nextCompletedAt }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -3864,7 +3963,7 @@ export async function action({ request }: ActionFunctionArgs) {
           ? { ...c, status: "cancelled" as const, completedAt: undefined }
           : c
       );
-      const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+      const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
       if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
       invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
       return { ok: true };
@@ -3884,7 +3983,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, cancelledGroupIds, status: nextStatus, completedAt: nextCompletedAt }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -3932,7 +4031,7 @@ export type SkuSearchVariant = {
 
 export default function InventoryCountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, collections, collectionDisplayMap = {}, productGroups, inventoryCounts, skuVariantList, shopTimezone, todayInShopTimezone, stocktakeCsvExportColumns, loadError = false } = loaderData || {
+  const { locations, collections, collectionDisplayMap = {}, productGroups, inventoryCounts, inventoryCountsVersion = 1, skuVariantList, shopTimezone, todayInShopTimezone, stocktakeCsvExportColumns, loadError = false } = loaderData || {
     locations: [],
     collections: [],
     collectionDisplayMap: {} as Record<string, CollectionNode>,
@@ -4817,6 +4916,7 @@ export default function InventoryCountPage() {
 
     const formData = new FormData();
     formData.append("action", "create_inventory_count");
+    formData.append("inventoryCountsVersion", String(inventoryCountsVersion));
     formData.append("locationId", createLocationId);
     // 複数選択対応：productGroupIdsを優先、なければproductGroupIdを使用（後方互換性）
     if (createProductGroupIds.length > 0) {
@@ -6286,7 +6386,7 @@ export default function InventoryCountPage() {
                             <>
                               <button
                                 type="button"
-                                onClick={() => fetcher.submit({ action: "repair_count_names" }, { method: "post" })}
+                                onClick={() => fetcher.submit({ action: "repair_count_names", inventoryCountsVersion: String(inventoryCountsVersion) }, { method: "post" })}
                                 disabled={fetcher.state !== "idle"}
                                 style={{
                                   padding: "8px 16px",
@@ -6913,6 +7013,7 @@ export default function InventoryCountPage() {
                         onClick={() => {
                           const fd = new FormData();
                           fd.set("action", "redistribute_count_group_items");
+                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                           fd.set("countId", String(modalCount.id));
                           fetcher.submit(fd, { method: "post" });
                         }}
@@ -6945,6 +7046,7 @@ export default function InventoryCountPage() {
                         onClick={() => {
                           const fd = new FormData();
                           fd.set("action", "ensure_count_groups_completed");
+                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                           fd.set("countId", String(modalCount.id));
                           fetcher.submit(fd, { method: "post" });
                         }}
@@ -7030,6 +7132,7 @@ export default function InventoryCountPage() {
                               onClick={() => {
                                 const fd = new FormData();
                                 fd.set("action", "restore_count_as_completed");
+                                fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                 fd.set("countId", String(modalCount.id));
                                 fd.set("countName", restoreCountName.trim());
                                 fd.set("locationId", restoreLocationId);
@@ -7423,6 +7526,7 @@ export default function InventoryCountPage() {
                                           }));
                                           const fd = new FormData();
                                           fd.set("action", "confirm_stocktake_group");
+                                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", groupId);
                                           fd.set("items", JSON.stringify(items));
@@ -7439,6 +7543,7 @@ export default function InventoryCountPage() {
                                           if (!confirm("このグループをキャンセルしますか？在庫は変更されません。")) return;
                                           const fd = new FormData();
                                           fd.set("action", "cancel_stocktake_group");
+                                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", groupId);
                                           historyActionFetcher.submit(fd, { method: "post" });
@@ -7458,6 +7563,7 @@ export default function InventoryCountPage() {
                                           if (!confirm("このグループの確定を取り消し、在庫を元に戻します。よろしいですか？")) return;
                                           const fd = new FormData();
                                           fd.set("action", "reset_stocktake_group");
+                                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", groupId);
                                           historyActionFetcher.submit(fd, { method: "post" });
@@ -7660,6 +7766,7 @@ export default function InventoryCountPage() {
                                           }));
                                           const fd = new FormData();
                                           fd.set("action", "confirm_stocktake_group");
+                                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", singleGroupId);
                                           fd.set("items", JSON.stringify(items));
@@ -7676,6 +7783,7 @@ export default function InventoryCountPage() {
                                           if (!confirm("このグループをキャンセルしますか？在庫は変更されません。")) return;
                                           const fd = new FormData();
                                           fd.set("action", "cancel_stocktake_group");
+                                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", singleGroupId);
                                           historyActionFetcher.submit(fd, { method: "post" });
@@ -7695,6 +7803,7 @@ export default function InventoryCountPage() {
                                           if (!confirm("このグループの確定を取り消し、在庫を元に戻します。よろしいですか？")) return;
                                           const fd = new FormData();
                                           fd.set("action", "reset_stocktake_group");
+                                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", singleGroupId);
                                           historyActionFetcher.submit(fd, { method: "post" });
@@ -7879,6 +7988,7 @@ export default function InventoryCountPage() {
                             }
                             const fd = new FormData();
                             fd.set("action", "confirm_stocktake_all");
+                            fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                             fd.set("countId", modalCount.id);
                             fd.set("incompleteGroupsItems", JSON.stringify(incompletePayload));
                             historyActionFetcher.submit(fd, { method: "post" });
@@ -7904,6 +8014,7 @@ export default function InventoryCountPage() {
                               if (!confirm("この棚卸の確定をすべて取り消し、在庫を元に戻します。よろしいですか？")) return;
                               const fd = new FormData();
                               fd.set("action", "reset_stocktake_all");
+                              fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                               fd.set("countId", modalCount.id);
                               historyActionFetcher.submit(fd, { method: "post" });
                             }}
@@ -7923,6 +8034,7 @@ export default function InventoryCountPage() {
                             if (!confirm(msg)) return;
                             const fd = new FormData();
                             fd.set("action", "cancel_stocktake");
+                            fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                             fd.set("countId", modalCount.id);
                             historyActionFetcher.submit(fd, { method: "post" });
                           }}

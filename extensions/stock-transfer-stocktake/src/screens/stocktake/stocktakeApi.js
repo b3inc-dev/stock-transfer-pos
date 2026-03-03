@@ -23,6 +23,8 @@ const INVENTORY_COUNT_INDEX_KEY = "inventory_count_index_v1";
 /** 書き込み前の1世代バックアップ用（復元用。list の軽量JSONのみ） */
 const INVENTORY_COUNTS_BACKUP_KEY = "inventory_counts_backup_v1";
 const INVENTORY_COUNTS_BACKUP_MAX_BYTES = 60_000;
+/** 楽観ロック用。管理画面・POS で共有。保存のたびに +1 */
+const INVENTORY_COUNTS_VERSION_KEY = "inventory_counts_version_v1";
 
 /** #C0001 形式の countName から数値（1）を取得。パースできない場合は 0 */
 function parseCountNameNumber(countName) {
@@ -222,6 +224,19 @@ function mergeCountParts(parts) {
   base.groupItems = groupItems;
   base.items = items;
   return base;
+}
+
+/**
+ * 楽観ロック用。棚卸一覧のバージョン（保存のたびに +1）を取得。無ければ 1。
+ * 管理画面と同一メタフィールドを参照。
+ */
+export async function getInventoryCountsVersion() {
+  const gql = `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`;
+  const d = await graphql(gql);
+  const v = d?.currentAppInstallation?.metafield?.value;
+  if (v == null || v === "") return 1;
+  const n = parseInt(String(v).trim(), 10);
+  return Number.isInteger(n) && n >= 1 ? n : 1;
 }
 
 /**
@@ -970,8 +985,9 @@ function ensureCountNamesBeforeWrite(counts) {
  * 棚卸一覧をメタフィールドに保存する。必ず「全件」の配列を渡すこと。
  * 部分的な配列で呼ぶと他棚卸IDが消えるため、呼び出し元は read で取得した全件を更新してから渡すこと。
  * 書き込み前に (1) 既存データから locationId / productGroupIds / groupItems 等を補完（空白で上書きしない）、(2) countName が欠けている件には付与する。
+ * expectedVersion を渡すと楽観ロック：現在のバージョンと一致しない場合は競合として throw する。
  */
-export async function writeInventoryCounts(counts) {
+export async function writeInventoryCounts(counts, expectedVersion) {
   if (WRITE_START_DELAY_MS > 0) {
     await new Promise((r) => setTimeout(r, WRITE_START_DELAY_MS));
   }
@@ -979,6 +995,11 @@ export async function writeInventoryCounts(counts) {
   const d = await runWithThrottleRetry(() => graphql(gqlApp));
   const ownerId = d?.currentAppInstallation?.id;
   if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
+
+  const currentVersion = await runWithThrottleRetry(() => getInventoryCountsVersion());
+  if (expectedVersion != null && expectedVersion !== currentVersion) {
+    throw new Error("他の操作でデータが更新されています。画面を再読み込みしてから再度お試しください。");
+  }
 
   let existing = [];
   try {
@@ -1113,6 +1134,7 @@ export async function writeInventoryCounts(counts) {
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" },
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: "[]" },
       { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: "{}" },
+      { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
     ];
     await runWithThrottleRetry(async () => {
       const res = await graphql(mutation, { metafields });
@@ -1127,7 +1149,10 @@ export async function writeInventoryCounts(counts) {
     if (full.length <= INVENTORY_COUNTS_CHUNK_BYTES) {
       await runWithThrottleRetry(async () => {
         const res = await graphql(mutation, {
-          metafields: [{ ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full }],
+          metafields: [
+            { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: full },
+            { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
+          ],
         });
         const errs = res?.metafieldsSet?.userErrors ?? [];
         if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
@@ -1190,6 +1215,7 @@ export async function writeInventoryCounts(counts) {
       value,
     })),
     { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: indexValue },
+    { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
   ];
   for (let i = 0; i < listMetafields.length; i += METAFIELDS_SET_MAX) {
     const batch = listMetafields.slice(i, i + METAFIELDS_SET_MAX);
