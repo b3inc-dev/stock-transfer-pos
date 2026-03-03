@@ -65,6 +65,11 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
   } catch (e) {
     const msg = e?.message ?? String(e);
     console.error("[reportStocktakeCompleteToApi] Request failed:", msg);
-    return { ok: false, error: msg };
+    // ブラウザの fetch がレスポンスを受け取る前に失敗した場合（接続不可・CORS・ネットワーク）は「Load failed」等になる
+    const isNetworkFailure = /load failed|failed to fetch|network error|connection refused|net::/i.test(String(msg));
+    const userMessage = isNetworkFailure
+      ? "サーバーに接続できませんでした。ネットワークとアプリURL（開発時はトンネルURL）を確認してください。"
+      : msg;
+    return { ok: false, error: userMessage };
   }
 }

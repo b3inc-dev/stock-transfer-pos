@@ -293,7 +293,8 @@ async function readInventoryCountsListChunked(admin: { graphql: (q: string, opts
       const chunk = JSON.parse(chunkRaw);
       if (Array.isArray(chunk)) counts.push(...(chunk as InventoryCount[]));
     } catch (e) {
-      throw new Error(`棚卸一覧チャンク${i}のパースに失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+      // チャンク中身が空・不正JSONでもページを落とさない（syntax error 表示を防ぐ）
+      console.warn(`[inventory-count] 棚卸一覧チャンク${i}のパースに失敗しました:`, e instanceof Error ? e.message : String(e));
     }
   }
   return counts;
@@ -365,10 +366,13 @@ export async function readInventoryCountsChunked(admin: { graphql: (q: string, o
     try {
       chunk = JSON.parse(chunkRaw);
     } catch (e) {
-      throw new Error(`棚卸チャンク${i}のパースに失敗しました: ${e instanceof Error ? e.message : String(e)}`);
+      // チャンク中身が空・不正JSONでもページを落とさない（syntax error, unexpected end of file を防ぐ）
+      console.warn(`[inventory-count] 棚卸チャンク${i}のパースに失敗しました:`, e instanceof Error ? e.message : String(e));
+      continue;
     }
     if (!Array.isArray(chunk)) {
-      throw new Error(`棚卸チャンク${i}が配列ではありません（上書きで他データが消えるのを防ぐため中断）`);
+      console.warn(`[inventory-count] 棚卸チャンク${i}が配列ではありません`);
+      continue;
     }
     for (const el of chunk) {
       if (el && typeof el === "object" && (el as CountPart)._part === true) {
