@@ -31,6 +31,7 @@ const PRODUCT_GROUP_NAMES_KEY = "product_group_names_v1";
 const INVENTORY_COUNTS_CHUNK_BYTES = 32_000;
 const INVENTORY_COUNTS_CHUNK_KEY_PREFIX = "inventory_counts_v1_c";
 const METAFIELDS_SET_MAX = 25;
+const ADMIN_GRAPHQL_API_VERSION = "2025-10";
 
 /** 商品グループ保存用メタフィールド（本體・ID一覧・ID→名前）。POS の一覧で軽量読取用 */
 function productGroupsMetafields(
@@ -702,8 +703,8 @@ export async function writeInventoryCountsChunked(
 
   const chunks = payloads.map((p) => JSON.stringify(p));
   const descriptor = JSON.stringify({ _chunked: true, totalChunks: chunks.length });
+  // ディスクリプタは最後に書く。途中でバッチが失敗しても「totalChunks はあるが最後のチャンクが無い」状態を避け、メタを壊しにくくする
   const metafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> = [
-    { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: descriptor },
     ...chunks.map((value, i) => ({
       ownerId,
       namespace: NS,
@@ -711,6 +712,7 @@ export async function writeInventoryCountsChunked(
       type: "json" as const,
       value,
     })),
+    { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: descriptor },
   ];
   for (let i = 0; i < metafields.length; i += METAFIELDS_SET_MAX) {
     const batch = metafields.slice(i, i + METAFIELDS_SET_MAX);
@@ -748,8 +750,8 @@ export async function writeInventoryCountsChunked(
   const indexValue = JSON.stringify(
     Object.fromEntries([...countIdToChunkIndices].map(([id, set]) => [id, [...set].sort((a, b) => a - b)]))
   );
+  // 一覧用もディスクリプタを最後に書く（メタを壊さない堅牢さ）
   const listMetafields: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> = [
-    { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: listDescriptor },
     ...listPayloads.map((value, i) => ({
       ownerId,
       namespace: NS,
@@ -757,6 +759,7 @@ export async function writeInventoryCountsChunked(
       type: "json" as const,
       value,
     })),
+    { ownerId, namespace: NS, key: INVENTORY_COUNTS_LIST_KEY, type: "json", value: listDescriptor },
     { ownerId, namespace: NS, key: INVENTORY_COUNT_INDEX_KEY, type: "json", value: indexValue },
   ];
   for (let i = 0; i < listMetafields.length; i += METAFIELDS_SET_MAX) {
@@ -999,75 +1002,140 @@ async function logInventoryChangeServer(
   }
 }
 
+/** loader 用: セッションで GraphQL を 1 回 fetch し、安全にパースして返す（throw しない） */
+async function loaderGraphql(
+  shop: string,
+  accessToken: string,
+  query: string,
+  variables?: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const resp = await fetch(`https://${shop}/admin/api/${ADMIN_GRAPHQL_API_VERSION}/graphql.json`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+    body: JSON.stringify({ query: query.replace(/^#graphql\s*/m, "").trim(), variables: variables ?? {} }),
+  });
+  const out = (await safeJsonFromResponseForLoader(resp, {})) as Record<string, unknown>;
+  return out ?? {};
+}
+
+/** GraphQL の metafield.value を list 用にパース → InventoryCount[] */
+function parseListMetafieldValue(raw: string | null | undefined): InventoryCount[] {
+  if (raw == null || raw === "") return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as InventoryCount[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** GraphQL の metafield.value を main 用にパース → { chunked, array } | { chunked, totalChunks } | null */
+function parseMainMetafieldValue(raw: string | null | undefined): { chunked: false; array: InventoryCount[] } | { chunked: true; totalChunks: number } | null {
+  if (raw == null || raw === "") return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) return { chunked: false, array: parsed as InventoryCount[] };
+    const desc = parsed as { _chunked?: boolean; totalChunks?: number };
+    if (desc?._chunked && typeof desc.totalChunks === "number" && desc.totalChunks >= 1) return { chunked: true, totalChunks: desc.totalChunks };
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** GraphQL の metafield.value を version 用にパース → number */
+function parseVersionMetafieldValue(raw: string | null | undefined): number {
+  if (raw == null || raw === "") return 1;
+  const n = parseInt(String(raw).trim(), 10);
+  return Number.isInteger(n) && n >= 1 ? n : 1;
+}
+
+/** GraphQL 応答 { data: { currentAppInstallation: { metafield: { value } } } } から value を抜き出す */
+function getMetafieldValueFromData(response: Record<string, unknown>): string | null {
+  const data = response?.data as Record<string, unknown> | undefined;
+  const inst = data?.currentAppInstallation as Record<string, unknown> | undefined;
+  const m = inst?.metafield as { value?: string } | undefined;
+  return (m?.value ?? null) as string | null;
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
-  // ショップのタイムゾーンを取得（失敗時は必ず "UTC" にし、loader が落ちないようにする）
   let shopTimezone = "UTC";
   try {
-    shopTimezone = await getShopTimezone(admin) || "UTC";
+    shopTimezone = (await getShopTimezone(admin)) || "UTC";
   } catch {
     shopTimezone = "UTC";
   }
 
-  // 案A: loader はチャンクを読まない。list の単一キー or メインの単一キーのみ読み（syntax error を防ぐ）
-  // admin.graphql() 内の Shopify API クライアントが空/不正レスポンスで throw することがあるため、各取得を try/catch で囲み loader を落とさない
-  const graphqlOrEmpty = async (query: string, vars?: { variables?: Record<string, unknown> }): Promise<Response> => {
-    try {
-      return await admin.graphql(query, vars);
-    } catch (e) {
-      console.warn("[inventory-count] loader graphql failed:", e instanceof Error ? e.message : String(e));
-      return new Response(JSON.stringify({ data: {} }));
-    }
-  };
-  const [locResp, appResp, settingsResp, listCountsOnly, mainKeyResult, inventoryCountsVersion] = await Promise.all([
-    graphqlOrEmpty(
-      `#graphql
-        query Locations($first: Int!) {
-          locations(first: $first) { nodes { id name } }
-        }
-      `,
-      { variables: { first: 250 } }
-    ),
-    graphqlOrEmpty(
-      `#graphql
-        query InventoryCountData {
-          currentAppInstallation {
-            productGroupsMetafield: metafield(namespace: "${NS}", key: "${PRODUCT_GROUPS_KEY}") { value }
-          }
-        }
-      `
-    ),
-    graphqlOrEmpty(
-      `#graphql
-        query StocktakeSettings {
-          currentAppInstallation {
-            metafield(namespace: "${NS}", key: "${SETTINGS_KEY}") { value }
-          }
-        }
-      `
-    ),
-    readListMainKeyOnly(admin),
-    readMainKeyOnly(admin),
-    getInventoryCountsVersion(admin),
-  ]);
-  const usedListMetafield = (listCountsOnly?.length ?? 0) > 0;
+  const shop = session?.shop ?? "";
+  const accessToken = session?.accessToken ?? "";
+  const useDirectFetch = Boolean(shop && accessToken);
+
+  const LOCATIONS_QUERY = `#graphql query Locations($first: Int!) { locations(first: $first) { nodes { id name } } }`;
+  const APP_QUERY = `#graphql query InventoryCountData { currentAppInstallation { productGroupsMetafield: metafield(namespace: "${NS}", key: "${PRODUCT_GROUPS_KEY}") { value } } }`;
+  const SETTINGS_QUERY = `#graphql query StocktakeSettings { currentAppInstallation { metafield(namespace: "${NS}", key: "${SETTINGS_KEY}") { value } } }`;
+  const LIST_QUERY = `#graphql query List { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_LIST_KEY}") { value } } }`;
+  const MAIN_QUERY = `#graphql query Main { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
+  const VERSION_QUERY = `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`;
+
+  let locData: Record<string, unknown>;
+  let appData: Record<string, unknown>;
+  let settingsData: Record<string, unknown>;
+  let listCountsOnly: InventoryCount[];
+  let mainKeyResult: { chunked: false; array: InventoryCount[] } | { chunked: true; totalChunks: number } | null;
+  let inventoryCountsVersion: number;
+
+  if (useDirectFetch) {
+    const [loc, app, set, list, main, ver] = await Promise.all([
+      loaderGraphql(shop, accessToken, LOCATIONS_QUERY, { first: 250 }),
+      loaderGraphql(shop, accessToken, APP_QUERY),
+      loaderGraphql(shop, accessToken, SETTINGS_QUERY),
+      loaderGraphql(shop, accessToken, LIST_QUERY),
+      loaderGraphql(shop, accessToken, MAIN_QUERY),
+      loaderGraphql(shop, accessToken, VERSION_QUERY),
+    ]);
+    locData = loc;
+    appData = app;
+    settingsData = set;
+    listCountsOnly = parseListMetafieldValue(getMetafieldValueFromData(list));
+    mainKeyResult = parseMainMetafieldValue(getMetafieldValueFromData(main));
+    inventoryCountsVersion = parseVersionMetafieldValue(getMetafieldValueFromData(ver));
+  } else {
+    const graphqlOrEmpty = async (query: string, vars?: { variables?: Record<string, unknown> }): Promise<Response> => {
+      try {
+        return await admin.graphql(query, vars);
+      } catch (e) {
+        console.warn("[inventory-count] loader graphql failed:", e instanceof Error ? e.message : String(e));
+        return new Response(JSON.stringify({ data: {} }));
+      }
+    };
+    const [locResp, appResp, setResp] = await Promise.all([
+      graphqlOrEmpty(LOCATIONS_QUERY, { variables: { first: 250 } }),
+      graphqlOrEmpty(APP_QUERY),
+      graphqlOrEmpty(SETTINGS_QUERY),
+    ]);
+    locData = (await safeJsonFromResponseForLoader(locResp, {})) as Record<string, unknown>;
+    appData = (await safeJsonFromResponseForLoader(appResp, {})) as Record<string, unknown>;
+    settingsData = (await safeJsonFromResponseForLoader(setResp, {})) as Record<string, unknown>;
+    listCountsOnly = [];
+    mainKeyResult = null;
+    inventoryCountsVersion = 1;
+  }
+
+  const usedListMetafield = listCountsOnly.length > 0;
   const inventoryCountsRaw: InventoryCount[] = usedListMetafield
-    ? (listCountsOnly ?? [])
+    ? listCountsOnly
     : (mainKeyResult && !mainKeyResult.chunked ? mainKeyResult.array : []);
 
-  const locData = (await safeJsonFromResponseForLoader(locResp, {})) as { data?: { locations?: { nodes?: LocationNode[] } } };
-  const appData = (await safeJsonFromResponseForLoader(appResp, {})) as { data?: { currentAppInstallation?: { productGroupsMetafield?: { value?: string } } } };
-  const settingsData = (await safeJsonFromResponseForLoader(settingsResp, {})) as { data?: { currentAppInstallation?: { metafield?: { value?: string } } } };
-
-  const locations: LocationNode[] = locData?.data?.locations?.nodes ?? [];
+  const locations: LocationNode[] = ((locData?.data as { locations?: { nodes?: LocationNode[] } })?.locations?.nodes) ?? [];
 
   // コレクション: 検索時のみ action で取得するため、loader では返さない（重いストア対策）
   const collections: CollectionNode[] = [];
 
   let productGroups: ProductGroup[] = [];
-  const groupsRaw = appData?.data?.currentAppInstallation?.productGroupsMetafield?.value;
+  const groupsRaw = (appData?.data as { currentAppInstallation?: { productGroupsMetafield?: { value?: string } } })?.currentAppInstallation?.productGroupsMetafield?.value;
   if (typeof groupsRaw === "string" && groupsRaw) {
     try {
       const parsed = JSON.parse(groupsRaw);
@@ -1192,7 +1260,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   // 設定から棚卸CSV出力項目を取得（明細あり用）
   let stocktakeCsvExportColumns: string[] = DEFAULT_STOCKTAKE_CSV_COLUMNS;
-  const settingsRaw = settingsData?.data?.currentAppInstallation?.metafield?.value;
+  const settingsRaw = (settingsData?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation?.metafield?.value;
   if (typeof settingsRaw === "string" && settingsRaw) {
     try {
       const parsed = JSON.parse(settingsRaw);
