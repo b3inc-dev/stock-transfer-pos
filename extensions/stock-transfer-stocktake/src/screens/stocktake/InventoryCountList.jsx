@@ -1052,16 +1052,10 @@ export function InventoryCountList({
           ...(cachedProductGroups.length > 0 ? { cachedProductGroups } : {}),
         };
         
-        // 各商品グループごとに処理
-        for (const groupId of targetProductGroupIds) {
-          const groupName = productGroupNames.get(normalizeIdForMatch(groupId)) || groupId;
-          // ✅ 完了判定：groupItemsMap[groupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
-          // ✅ 確実に判定するため、groupIdとgroupItemsMapの両方をチェック
-          // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング（InventoryCountProductGroupSelectionと同じロジック）
+        // ✅ まとめて表示：各グループを並列で取得して表示が早くなるようにする（直列だとグループ数分だけ待ちが発生するため）
+        const processOneGroupInBulk = async (groupId) => {
           let groupItemsForGroup = getGroupItemsByKey(groupItemsMap, groupId);
           if (groupItemsForGroup.length === 0 && countItemsLegacy.length > 0) {
-            // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
-            // 商品グループの商品リストを取得してフィルタリング（inventoryItemIdsByGroupも渡してまとめて表示で全グループ取得できるようにする）
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
               const productsRaw = await fetchProductsByGroups([groupId], c.locationId, {
@@ -1085,10 +1079,7 @@ export function InventoryCountList({
           }
           const completedItems = groupItemsForGroup.length > 0 ? groupItemsForGroup : null;
           const isGroupCancelled = cancelledSet.has(normalizeIdForMatch(groupId));
-          
           if (completedItems || isGroupCancelled) {
-            // ✅ 完了済みまたはキャンセル済みのグループ：APIの groupItems から読み込んで読み取り専用で表示（下書きで上書きしない）
-            // ✅ 画像URLを取得するため、商品情報を取得。初回読み込み数より多いグループでも全件取得するため limit: 2000
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
               const productsRaw = await fetchProductsByGroups([groupId], c.locationId, {
@@ -1105,9 +1096,6 @@ export function InventoryCountList({
                   productMap.set(String(p.inventoryItemId).trim(), p);
                 }
               });
-              
-              // ✅ 予定外商品の画像URLを取得するため、Promise.allで並列処理
-              // ✅ キャンセル済みで商品0件のとき completedItems が null なので .map で落ちないよう配列に正規化
               const completedLines = await Promise.all(
                 (completedItems || []).map(async (it, i) => {
                   const t = (it?.title || it?.sku || "-").split(" / ");
@@ -1116,14 +1104,10 @@ export function InventoryCountList({
                   const inventoryItemIdStr = String(it?.inventoryItemId || "").trim();
                   const product = productMap.get(inventoryItemIdStr);
                   let imageUrl = product?.imageUrl ?? "";
-                  
-                  // ✅ 予定外商品で画像URLが取得できていない場合、groupItemsに保存されている画像URLを使用
                   const isExtra = Boolean(it?.isExtra);
                   if (isExtra && !imageUrl && it?.imageUrl) {
                     imageUrl = String(it.imageUrl);
                   }
-                  
-                  // ✅ 予定外商品で画像URLがまだ取得できていない場合、resolveVariantByCodeで取得を試みる
                   if (isExtra && !imageUrl && showImages && !liteMode) {
                     const code = it?.barcode || it?.sku || "";
                     if (code) {
@@ -1137,7 +1121,6 @@ export function InventoryCountList({
                       }
                     }
                   }
-                  
                   return {
                     id: String(it?.id ?? `ro-${groupId}-${Date.now()}-${i}`),
                     variantId: it?.variantId ?? null,
@@ -1146,49 +1129,43 @@ export function InventoryCountList({
                     variantTitle,
                     sku: String(it?.sku ?? ""),
                     barcode: String(it?.barcode ?? ""),
-                    imageUrl, // ✅ 画像URLを取得（予定外商品の場合は追加で取得を試みる）
+                    imageUrl,
                     currentQuantity: Number(it?.currentQuantity ?? 0),
                     actualQuantity: Number(it?.actualQuantity ?? 0),
-                    isReadOnly: true, // ✅ 完了済みは読み取り専用
-                    isExtra, // ✅ 予定外商品フラグを保持（予定外リスト分離表示用）
-                    productGroupId: groupId, // ✅ どのグループに属するか記録
+                    isReadOnly: true,
+                    isExtra,
+                    productGroupId: groupId,
                   };
                 })
               );
-              allLines.push(...completedLines);
+              return completedLines;
             } catch (e) {
               console.error(`Failed to load product images for completed group ${groupId}:`, e);
-              // ✅ エラーが発生した場合でも、画像なしで商品リストを表示
-              const completedLines = completedItems.map((it, i) => {
+              return (completedItems || []).map((it, i) => {
                 const t = (it?.title || it?.sku || "-").split(" / ");
-                const productTitle = t[0] || "";
-                const variantTitle = t[1] || "";
                 return {
                   id: String(it?.id ?? `ro-${groupId}-${Date.now()}-${i}`),
                   variantId: it?.variantId ?? null,
                   inventoryItemId: it?.inventoryItemId ?? null,
-                  productTitle,
-                  variantTitle,
+                  productTitle: t[0] || "",
+                  variantTitle: t[1] || "",
                   sku: String(it?.sku ?? ""),
                   barcode: String(it?.barcode ?? ""),
                   imageUrl: "",
                   currentQuantity: Number(it?.currentQuantity ?? 0),
                   actualQuantity: Number(it?.actualQuantity ?? 0),
                   isReadOnly: true,
-                  isExtra: Boolean(it?.isExtra), // ✅ 予定外商品フラグを保持（予定外リスト分離表示用）
+                  isExtra: Boolean(it?.isExtra),
                   productGroupId: groupId,
                 };
               });
-              allLines.push(...completedLines);
-            }
-          } else {
-            // ✅ 未完了のグループ：下書きがあればそのグループ分だけ復元。なければ「読込」ボタンで読み込む
-            const draftForGroup = draftLinesByGroup.get(normalizeIdForMatch(groupId)) || [];
-            if (draftForGroup.length > 0) {
-              allLines.push(...draftForGroup);
             }
           }
-        }
+          const draftForGroup = draftLinesByGroup.get(normalizeIdForMatch(groupId)) || [];
+          return draftForGroup;
+        };
+        const allLinesArrays = await Promise.all(targetProductGroupIds.map((groupId) => processOneGroupInBulk(groupId)));
+        const allLines = allLinesArrays.flat();
         
         // ✅ まとめて表示モードの場合、isReadOnlyStateを適切に設定
         // ✅ 未完了グループ（isReadOnly: falseの商品）がある場合は編集可能、全て完了/キャンセルの場合は読み取り専用（管理画面と連動）
@@ -1316,14 +1293,27 @@ export function InventoryCountList({
         return;
       }
 
-      // ✅ 現在のグループが完了/キャンセル済みのときは下書きを使わずAPIの groupItems から表示する
+      // ✅ 現在のグループが完了/キャンセル済みのときは下書きを使わずAPIの groupItems から表示する（グループごと表示と同じfetchに統一）
       if (isCurrentGroupCompletedOrCancelledSingle && groupItemsForCurrentSingle.length > 0) {
         try {
+          let cachedProductGroupsForCompleted = [];
+          try {
+            cachedProductGroupsForCompleted = await readProductGroups();
+          } catch (e) {
+            console.error("[InventoryCountList] readProductGroups (completed single) failed:", e);
+          }
           const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
           const productsForCompleted = await fetchProductsByGroups(
             [currentGroupIdSingle],
             c.locationId,
-            { productFirst, filterByInventoryLevel: false, includeImages: showImages && !liteMode, inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null }
+            {
+              productFirst,
+              limit: 2000,
+              filterByInventoryLevel: false,
+              includeImages: showImages && !liteMode,
+              inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
+              ...(cachedProductGroupsForCompleted.length > 0 ? { cachedProductGroups: cachedProductGroupsForCompleted } : {}),
+            }
           );
           const productMap = new Map();
           (Array.isArray(productsForCompleted) ? productsForCompleted : (productsForCompleted?.products ?? [])).forEach((p) => {
@@ -1378,19 +1368,23 @@ export function InventoryCountList({
         return;
       }
 
-      // 在庫レベルがある商品のみを取得（初期表示用）・入庫並み：1回の取得で currentQuantity 付きで返るため二重取得しない
-      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+      // ✅ グループごとに表示と同じ処理に統一：1グループ分だけ同じオプションで取得（表示が早いパスに合わせる）
       collectionPageInfoRef.current = null; // ✅ 棚卸/グループ切り替え時は cursor をリセット
-      // ✅ さらに読み込む用の1回あたり件数（管理画面と揃える）
-      // ✅ 常に画像付きで取得（画像ON/OFFは表示切替のみ。ロス・入庫・出庫と同様にリスト再読込しない）
-      // ✅ 入庫並みの表示速度：初回は在庫クエリなしで商品リストのみ取得。在庫数は「在庫更新」ボタンで取得
-      const rawProducts = await fetchProductsByGroups(targetProductGroupIds, c.locationId, {
+      let cachedProductGroupsSingle = [];
+      try {
+        cachedProductGroupsSingle = await readProductGroups();
+      } catch (e) {
+        console.error("[InventoryCountList] readProductGroups (single) failed:", e);
+      }
+      const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
+      const rawProducts = await fetchProductsByGroups([currentGroupIdSingle], c.locationId, {
         productFirst,
+        limit: 2000,
         filterByInventoryLevel: false,
-        includeImages: true,
-        inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null, // ✅ 生成時の商品リストを使用
+        includeImages: showImages && !liteMode,
+        inventoryItemIdsByGroup: c?.inventoryItemIdsByGroup || null,
+        ...(cachedProductGroupsSingle.length > 0 ? { cachedProductGroups: cachedProductGroupsSingle } : {}),
         offset: 0,
-        limit: 600,
       });
       const products = Array.isArray(rawProducts) ? rawProducts : (rawProducts?.products ?? []);
       const hasMore = rawProducts?.hasMore ?? false;

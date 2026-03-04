@@ -4737,6 +4737,8 @@ export default function InventoryCountPage() {
   const listDetailQueueRef = useRef<string[]>([]);
   // ✅ 未完了グループの商品リストを取得するためのfetcherとstate（モーダル用）
   const incompleteGroupProductsFetcher = useFetcher<typeof action>();
+  const incompleteGroupProductsFetcher2 = useFetcher<typeof action>();
+  const incompleteGroupProductsFetcher3 = useFetcher<typeof action>();
   const [incompleteGroupProducts, setIncompleteGroupProducts] = useState<Map<string, Array<any>>>(new Map());
   const [incompleteGroupHasMore, setIncompleteGroupHasMore] = useState<Map<string, boolean>>(new Map());
   const [loadingMoreIncompleteGroupId, setLoadingMoreIncompleteGroupId] = useState<string | null>(null);
@@ -4744,6 +4746,10 @@ export default function InventoryCountPage() {
   const [loadingIncompleteGroupIds, setLoadingIncompleteGroupIds] = useState<Set<string>>(new Set());
   const incompleteGroupFetchIndexRef = useRef<number>(0);
   const incompleteGroupIdsRef = useRef<string[]>([]);
+  // ✅ 並列取得用キュー（先頭3件を3fetcherに振り、残りは完了したfetcherに順次渡す）
+  const incompleteGroupQueueRef = useRef<string[]>([]);
+  // ✅ 各並列fetcherで「最後に処理したgroupId」（二重マージ防止・次リクエスト割り当て用）。モーダル閉じでリセット
+  const lastProcessedIncompleteByFetcherRef = useRef<{ f1: string | null; f2: string | null; f3: string | null }>({ f1: null, f2: null, f3: null });
   // ✅ 直前に submit した groupId（エラー応答時に loading を解除するため）
   const lastSubmittedGroupIdRef = useRef<string | null>(null);
   // ✅ モーダルを閉じて再度開いたときに fetcher.data の古いレスポンスを無視するため。「今回のオープンで submit した countId+groupId」と一致するレスポンスだけ処理する
@@ -4783,6 +4789,8 @@ export default function InventoryCountPage() {
   const [adminMetafieldUnlocked, setAdminMetafieldUnlocked] = useState(false);
   const [adminUnlockCodeInput, setAdminUnlockCodeInput] = useState("");
   const ADMIN_UNLOCK_CODE = "metafield";
+  /** 管理者用メタフィールド復元UI（コード入力＋修復ボタン）を表示するか。true にすると再有効化 */
+  const SHOW_METAFIELD_RESTORE_UI = false;
 
   const editingGroup = editingGroupId
     ? productGroups.find((g) => g.id === editingGroupId)
@@ -4871,7 +4879,9 @@ export default function InventoryCountPage() {
       setLoadingIncompleteGroupIds(new Set());
       incompleteGroupFetchIndexRef.current = 0;
       incompleteGroupIdsRef.current = [];
-      lastSubmittedForModalRef.current = null; // ✅ 閉じたときにリセットし、再度開いたときに古い fetcher.data を無視する
+      incompleteGroupQueueRef.current = [];
+      lastSubmittedForModalRef.current = null;
+      lastProcessedIncompleteByFetcherRef.current = { f1: null, f2: null, f3: null };
       setModalEditMode(false);
       setModalEditedQuantities({});
       return;
@@ -4879,41 +4889,47 @@ export default function InventoryCountPage() {
 
     // ✅ 今回のオープンで「どの submit のレスポンスを有効とするか」をリセット。閉じて再度開いたときの古い fetcher.data を処理しないようにする
     lastSubmittedForModalRef.current = null;
+    lastProcessedIncompleteByFetcherRef.current = { f1: null, f2: null, f3: null };
 
     const allGroupIds = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
       ? modalCount.productGroupIds
       : modalCount.productGroupId ? [modalCount.productGroupId] : [];
     const groupItemsMap = (modalCount as any)?.groupItems && typeof (modalCount as any).groupItems === "object" ? (modalCount as any).groupItems : {};
 
-    // 未完了グループの商品リストを取得（各グループごとに順次実行）
+    // 未完了グループの商品リストを取得（3 fetcher で並列取得し、完了した fetcher にキューから次を割り当て）
     // ✅ 完了判定と同じロジック：getGroupItemsByKey で POS と同一の正規化キー照合
     const incompleteGroupIds = allGroupIds.filter((groupId) => {
       const groupItems = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, String(groupId));
       return groupItems.length === 0;
     });
 
-    // ✅ 未完了グループIDをrefに保存（submit では文字列で送る）
     const incompleteGroupIdsStr = incompleteGroupIds.map((id) => String(id));
     incompleteGroupIdsRef.current = incompleteGroupIdsStr;
     incompleteGroupFetchIndexRef.current = 0;
     setIncompleteGroupHasMore(new Map());
     setLoadingMoreIncompleteGroupId(null);
-    // ✅ 取得開始時に「読み込み中」としてマーク（先頭グループが一瞬「まだ処理されていません」になるのを防ぐ）
     setLoadingIncompleteGroupIds(new Set(incompleteGroupIdsStr));
 
-    // ✅ 最初のグループを取得（countId を送信し、古いモーダル用のレスポンスを無視するため）
-    if (incompleteGroupIdsStr.length > 0) {
-      const firstGroupId = incompleteGroupIdsStr[0];
-      lastSubmittedGroupIdRef.current = firstGroupId;
-      lastSubmittedForModalRef.current = { countId: String(modalCount.id), groupId: firstGroupId };
+    const countIdStr = String(modalCount.id);
+    const locationIdStr = modalCount.locationId ?? "";
+    const submitOne = (groupId: string, fetcher: ReturnType<typeof useFetcher<typeof action>>) => {
       const formData = new FormData();
       formData.append("action", "get_incomplete_group_products");
-      formData.append("countId", String(modalCount.id));
-      formData.append("groupId", firstGroupId);
-      formData.append("locationId", modalCount.locationId);
+      formData.append("countId", countIdStr);
+      formData.append("groupId", groupId);
+      formData.append("locationId", locationIdStr);
       formData.append("offset", "0");
-      incompleteGroupProductsFetcher.submit(formData, { method: "post" });
-      incompleteGroupFetchIndexRef.current = 1;
+      fetcher.submit(formData, { method: "post" });
+    };
+
+    if (incompleteGroupIdsStr.length > 0) {
+      // 先頭3件を3 fetcher に並列で送信し、残りをキューに
+      if (incompleteGroupIdsStr.length > 0) submitOne(incompleteGroupIdsStr[0], incompleteGroupProductsFetcher);
+      if (incompleteGroupIdsStr.length > 1) submitOne(incompleteGroupIdsStr[1], incompleteGroupProductsFetcher2);
+      if (incompleteGroupIdsStr.length > 2) submitOne(incompleteGroupIdsStr[2], incompleteGroupProductsFetcher3);
+      incompleteGroupQueueRef.current = incompleteGroupIdsStr.slice(3);
+    } else {
+      incompleteGroupQueueRef.current = [];
     }
   }, [modalOpen, modalCount?.id]);
 
@@ -4992,27 +5008,25 @@ export default function InventoryCountPage() {
     });
   }, [listRowDetailFetcher.data]);
 
-  // ✅ 未完了グループの商品リスト取得完了時の処理（成功時はデータ保存・loading 解除・次を submit、失敗時も loading を解除して「読み込み中」のままにならないようにする）
-  // ✅ モーダルを閉じて再度開いたときに fetcher.data に残る古いレスポンスを無視する（lastSubmittedForModalRef と一致する今回の submit のレスポンスだけ処理）
-  useEffect(() => {
-    const data = incompleteGroupProductsFetcher.data;
-    if (!data) return;
-
+  // ✅ 未完了グループの商品リスト取得完了時の処理（3 fetcher 並列：成功時はマージ・loading 解除・キューから次をその fetcher に submit）
+  const processIncompleteFetcherData = (
+    data: any,
+    fetcherKey: "f1" | "f2" | "f3",
+    submitNext: (groupId: string) => void
+  ) => {
+    if (!data || !modalCount) return;
     const responseCountId = data?.countId != null ? String(data.countId) : null;
     const responseGroupId = data?.groupId != null ? String(data.groupId) : null;
-    const currentCountId = modalCount?.id != null ? String(modalCount.id) : null;
-    if (responseCountId !== "" && currentCountId != null && normalizeIdForMatch(responseCountId) !== normalizeIdForMatch(currentCountId)) return;
+    const currentCountId = String(modalCount.id);
+    if (responseCountId !== "" && currentCountId && normalizeIdForMatch(responseCountId) !== normalizeIdForMatch(currentCountId)) return;
 
-    // ✅ 今回のモーダルオープンで submit したリクエストのレスポンスだけ処理する。閉じて再度開いたときの古い fetcher.data は無視
-    const last = lastSubmittedForModalRef.current;
-    if (!last || normalizeIdForMatch(responseCountId) !== normalizeIdForMatch(last.countId) || normalizeIdForMatch(responseGroupId ?? "") !== normalizeIdForMatch(last.groupId)) return;
-
-    const groupKeyFromResponse = responseGroupId;
+    const lastProcessed = lastProcessedIncompleteByFetcherRef.current[fetcherKey];
+    const isLoadMore = Number(data?.offset ?? 0) > 0;
 
     if (data?.ok && data?.products != null && data?.groupId != null) {
       const { groupId, products, hasMore, offset } = data;
       const groupKey = String(groupId);
-      const isLoadMore = Number(offset) > 0;
+      if (!isLoadMore && lastProcessed === groupKey) return; // 同一レスポンスの二重処理防止
       setLoadingMoreIncompleteGroupId(null);
       setLoadingIncompleteGroupIds((prev) => {
         const next = new Set(prev);
@@ -5021,7 +5035,7 @@ export default function InventoryCountPage() {
       });
       setIncompleteGroupProducts((prev) => {
         const newMap = new Map(prev);
-        if (isLoadMore) {
+        if (Number(offset) > 0) {
           const existing = newMap.get(groupKey) ?? [];
           newMap.set(groupKey, [...existing, ...products]);
         } else {
@@ -5034,42 +5048,58 @@ export default function InventoryCountPage() {
         next.set(groupKey, Boolean(hasMore));
         return next;
       });
-      
-      // ✅ 次の未完了グループを取得（初回読み込み時のみ。さらに読み込むのときは進めない）
       if (!isLoadMore) {
-        const currentIndex = incompleteGroupFetchIndexRef.current;
-        const remainingGroupIds = incompleteGroupIdsRef.current;
-        if (currentIndex < remainingGroupIds.length && modalCount) {
-          const nextGroupId = remainingGroupIds[currentIndex];
-          lastSubmittedGroupIdRef.current = nextGroupId;
-          lastSubmittedForModalRef.current = { countId: String(modalCount.id), groupId: nextGroupId };
-          const formData = new FormData();
-          formData.append("action", "get_incomplete_group_products");
-          formData.append("countId", String(modalCount.id));
-          formData.append("groupId", nextGroupId);
-          formData.append("locationId", modalCount.locationId);
-          formData.append("offset", "0");
-          incompleteGroupProductsFetcher.submit(formData, { method: "post" });
-          incompleteGroupFetchIndexRef.current = currentIndex + 1;
-        } else {
-          lastSubmittedGroupIdRef.current = null;
-          lastSubmittedForModalRef.current = null;
+        lastProcessedIncompleteByFetcherRef.current[fetcherKey] = groupKey;
+        const nextGroupId = incompleteGroupQueueRef.current.shift();
+        if (nextGroupId && modalCount) {
+          submitNext(nextGroupId);
         }
       }
       return;
     }
-
-    // ✅ API が ok: false を返した場合や groupId がない場合：送信済み group の loading を解除（同じグループが「読み込み中」のまま残るのを防ぐ）
-    if (groupKeyFromResponse == null && lastSubmittedGroupIdRef.current != null) {
-      const groupKeyToClear = String(lastSubmittedGroupIdRef.current);
+    if (responseGroupId != null) {
       setLoadingIncompleteGroupIds((prev) => {
         const next = new Set(prev);
-        next.delete(groupKeyToClear);
+        next.delete(String(responseGroupId));
         return next;
       });
-      lastSubmittedGroupIdRef.current = null;
     }
-  }, [incompleteGroupProductsFetcher.data, modalCount]);
+  };
+
+  useEffect(() => {
+    if (!modalCount) return;
+    const loc = modalCount.locationId ?? "";
+    const countIdStr = String(modalCount.id);
+    const submitOne = (groupId: string, fetcher: ReturnType<typeof useFetcher<typeof action>>) => {
+      const formData = new FormData();
+      formData.append("action", "get_incomplete_group_products");
+      formData.append("countId", countIdStr);
+      formData.append("groupId", groupId);
+      formData.append("locationId", loc);
+      formData.append("offset", "0");
+      fetcher.submit(formData, { method: "post" });
+    };
+    processIncompleteFetcherData(
+      incompleteGroupProductsFetcher.data,
+      "f1",
+      (groupId) => submitOne(groupId, incompleteGroupProductsFetcher)
+    );
+    processIncompleteFetcherData(
+      incompleteGroupProductsFetcher2.data,
+      "f2",
+      (groupId) => submitOne(groupId, incompleteGroupProductsFetcher2)
+    );
+    processIncompleteFetcherData(
+      incompleteGroupProductsFetcher3.data,
+      "f3",
+      (groupId) => submitOne(groupId, incompleteGroupProductsFetcher3)
+    );
+  }, [
+    incompleteGroupProductsFetcher.data,
+    incompleteGroupProductsFetcher2.data,
+    incompleteGroupProductsFetcher3.data,
+    modalCount,
+  ]);
 
   // ✅ 履歴モーダルでの確定・リセット・キャンセル・数量保存成功時に一覧を再取得
   useEffect(() => {
@@ -5628,7 +5658,8 @@ export default function InventoryCountPage() {
                   );
                 })}
               </div>
-              {/* 管理者用：コード入力＋ボタンでメタフィールド復旧セクションを表示（UIはそのまま） */}
+              {/* 管理者用：コード入力＋ボタンでメタフィールド復旧セクションを表示（SHOW_METAFIELD_RESTORE_UI を true にすると再有効化） */}
+              {SHOW_METAFIELD_RESTORE_UI && (
               <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
                 <input
                   type="text"
@@ -5667,11 +5698,12 @@ export default function InventoryCountPage() {
                   表示
                 </button>
               </div>
+              )}
             </div>
           </s-box>
 
-          {/* 管理者用：コードで表示したメタフィールド復旧（adminMetafieldUnlocked 時のみ表示） */}
-          {adminMetafieldUnlocked && (
+          {/* 管理者用：コードで表示したメタフィールド復旧（adminMetafieldUnlocked 時のみ表示）。SHOW_METAFIELD_RESTORE_UI が true のときだけ枠ごと表示 */}
+          {SHOW_METAFIELD_RESTORE_UI && adminMetafieldUnlocked && (
             <div style={{ margin: "12px 16px", padding: "12px", background: "#f9fafb", borderRadius: "8px", border: "1px solid #e5e7eb" }}>
               <div style={{ fontSize: "12px", color: "#6d7175", marginBottom: "8px" }}>管理者用：メタフィールド復旧</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "8px" }}>
