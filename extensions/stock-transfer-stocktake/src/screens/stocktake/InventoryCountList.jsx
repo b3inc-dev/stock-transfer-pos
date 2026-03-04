@@ -1035,7 +1035,6 @@ export function InventoryCountList({
           toast("下書きを復元しました");
         }
         
-        const allLines = [];
         const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
         const cancelledSet = cancelledGroupIdSet(c);
         // ✅ 後方互換性：groupItemsがない場合、itemsフィールドから該当グループの商品をフィルタリング
