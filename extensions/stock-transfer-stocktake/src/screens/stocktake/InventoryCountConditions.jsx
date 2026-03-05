@@ -370,7 +370,10 @@ export function InventoryCountConditions({
   }, [counts]);
 
   const onTapCount = async (c) => {
-    const productGroupIds = Array.isArray(c?.productGroupIds) ? c.productGroupIds : [];
+    // ✅ 単一グループの棚卸は API/ストレージで productGroupIds が無く productGroupId のみのことがあるためフォールバック
+    const productGroupIds = Array.isArray(c?.productGroupIds) && c.productGroupIds.length > 0
+      ? c.productGroupIds
+      : (c?.productGroupId ? [c.productGroupId] : []);
     const productGroupCount = productGroupIds.length;
 
     if (productGroupCount === 0) {
@@ -416,7 +419,10 @@ export function InventoryCountConditions({
     const c = pendingCountForModal;
     if (!c) return;
 
-    const productGroupIds = Array.isArray(c?.productGroupIds) ? c.productGroupIds : [];
+    // ✅ 単一タップ時と同じフォールバック（productGroupId のみの count でもまとめて表示できるようにする）
+    const productGroupIds = Array.isArray(c?.productGroupIds) && c.productGroupIds.length > 0
+      ? c.productGroupIds
+      : (c?.productGroupId ? [c.productGroupId] : []);
     if (productGroupIds.length === 0) {
       toast("商品グループが見つかりません");
       return;

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "preact/hooks";
+import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
 import { getProductGroupName, getLocationName, readInventoryCountById, readInventoryCounts, writeInventoryCounts, fetchProductsByGroups, getCurrentQuantitiesBulk, normalizeIdForMatch, getCancelledGroupIdSet } from "./stocktakeApi.js";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
@@ -40,6 +40,15 @@ export function InventoryCountProductGroupSelection({
   const quantitiesAutoLoadStartedRef = useRef(new Set());
 
   const effectiveCount = fullCount ?? (count?.groupItems ? count : null);
+
+  // ✅ 単一タップ・まとめて表示と同じフォールバック（productGroupId のみの count でもグループ一覧を表示）
+  const resolvedProductGroupIds = useMemo(() => {
+    const c = effectiveCount ?? count;
+    if (!c) return [];
+    return Array.isArray(c.productGroupIds) && c.productGroupIds.length > 0
+      ? c.productGroupIds
+      : (c.productGroupId ? [c.productGroupId] : []);
+  }, [effectiveCount, count]);
 
   // ✅ 一覧タップ後：最小情報のときだけ棚卸1件をAPI取得
   useEffect(() => {
@@ -93,39 +102,34 @@ export function InventoryCountProductGroupSelection({
 
   // 商品グループ名を取得（Map のキーは正規化キーで統一し、GID と数値の混在でずれないようにする）
   useEffect(() => {
-    const c = effectiveCount ?? count;
     const loadNames = async () => {
       const groupMap = new Map();
-      const productGroupIds = Array.isArray(c?.productGroupIds) ? c.productGroupIds : [];
-      for (const groupId of productGroupIds) {
+      for (const groupId of resolvedProductGroupIds) {
         const name = await getProductGroupName(groupId);
         if (name) groupMap.set(normalizeIdForMatch(groupId), name);
       }
       setProductGroupNames(groupMap);
     };
-    if (c?.productGroupIds?.length) {
+    if (resolvedProductGroupIds.length > 0) {
       loadNames();
     }
-  }, [effectiveCount, count]);
+  }, [effectiveCount, count, resolvedProductGroupIds]);
 
   // 商品グループ情報を準備（管理画面で保存済みの productGroupNames を優先。参照は正規化キーで）
   useEffect(() => {
     const c = effectiveCount ?? count;
-    if (!c) return;
-    const productGroupIds = Array.isArray(c.productGroupIds) ? c.productGroupIds : [];
+    if (!c || resolvedProductGroupIds.length === 0) return;
     const namesFromCount = Array.isArray(c.productGroupNames) ? c.productGroupNames : [];
-    setProductGroups(productGroupIds.map((id, i) => ({
+    setProductGroups(resolvedProductGroupIds.map((id, i) => ({
       id,
       name: namesFromCount[i] || productGroupNames.get(normalizeIdForMatch(id)) || id,
     })));
-  }, [effectiveCount, count, productGroupNames]);
+  }, [effectiveCount, count, productGroupNames, resolvedProductGroupIds]);
 
   // ✅ 各商品グループの数量情報を取得（入庫のシップメント選択画面と同じ方式）
   const loadProductGroupQuantities = useCallback(async () => {
     const c = effectiveCount;
-    if (!c || !c.locationId) return;
-    const productGroupIds = Array.isArray(c.productGroupIds) ? c.productGroupIds : [];
-    if (productGroupIds.length === 0) return;
+    if (!c || !c.locationId || resolvedProductGroupIds.length === 0) return;
 
     const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
     const countItemsLegacy = Array.isArray(c?.items) ? c.items : [];
@@ -134,7 +138,7 @@ export function InventoryCountProductGroupSelection({
     const toProducts = (raw) => (Array.isArray(raw) ? raw : (raw?.products ?? []));
 
     try {
-      for (const groupId of productGroupIds) {
+      for (const groupId of resolvedProductGroupIds) {
         try {
           let groupItems = getGroupItemsByKey(groupItemsMap, groupId);
           const isGroupCompleted = groupItems.length > 0;
@@ -211,17 +215,17 @@ export function InventoryCountProductGroupSelection({
     } catch (e) {
       console.error("Failed to load product group quantities:", e);
     }
-  }, [effectiveCount]);
+  }, [effectiveCount, resolvedProductGroupIds]);
 
   // ✅ 商品グループ一覧表示後に、各行の「N件 N/N」をバックグラウンドで自動取得（loadProductGroupQuantities 定義の後に配置し未初期化参照を防ぐ）
   useEffect(() => {
     const c = effectiveCount;
-    if (!c?.productGroupIds?.length) return;
+    if (!c || resolvedProductGroupIds.length === 0) return;
     const countId = c.id;
     if (!countId || quantitiesAutoLoadStartedRef.current.has(countId)) return;
     quantitiesAutoLoadStartedRef.current.add(countId);
     loadProductGroupQuantities();
-  }, [effectiveCount, loadProductGroupQuantities]);
+  }, [effectiveCount, loadProductGroupQuantities, resolvedProductGroupIds.length]);
 
   // ✅ 初回は在庫数を自動読込しない。ヘッダー「在庫数読込」またはフッター「再読込」で取得（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
 

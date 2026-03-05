@@ -755,10 +755,12 @@ export function InventoryCountList({
   // 商品リストを読み込む（effectiveCount: 一覧タップ後はAPI取得したフルデータ）
   const loadProducts = useCallback(async () => {
     const c = effectiveCount ?? count;
+    // ✅ 単一グループで fullCount に locationId が無い場合（API/ストレージの差）は親の count をフォールバック
+    const locationId = c?.locationId ?? count?.locationId;
     isLoadingProductsRef.current = true; // ✅ loadProducts開始時に即座にフラグを立てる（自動保存をスキップするため）
-    if (!c || !c.locationId) {
+    if (!c || !locationId) {
       isLoadingProductsRef.current = false; // ✅ 早期リターン時はフラグを下ろす
-      console.log("[InventoryCountList] loadProducts skipped: missing count or locationId", { count: c, locationId: c?.locationId });
+      console.log("[InventoryCountList] loadProducts skipped: missing count or locationId", { count: c, locationId });
       return;
     }
     if (targetProductGroupIds.length === 0) {
@@ -776,7 +778,7 @@ export function InventoryCountList({
 
     // ✅ count.id / locationId / productGroupId（単一モード）が変わった場合は、draftLoadedRefをリセット
     const currentCountId = String(c.id || "").trim();
-    const currentLocationId = String(c.locationId || "").trim();
+    const currentLocationId = String(locationId || "").trim();
     const currentGroupId = productGroupId || (targetProductGroupIds?.[0] || null);
     if (
       lastDraftCountIdRef.current !== currentCountId ||
@@ -797,7 +799,7 @@ export function InventoryCountList({
     if (groupItemsForCurrentGroup.length === 0 && countItemsLegacy.length > 0 && currentGroupId) {
       try {
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-        const productsRaw = await fetchProductsByGroups([currentGroupId], c.locationId, {
+        const productsRaw = await fetchProductsByGroups([currentGroupId], locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: false,
@@ -849,7 +851,7 @@ export function InventoryCountList({
         // ✅ 完了済みの商品リスト：在庫は棚卸時の在庫数（currentQuantity）、実数は確定した在庫数（actualQuantity）を表示
         // ✅ 画像URLを取得するため、商品情報を取得
         const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-        const productsRaw = await fetchProductsByGroups([currentGroupId], c.locationId, {
+        const productsRaw = await fetchProductsByGroups([currentGroupId], locationId, {
           productFirst,
           filterByInventoryLevel: false,
           includeImages: showImages && !liteMode,
@@ -957,7 +959,7 @@ export function InventoryCountList({
     }
 
     console.log("[InventoryCountList] loadProducts starting", { 
-      locationId: c.locationId, 
+      locationId, 
       targetProductGroupIds,
       isMultipleMode
     });
@@ -973,7 +975,7 @@ export function InventoryCountList({
           try {
             if (SHOPIFY?.storage?.get && targetProductGroupIds.length > 0) {
             const currentCountId = String(c.id || "").trim();
-            const currentLocationId = String(c.locationId || "").trim();
+            const currentLocationId = String(locationId || "").trim();
             const allGroupDrafts = await Promise.all(
               targetProductGroupIds.map(async (groupId) => {
                 const key = inventoryCountDraftKey({
@@ -1031,7 +1033,7 @@ export function InventoryCountList({
             draftLinesByGroup.get(norm).push(line);
           }
           lastDraftCountIdRef.current = String(c.id || "").trim();
-          lastDraftLocationIdRef.current = String(c.locationId || "").trim();
+          lastDraftLocationIdRef.current = String(locationId || "").trim();
           toast("下書きを復元しました");
         }
         
@@ -1057,7 +1059,7 @@ export function InventoryCountList({
           if (groupItemsForGroup.length === 0 && countItemsLegacy.length > 0) {
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-              const productsRaw = await fetchProductsByGroups([groupId], c.locationId, {
+              const productsRaw = await fetchProductsByGroups([groupId], locationId, {
                 productFirst,
                 limit: 2000,
                 filterByInventoryLevel: false,
@@ -1081,7 +1083,7 @@ export function InventoryCountList({
           if (completedItems || isGroupCancelled) {
             try {
               const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-              const productsRaw = await fetchProductsByGroups([groupId], c.locationId, {
+              const productsRaw = await fetchProductsByGroups([groupId], locationId, {
                 productFirst,
                 limit: 2000,
                 filterByInventoryLevel: false,
@@ -1197,7 +1199,7 @@ export function InventoryCountList({
         try {
           if (SHOPIFY?.storage?.get) {
             const currentCountId = String(c.id || "").trim();
-            const currentLocationId = String(c.locationId || "").trim();
+            const currentLocationId = String(locationId || "").trim();
             const currentGroupId = productGroupId || (targetProductGroupIds?.[0] || null);
             let raw = null;
             if (countHasMultipleGroups && currentGroupId) {
@@ -1304,7 +1306,7 @@ export function InventoryCountList({
           const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
           const productsForCompleted = await fetchProductsByGroups(
             [currentGroupIdSingle],
-            c.locationId,
+            locationId,
             {
               productFirst,
               limit: 2000,
@@ -1376,7 +1378,7 @@ export function InventoryCountList({
         console.error("[InventoryCountList] readProductGroups (single) failed:", e);
       }
       const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-      const rawProducts = await fetchProductsByGroups([currentGroupIdSingle], c.locationId, {
+      const rawProducts = await fetchProductsByGroups([currentGroupIdSingle], locationId, {
         productFirst,
         limit: 2000,
         filterByInventoryLevel: false,
@@ -1418,9 +1420,8 @@ export function InventoryCountList({
       console.log("[InventoryCountList] Products loaded, lines count:", linesWithCurrent.length);
 
       // ✅ リスト表示後、在庫数をバックグラウンドで一括取得（50件/リクエスト）。スキャン・カウントは並行して可能。actualQuantity は更新しない
-      if (!c.locationId || linesWithCurrent.length === 0) return;
+      if (!locationId || linesWithCurrent.length === 0) return;
       const thisLoadId = ++backgroundInventoryLoadIdRef.current;
-      const locationId = c.locationId;
       (async () => {
         const ids = linesWithCurrent.map((l) => l.inventoryItemId).filter(Boolean);
         if (ids.length === 0) return;
