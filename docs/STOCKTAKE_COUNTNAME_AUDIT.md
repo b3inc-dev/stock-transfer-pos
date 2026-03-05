@@ -54,7 +54,9 @@
 
 **番号重複の防止（2026-02 追加）**  
 - **過去の不具合**: 管理画面で新規棚卸を作成する際、action 開始時に読み込んだ `inventoryCounts` から max+1 を計算して countName を付与していた。別タブや同時発行で同じ max を参照すると、#C0018 が二重に付与される可能性があった。
-- **対策**: 管理画面の `create_inventory_count` では、**保存直前に** `readInventoryCountsChunked(admin)` で最新の一覧を取得し、新規件は countName を空のまま `fullList = [...existingAtWrite, newCount]` に追加。`ensureCountNamesOnCounts(fullList)` で「欠けている countName にのみ」番号を付与してから `writeInventoryCountsChunked` に渡す。これにより番号の付与は常に「書き込み時点の全件」を元に行われ、重複しない。
+- **現行実装**: 管理画面の `create_inventory_count` では **getNextCountNumber** で「次の番号」を取得し、**appendNewCountToChunked** で 1 件だけ末尾に追加している。`getNextCountNumber` は (1) メタフィールド **inventory_count_next_v1**（NEXT_KEY）、(2) バックアップ一覧の max(countName)+1、(3) list/main キーの max(countName)+1 の順で参照し、いずれも「既存の最大番号＋1」を返す。追加後に **updateNextNumberAndBackupAfterAppend**（またはチャンク時は同様の更新）で NEXT_KEY を「付与した番号＋1」に更新するため、**通常時は過去のID名称と重複しない**。
+- **残るリスク（同時発行）**: 複数タブや複数ユーザーがほぼ同時に「発行」した場合、両方が同じ NEXT_KEY を読んで同じ番号を取得し、同一の countName（例: #C0005）が 2 件できる可能性がある。完全に防ぐには発行処理の直列化や、発行後に一覧を再読して重複があれば ensureCountNamesOnCounts で付け直すなどの対応が必要。
+- **名前の変更・修復時**: `repair_count_names` や countName を変更する処理では、`inventoryCounts.find(...)` で「同一 countName で id が異なる」ものを検出し、`棚卸ID「${countName}」は既に別の棚卸で使用されています` として保存を拒否するため、**既存名称への意図的な重複は防止**されている。
 - **POS**: 新規棚卸の「発行」は管理画面のみ。POS の write は常に `mergeExistingNonBlank` → `ensureCountNamesBeforeWrite` を経るため、付与は常に保存時点の merged 配列に基づき重複しない。
 
 **結論**: すべての write は **ensureCountNamesBeforeWrite**（countName）→ **mergeExistingNonBlank**（locationId / productGroupIds / groupItems 等）→ **filterInvalidCountsBeforeWrite**（不完全レコードを保存しない）の順で処理し、その前に **バックアップ** を保存する。

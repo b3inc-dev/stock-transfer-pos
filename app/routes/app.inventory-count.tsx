@@ -783,6 +783,7 @@ export async function writeInventoryCountsChunked(
       );
     }
     // ✅ read 失敗で existing=[] のときも、実際のメタにデータがあれば空で上書きしない（POS と同様の二重ガード）
+    // ✅ メインキー確認で例外（ネットワーク等）が出た場合も空で上書きしない（状態が不明なときは安全側に倒す）
     const mainKeyQuery = `#graphql query MainKey { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value } } }`;
     try {
       const checkJson = gql
@@ -801,6 +802,10 @@ export async function writeInventoryCountsChunked(
       }
     } catch (e: unknown) {
       if (e instanceof Error && e.message.includes("ブロックしました")) throw e;
+      // メインキー確認が例外で終わった場合は状態不明のため空で上書きしない
+      throw new Error(
+        "棚卸データの状態を確認できませんでした。空での上書きはブロックしました。しばらくしてから再試行するか、修復を試してください。"
+      );
     }
     const metafields = [
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_KEY, type: "json", value: "[]" },
@@ -1998,6 +2003,13 @@ function mergeExistingNonBlank(counts: InventoryCount[], existing: InventoryCoun
       if (ex.completedAt) out.completedAt = ex.completedAt;
     } else if ((ex.status === "completed" || ex.status === "cancelled") && !out.completedAt && ex.completedAt) {
       out.completedAt = ex.completedAt;
+    }
+    // ✅ 既存が完了/キャンセルのとき、payload の in_progress や draft で上書きしない（多発していた「完了→未処理」の要因を残さない）
+    if (ex.status === "completed" || ex.status === "cancelled") {
+      if (out.status !== "completed" && out.status !== "cancelled") {
+        out.status = ex.status;
+        out.completedAt = ex.completedAt ?? out.completedAt;
+      }
     }
     return out;
   });

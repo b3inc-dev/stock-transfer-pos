@@ -74,6 +74,25 @@
 3. **最後以外のチャンクが欠けている場合**  
    現状は「修復」や通常の保存では直せない。バックアップがあればリスト＋メタの再構成が必要。コード側では「最後の1チャンクだけ」を特別扱いしているため、**途中のチャンク欠損はエラーにしたまま**である。
 
+### 全ての情報が空のままメタを上書きしてデータが消える可能性の防止（管理画面・writeInventoryCountsChunked）
+
+- **入口**: 棚卸メタを書くのは **writeInventoryCountsChunked** のみ。呼び出し元はすべて「既存を read したうえで 1 件だけ更新した full リスト」を渡す（管理画面の各 action・POS 確定API）。
+- **既存読取失敗時（existing = []）**  
+  - **counts.length > 0 のとき**: メインキーを `readMainKeyOnly` で確認。**メインキーが存在する（null でない）場合は書き込まずエラーを返す**。「読み取りに一時的に失敗しています。しばらくしてから再試行するか、修復を試してください。」
+  - **counts.length === 0 のとき（空で上書きしようとしている）**:  
+    1. `existing.length > 0` なら「棚卸データを空にすることはできません」で throw。  
+    2. メインキーを 1 本だけ取得して、**値が空でない／チャンクディスクリプタなら「空での上書きはブロック」で throw**。  
+    3. **メインキー取得で例外（ネットワーク・パース失敗等）が出た場合も「状態を確認できませんでした。空での上書きはブロックしました」で throw** し、状態が不明なときは空で上書きしない。
+- **マージ**: `mergeExistingNonBlank(counts, existing)` で、**渡された counts のうち locationId / productGroupIds / groupItems / items が空白の件は既存で補完**。list 由来の minimal だけが渡っても既存の full で補完され、空白で上書きされない。
+- **ステータスのダウングレード防止**: 同じく `mergeExistingNonBlank` で、**既存が completed / cancelled の件は、payload が in_progress や draft でも上書きせず既存の status・completedAt を維持**。過去に多発していた「何か処理したら棚卸全体や他グループのステータスが完了→未処理に戻る」事象の要因を残さない。
+- **保存前フィルタ**: `filterInvalidCountsBeforeWrite` で、**id はあるが countName または locationId が空白のレコードは保存対象から除外**。空白のIDだけが永続化されない。
+
+### 管理画面で棚卸IDを発行した際の過去ID名称との重複
+
+- **通常時**: 発行時は **getNextCountNumber** で「次の番号」を取得し、**appendNewCountToChunked** で 1 件追加している。`getNextCountNumber` は (1) メタ **inventory_count_next_v1**、(2) バックアップ一覧の max(countName)+1、(3) list/main の max(countName)+1 の順で参照するため、**既存の最大番号＋1** が付与され、**過去のID名称と重複しない**。追加後に NEXT_KEY を「付与した番号＋1」に更新するため、次回発行も一意になる。
+- **残るリスク**: **複数タブや複数ユーザーがほぼ同時に発行**した場合、両方が同じ NEXT_KEY を読んで同じ番号を取り、同一 countName（例: #C0005）が 2 件できる可能性がある。
+- **名前変更・修復時**: `repair_count_names` や countName 変更時は、**同一 countName で id が異なる**ものを検出して保存を拒否するため、既存名称への意図的な重複は防止されている。詳細は `docs/STOCKTAKE_COUNTNAME_AUDIT.md` の「番号重複の防止」を参照。
+
 ### メタを壊さない堅牢さ
 
 - **書き込み順の変更**: `writeInventoryCountsChunked` で、**ディスクリプタ（totalChunks）をチャンクのあと（最後）に書く**ようにした。  

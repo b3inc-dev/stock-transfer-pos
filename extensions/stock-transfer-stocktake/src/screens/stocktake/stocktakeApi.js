@@ -12,6 +12,8 @@ const THROTTLE_RETRY_DELAY_MS = 3000;
 const THROTTLE_RETRY_MAX = 4;
 /** バッチ間の待機（ms）。連続書き込みで Throttled になりにくくする */
 const BATCH_WRITE_DELAY_MS = 350;
+/** Shopify API: 配列引数の最大件数（inventorySetQuantities の quantities は250件まで） */
+const INVENTORY_SET_QUANTITIES_MAX = 250;
 /** write 開始前の待機（ms）。read 直後の連続呼び出しでスロットに当たりにくくする */
 const WRITE_START_DELAY_MS = 300;
 
@@ -2036,8 +2038,8 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
   // ✅ リトライ処理（ネットワークエラー・タイムアウト対応）
   const maxRetries = 3;
   const retryDelayMs = 1000;
-  
-  // ✅ 在庫数の反映は1回の mutation で全件まとめて実行するため、途中で「一部だけ在庫調整された」状態にはならない（成功なら全件更新、失敗なら全件未更新）。
+
+  // ✅ Shopify API は配列引数が最大250件のため、250件ずつチャンクに分割して複数回 mutation を実行する
   const m = `#graphql
     mutation Set($input: InventorySetQuantitiesInput!) {
       inventorySetQuantities(input: $input) {
@@ -2045,86 +2047,86 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
         userErrors { field message }
       }
     }`;
-  
-  const input = {
-    name: "available",
-    reason: "correction",
-    ignoreCompareQuantity: true,
-    quantities: quantities.map((q) => ({
-      inventoryItemId: q.inventoryItemId,
-      locationId: locationGid,
-      quantity: q.quantity,
-      compareQuantity: q.compareQuantity,
-    })),
-  };
-  
-  // referenceDocumentUriが指定されている場合は追加
-  if (uri) {
-    input.referenceDocumentUri = uri;
-  }
 
+  let lastAdjustmentGroup = null;
   let lastError;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      // ✅ Throttled 時もリトライする（write と同様 runWithThrottleRetry でラップ）
-      const d = await runWithThrottleRetry(() => graphql(m, { input }));
 
-      // レスポンスが空の場合はエラー
-      if (!d || !d.inventorySetQuantities) {
-        throw new Error("GraphQL response is invalid");
+  for (let chunkStart = 0; chunkStart < quantities.length; chunkStart += INVENTORY_SET_QUANTITIES_MAX) {
+    const chunk = quantities.slice(chunkStart, chunkStart + INVENTORY_SET_QUANTITIES_MAX);
+    const input = {
+      name: "available",
+      reason: "correction",
+      ignoreCompareQuantity: true,
+      quantities: chunk.map((q) => ({
+        inventoryItemId: q.inventoryItemId,
+        locationId: locationGid,
+        quantity: q.quantity,
+        compareQuantity: q.compareQuantity,
+      })),
+    };
+    if (uri) {
+      input.referenceDocumentUri = uri;
+    }
+
+    let chunkSuccess = false;
+    for (let attempt = 1; attempt <= maxRetries && !chunkSuccess; attempt++) {
+      try {
+        const d = await runWithThrottleRetry(() => graphql(m, { input }));
+
+        if (!d || !d.inventorySetQuantities) {
+          throw new Error("GraphQL response is invalid");
+        }
+
+        const errs = d?.inventorySetQuantities?.userErrors ?? [];
+        if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+
+        lastAdjustmentGroup = d.inventorySetQuantities.inventoryAdjustmentGroup ?? null;
+        chunkSuccess = true;
+
+        // チャンク間でスロットリングを避けるため少し待機
+        if (chunkStart + chunk.length < quantities.length) {
+          await new Promise((resolve) => setTimeout(resolve, BATCH_WRITE_DELAY_MS));
+        }
+      } catch (e) {
+        lastError = e;
+        const msg = String(e?.message ?? e);
+        const isRetryable =
+          msg.includes("timeout") ||
+          msg.includes("network") ||
+          msg.includes("fetch") ||
+          msg.includes("HTTP 5") ||
+          /throttle/i.test(msg) ||
+          /429/.test(msg);
+
+        if (!isRetryable || attempt === maxRetries) {
+          break;
+        }
+        console.warn(`[adjustInventoryToActual] チャンク ${chunkStart / INVENTORY_SET_QUANTITIES_MAX + 1} リトライ ${attempt}/${maxRetries}: ${msg}`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
       }
+    }
 
-      const errs = d?.inventorySetQuantities?.userErrors ?? [];
-      if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
-
-      // ✅ 成功時は不正ID件数も返す（全件有効化済みのため除外なし）
-      return {
-        adjustmentGroup: d.inventorySetQuantities.inventoryAdjustmentGroup ?? null,
-        invalidCount,
-        processedCount: quantities.length,
-      };
-    } catch (e) {
-      lastError = e;
-      const msg = String(e?.message ?? e);
-      const isRetryable =
-        msg.includes("timeout") ||
-        msg.includes("network") ||
-        msg.includes("fetch") ||
-        msg.includes("HTTP 5") ||
-        /throttle/i.test(msg) ||
-        /429/.test(msg);
-
-      if (!isRetryable || attempt === maxRetries) {
-        break;
+    if (!chunkSuccess) {
+      const msg = String(lastError?.message ?? lastError);
+      console.error("[adjustInventoryToActual] Error:", {
+        error: msg,
+        locationGid,
+        quantitiesCount: quantities.length,
+        chunkStart,
+        chunkSize: chunk.length,
+      });
+      if (msg.includes("HTTP 400") || msg.includes("Invalid request") || msg.includes("maximum allowed")) {
+        throw new Error(`在庫調整エラー: ${msg}\nロケーション: ${locationGid?.substring(0, 30)}...\n変更数: ${quantities.length}件（250件ずつ分割して送信中）`);
       }
-
-      console.warn(`[adjustInventoryToActual] リトライ ${attempt}/${maxRetries}: ${msg}`);
-      await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+      throw lastError;
     }
   }
-  
-  const msg = String(lastError?.message ?? lastError);
-  console.error("[adjustInventoryToActual] Error:", {
-    error: msg,
-    locationGid,
-    quantitiesCount: quantities.length,
-    quantitiesSample: quantities.slice(0, 2).map((q) => ({
-      inventoryItemId: q.inventoryItemId?.substring(0, 30),
-      quantity: q.quantity,
-      compareQuantity: q.compareQuantity,
-    })),
-  });
-  
-  // HTTP 400エラーなどの場合は、より詳細なエラーメッセージを投げる
-  if (msg.includes("HTTP 400") || msg.includes("Invalid request")) {
-    const quantitiesSummary = quantities.slice(0, 3).map((q) => ({
-      id: q.inventoryItemId?.substring(0, 30) + "...",
-      quantity: q.quantity,
-      compareQuantity: q.compareQuantity,
-    }));
-    throw new Error(`在庫調整エラー: ${msg}\nロケーション: ${locationGid?.substring(0, 30)}...\n変更数: ${quantities.length}件`);
-  }
-  throw lastError;
+
+  return {
+    adjustmentGroup: lastAdjustmentGroup,
+    invalidCount,
+    processedCount: quantities.length,
+  };
 }
 
 export async function fetchLocations() {

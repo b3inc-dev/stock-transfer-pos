@@ -441,6 +441,42 @@ REQUIREMENTS_FINAL.md に基づき、確定処理まわりを実装と照らし�
 
 ---
 
+## 確定ボタン押下後：成功するまで自動保存（下書き）が消えないか（3表示モード共通）
+
+**質問**: 確定ボタンを押した後、確実に成功するまで自動保存内容が消えないか（商品グループごと表示、まとめて表示、単一商品グループしかないもの）
+
+**結論: ✅ 消えない。4経路すべてで `clearAllInventoryCountDraftsForCount` は「API が ok を返した後」かつ「差異ありのときは在庫調整も成功した後」にだけ呼ばれる。**
+
+| 経路 | clear が呼ばれる条件 | 失敗時に clear が呼ばれるか |
+|------|----------------------|-----------------------------|
+| まとめて表示・差異なし | `reportStocktakeCompleteToApi` が `result.ok` を返した直後 | ❌ 呼ばれない（`result.ok` でないときは else でエラートーストのみ。catch では onAfterConfirm(null) のみで clear なし） |
+| まとめて表示・差異あり | API が ok の後、`adjustInventoryToActual` が成功した直後 | ❌ 呼ばれない（API が !ok なら return false。adjust が throw なら catch で return false。いずれも clear は実行されない） |
+| 単一/グループごと・差異なし | `reportStocktakeCompleteToApi` が `resultNoAdjust.ok` を返した直後 | ❌ 呼ばれない（同上） |
+| 単一/グループごと・差異あり | API が ok の後、`adjustInventoryToActual` が成功した直後 | ❌ 呼ばれない（同上） |
+
+- **実装箇所**: InventoryCountList.jsx の handleComplete 内、上記4経路それぞれで `clearAllInventoryCountDraftsForCount` は **if (result.ok)** または **API ok → adjust 成功の直後** のブロック内でのみ実行される。
+- **商品グループごと表示・まとめて表示・単一商品グループしかないもの** は、いずれもこの4経路のどれかに入るため、**「確実に成功するまで自動保存内容が消えない」** 挙動で統一されている。
+
+---
+
+## 確定処理：表示モード別・差異あり/なしの対応（再確認）
+
+**質問**: 確定処理は差異あり・差異なしどちらも問題なく処理されるか（商品グループごと表示、まとめて表示、単一商品グループしかないもの）
+
+**結論: ✅ はい。3つの表示モード × 差異あり/差異なしの全組み合わせで、同一の確定フロー（4経路）が正しく動く。**
+
+| 表示モード | 差異なし | 差異あり | 補足 |
+|------------|----------|----------|------|
+| **商品グループごと表示** | ✅ | ✅ | `isMultipleMode === true`。表示中グループの `lines` のみで `buildUpdatedCountFromLocalState` を呼ぶが、`parentGroupItems = count.groupItems` で他グループを維持。API は read 済みの `groupItems` に送信分をマージするため、1グループだけ送っても他グループは消えない。 |
+| **まとめて表示** | ✅ | ✅ | 同上。`editableLines` をグループ別にまとめて `groupItems` を組み立て。差異なし時は API のみ、差異あり時は API 成功後に `adjustInventoryToActual` → `logInventoryCountToApi`。 |
+| **単一商品グループしかないもの** | ✅ | ✅ | `isMultipleMode === false`。`currentGroupId` のみで `groupItems` を組み立て。`resolvedAllIds` / `groupIdsForCheck` で allDone が true になり「完了」が書かれる。 |
+
+- **差異なし**: いずれのモードも `buildUpdatedCountFromLocalState` → `buildCompletedGroupsPayload` → `reportStocktakeCompleteToApi` の1本。成功時 toast → onAfterConfirm → setSubmitting(false)、read/write/clear はバックグラウンド。
+- **差異あり**: 上記に加え、API 成功後に `adjustInventoryToActual` を await。成功後のみ toast / onAfterConfirm。失敗時は catch で return false、成功トーストは出さない。
+- **API 側**: `api.pos-stocktake-complete` は `groupItemsMap = { ...count.groupItems }` のうえで `completedGroups` をマージするため、POS が「現在表示中の1グループ」だけ送っても、既存の他グループはサーバー read 結果で保持され、上書きされない。
+
+---
+
 ## まとめ
 
 | 確認項目 | 結果 |
