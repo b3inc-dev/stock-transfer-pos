@@ -766,6 +766,20 @@ export default function InventoryInfoPage() {
   
   // 前回のURLパラメータのinventoryItemIdsを記録（選択状態のリセットを防ぐため）
   const prevInventoryItemIdsRef = useRef<string>("");
+  const tableScrollRef = useRef<HTMLDivElement>(null);
+
+  /** 横スクロール領域でホイールの横方向を吸収し、ブラウザの戻る／進むに取られないようにする */
+  const handleTableScrollWheel = (e: React.WheelEvent) => {
+    const el = tableScrollRef.current;
+    if (!el || e.deltaX === 0) return;
+    const { scrollLeft, scrollWidth, clientWidth } = el;
+    const canScrollLeft = scrollLeft > 0;
+    const canScrollRight = scrollLeft < scrollWidth - clientWidth - 1;
+    if ((e.deltaX < 0 && canScrollRight) || (e.deltaX > 0 && canScrollLeft)) {
+      e.preventDefault();
+      el.scrollLeft += e.deltaX;
+    }
+  };
 
   useEffect(() => {
     setDateValue(selectedDate);
@@ -1514,7 +1528,11 @@ export default function InventoryInfoPage() {
                 )}
                 {/* 在庫高テーブル */}
                 {snapshots.length > 0 && (
-                  <div style={{ marginTop: "16px", width: "100%", overflowX: "auto", overflowY: "visible" }}>
+                  <div
+                    ref={tableScrollRef}
+                    onWheel={handleTableScrollWheel}
+                    style={{ marginTop: "16px", width: "100%", overflowX: "auto", overflowY: "visible" }}
+                  >
                     <table
                       style={{
                         width: "100%",
