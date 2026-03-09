@@ -202,6 +202,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const results: Array<{ ok: boolean; id?: number; updated?: boolean; message?: string; error?: string }> = [];
     for (const singleBody of entries) {
       const {
+        appEventId: appEventIdFromBody,
         inventoryItemId,
         variantId,
         sku,
@@ -227,12 +228,14 @@ export async function action({ request }: ActionFunctionArgs) {
       const rawLocId = toRawId(locationId);
       const ts = timestamp ? new Date(timestamp) : new Date();
       const date = getDateInShopTimezone(ts, shopTimezone);
-      // idempotencyKeyの生成: sourceIdがある場合はそれを使用、ない場合はタイムスタンプを秒単位に丸めて使用
-      // quantityAfterは含めない（同じ操作でもquantityAfterが異なる可能性があるため）
+      // idempotencyKey: appEventId があれば 1 操作単位で一意にし再送時に upsert。なければ従来どおり sourceId または timestamp
+      const appEventId = typeof appEventIdFromBody === "string" && appEventIdFromBody.trim() ? appEventIdFromBody.trim() : null;
       const tsRounded = timestamp ? new Date(Math.floor(new Date(timestamp).getTime() / 1000) * 1000) : new Date(Math.floor(ts.getTime() / 1000) * 1000);
-      const idempotencyKey = sourceId 
-        ? `${shop}_${activity}_${inventoryItemId}_${locationId}_${sourceId}`
-        : `${shop}_${activity}_${inventoryItemId}_${locationId}_${tsRounded.toISOString()}`;
+      const idempotencyKey = appEventId
+        ? `${shop}_app_${appEventId}_${rawItemId}_${rawLocId}`
+        : sourceId
+          ? `${shop}_${activity}_${inventoryItemId}_${locationId}_${sourceId}`
+          : `${shop}_${activity}_${inventoryItemId}_${locationId}_${tsRounded.toISOString()}`;
 
       // 入庫・出庫・仕入・ロス・棚卸で変動があったロケーション名を確実に保存する。
       // 未設定・ラベル（出庫元）・GID形式（gid://shopify/Location/...）のときは GraphQL で実ロケーション名を取得する。
@@ -249,7 +252,19 @@ export async function action({ request }: ActionFunctionArgs) {
           where: { shop_idempotencyKey: { shop, idempotencyKey } },
         });
         if (existingLog) {
-          results.push({ ok: true, message: "Log already exists", id: existingLog.id });
+          if (appEventId) {
+            const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
+            if (variantId != null && variantId !== "") updateData.variantId = variantId;
+            if (sku != null && sku !== "") updateData.sku = String(sku);
+            if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
+            if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
+            if (sourceId != null) updateData.sourceId = sourceId;
+            if (adjustmentGroupId != null) updateData.adjustmentGroupId = adjustmentGroupId;
+            await (db as any).inventoryChangeLog.update({ where: { id: existingLog.id }, data: updateData });
+            results.push({ ok: true, updated: true, id: existingLog.id });
+          } else {
+            results.push({ ok: true, message: "Log already exists", id: existingLog.id });
+          }
           continue;
         }
         // 検索範囲: admin_webhook を確実に拾うため「イベント30分前」と「現在から最大15分前」の遅い方〜「イベント+5分」と「現在+2分」の遅い方
@@ -381,7 +396,19 @@ export async function action({ request }: ActionFunctionArgs) {
         where: { shop_idempotencyKey: { shop: shopId, idempotencyKey } },
       });
       if (existingLog) {
-        results.push({ ok: true, message: "Log already exists", id: existingLog.id });
+        if (appEventId) {
+          const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
+          if (variantId != null && variantId !== "") updateData.variantId = variantId;
+          if (sku != null && sku !== "") updateData.sku = String(sku);
+          if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
+          if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
+          if (sourceId != null) updateData.sourceId = sourceId;
+          if (adjustmentGroupId != null) updateData.adjustmentGroupId = adjustmentGroupId;
+          await (db as any).inventoryChangeLog.update({ where: { id: existingLog.id }, data: updateData });
+          results.push({ ok: true, updated: true, id: existingLog.id });
+        } else {
+          results.push({ ok: true, message: "Log already exists", id: existingLog.id });
+        }
         continue;
       }
       // 検索範囲: 上記と同じ（API が遅れて届いても admin_webhook を確実に拾う）
