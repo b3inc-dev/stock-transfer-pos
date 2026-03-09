@@ -2,7 +2,6 @@ import { memo } from "preact/compat";
 import { useState, useMemo, useEffect, useCallback, useRef } from "preact/hooks";
 import {
   searchVariants,
-  adjustInventoryAtLocation,
   readPurchaseEntries,
   writePurchaseEntries,
   fetchVariantAvailable,
@@ -10,7 +9,7 @@ import {
   fetchSettings,
 } from "./purchaseApi.js";
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
-import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
+import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -866,15 +865,27 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     setSubmitting(true);
     try {
       const purchaseEntryId = generatePurchaseId();
-      const deltas = lines.map((l) => ({
-        inventoryItemId: l.inventoryItemId,
-        delta: Math.abs(Number(l.qty) || 0),
-      }));
-      await adjustInventoryAtLocation({
-        locationId: conds.locationId,
-        deltas,
-        referenceDocumentUri: purchaseEntryId,
-      });
+      const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const entriesForApply = lines
+        .filter((l) => Math.abs(Number(l.qty) || 0) > 0)
+        .map((l) => ({
+          inventoryItemId: l.inventoryItemId,
+          variantId: l.variantId ?? undefined,
+          sku: l.sku ?? undefined,
+          delta: Math.abs(Number(l.qty) || 0),
+        }));
+
+      if (entriesForApply.length > 0) {
+        await applyInventoryChangeToApi({
+          appEventId,
+          activity: "purchase_entry",
+          locationId: conds.locationId,
+          locationName: conds.locationName || "",
+          sourceId: purchaseEntryId,
+          referenceDocumentUri: purchaseEntryId,
+          entries: entriesForApply,
+        });
+      }
 
       const items = lines.map((l) => {
         // オプション情報を抽出
@@ -921,53 +932,15 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         createdAt: new Date().toISOString(),
       };
 
+      await writePurchaseEntries([entry, ...existing]);
+      if (SHOPIFY?.storage?.delete) {
+        await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
+        await SHOPIFY.storage.delete(PURCHASE_CONDITIONS_DRAFT_KEY);
+      }
       toast("仕入を登録しました");
       confirmPurchaseModalRef?.current?.hideOverlay?.();
       confirmPurchaseModalRef?.current?.hide?.();
       onAfterConfirm?.();
-      setSubmitting(false);
-      // 残りはバックグラウンドで実行（変動ログ・履歴保存・下書き削除）
-      (async () => {
-        try {
-          const purchaseDeltas = [];
-          for (const l of lines) {
-            const qty = Math.abs(Number(l.qty) || 0);
-            if (qty <= 0) continue;
-            let quantityAfter = null;
-            try {
-              const available = await fetchVariantAvailable({
-                variantGid: l.variantId,
-                locationGid: conds.locationId,
-              });
-              quantityAfter = available?.available ?? null;
-            } catch (_) {}
-            purchaseDeltas.push({
-              inventoryItemId: l.inventoryItemId,
-              variantId: l.variantId,
-              sku: l.sku || "",
-              delta: qty,
-              quantityAfter,
-            });
-          }
-          if (purchaseDeltas.length > 0) {
-            await logInventoryChangeToApi({
-              activity: "purchase_entry",
-              locationId: conds.locationId,
-              locationName: conds.locationName || "",
-              deltas: purchaseDeltas,
-              sourceId: purchaseEntryId,
-            });
-          }
-          await writePurchaseEntries([entry, ...existing]);
-          if (SHOPIFY?.storage?.delete) {
-            await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
-            await SHOPIFY.storage.delete(PURCHASE_CONDITIONS_DRAFT_KEY);
-          }
-        } catch (e) {
-          console.error("[PurchaseProductList] Background save failed:", e);
-          toast(`保存に失敗しました: ${e?.message ?? e}`);
-        }
-      })();
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
     } finally {

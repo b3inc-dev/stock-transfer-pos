@@ -2,7 +2,6 @@ import { memo } from "preact/compat";
 import { useState, useMemo, useEffect, useCallback, useRef } from "preact/hooks";
 import {
   searchVariants,
-  adjustInventoryAtLocation,
   readLossEntries,
   writeLossEntries,
   fetchVariantAvailable,
@@ -10,8 +9,7 @@ import {
   fetchSettings,
 } from "./lossApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
-
-import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
+import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -837,22 +835,32 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     }
     setSubmitting(true);
     try {
-      // ロスエントリIDを先に生成（referenceDocumentUri用）
       const lossEntryId = generateLossId();
-      
-      // inventoryItemIdはadjustInventoryAtLocation内でGID形式に変換される
-      const deltas = lines.map((l) => ({
-        inventoryItemId: l.inventoryItemId,
-        delta: -Math.abs(Number(l.qty) || 0),
-      }));
-      
-      // referenceDocumentUriを設定して在庫調整を実行
-      const adjustmentGroup = await adjustInventoryAtLocation({ 
-        locationId: conds.locationId, 
-        deltas,
-        referenceDocumentUri: lossEntryId
+      const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const entriesForApply = lines
+        .filter((l) => Math.abs(Number(l.qty) || 0) > 0)
+        .map((l) => ({
+          inventoryItemId: l.inventoryItemId,
+          variantId: l.variantId ?? undefined,
+          sku: l.sku ?? undefined,
+          delta: -Math.abs(Number(l.qty) || 0),
+        }));
+
+      if (entriesForApply.length === 0) {
+        toast("ロスする数量がありません");
+        setSubmitting(false);
+        return;
+      }
+
+      await applyInventoryChangeToApi({
+        appEventId,
+        activity: "loss_entry",
+        locationId: conds.locationId,
+        locationName: conds.locationName || "",
+        sourceId: lossEntryId,
+        referenceDocumentUri: lossEntryId,
+        entries: entriesForApply,
       });
-      const adjustmentGroupId = adjustmentGroup?.id || null;
 
       const items = lines.map((l) => {
         // オプション情報を抽出
@@ -895,57 +903,17 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         items,
         status: "active",
         createdAt: new Date().toISOString(),
-        adjustmentGroupId, // inventoryAdjustmentGroup.idを保存（webhookマッチング用）
+        adjustmentGroupId: null,
       };
-
+      await writeLossEntries([entry, ...existing]);
+      if (SHOPIFY?.storage?.delete) {
+        await SHOPIFY.storage.delete(LOSS_DRAFT_KEY);
+        await SHOPIFY.storage.delete(LOSS_CONDITIONS_DRAFT_KEY);
+      }
       toast("ロスしました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
-      setSubmitting(false);
-      // 残りはバックグラウンドで実行（変動ログ・履歴保存・下書き削除）
-      (async () => {
-        try {
-          const lossDeltas = [];
-          for (const l of lines) {
-            const qty = Math.abs(Number(l.qty) || 0);
-            if (qty <= 0) continue;
-            let quantityAfter = null;
-            try {
-              const available = await fetchVariantAvailable({
-                variantGid: l.variantId,
-                locationGid: conds.locationId,
-              });
-              quantityAfter = available?.available ?? null;
-            } catch (_) {}
-            lossDeltas.push({
-              inventoryItemId: l.inventoryItemId,
-              variantId: l.variantId,
-              sku: l.sku || "",
-              delta: -qty,
-              quantityAfter,
-            });
-          }
-          if (lossDeltas.length > 0) {
-            await logInventoryChangeToApi({
-              activity: "loss_entry",
-              locationId: conds.locationId,
-              locationName: conds.locationName || "",
-              deltas: lossDeltas,
-              sourceId: lossEntryId,
-              adjustmentGroupId,
-            });
-          }
-          await writeLossEntries([entry, ...existing]);
-          if (SHOPIFY?.storage?.delete) {
-            await SHOPIFY.storage.delete(LOSS_DRAFT_KEY);
-            await SHOPIFY.storage.delete(LOSS_CONDITIONS_DRAFT_KEY);
-          }
-        } catch (e) {
-          console.error("[LossProductList] Background save failed:", e);
-          toast(`保存に失敗しました: ${e?.message ?? e}`);
-        }
-      })();
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
     } finally {

@@ -3,7 +3,8 @@
 ## 概要
 
 - **appUrl.js**: POS 拡張がアプリの API（`/api/log-inventory-change` など）を呼ぶ際のベース URL を、1箇所で管理します。
-- **logInventoryChange.js**: 在庫変動を `api/log-inventory-change` に記録する**共通関数**です。出庫・入庫・ロス・棚卸・仕入の全フローでこの1つを使い、処理を統一しています。
+- **logInventoryChange.js**: 在庫変動を `api/log-inventory-change` に記録する**共通関数**です。出庫・入庫・ロス・仕入などで使用。
+- **applyInventoryChange.js**: Phase1 用。在庫変更＋履歴を1本化した `api/inventory/apply-change` を呼ぶ**共通関数**です。棚卸・調整の確定で使用（イベント先保存→Shopify 実行→履歴記録をサーバで一括実行）。
 
 ## 設定ファイル
 

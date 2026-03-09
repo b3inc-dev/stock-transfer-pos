@@ -2,7 +2,6 @@ import { memo } from "preact/compat";
 import { useState, useMemo, useEffect, useCallback, useRef } from "preact/hooks";
 import {
   searchVariants,
-  adjustInventoryToActual,
   readAdjustmentEntries,
   writeAdjustmentEntries,
   fetchVariantAvailable,
@@ -10,8 +9,7 @@ import {
   fetchSettings,
 } from "./adjustmentApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
-
-import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
+import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -853,22 +851,35 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
     const act = (l) => Number(l.qty ?? 0);
     try {
       const adjustmentEntryId = generateAdjustmentId();
-      const itemsForApi = lines.map((l) => ({
+      const entriesForApply = lines.map((l) => ({
         inventoryItemId: l.inventoryItemId,
-        currentQuantity: cur(l),
-        actualQuantity: act(l),
+        variantId: l.variantId ?? undefined,
+        sku: l.sku ?? undefined,
+        quantityAfter: act(l),
+        quantityBefore: cur(l),
       }));
 
-      // 1) 在庫調整（棚卸と同様：在庫有効化→inventorySetQuantities・Throttleリトライ）
-      const result = await adjustInventoryToActual({
-        locationId: conds.locationId,
-        items: itemsForApi,
-        referenceDocumentUri: adjustmentEntryId,
-      });
-      const adjustmentGroupId = result?.adjustmentGroup?.id || null;
-      if (result?.invalidCount > 0) {
-        console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
-        toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
+      // 1) Phase1: 在庫変更＋履歴を1本化（apply-change API）
+      const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      let adjustmentGroupId = null;
+      try {
+        const applyResult = await applyInventoryChangeToApi({
+          appEventId,
+          activity: "adjustment",
+          locationId: conds.locationId,
+          locationName: conds.locationName || "",
+          sourceId: adjustmentEntryId,
+          referenceDocumentUri: adjustmentEntryId,
+          entries: entriesForApply,
+        });
+        if (applyResult?.invalidCount > 0) {
+          toast(`⚠️ ${applyResult.invalidCount}件の商品が不正なIDのため除外されました`);
+        }
+      } catch (applyErr) {
+        const msg = String(applyErr?.message ?? applyErr);
+        toast(`在庫調整エラー: ${msg}`);
+        setSubmitting(false);
+        return;
       }
 
       const items = lines.map((l) => {
@@ -892,27 +903,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         };
       });
 
-      const deltas = lines.map((l) => ({
-        inventoryItemId: l.inventoryItemId,
-        variantId: l.variantId,
-        sku: l.sku || "",
-        delta: act(l) - cur(l),
-        quantityAfter: act(l),
-      })).filter((d) => d.delta !== 0);
-
-      // 2) 変動ログ送信（API成功後のみ・棚卸と同様）
-      if (deltas.length > 0) {
-        await logInventoryChangeToApi({
-          activity: "adjustment",
-          locationId: conds.locationId,
-          locationName: conds.locationName || "",
-          deltas,
-          sourceId: adjustmentEntryId,
-          adjustmentGroupId,
-        });
-      }
-
-      // 3) 履歴保存（メタフィールド）
+      // 2) 履歴保存（メタフィールド）
       const existing = await readAdjustmentEntries();
       const existingCount = Array.isArray(existing) ? existing.length : 0;
       const adjustmentName = `#A${String(existingCount + 1).padStart(4, "0")}`;
@@ -932,14 +923,14 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       };
       await writeAdjustmentEntries([entry, ...existing]);
 
-      // 4) UI完了（棚卸と同様：全処理成功後にトースト・モーダル閉じ・コールバック）
+      // 3) UI完了（全処理成功後にトースト・モーダル閉じ・コールバック）
       toast("調整を確定しました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
       setSubmitting(false);
 
-      // 5) 下書き削除（確定成功時のみ・棚卸と同様）
+      // 4) 下書き削除（確定成功時のみ）
       if (SHOPIFY?.storage?.delete) {
         Promise.all([
           SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY),

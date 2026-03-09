@@ -63,6 +63,52 @@ model InventoryChangeLog {
   @@index([shop, timestamp])
 }
 
+// 在庫変更イベント（Phase1 イベント先行）：1回の操作単位のヘッダ。先にDB保存→Shopify実行→履歴確定
+model InventoryChangeEvent {
+  id             String   @id @default(cuid())
+  appEventId     String   @unique // 1操作1ID（POS/管理画面で発行）。再送・突合の軸
+  shop           String
+  activity       String   // inbound_transfer, outbound_transfer, loss_entry, inventory_count, adjustment, purchase_entry, purchase_cancel 等
+  locationId     String
+  locationName   String?
+  sourceType     String?
+  sourceId       String?  // Transfer ID, count.id, loss_xxx 等
+  requestedAt    DateTime @default(now())
+  status         String   // pending | applying | completed | partial_failed | failed
+  errorSummary   String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  lines InventoryChangeEventLine[]
+
+  @@index([shop, status])
+  @@index([shop, appEventId])
+  @@index([shop, requestedAt])
+}
+
+// 在庫変更イベント明細（Phase1）：行単位の状態・結果
+model InventoryChangeEventLine {
+  id                      String    @id @default(cuid())
+  eventId                 String
+  event                   InventoryChangeEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  inventoryItemId         String
+  variantId               String?
+  sku                     String?
+  delta                   Int?
+  quantityBefore          Int?
+  quantityAfterExpected   Int?
+  quantityAfterActual     Int?
+  shopifyAdjustmentGroupId String?
+  lineStatus              String    // pending | applied | failed
+  errorMessage            String?
+  appliedAt               DateTime?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  @@unique([eventId, inventoryItemId])
+  @@index([eventId])
+}
+
 // 受注直後は FulfillmentOrder.assignedLocation が null のため orders/updated でロケーションが取れない。
 // その場合に「この注文のこの商品は売上候補」を一時保存し、inventory_levels/update で突き合わせて order_sales にする。
 // 同一注文で同一商品が2ロケーションから出荷される場合に正しくマッチするよう locationId を持つ。

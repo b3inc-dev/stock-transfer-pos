@@ -4,7 +4,6 @@ import {
   fetchProductsByGroups,
   getCurrentQuantity,
   getCurrentQuantitiesBulk,
-  adjustInventoryToActual,
   searchVariants,
   readInventoryCounts,
   readInventoryCountsRaw,
@@ -20,7 +19,7 @@ import {
 import { fetchSettings } from "./stocktakeApi.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
-import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
+import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { reportStocktakeCompleteToApi } from "../../../../common/reportStocktakeComplete.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
@@ -54,50 +53,6 @@ function buildCompletedGroupsPayload(count, locallyBuilt) {
       })),
     }));
   return { countId: count?.id ?? "", completedGroups };
-}
-
-/** 棚卸確定時の在庫変動を共通関数で記録（履歴で種別が正しく表示されるようにする） */
-
-async function logInventoryCountToApi({ locationId, locationName, items, sourceId }) {
-  console.log(`[InventoryCountList] logInventoryCountToApi called: items.length=${items?.length || 0}, locationId=${locationId}, sourceId=${sourceId}`);
-  if (!items?.length) {
-    console.warn(`[InventoryCountList] No items provided, skipping logInventoryCountToApi`);
-    return;
-  }
-  const deltas = items
-    .filter((l) => l?.inventoryItemId)
-    .map((l) => {
-      const actual = Number(l.actualQuantity ?? 0);
-      const current = Number(l.currentQuantity ?? 0);
-      return {
-        inventoryItemId: l.inventoryItemId,
-        variantId: l.variantId ?? null,
-        sku: l.sku ?? "",
-        delta: actual - current,
-        quantityAfter: actual,
-      };
-    })
-    .filter((d) => d.delta !== 0);
-  console.log(`[InventoryCountList] deltas.length=${deltas.length}, will call logInventoryChangeToApi=${deltas.length > 0}`);
-  if (deltas.length === 0) {
-    console.warn(`[InventoryCountList] deltas.length is 0, skipping logInventoryChangeToApi call`);
-    return;
-  }
-  // 在庫調整後に await して履歴送信する場合の「処理中」延び目安の計測用。
-  // 目安: 50件/リクエスト・1リクエストあたり約0.3〜1.5秒 → 50件で約0.3〜1.5秒、100件で約0.6〜3秒、200件で約1.2〜6秒（ネットワーク・サーバー負荷により変動）
-  const chunkCount = Math.ceil(deltas.length / 50) || 1; // 共通モジュールの LOG_INVENTORY_CHANGE_CHUNK_SIZE=50 と一致
-  const getNow = typeof performance !== "undefined" && typeof performance.now === "function" ? () => performance.now() : () => Date.now();
-  const startMs = getNow();
-  console.log(`[InventoryCountList] Calling logInventoryChangeToApi: activity=inventory_count, deltas=${deltas.length}, chunks=${chunkCount}, sourceId=${sourceId}`);
-  await logInventoryChangeToApi({
-    activity: "inventory_count",
-    locationId,
-    locationName: locationName || locationId,
-    deltas,
-    sourceId: sourceId || null,
-  });
-  const elapsedMs = getNow() - startMs;
-  console.log(`[InventoryCountList] logInventoryCountToApi completed: ${Math.round(elapsedMs)}ms for ${deltas.length} deltas (${chunkCount} chunk(s))`);
 }
 
 const SCAN_QUEUE_KEY = "stock_transfer_pos_inventory_count_scan_queue_v1";
@@ -2129,26 +2084,34 @@ export function InventoryCountList({
           setSubmitting(false);
           return false;
         }
-        // ✅ API成功後のみ在庫調整と履歴送信（API失敗時は在庫・履歴を送らず一貫性を保つ）
-        const adjustResult = await adjustInventoryToActual({
-          locationId: count.locationId,
-          items: allItemsToAdjust.map((l) => ({
-            inventoryItemId: l.inventoryItemId,
-            currentQuantity: l.currentQuantity,
-            actualQuantity: l.actualQuantity,
-          })),
-          referenceDocumentUri: count.id,
-        });
-        if (adjustResult?.invalidCount > 0) {
-          console.warn(`${adjustResult.invalidCount}件の商品が不正なIDのため除外されました`);
-          toast(`⚠️ ${adjustResult.invalidCount}件の商品が不正なIDのため除外されました`);
+        // ✅ Phase1: 在庫変更＋履歴を1本化（apply-change API）
+        const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        const entriesAdjust = allItemsToAdjust.map((l) => ({
+          inventoryItemId: l.inventoryItemId,
+          variantId: l.variantId ?? undefined,
+          sku: l.sku ?? undefined,
+          quantityAfter: Number(l.actualQuantity ?? 0),
+          quantityBefore: Number(l.currentQuantity ?? 0),
+        }));
+        try {
+          const applyResult = await applyInventoryChangeToApi({
+            appEventId,
+            activity: "inventory_count",
+            locationId: count.locationId,
+            locationName: locationName || count.locationName || "",
+            sourceId: count.id,
+            referenceDocumentUri: count.id,
+            entries: entriesAdjust,
+          });
+          if (applyResult?.invalidCount > 0) {
+            toast(`⚠️ ${applyResult.invalidCount}件の商品が不正なIDのため除外されました`);
+          }
+        } catch (applyErr) {
+          const msg = String(applyErr?.message ?? applyErr);
+          toast(`在庫調整エラー: ${msg}`);
+          setSubmitting(false);
+          return false;
         }
-        await logInventoryCountToApi({
-          locationId: count.locationId,
-          locationName: locationName || count.locationName || "",
-          items: allItemsToAdjust,
-          sourceId: count.id,
-        }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e));
         toast("棚卸を完了しました");
         onAfterConfirm?.(locallyBuiltAdjust);
         clearAllInventoryCountDraftsForCount({
@@ -2217,34 +2180,34 @@ export function InventoryCountList({
         setSubmitting(false);
         return false;
       }
-      // ✅ API成功後のみ在庫調整と履歴送信（API失敗時は在庫・履歴を送らず一貫性を保つ）
+      // ✅ Phase1: 在庫変更＋履歴を1本化（apply-change API）
+      const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const entriesSingle = itemsToAdjust.map((l) => ({
+        inventoryItemId: l.inventoryItemId,
+        variantId: l.variantId ?? undefined,
+        sku: l.sku ?? undefined,
+        quantityAfter: Number(l.actualQuantity ?? 0),
+        quantityBefore: Number(l.currentQuantity ?? 0),
+      }));
       try {
-        const result = await adjustInventoryToActual({
+        const applyResult = await applyInventoryChangeToApi({
+          appEventId,
+          activity: "inventory_count",
           locationId: count.locationId,
-          items: itemsToAdjust.map((l) => ({
-            inventoryItemId: l.inventoryItemId,
-            currentQuantity: l.currentQuantity,
-            actualQuantity: l.actualQuantity,
-          })),
+          locationName: locationName || count.locationName || "",
+          sourceId: count.id,
           referenceDocumentUri: count.id,
+          entries: entriesSingle,
         });
-        if (result?.invalidCount > 0) {
-          console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
-          toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
+        if (applyResult?.invalidCount > 0) {
+          toast(`⚠️ ${applyResult.invalidCount}件の商品が不正なIDのため除外されました`);
         }
-      } catch (adjustError) {
-        const adjustMsg = String(adjustError?.message ?? adjustError);
-        console.error("[InventoryCountList] adjustInventoryToActual error:", adjustError);
-        toast(`在庫調整エラー: ${adjustMsg}`);
+      } catch (applyErr) {
+        const msg = String(applyErr?.message ?? applyErr);
+        toast(`在庫調整エラー: ${msg}`);
         setSubmitting(false);
         return false;
       }
-      await logInventoryCountToApi({
-        locationId: count.locationId,
-        locationName: locationName || count.locationName || "",
-        items: itemsToAdjust,
-        sourceId: count.id,
-      }).catch((e) => console.error("[InventoryCountList] logInventoryCountToApi error:", e));
       toast("棚卸を完了しました");
       onAfterConfirm?.(locallyBuiltResult);
       clearAllInventoryCountDraftsForCount({

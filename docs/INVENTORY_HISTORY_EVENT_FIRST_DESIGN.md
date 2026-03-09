@@ -138,6 +138,65 @@ Phase 0 では「イベントを先にDBに書く」まではやらず、**今�
   - POS 側は「在庫変更」もこの API 経由にし、`logInventoryChangeToApi` 単体呼び出しをやめる  
 - 履歴画面は **自アプリのイベント／履歴を正本** として表示する。
 
+#### Phase 1 実装状況（2026-03）
+
+- **完了**: Prisma に `InventoryChangeEvent` / `InventoryChangeEventLine` を追加。マイグレーションは `prisma/migrations/20260309000000_add_inventory_change_events_and_lines/migration.sql`。**本番反映時は `npx prisma migrate deploy` を実行すること。**
+- **完了**: `POST /api/inventory/apply-change` を実装（`app/routes/api.inventory.apply-change.tsx`）。イベント先保存→Shopify inventorySetQuantities→InventoryChangeLog 記録まで一括実行。
+- **完了**: POS 共通 `applyInventoryChangeToApi`（`extensions/common/applyInventoryChange.js`）を追加。
+- **完了**: **棚卸**（InventoryCountList）と**調整**（AdjustmentProductList）を apply-change API に切り替え。在庫変更と履歴が 1 本化されている。
+- **対応済み**: **ロス**を apply-change に切り替え（entries を delta のみで送信。サーバで現在値取得→quantityAfter 正規化→setQuantities＋履歴記録）。
+- **対応済み**: **仕入**を apply-change に切り替え（PurchaseProductList・PurchaseHistoryList の両方。delta で送信）。
+- **対応済み**: **入庫・出庫**は Transfer API のため apply-change には載せず、`logInventoryChangeToApi` の失敗を握りつぶさないよう、出庫確定時の呼び出しを **await** に変更（Promise.all 内 .catch をやめ、失敗時はトースト表示）。
+
+---
+
+## 履歴API失敗時の通知と「失敗しない」ための対策
+
+### 失敗したときにどこでどう通知されるか
+
+| 画面 | 通知の場所 | 通知の内容 |
+|------|------------|------------|
+| **出庫**（ModalOutbound） | 1) **POS 画面上のトースト**（短いメッセージ）<br>2) **エラーダイアログ**（タイトル「確定に失敗」＋本文にエラー文言） | `確定に失敗: [エラーメッセージ]` |
+| **入庫**（InboundListScreen） | **POS 画面上のトースト**のみ | `入庫確定エラー: [エラーメッセージ]` |
+
+- いずれも、履歴API（`logInventoryChangeToApi`）が **throw した場合** に、その外側の try/catch で上記のように表示される。
+- 「伝わる」＝**失敗した事実とエラー内容がユーザーに表示される**という意味。**「失敗しない」保証ではない**。
+
+### 履歴処理を失敗させない（失敗を減らす）ためにできること
+
+1. **管理画面を定期的に開く**  
+   入庫・出庫の履歴APIは **オフラインアクセストークン** を使う。このトークンは「管理画面でアプリを開いたとき」に OAuth で更新される。  
+   → **運用で「しばらくに1回は管理画面でアプリを開く」** ようにすると、トークン期限切れによる 401 を減らせる。
+
+2. **ネットワーク環境**  
+   タイムアウト・切断で失敗することがある。  
+   → 安定した Wi‑Fi／回線で確定操作を行うと失敗しにくい。
+
+3. **入庫・出庫を apply-change に載せない理由**  
+   在庫変更そのものは **Shopify の Transfer API**（入庫受信・出庫作成）で行っており、アプリは「そのあとで履歴だけ記録」している。  
+   → 履歴を「失敗しない」ようにするには、**サーバ側で「Transfer 結果を記録するAPI」を用意し、POS はそのAPIだけ await する**形にすると、タブを閉じる・クライアントの不安定さの影響を減らせる（現状はクライアントから履歴APIを叩いている）。
+
+4. **リトライ**  
+   現状の `logInventoryChangeToApi` はチャンク単位でリトライしているが、**呼び出し元でのリトライ**はない。  
+   → 必要なら、入庫・出庫の確定処理で「履歴APIが失敗したら N 回までリトライしてから throw」するようにすると、一時的なネットエラーで失敗する確率を下げられる。
+
+5. **棚卸・調整・ロス・仕入**  
+   これらは **apply-change** でサーバが「在庫変更＋履歴」を一括して行うため、**クライアントのタブやトークンに依存しにくく、履歴が「管理」のまま残りにくい**。
+- **変動履歴表示**: 従来どおり `InventoryChangeLog` を正本として表示。apply-change 成功時も同じテーブルに書き込んでいるため、既存の在庫情報画面でそのまま表示される。
+
+### 実装済み：失敗しないための追求（全機能共通）
+
+以下を実装し、一時的なネットワーク・サーバ障害やトークン切れで失敗する確率を下げている。
+
+| 対象 | 内容 |
+|------|------|
+| **apply-change 呼び出し（クライアント）** | `applyInventoryChange.js`: リクエスト全体を最大 3 回リトライ。401 のときはトークン再取得して再試行。429／5xx／ネットワークエラー時は指数バックオフ（1s → 2s）で再試行。 |
+| **履歴API 呼び出し（クライアント）** | `logInventoryChange.js`: チャンクあたりのリトライを 3 回に増加し、指数バックオフを適用。1 回目の送信で失敗したチャンクがある場合、**トークン再取得して全チャンクを 1 回だけ再送**（idempotency で重複は防止）。 |
+| **Shopify GraphQL（サーバ）** | `inventory-set-quantities-server.ts`: 全 GraphQL 呼び出しを **graphqlWithRetry** でラップ。429／503／5xx のときは最大 3 回リトライ（1s → 2s のバックオフ）。`setInventoryQuantitiesServer`・`fetchCurrentQuantityServer`・`adjustInventoryQuantitiesServer` で共通利用。 |
+| **apply-change API（サーバ）** | `api.inventory.apply-change.tsx`: `setInventoryQuantitiesServer` が一時障害（429／5xx／timeout／network 等）で失敗した場合、1.5 秒待って **1 回だけ再実行**。 |
+
+これにより、**棚卸・調整・ロス・仕入**はクライアント・サーバ両方でリトライが効き、**入庫・出庫**の履歴記録もチャンク単位＋トークン再取得による再送で失敗しにくくなっている。
+
 ---
 
 ## 5. 修正方針の確定事項（まとめ）

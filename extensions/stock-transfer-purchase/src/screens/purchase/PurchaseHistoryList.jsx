@@ -13,13 +13,12 @@ import {
   fetchLocations,
   fetchVariantImage,
   fetchSettings,
-  adjustInventoryAtLocation,
   searchVariants,
   fetchVariantAvailable,
 } from "./purchaseApi.js";
 import { getStatusBadgeTone } from "../../lossHelpers.js";
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
-import { logInventoryChangeToApi } from "../../../../common/logInventoryChange.js";
+import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 
 function stripEntryForList(entry) {
   if (!entry) return entry;
@@ -370,18 +369,6 @@ function CandidateAddRow({
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
-
-/** 仕入入庫確定時の在庫変動を共通関数で記録（履歴で「仕入」と表示されるようにする） */
-async function logPurchaseToApi({ locationId, locationName, deltas, sourceId, lineItems }) {
-  await logInventoryChangeToApi({
-    activity: "purchase_entry",
-    locationId,
-    locationName: locationName || locationId,
-    deltas: (deltas || []).filter((d) => d?.inventoryItemId && Number(d?.delta || 0) > 0),
-    sourceId: sourceId || null,
-    lineItems,
-  });
-}
 
 // POS セッションのロケーションIDを取得
 function useSessionLocationId() {
@@ -975,22 +962,22 @@ export function PurchaseHistoryList({
 
     setSubmitting(true);
     try {
-      const deltas = [
-        ...(Array.isArray(lines) ? lines : []).map((l) => ({ inventoryItemId: l.inventoryItemId, delta: Math.abs(Number(l.receiveQty) || 0), variantId: l.variantId, sku: l.sku })),
-        ...(Array.isArray(extras) ? extras : []).map((l) => ({ inventoryItemId: l.inventoryItemId, delta: Math.abs(Number(l.receiveQty) || 0), variantId: l.variantId, sku: l.sku })),
+      const entriesForApply = [
+        ...(Array.isArray(lines) ? lines : []).map((l) => ({ inventoryItemId: l.inventoryItemId, delta: Math.abs(Number(l.receiveQty) || 0), variantId: l.variantId ?? undefined, sku: l.sku ?? undefined })),
+        ...(Array.isArray(extras) ? extras : []).map((l) => ({ inventoryItemId: l.inventoryItemId, delta: Math.abs(Number(l.receiveQty) || 0), variantId: l.variantId ?? undefined, sku: l.sku ?? undefined })),
       ].filter((d) => d.inventoryItemId && d.delta > 0);
-      await adjustInventoryAtLocation({
-        locationId: entry.locationId,
-        deltas,
-        referenceDocumentUri: entry.id,
-      });
-      await logPurchaseToApi({
-        locationId: entry.locationId,
-        locationName: entry.locationName || "",
-        deltas,
-        sourceId: entry.id,
-        lineItems: [...(Array.isArray(lines) ? lines : []), ...(Array.isArray(extras) ? extras : [])],
-      });
+      if (entriesForApply.length > 0) {
+        const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        await applyInventoryChangeToApi({
+          appEventId,
+          activity: "purchase_entry",
+          locationId: entry.locationId,
+          locationName: entry.locationName || "",
+          sourceId: entry.id,
+          referenceDocumentUri: entry.id,
+          entries: entriesForApply,
+        });
+      }
 
       // #P → #B 付番（既に #B の場合は維持）
       let nextPurchaseName = String(entry.purchaseName || "").trim();

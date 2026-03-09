@@ -6862,19 +6862,17 @@ function OutboundList({
         };
       }).filter((d) => d.inventoryItemId && d.delta !== 0);
 
+      if (outboundDeltas.length > 0) {
+        await logInventoryChangeToApi({
+          activity: "outbound_transfer",
+          locationId: originLocationGid,
+          locationName: originLocationName,
+          deltas: outboundDeltas,
+          sourceId: transferIdForUri,
+          lineItems: lines,
+        });
+      }
       Promise.all([
-        outboundDeltas.length > 0
-          ? logInventoryChangeToApi({
-              activity: "outbound_transfer",
-              locationId: originLocationGid,
-              locationName: originLocationName,
-              deltas: outboundDeltas,
-              sourceId: transferIdForUri,
-              lineItems: lines,
-            }).catch((apiErr) => {
-              console.warn("[ModalOutbound] logInventoryChangeToApi failed (outbound still created):", apiErr?.message || apiErr);
-            })
-          : Promise.resolve(),
         clearOutboundDraft?.().catch(() => {}),
         SHOPIFY?.storage?.delete ? SHOPIFY.storage.delete(OUTBOUND_CONDITIONS_DRAFT_KEY).catch(() => {}) : Promise.resolve(),
         SHOPIFY?.storage?.set ? SHOPIFY.storage.set(OUTBOUND_CONDITIONS_DRAFT_KEY, {}).catch(() => {}) : Promise.resolve(),

@@ -20,13 +20,13 @@
 const LOG_INVENTORY_CHANGE_CHUNK_SIZE = 50;
 
 /** チャンク送信失敗時の最大リトライ回数。一時的なネットワーク障害で「管理」のまま残る漏れを防ぐ。 */
-const MAX_CHUNK_RETRIES = 2;
+const MAX_CHUNK_RETRIES = 3;
 
 /** リトライ間隔（ミリ秒） */
 const RETRY_DELAY_MS = 1000;
 
 /**
- * チャンクをAPIに送信し、失敗時はリトライする
+ * チャンクをAPIに送信し、失敗時はリトライする。401/5xx/ネットワークエラーは指数バックオフで再試行。
  * @returns {Promise<boolean>} 成功したかどうか
  */
 async function sendChunkWithRetry(apiUrl, token, body, activity, chunkIndex, totalChunks) {
@@ -38,11 +38,12 @@ async function sendChunkWithRetry(apiUrl, token, body, activity, chunkIndex, tot
         body: JSON.stringify(body),
       });
       if (res.ok) return true;
+      const delayMs = RETRY_DELAY_MS * Math.min(attempt, 2);
       if (attempt < MAX_CHUNK_RETRIES) {
         console.warn(
-          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} failed (attempt ${attempt}), retrying in ${RETRY_DELAY_MS}ms... status=${res.status}`
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} failed (attempt ${attempt}), retrying in ${delayMs}ms... status=${res.status}`
         );
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        await new Promise((r) => setTimeout(r, delayMs));
       } else {
         const text = await res.text().catch(() => "");
         console.error(
@@ -50,11 +51,12 @@ async function sendChunkWithRetry(apiUrl, token, body, activity, chunkIndex, tot
         );
       }
     } catch (fetchErr) {
+      const delayMs = RETRY_DELAY_MS * Math.min(attempt, 2);
       if (attempt < MAX_CHUNK_RETRIES) {
         console.warn(
-          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} exception (attempt ${attempt}), retrying: ${fetchErr?.message}`
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} exception (attempt ${attempt}), retrying in ${delayMs}ms: ${fetchErr?.message}`
         );
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+        await new Promise((r) => setTimeout(r, delayMs));
       } else {
         console.error(
           `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} exception after ${MAX_CHUNK_RETRIES} attempts: activity=${activity}, error=${fetchErr?.message}`
@@ -143,25 +145,41 @@ export async function logInventoryChangeToApi({
   }
 
   const failedChunks = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    const body = {
-      appEventId,
-      activity,
-      locationId,
-      locationName: locName,
-      sourceId: sourceId || null,
-      adjustmentGroupId: adjustmentGroupId ?? undefined,
-      chunkIndex: i + 1,
-      totalChunks: chunks.length,
-      entryIndexStart: i * chunkSize,
-      entries: chunk,
-    };
-    const ok = await sendChunkWithRetry(apiUrl, token, body, activity, i + 1, chunks.length);
-    if (!ok) failedChunks.push(i + 1);
-  }
+  const sendChunks = async (t) => {
+    const failed = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const body = {
+        appEventId,
+        activity,
+        locationId,
+        locationName: locName,
+        sourceId: sourceId || null,
+        adjustmentGroupId: adjustmentGroupId ?? undefined,
+        chunkIndex: i + 1,
+        totalChunks: chunks.length,
+        entryIndexStart: i * chunkSize,
+        entries: chunk,
+      };
+      const ok = await sendChunkWithRetry(apiUrl, t, body, activity, i + 1, chunks.length);
+      if (!ok) failed.push(i + 1);
+    }
+    return failed;
+  };
 
+  failedChunks.push(...(await sendChunks(token)));
+
+  // 失敗チャンクがあればトークン再取得して1回だけ全チャンク再送（idempotency で重複は防がれる）
   if (failedChunks.length > 0) {
-    throw new Error(`Inventory log partially failed. failedChunks=${failedChunks.join(",")} (activity=${activity}, appEventId=${appEventId})`);
+    const token2 = await session.getSessionToken();
+    if (token2) {
+      console.warn(`[logInventoryChangeToApi] Retrying ${failedChunks.length} failed chunk(s) with fresh token (activity=${activity})`);
+      const retryFailed = await sendChunks(token2);
+      if (retryFailed.length > 0) {
+        throw new Error(`Inventory log partially failed. failedChunks=${retryFailed.join(",")} (activity=${activity}, appEventId=${appEventId})`);
+      }
+    } else {
+      throw new Error(`Inventory log partially failed. failedChunks=${failedChunks.join(",")} (activity=${activity}, appEventId=${appEventId})`);
+    }
   }
 }
