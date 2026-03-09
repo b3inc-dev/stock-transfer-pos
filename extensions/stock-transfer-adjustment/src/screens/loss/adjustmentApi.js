@@ -627,13 +627,232 @@ function toInventoryItemGid(s) {
   return null;
 }
 
-// 在庫を実数に設定（棚卸と同様：inventorySetQuantitiesで絶対値設定）
+/** Throttled 時リトライ（棚卸と同様） */
+const THROTTLE_RETRY_DELAY_MS = 3000;
+const THROTTLE_RETRY_MAX = 4;
+/** バッチ間の待機（ms）。連続書き込みで Throttled になりにくくする */
+const BATCH_WRITE_DELAY_MS = 350;
+/** Shopify API: inventorySetQuantities の quantities は250件まで */
+const INVENTORY_SET_QUANTITIES_MAX = 250;
+
+async function runWithThrottleRetry(fn, maxRetries = THROTTLE_RETRY_MAX) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      if ((/throttle/i.test(msg) || /429/.test(msg)) && attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, THROTTLE_RETRY_DELAY_MS));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+/**
+ * 指定ロケーションで在庫レベルがないアイテムを有効化する（棚卸と同様）。
+ * inventorySetQuantities は「ロケーションに在庫レベルがない」と失敗するため、確定前に実行する。
+ */
+async function ensureInventoryActivatedAtLocation({ locationGid, items }) {
+  const activated = [];
+  const errors = [];
+  if (!locationGid || !Array.isArray(items) || items.length === 0) {
+    return { ok: true, activated, errors };
+  }
+  const ids = items.map((x) => x?.inventoryItemId).filter(Boolean);
+  if (ids.length === 0) return { ok: true, activated, errors };
+
+  const quantityByItemId = new Map(items.map((x) => [x.inventoryItemId, x.quantity]));
+  const toProcess = [];
+
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    try {
+      const d = await graphql(
+        `#graphql
+          query CheckInventoryItems($ids: [ID!]!, $locationId: ID!) {
+            nodes(ids: $ids) {
+              ... on InventoryItem {
+                id
+                tracked
+                inventoryLevel(locationId: $locationId) { id }
+              }
+            }
+          }`,
+        { ids: chunk, locationId: locationGid }
+      );
+      const nodes = Array.isArray(d?.nodes) ? d.nodes : [];
+      const processedIds = new Set();
+      for (const node of nodes) {
+        const inventoryItemId = String(node?.id || "").trim();
+        if (!inventoryItemId) continue;
+        processedIds.add(inventoryItemId);
+        const hasLevel = !!node?.inventoryLevel?.id;
+        const tracked = node?.tracked === true;
+        if (!hasLevel || !tracked) {
+          toProcess.push({
+            inventoryItemId,
+            needsTrackedUpdate: !tracked,
+            needsActivate: !hasLevel,
+          });
+        } else {
+          activated.push({ inventoryItemId, locationId: locationGid });
+        }
+      }
+      for (const id of chunk) {
+        if (!processedIds.has(id)) {
+          toProcess.push({
+            inventoryItemId: id,
+            needsTrackedUpdate: true,
+            needsActivate: true,
+          });
+        }
+      }
+    } catch (e) {
+      for (const inventoryItemId of chunk) {
+        toProcess.push({
+          inventoryItemId,
+          needsTrackedUpdate: true,
+          needsActivate: true,
+        });
+      }
+    }
+  }
+
+  const maxAttempts = 4;
+  const delayAfterTrackedMs = 1000;
+  const delayBetweenItemsMs = 150;
+
+  for (let idx = 0; idx < toProcess.length; idx++) {
+    const item = toProcess[idx];
+    const { inventoryItemId, needsTrackedUpdate, needsActivate } = item;
+    const initialQty = quantityByItemId.get(inventoryItemId);
+    if (idx > 0) await new Promise((r) => setTimeout(r, delayBetweenItemsMs));
+    let lastError = null;
+    let succeeded = false;
+    for (let attempt = 1; attempt <= maxAttempts && !succeeded; attempt++) {
+      try {
+        if (needsTrackedUpdate) {
+          const updateRes = await graphql(
+            `#graphql
+              mutation UpdateInventoryItem($id: ID!, $input: InventoryItemInput!) {
+                inventoryItemUpdate(id: $id, input: $input) {
+                  inventoryItem { id tracked }
+                  userErrors { field message }
+                }
+              }`,
+            { id: inventoryItemId, input: { tracked: true } }
+          );
+          const updateErrs = updateRes?.inventoryItemUpdate?.userErrors ?? [];
+          if (updateErrs.length > 0) {
+            lastError = updateErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "在庫追跡の有効化に失敗しました";
+            if (attempt < maxAttempts) {
+              await new Promise((r) => setTimeout(r, 800 * attempt));
+              continue;
+            }
+          } else {
+            await new Promise((r) => setTimeout(r, delayAfterTrackedMs));
+          }
+        }
+        if (!needsActivate) {
+          activated.push({ inventoryItemId, locationId: locationGid });
+          succeeded = true;
+          break;
+        }
+        const withQty = attempt === 1 && initialQty != null && Number.isFinite(Number(initialQty));
+        const vars = { inventoryItemId, locationId: locationGid };
+        if (withQty) {
+          const q = Math.floor(Number(initialQty));
+          vars.available = q;
+          vars.onHand = q;
+        }
+        const actRes = await graphql(
+          `#graphql
+            mutation ActivateInventoryItem(
+              $inventoryItemId: ID!
+              $locationId: ID!
+              $available: Int
+              $onHand: Int
+            ) {
+              inventoryActivate(
+                inventoryItemId: $inventoryItemId
+                locationId: $locationId
+                available: $available
+                onHand: $onHand
+              ) {
+                inventoryLevel { id }
+                userErrors { field message }
+              }
+            }`,
+          vars
+        );
+        const payload = actRes?.inventoryActivate;
+        const userErrs = payload?.userErrors ?? [];
+        if (userErrs.length > 0) {
+          const errMsg = userErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "unknown";
+          const alreadyActivated = /already|既に|activated|在庫レベル|already has/i.test(errMsg);
+          if (alreadyActivated) {
+            const check = await graphql(
+              `#graphql
+                query CheckLevel($ids: [ID!]!, $locationId: ID!) {
+                  nodes(ids: $ids) {
+                    ... on InventoryItem {
+                      id
+                      inventoryLevel(locationId: $locationId) { id }
+                    }
+                  }
+                }`,
+              { ids: [inventoryItemId], locationId: locationGid }
+            );
+            const node = (check?.nodes ?? [])[0];
+            if (node?.inventoryLevel?.id) {
+              activated.push({ inventoryItemId, locationId: locationGid });
+              succeeded = true;
+              break;
+            }
+          }
+          lastError = errMsg;
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 800 * attempt));
+            continue;
+          }
+          if (!succeeded) errors.push({ inventoryItemId, message: lastError });
+          break;
+        }
+        if (payload?.inventoryLevel?.id) {
+          activated.push({ inventoryItemId, locationId: locationGid });
+          succeeded = true;
+        } else {
+          lastError = "inventoryLevel が返されませんでした";
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 800 * attempt));
+            continue;
+          }
+          if (!succeeded) errors.push({ inventoryItemId, message: lastError });
+        }
+        break;
+      } catch (e) {
+        lastError = String(e?.message ?? e);
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 800 * attempt));
+          continue;
+        }
+        if (!succeeded) errors.push({ inventoryItemId, message: lastError });
+      }
+    }
+  }
+  return { ok: errors.length === 0, activated, errors };
+}
+
+// 在庫を実数に設定（棚卸と同様：在庫有効化→250件チャンク→Throttleリトライ）
 export async function adjustInventoryToActual({ locationId, items, referenceDocumentUri }) {
   const locationGid = toLocationGid(locationId);
   if (!locationGid) {
     throw new Error(`無効なロケーションID: ${locationId}`);
   }
 
+  // 調整も棚卸と同様にマイナス在庫を許可するため Math.max(0,...) は適用しない
   const validItems = (items ?? []).filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.actualQuantity)));
   const quantitiesWithStatus = validItems.map((x) => {
     const inventoryItemGid = toInventoryItemGid(x.inventoryItemId);
@@ -659,8 +878,27 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     return { adjustmentGroup: null, invalidCount, processedCount: 0 };
   }
 
-  const uri = referenceDocumentUri ? `gid://stock-transfer-pos/AdjustmentEntry/${referenceDocumentUri}` : null;
+  // ロケーションに在庫レベルがないアイテムがあると inventorySetQuantities が失敗するため、先に在庫有効化（棚卸と同様）
+  let activateResult = await ensureInventoryActivatedAtLocation({
+    locationGid,
+    items: quantities.map((q) => ({ inventoryItemId: q.inventoryItemId, quantity: q.quantity })),
+  });
+  const maxActivateRetries = 2;
+  for (let r = 0; r < maxActivateRetries && (activateResult.errors ?? []).length > 0; r++) {
+    const failedIds = new Set((activateResult.errors ?? []).map((e) => e.inventoryItemId));
+    const failedItems = quantities.filter((q) => failedIds.has(q.inventoryItemId));
+    if (failedItems.length === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 1000 * (r + 1)));
+    activateResult = await ensureInventoryActivatedAtLocation({
+      locationGid,
+      items: failedItems.map((q) => ({ inventoryItemId: q.inventoryItemId, quantity: q.quantity })),
+    });
+  }
+  if ((activateResult.errors ?? []).length > 0) {
+    throw new Error("在庫有効化に失敗しました");
+  }
 
+  const uri = referenceDocumentUri ? `gid://stock-transfer-pos/AdjustmentEntry/${referenceDocumentUri}` : null;
   const maxRetries = 3;
   const retryDelayMs = 1000;
   const m = `#graphql
@@ -671,45 +909,65 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
       }
     }`;
 
-  const input = {
-    name: "available",
-    reason: "correction",
-    ignoreCompareQuantity: true,
-    quantities: quantities.map((q) => ({
-      inventoryItemId: q.inventoryItemId,
-      locationId: locationGid,
-      quantity: q.quantity,
-      compareQuantity: q.compareQuantity,
-    })),
-  };
-  if (uri) input.referenceDocumentUri = uri;
-
+  let lastAdjustmentGroup = null;
   let lastError;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const d = await graphql(m, { input });
-      if (!d || !d.inventorySetQuantities) throw new Error("GraphQL response is invalid");
-      const errs = d?.inventorySetQuantities?.userErrors ?? [];
-      if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
-      return {
-        adjustmentGroup: d.inventorySetQuantities.inventoryAdjustmentGroup ?? null,
-        invalidCount,
-        processedCount: quantities.length,
-      };
-    } catch (e) {
-      lastError = e;
-      const msg = String(e?.message ?? e);
-      const isRetryable = msg.includes("timeout") || msg.includes("network") || msg.includes("fetch") || msg.includes("HTTP 5");
-      if (!isRetryable || attempt === maxRetries) break;
-      console.warn(`[adjustInventoryToActual] リトライ ${attempt}/${maxRetries}: ${msg}`);
-      await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
+
+  for (let chunkStart = 0; chunkStart < quantities.length; chunkStart += INVENTORY_SET_QUANTITIES_MAX) {
+    const chunk = quantities.slice(chunkStart, chunkStart + INVENTORY_SET_QUANTITIES_MAX);
+    const input = {
+      name: "available",
+      reason: "correction",
+      ignoreCompareQuantity: true,
+      quantities: chunk.map((q) => ({
+        inventoryItemId: q.inventoryItemId,
+        locationId: locationGid,
+        quantity: q.quantity,
+        compareQuantity: q.compareQuantity,
+      })),
+    };
+    if (uri) input.referenceDocumentUri = uri;
+
+    let chunkSuccess = false;
+    for (let attempt = 1; attempt <= maxRetries && !chunkSuccess; attempt++) {
+      try {
+        const d = await runWithThrottleRetry(() => graphql(m, { input }));
+        if (!d || !d.inventorySetQuantities) throw new Error("GraphQL response is invalid");
+        const errs = d?.inventorySetQuantities?.userErrors ?? [];
+        if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
+        lastAdjustmentGroup = d.inventorySetQuantities.inventoryAdjustmentGroup ?? null;
+        chunkSuccess = true;
+        if (chunkStart + chunk.length < quantities.length) {
+          await new Promise((resolve) => setTimeout(resolve, BATCH_WRITE_DELAY_MS));
+        }
+      } catch (e) {
+        lastError = e;
+        const msg = String(e?.message ?? e);
+        const isRetryable =
+          msg.includes("timeout") ||
+          msg.includes("network") ||
+          msg.includes("fetch") ||
+          msg.includes("HTTP 5") ||
+          /throttle/i.test(msg) ||
+          /429/.test(msg);
+        if (!isRetryable || attempt === maxRetries) break;
+        console.warn(`[adjustInventoryToActual] チャンク ${chunkStart / INVENTORY_SET_QUANTITIES_MAX + 1} リトライ ${attempt}/${maxRetries}: ${msg}`);
+        await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
+      }
+    }
+    if (!chunkSuccess) {
+      const msg = String(lastError?.message ?? lastError);
+      if (msg.includes("HTTP 400") || msg.includes("Invalid request") || msg.includes("maximum allowed")) {
+        throw new Error(`在庫調整エラー: ${msg}\nロケーション: ${locationGid?.substring(0, 30)}...\n変更数: ${quantities.length}件（250件ずつ分割して送信中）`);
+      }
+      throw lastError;
     }
   }
-  const msg = String(lastError?.message ?? lastError);
-  if (msg.includes("HTTP 400") || msg.includes("Invalid request")) {
-    throw new Error(`在庫調整エラー: ${msg}\nロケーション: ${locationGid?.substring(0, 30)}...\n変更数: ${quantities.length}件`);
-  }
-  throw lastError;
+
+  return {
+    adjustmentGroup: lastAdjustmentGroup,
+    invalidCount,
+    processedCount: quantities.length,
+  };
 }
 
 export async function fetchLocations() {

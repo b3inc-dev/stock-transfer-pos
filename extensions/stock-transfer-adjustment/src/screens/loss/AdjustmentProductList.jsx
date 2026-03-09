@@ -841,6 +841,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
   }, 0), [lines]);
   const canSubmit = totalLines > 0 && !submitting;
 
+  // 確定処理：棚卸と同順（在庫調整 → 変動ログ → 履歴保存 → UI完了 → 下書き削除）
   const handleConfirm = useCallback(async () => {
     if (!canSubmit || !conds?.locationId) {
       if (totalLines === 0) toast("商品を追加してください");
@@ -848,23 +849,27 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       return;
     }
     setSubmitting(true);
+    const cur = (l) => Number(l.currentQuantity ?? l.available ?? 0);
+    const act = (l) => Number(l.qty ?? 0);
     try {
       const adjustmentEntryId = generateAdjustmentId();
-      const cur = (l) => Number(l.currentQuantity ?? l.available ?? 0);
-      const act = (l) => Number(l.qty ?? 0);
-
       const itemsForApi = lines.map((l) => ({
         inventoryItemId: l.inventoryItemId,
         currentQuantity: cur(l),
         actualQuantity: act(l),
       }));
 
+      // 1) 在庫調整（棚卸と同様：在庫有効化→inventorySetQuantities・Throttleリトライ）
       const result = await adjustInventoryToActual({
         locationId: conds.locationId,
         items: itemsForApi,
         referenceDocumentUri: adjustmentEntryId,
       });
       const adjustmentGroupId = result?.adjustmentGroup?.id || null;
+      if (result?.invalidCount > 0) {
+        console.warn(`${result.invalidCount}件の商品が不正なIDのため除外されました`);
+        toast(`⚠️ ${result.invalidCount}件の商品が不正なIDのため除外されました`);
+      }
 
       const items = lines.map((l) => {
         const pRaw = String(l.productTitle || "").trim() || "(unknown)";
@@ -887,10 +892,30 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         };
       });
 
+      const deltas = lines.map((l) => ({
+        inventoryItemId: l.inventoryItemId,
+        variantId: l.variantId,
+        sku: l.sku || "",
+        delta: act(l) - cur(l),
+        quantityAfter: act(l),
+      })).filter((d) => d.delta !== 0);
+
+      // 2) 変動ログ送信（API成功後のみ・棚卸と同様）
+      if (deltas.length > 0) {
+        await logInventoryChangeToApi({
+          activity: "adjustment",
+          locationId: conds.locationId,
+          locationName: conds.locationName || "",
+          deltas,
+          sourceId: adjustmentEntryId,
+          adjustmentGroupId,
+        });
+      }
+
+      // 3) 履歴保存（メタフィールド）
       const existing = await readAdjustmentEntries();
       const existingCount = Array.isArray(existing) ? existing.length : 0;
       const adjustmentName = `#A${String(existingCount + 1).padStart(4, "0")}`;
-
       const entry = {
         id: adjustmentEntryId,
         adjustmentName,
@@ -905,40 +930,24 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         createdAt: new Date().toISOString(),
         adjustmentGroupId,
       };
+      await writeAdjustmentEntries([entry, ...existing]);
 
+      // 4) UI完了（棚卸と同様：全処理成功後にトースト・モーダル閉じ・コールバック）
       toast("調整を確定しました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
       setSubmitting(false);
-      // 残りはバックグラウンドで実行（変動ログ・履歴保存・下書き削除）
-      const deltas = lines.map((l) => ({
-        inventoryItemId: l.inventoryItemId,
-        variantId: l.variantId,
-        sku: l.sku || "",
-        delta: act(l) - cur(l),
-        quantityAfter: act(l),
-      })).filter((d) => d.delta !== 0);
-      Promise.all([
-        deltas.length > 0 ? logInventoryChangeToApi({
-          activity: "adjustment",
-          locationId: conds.locationId,
-          locationName: conds.locationName || "",
-          deltas,
-          sourceId: adjustmentEntryId,
-          adjustmentGroupId,
-        }) : Promise.resolve(),
-        writeAdjustmentEntries([entry, ...existing]),
-        SHOPIFY?.storage?.delete ? Promise.all([
+
+      // 5) 下書き削除（確定成功時のみ・棚卸と同様）
+      if (SHOPIFY?.storage?.delete) {
+        Promise.all([
           SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY),
           SHOPIFY.storage.delete(ADJUSTMENT_CONDITIONS_DRAFT_KEY),
-        ]).catch((e) => console.error("Failed to clear adjustment draft:", e)) : Promise.resolve(),
-      ]).catch((e) => {
-        toast(`保存に失敗しました: ${e?.message ?? e}`);
-      });
+        ]).catch((e) => console.error("Failed to clear adjustment draft:", e));
+      }
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
-    } finally {
       setSubmitting(false);
     }
   }, [lines, conds, canSubmit, onAfterConfirm]);
