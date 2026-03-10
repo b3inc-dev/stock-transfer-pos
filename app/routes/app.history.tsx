@@ -4,6 +4,7 @@ import { useLoaderData, useFetcher, useSearchParams } from "react-router";
 import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
 import { getDateInShopTimezone } from "../utils/timezone";
+import type { LocationNode, TransferLineItem, GroupedLineItemsEntry, TransferHistory } from "../types";
 
 // 入出庫履歴CSV列（設定画面の「入出庫履歴CSV出力項目設定」と一致）
 const HISTORY_CSV_COLUMN_IDS = [
@@ -55,50 +56,8 @@ function extractExtrasCountFromNote(note: string): number {
   return parseInt(extrasSectionMatch[1] || "0", 10);
 }
 
-export type LocationNode = { id: string; name: string };
-
-export type TransferLineItem = {
-  id: string;
-  inventoryItemId: string;
-  variantId?: string;
-  sku?: string;
-  barcode?: string;
-  title?: string;
-  option1?: string;
-  option2?: string;
-  option3?: string;
-  quantity: number; // 予定数
-  receivedQuantity?: number; // 入庫数（取得可能な場合）
-  isExtra?: boolean; // 予定外入庫フラグ
-  /** 複数シップメント時にどの配送に属するか（棚卸の商品グループ列と同様） */
-  shipmentId?: string;
-  shipmentDisplayId?: string; // 表示用 e.g. #T0127-1, #T0127-L
-  /** 配送ごとのステータス（棚卸の商品グループごとの完了済み/未完了と同様） */
-  shipmentStatus?: string; // DRAFT, READY_TO_SHIP, RECEIVED, TRANSFERRED, CANCELED 等
-};
-
-/** 配送単位でグループ化した明細（棚卸の groupItems と同様） */
-export type GroupedLineItemsEntry = {
-  shipmentMetadata: { id: string; displayId: string; status: string };
-  items: TransferLineItem[];
-};
-
-export type TransferHistory = {
-  id: string;
-  name: string;
-  status: string;
-  note?: string;
-  dateCreated: string;
-  totalQuantity: number;
-  receivedQuantity: number;
-  originLocationId: string;
-  originLocationName: string;
-  destinationLocationId: string;
-  destinationLocationName: string;
-  shipmentCount: number;
-  lineItems: TransferLineItem[];
-  type: "outbound" | "inbound"; // 出庫 or 入庫
-};
+// 型定義は app/types.ts に集約。後方互換のため re-export する
+export type { LocationNode, TransferLineItem, GroupedLineItemsEntry, TransferHistory } from "../types";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
@@ -1167,7 +1126,7 @@ export default function HistoryPage() {
                       >
                         入出庫履歴
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         条件で絞り込みを行い、入出庫履歴を表示します。
                       </s-text>
                     </div>
@@ -1182,12 +1141,12 @@ export default function HistoryPage() {
                       }}
                     >
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">フィルター</s-text>
-                        <s-text tone="subdued" size="small">
+                        <s-text type="strong">フィルター</s-text>
+                        <s-text color="subdued">
                           ロケーション・ステータスを選ぶと一覧が絞り込まれます。
                         </s-text>
                         <s-divider />
-                        <s-text emphasis="bold" size="small">出庫ロケーション</s-text>
+                        <s-text type="strong">出庫ロケーション</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                           <div onClick={() => setOutboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: outboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: outboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
                             <input type="checkbox" checked={outboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
@@ -1235,7 +1194,7 @@ export default function HistoryPage() {
                             );
                           })}
                         </div>
-                        <s-text emphasis="bold" size="small">入庫ロケーション</s-text>
+                        <s-text type="strong">入庫ロケーション</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                           <div onClick={() => setInboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: inboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: inboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
                             <input type="checkbox" checked={inboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
@@ -1251,7 +1210,7 @@ export default function HistoryPage() {
                             );
                           })}
                         </div>
-                        <s-text emphasis="bold" size="small">ステータス</s-text>
+                        <s-text type="strong">ステータス</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                           <div onClick={() => setStatusFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: statusFilters.size === 0 ? "#eff6ff" : "transparent", border: statusFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
                             <input type="checkbox" checked={statusFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
@@ -1274,8 +1233,8 @@ export default function HistoryPage() {
                     {/* ソート: 日付 昇順 / 降順 */}
                     <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">ソート</s-text>
-                        <s-text tone="subdued" size="small">入出庫履歴の表示順（日付）を選びます。</s-text>
+                        <s-text type="strong">ソート</s-text>
+                        <s-text color="subdued">入出庫履歴の表示順（日付）を選びます。</s-text>
                         <s-divider />
                         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                           <div onClick={() => setDateSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: dateSortOrder === "desc" ? "#eff6ff" : "transparent", border: dateSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
@@ -1303,7 +1262,7 @@ export default function HistoryPage() {
                   >
                     <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         {rangeDisplay} / {totalDisplay}
                       </s-text>
                       {(pageInfo.hasPreviousPage || pageInfo.hasNextPage) && (
@@ -1354,7 +1313,7 @@ export default function HistoryPage() {
                     </div>
                     {filteredHistories.length === 0 ? (
             <s-box padding="base">
-              <s-text tone="subdued">履歴がありません</s-text>
+              <s-text color="subdued">履歴がありません</s-text>
             </s-box>
           ) : (
             <s-stack gap="none">
@@ -1400,25 +1359,25 @@ export default function HistoryPage() {
                       /> */}
                       <div style={{ flex: "1 1 auto", minWidth: 0 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                          <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          <s-text type="strong" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                             {history.name || history.id}
                           </s-text>
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
+                          <s-text color="subdued" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
                             {date}
                           </s-text>
                         </div>
                         <div style={{ marginBottom: "2px" }}>
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
+                          <s-text color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
                             出庫元: {originName}
                           </s-text>
                         </div>
                         <div>
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
+                          <s-text color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
                             入庫先: {destName}
                           </s-text>
                         </div>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
+                          <s-text color="subdued" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
                             <span style={getStatusBadgeStyle(history.status)}>{STATUS_LABEL[history.status] || history.status}</span>
                             {(() => {
                               const extrasCount = extractExtrasCountFromNote(history.note || "");
@@ -1432,7 +1391,7 @@ export default function HistoryPage() {
                               return null;
                             })()}
                           </s-text>
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                          <s-text color="subdued" style={{ whiteSpace: "nowrap" }}>
                             {history.receivedQuantity}/{history.totalQuantity}
                           </s-text>
                         </div>

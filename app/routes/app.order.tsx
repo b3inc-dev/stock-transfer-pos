@@ -4,7 +4,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
-import type { SettingsV1, OrderCsvColumn, OrderDestinationOption } from "./app.settings";
+import type { SettingsV1, OrderCsvColumn, OrderDestinationOption, LocationNode, OrderRequestItem, OrderRequestEntry, PurchaseEntry } from "../types";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 
 const ORDER_NS = "stock_transfer_pos";
@@ -12,69 +12,8 @@ const ORDER_KEY = "order_request_entries_v1";
 const PURCHASE_NS = "stock_transfer_pos";
 const PURCHASE_KEY = "purchase_entries_v1";
 
-export type LocationNode = { id: string; name: string };
-
-export type OrderRequestItem = {
-  id?: string;
-  inventoryItemId: string;
-  variantId?: string;
-  sku?: string;
-  barcode?: string;
-  title?: string;
-  option1?: string;
-  option2?: string;
-  option3?: string;
-  quantity: number;
-  cost?: number; // 原価（商品情報から取得）
-  price?: number; // 販売価格（商品情報から取得）
-  /** 予定外仕入（未処理から入庫確定時に POS が付与。管理画面で予定外ブロック表示用） */
-  isExtra?: boolean;
-};
-
-export type OrderRequestEntry = {
-  id: string; // order_${timestamp}_${random}
-  orderName?: string; // #P0001形式の名称
-  locationId: string; // 発注元ロケーション
-  locationName?: string;
-  destination?: string; // 発注先（例: 本社）
-  date: string; // YYYY-MM-DD
-  desiredDeliveryDate?: string;
-  note?: string;
-  staffName?: string;
-  items: OrderRequestItem[];
-  // 承認時に実際に発注に回す商品（部分承認対応）
-  approvedItems?: OrderRequestItem[];
-  status: "pending" | "shipped" | "cancelled";
-  createdAt: string;
-  // 将来の発注書（Transfer）連携用
-  linkedTransferId?: string | null;
-  // 入荷日・検品日（管理画面で編集可能）
-  arrivalDate?: string; // YYYY-MM-DD形式
-  inspectionDate?: string; // YYYY-MM-DD形式
-};
-
-// 仕入エントリの型定義
-export type PurchaseEntry = {
-  id: string; // purchase_${timestamp}_${random}
-  purchaseName: string; // #P0000（発注から）または #B0000（POSから）
-  sourceOrderId?: string; // 発注から作成された場合の元発注ID
-  locationId: string; // 入庫先ロケーション
-  locationName?: string;
-  supplierId?: string; // サプライヤーID（発注先マスタと連動）
-  supplierName?: string; // サプライヤー名
-  date: string; // YYYY-MM-DD
-  desiredDeliveryDate?: string; // 希望納品日（発注から引き継ぎ）
-  carrier?: string; // 配送業者
-  trackingNumber?: string; // 配送番号
-  expectedArrival?: string; // 到着予定日
-  staffName?: string;
-  note?: string;
-  items: OrderRequestItem[]; // 仕入商品リスト（発注から引き継ぎ）
-  status: "pending" | "received" | "cancelled"; // pending=未入庫, received=入庫済み, cancelled=キャンセル
-  createdAt: string;
-  receivedAt?: string; // 入庫日時
-  cancelledAt?: string; // キャンセル日時（仕入キャンセル時）
-};
+// 型定義は app/types.ts に集約。後方互換のため re-export する
+export type { LocationNode, OrderRequestItem, OrderRequestEntry, PurchaseEntry } from "../types";
 
 // =========================
 // Transfer（発注書）作成ヘルパー
@@ -1680,7 +1619,7 @@ export default function OrderPage() {
                     >
                       発注履歴
                     </div>
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       条件で絞り込みを行い、発注履歴を表示します。
                     </s-text>
                   </div>
@@ -1695,14 +1634,14 @@ export default function OrderPage() {
                     }}
                   >
                     <s-stack gap="base">
-                      <s-text emphasis="bold" size="large">
+                      <s-text type="strong">
                         フィルター
                       </s-text>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         発注店舗・ステータスを選ぶと一覧が絞り込まれます。
                       </s-text>
                       <s-divider />
-                      <s-text emphasis="bold" size="small">
+                      <s-text type="strong">
                         発注店舗（ロケーション）
                       </s-text>
                       <div
@@ -1778,7 +1717,7 @@ export default function OrderPage() {
                         })}
                       </div>
 
-                      <s-text emphasis="bold" size="small">
+                      <s-text type="strong">
                         ステータス
                       </s-text>
                       <div
@@ -1851,8 +1790,8 @@ export default function OrderPage() {
                   {/* ソート: 発注ID 昇順 / 降順 */}
                   <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
                     <s-stack gap="base">
-                      <s-text emphasis="bold" size="large">ソート</s-text>
-                      <s-text tone="subdued" size="small">発注IDの表示順を選びます。</s-text>
+                      <s-text type="strong">ソート</s-text>
+                      <s-text color="subdued">発注IDの表示順を選びます。</s-text>
                       <s-divider />
                       <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                         <div onClick={() => setIdSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "desc" ? "#eff6ff" : "transparent", border: idSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
@@ -1889,14 +1828,14 @@ export default function OrderPage() {
                         gap: "8px",
                       }}
                     >
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         表示: {filteredEntries.length}件 / {estimatedTotal}
                       </s-text>
                     </div>
 
                     {filteredEntries.length === 0 ? (
                       <s-box padding="base">
-                        <s-text tone="subdued">履歴がありません</s-text>
+                        <s-text color="subdued">履歴がありません</s-text>
                       </s-box>
                     ) : (
                       <s-stack gap="none">
@@ -1935,7 +1874,7 @@ export default function OrderPage() {
                                     }}
                                   >
                                     <s-text
-                                      emphasis="bold"
+                                      type="strong"
                                       style={{
                                         whiteSpace: "nowrap",
                                         overflow: "hidden",
@@ -1945,8 +1884,8 @@ export default function OrderPage() {
                                       {entry.orderName || entry.id}
                                     </s-text>
                                     <s-text
-                                      tone="subdued"
-                                      size="small"
+                                      color="subdued"
+                                     
                                       style={{ whiteSpace: "nowrap", marginLeft: "8px" }}
                                     >
                                       {date}
@@ -1954,8 +1893,8 @@ export default function OrderPage() {
                                   </div>
                                   <div style={{ marginBottom: "2px" }}>
                                     <s-text
-                                      tone="subdued"
-                                      size="small"
+                                      color="subdued"
+                                     
                                       style={{
                                         whiteSpace: "nowrap",
                                         overflow: "hidden",
@@ -1968,8 +1907,8 @@ export default function OrderPage() {
                                   </div>
                                   <div>
                                     <s-text
-                                      tone="subdued"
-                                      size="small"
+                                      color="subdued"
+                                     
                                       style={{
                                         whiteSpace: "nowrap",
                                         overflow: "hidden",
@@ -1983,8 +1922,8 @@ export default function OrderPage() {
                                   {useDesiredDeliveryDate && entry.desiredDeliveryDate && (
                                     <div>
                                       <s-text
-                                        tone="subdued"
-                                        size="small"
+                                        color="subdued"
+                                       
                                         style={{
                                           whiteSpace: "nowrap",
                                           overflow: "hidden",
@@ -2005,8 +1944,8 @@ export default function OrderPage() {
                                     }}
                                   >
                                     <s-text
-                                      tone="subdued"
-                                      size="small"
+                                      color="subdued"
+                                     
                                       style={{
                                         whiteSpace: "nowrap",
                                         display: "flex",
@@ -2019,8 +1958,8 @@ export default function OrderPage() {
                                       </span>
                                     </s-text>
                                     <s-text
-                                      tone="subdued"
-                                      size="small"
+                                      color="subdued"
+                                     
                                       style={{ whiteSpace: "nowrap" }}
                                     >
                                       {itemCount}件・合計{totalQty}

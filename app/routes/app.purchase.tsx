@@ -5,7 +5,7 @@ import { useLoaderData, useFetcher, useSearchParams, useRevalidator, useLocation
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import shopify from "../shopify.server";
-import type { PurchaseEntry, OrderRequestItem, LocationNode } from "./app.order";
+import type { PurchaseEntry, OrderRequestItem, LocationNode } from "../types";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 import { logInventoryChangesFromAdjustment } from "../utils/inventory-change-log";
 
@@ -1491,7 +1491,7 @@ export default function PurchasePage() {
                   <s-stack gap="base">
                     <div>
                       <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>新規仕入</div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         入庫先・日付・設定を入力し、商品を追加。一覧で内容を確認して「仕入ID発行確定」で仕入IDを発行します。
                       </s-text>
                     </div>
@@ -1502,7 +1502,7 @@ export default function PurchasePage() {
                     )}
                     <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">設定</s-text>
+                        <s-text type="strong">設定</s-text>
                         {/* 1カラムで縦並び（SP/PCとも同じ並び） */}
                         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                           <div>
@@ -1799,7 +1799,7 @@ export default function PurchasePage() {
                         </div>
 
                         <s-divider />
-                        <s-text emphasis="bold" size="large">商品</s-text>
+                        <s-text type="strong">商品</s-text>
                         <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
                           <button type="button" onClick={() => setNewPurchaseProductMethod("search")} style={{ padding: "8px 16px", border: "none", borderRadius: 8, background: newPurchaseProductMethod === "search" ? "#e5e7eb" : "transparent", color: "#202223", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>商品検索</button>
                           <button type="button" onClick={() => setNewPurchaseProductMethod("collection")} style={{ padding: "8px 16px", border: "none", borderRadius: 8, background: newPurchaseProductMethod === "collection" ? "#e5e7eb" : "transparent", color: "#202223", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>コレクション検索</button>
@@ -1809,8 +1809,8 @@ export default function PurchasePage() {
 
                         {newPurchaseProductMethod === "collection" && (
                           <s-stack gap="base">
-                            <s-text emphasis="bold" size="small">コレクションから追加</s-text>
-                            <s-text tone="subdued" size="small">コレクションを検索し、行の「商品を選ぶ」からモーダルで商品を選択して追加します。</s-text>
+                            <s-text type="strong">コレクションから追加</s-text>
+                            <s-text color="subdued">コレクションを検索し、行の「商品を選ぶ」からモーダルで商品を選択して追加します。</s-text>
                             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                               <input
                                 type="text"
@@ -1846,7 +1846,7 @@ export default function PurchasePage() {
                               </button>
                             </div>
                             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                              <s-text tone="subdued" size="small">表示: {newPurchaseCollectionSearchResults.length}件</s-text>
+                              <s-text color="subdued">表示: {newPurchaseCollectionSearchResults.length}件</s-text>
                             </div>
                             <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                               {newPurchaseCollectionSearchResults.length > 0 ? (
@@ -1896,7 +1896,7 @@ export default function PurchasePage() {
                                 ))
                               ) : (
                                 <s-box padding="base">
-                                  <s-text tone="subdued" size="small">
+                                  <s-text color="subdued">
                                     {newPurchaseCollectionSearchFetcher.state === "submitting" ? "検索中..." : (newPurchaseCollectionSearchFetcher.data?.collections?.length === 0 && newPurchaseCollectionSearchQuery.trim()) ? "別キーワードで検索してください" : "コレクション名を入力して検索してください"}
                                   </s-text>
                                 </s-box>
@@ -1908,7 +1908,7 @@ export default function PurchasePage() {
                           <s-stack gap="base">
                             {/* 1行目: タイトルのみ */}
                             <div style={{ display: "block" }}>
-                              <s-text emphasis="bold" size="small">商品検索</s-text>
+                              <s-text type="strong">商品検索</s-text>
                             </div>
                             {/* 2行目: 検索窓＋検索ボタン */}
                             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
@@ -1966,7 +1966,7 @@ export default function PurchasePage() {
                             </div>
                             {/* 3行目: 表示件数（左）・選択済み・選択解除（右寄せ） */}
                             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                              <s-text tone="subdued" size="small">
+                              <s-text color="subdued">
                                 {newPurchaseShowSelectedProducts
                                   ? `選択済み: ${Array.from(newPurchaseSelectedProductsInfo.values()).length}件`
                                   : newPurchaseSearchVariants.length <= 0
@@ -2240,7 +2240,7 @@ export default function PurchasePage() {
                                 </>
                               ) : (
                                 <s-box padding="base">
-                                  <s-text tone="subdued" size="small">
+                                  <s-text color="subdued">
                                     {fetcher.state === "submitting" ? "検索中..." : (fetcher.data?.variants?.length === 0 && newPurchaseSearchQuery.trim()) ? "別キーワードで検索してください" : "キーワードを入力して検索してください"}
                                   </s-text>
                                 </s-box>
@@ -2250,8 +2250,8 @@ export default function PurchasePage() {
                         )}
                         {newPurchaseProductMethod === "csv" && (
                           <s-stack gap="base">
-                            <s-text emphasis="bold" size="small">CSVアップロード</s-text>
-                            <s-text tone="subdued" size="small">
+                            <s-text type="strong">CSVアップロード</s-text>
+                            <s-text color="subdued">
                               テンプレートをダウンロードしてCSVを作成し、アップロードしてください。アップロード後にリストが表示されるので、チェックした商品だけ「商品を追加」で追加します。
                             </s-text>
                             <input
@@ -2300,7 +2300,7 @@ export default function PurchasePage() {
                             {newPurchaseCsvPreviewItems.length > 0 && (
                               <>
                                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                                  <s-text tone="subdued" size="small">
+                                  <s-text color="subdued">
                                     {newPurchaseCsvSelectedIds.size > 0
                                       ? `選択中: ${newPurchaseCsvSelectedIds.size}件 / 表示: ${newPurchaseCsvPreviewItems.length}件`
                                       : `表示: ${newPurchaseCsvPreviewItems.length}件`}
@@ -2441,7 +2441,7 @@ export default function PurchasePage() {
                     <s-stack gap="base">
                       {newPurchaseItems.length > 0 ? (
                           <>
-                            <s-text tone="subdued" size="small">合計 {newPurchaseItems.length} 件</s-text>
+                            <s-text color="subdued">合計 {newPurchaseItems.length} 件</s-text>
                             <div style={{ maxHeight: 320, overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: 8, marginBottom: 16 }}>
                               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
                                 <thead>
@@ -2522,7 +2522,7 @@ export default function PurchasePage() {
                           </>
                         ) : (
                           <s-box padding="base">
-                            <s-text tone="subdued" size="small">「商品を追加」から追加すると、ここに一覧が表示されます。</s-text>
+                            <s-text color="subdued">「商品を追加」から追加すると、ここに一覧が表示されます。</s-text>
                           </s-box>
                         )}
                     </s-stack>
@@ -2539,7 +2539,7 @@ export default function PurchasePage() {
                 <s-stack gap="base">
                   <div>
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>仕入履歴</div>
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       条件で絞り込みを行い、仕入履歴を表示します。
                       <br />
                       発注から作成したリスト（#P0000）や POS や新規作成から作成した（#B0000）が確認できます。
@@ -2555,12 +2555,12 @@ export default function PurchasePage() {
                     }}
                   >
                     <s-stack gap="base">
-                      <s-text emphasis="bold" size="large">フィルター</s-text>
-                      <s-text tone="subdued" size="small">
+                      <s-text type="strong">フィルター</s-text>
+                      <s-text color="subdued">
                         ロケーション・ステータス・仕入先・作成元を選ぶと一覧が絞り込まれます。
                       </s-text>
                       <s-divider />
-                      <s-text emphasis="bold" size="small">入庫先ロケーション</s-text>
+                      <s-text type="strong">入庫先ロケーション</s-text>
                       <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                         <div
                           onClick={() => setLocationFilters(new Set())}
@@ -2607,7 +2607,7 @@ export default function PurchasePage() {
                           );
                         })}
                       </div>
-                      <s-text emphasis="bold" size="small">ステータス</s-text>
+                      <s-text type="strong">ステータス</s-text>
                       <div style={{ maxHeight: "180px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                         <div
                           onClick={() => setStatusFilters(new Set())}
@@ -2654,7 +2654,7 @@ export default function PurchasePage() {
                           );
                         })}
                       </div>
-                      <s-text emphasis="bold" size="small">仕入先</s-text>
+                      <s-text type="strong">仕入先</s-text>
                       <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                         <div
                           onClick={() => setSupplierFilters(new Set())}
@@ -2709,7 +2709,7 @@ export default function PurchasePage() {
                         })}
                       </div>
 
-                      <s-text emphasis="bold" size="small">作成元</s-text>
+                      <s-text type="strong">作成元</s-text>
                       <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                         <div
                           onClick={() => setSourceFilters(new Set())}
@@ -2765,8 +2765,8 @@ export default function PurchasePage() {
                   {/* ソート: 仕入ID 昇順 / 降順 */}
                   <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
                     <s-stack gap="base">
-                      <s-text emphasis="bold" size="large">ソート</s-text>
-                      <s-text tone="subdued" size="small">仕入IDの表示順を選びます。</s-text>
+                      <s-text type="strong">ソート</s-text>
+                      <s-text color="subdued">仕入IDの表示順を選びます。</s-text>
                       <s-divider />
                       <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                         <div onClick={() => setIdSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "desc" ? "#eff6ff" : "transparent", border: idSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
@@ -2787,14 +2787,14 @@ export default function PurchasePage() {
                 <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
                   <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         表示: {filteredEntries.length}件 / {estimatedTotal}
                       </s-text>
                       {/* 一覧のCSV一括ダウンロードは非表示（モーダル内のCSV出力のみ利用可能） */}
                     </div>
                     {filteredEntries.length === 0 ? (
                       <s-box padding="base">
-                        <s-text tone="subdued">仕入履歴がありません。発注画面で「仕入に反映」すると #P0000 がここに表示されます。</s-text>
+                        <s-text color="subdued">仕入履歴がありません。発注画面で「仕入に反映」すると #P0000 がここに表示されます。</s-text>
                       </s-box>
                     ) : (
                       <s-stack gap="none">
@@ -2813,27 +2813,27 @@ export default function PurchasePage() {
                               >
                                 <div style={{ flex: "1 1 auto", minWidth: 0 }}>
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                                    <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                    <s-text type="strong" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                       {entry.purchaseName || entry.id}
                                     </s-text>
-                                    <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
+                                    <s-text color="subdued" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
                                       {date}
                                     </s-text>
                                   </div>
                                   <div style={{ marginBottom: "2px" }}>
-                                    <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
+                                    <s-text color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
                                       入庫先: {locationName}
                                     </s-text>
                                   </div>
                                   {entry.supplierName && (
                                     <div style={{ marginBottom: "2px" }}>
-                                      <s-text tone="subdued" size="small" style={{ display: "block" }}>
+                                      <s-text color="subdued" style={{ display: "block" }}>
                                         仕入先: {entry.supplierName}
                                       </s-text>
                                     </div>
                                   )}
                                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
-                                    <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
+                                    <s-text color="subdued" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
                                       <span style={getStatusBadgeStyle(entry.status)}>{STATUS_LABEL[entry.status] || entry.status}</span>
                                       {entry.status === "received" && (() => {
                                         const extrasCount = (entry.items || []).filter((it: OrderRequestItem) => it.isExtra).length;
@@ -2847,7 +2847,7 @@ export default function PurchasePage() {
                                         </span>
                                       )}
                                     </s-text>
-                                    <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                                    <s-text color="subdued" style={{ whiteSpace: "nowrap" }}>
                                       {itemCount}件・合計{totalQty}
                                     </s-text>
                                   </div>

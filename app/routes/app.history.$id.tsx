@@ -2,7 +2,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useNavigate, useRouteError } from "react-router";
 import { authenticate } from "../shopify.server";
-import type { TransferLineItem } from "./app.history";
+import type { TransferLineItem } from "../types";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
@@ -184,15 +184,15 @@ export default function HistoryDetailPage() {
           {/* 履歴情報 */}
           <s-section heading="履歴情報">
             <s-box padding="base">
-              <s-stack gap="tight">
-                <s-text emphasis="bold">{transfer.name || transfer.id}</s-text>
-                <s-text tone="subdued" size="small">
+              <s-stack gap="small">
+                <s-text type="strong">{transfer.name || transfer.id}</s-text>
+                <s-text color="subdued">
                   {transfer.type === "outbound" ? "出庫元" : "入庫先"}: {transfer.locationName}
                 </s-text>
-                <s-text tone="subdued" size="small">
+                <s-text color="subdued">
                   日付: {date}
                 </s-text>
-                <s-text tone="subdued" size="small">
+                <s-text color="subdued">
                   ステータス: {transfer.status}
                 </s-text>
               </s-stack>
@@ -205,33 +205,33 @@ export default function HistoryDetailPage() {
           <s-section heading="商品明細">
             {lineItems.length === 0 ? (
               <s-box padding="base">
-                <s-text tone="subdued">商品明細がありません</s-text>
+                <s-text color="subdued">商品明細がありません</s-text>
               </s-box>
             ) : (
               <s-stack gap="none">
                 {lineItems.map((item, idx) => (
                   <div key={item.id || idx}>
                     <div style={{ padding: "12px" }}>
-                      <s-stack gap="tight">
-                        <s-text emphasis="bold" size="small">
+                      <s-stack gap="small">
+                        <s-text type="strong">
                           {item.title || "(商品名なし)"}
                         </s-text>
                         {item.sku ? (
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             SKU: {item.sku}
                           </s-text>
                         ) : null}
                         {item.barcode ? (
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             JAN: {item.barcode}
                           </s-text>
                         ) : null}
                         {(item.option1 || item.option2 || item.option3) ? (
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             オプション: {[item.option1, item.option2, item.option3].filter(Boolean).join(" / ")}
                           </s-text>
                         ) : null}
-                        <s-text tone="subdued" size="small">
+                        <s-text color="subdued">
                           数量: {item.quantity}
                         </s-text>
                       </s-stack>

@@ -1,5 +1,6 @@
 // app/routes/app.inventory-count.tsx
 // 棚卸（商品グループ設定・棚卸ID発行・履歴管理）画面
+import { randomBytes } from "crypto";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
@@ -31,7 +32,7 @@ const PRODUCT_GROUP_NAMES_KEY = "product_group_names_v1";
 const INVENTORY_COUNTS_CHUNK_BYTES = 32_000;
 const INVENTORY_COUNTS_CHUNK_KEY_PREFIX = "inventory_counts_v1_c";
 const METAFIELDS_SET_MAX = 25;
-const ADMIN_GRAPHQL_API_VERSION = "2025-10";
+const ADMIN_GRAPHQL_API_VERSION = "2026-01";
 
 /** 商品グループ保存用メタフィールド（本體・ID一覧・ID→名前）。POS の一覧で軽量読取用 */
 function productGroupsMetafields(
@@ -182,6 +183,8 @@ function mergeCountParts(parts: CountPart[]): InventoryCount {
 const CHUNK_FETCH_CONCURRENCY = 8; // チャンク並列取得数（502/タイムアウト・レート制限のバランス）
 const CHUNK_FETCH_RETRY = 2; // 2回リトライ（計3回）。Throttle・一時的な502を拾い直す
 const CHUNK_FETCH_RETRY_DELAY_MS = 2000; // リトライ前の待機（Throttle 解消を待つ）
+const CHUNK_WRITE_RETRY = 2; // 書き込み：2回リトライ（計3回）。503/Throttle を拾い直す
+const CHUNK_WRITE_RETRY_DELAY_MS = 2000; // 書き込みリトライ前の待機
 
 /**
  * GraphQL レスポンスを安全に JSON パースする。空や不正な body で「syntax error, unexpected end of file」等を防ぐ。
@@ -598,6 +601,50 @@ function splitCountIntoParts(count: InventoryCount): CountPart[] {
   return parts;
 }
 
+/**
+ * メタフィールド書き込みをリトライ付きで実行する。
+ * HTTP エラー・例外発生時のみリトライ。userErrors はリトライせず呼び出し元に委ねる。
+ * 全リトライ失敗時は throw せず、userErrors 形式のオブジェクトを返して呼び出し元の既存チェックで拾えるようにする。
+ */
+async function metafieldSetWithRetry(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  mutation: string,
+  variables: Record<string, unknown>,
+  gql: ((query: string, variables?: Record<string, unknown>) => Promise<unknown>) | null
+): Promise<Record<string, unknown>> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= CHUNK_WRITE_RETRY; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, CHUNK_WRITE_RETRY_DELAY_MS));
+      console.warn(`[writeInventoryCountsChunked] metafield write retry ${attempt}/${CHUNK_WRITE_RETRY}`);
+    }
+    try {
+      if (gql) {
+        return (await gql(mutation, variables)) as Record<string, unknown>;
+      }
+      const resp = await admin.graphql(mutation, { variables });
+      if (!resp.ok) {
+        lastError = new Error(`HTTP ${resp.status}`);
+        if (attempt < CHUNK_WRITE_RETRY) continue;
+        break;
+      }
+      return (await safeJsonFromResponseForLoader(resp, {})) as Record<string, unknown>;
+    } catch (e) {
+      lastError = e;
+      if (attempt < CHUNK_WRITE_RETRY) {
+        console.warn(
+          `[writeInventoryCountsChunked] metafield write attempt ${attempt + 1}/${CHUNK_WRITE_RETRY + 1} failed, retrying:`,
+          (e as Error)?.message ?? e
+        );
+      }
+    }
+  }
+  // 全リトライ失敗時: throw せず userErrors 形式で返す（呼び出し元の既存チェックで拾える）
+  const errMsg = (lastError as Error)?.message ?? "メタフィールドの書き込みに失敗しました";
+  console.error(`[writeInventoryCountsChunked] metafield write failed after ${CHUNK_WRITE_RETRY + 1} attempts:`, errMsg);
+  return { data: { metafieldsSet: { userErrors: [{ message: `保存に失敗しました（${errMsg}）。しばらくしてから再試行してください。` }] } } };
+}
+
 function toMinimalCountForList(c: InventoryCount): Record<string, unknown> {
   return {
     id: c.id,
@@ -815,7 +862,7 @@ export async function writeInventoryCountsChunked(
     ];
     const emptyMutation = `#graphql mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`;
     const emptyVars = { metafields };
-    const emptyJson = gql ? await gql(emptyMutation, emptyVars) : (await safeJsonFromResponseForLoader(await admin.graphql(emptyMutation, { variables: emptyVars }), {})) as Record<string, unknown>;
+    const emptyJson = await metafieldSetWithRetry(admin, emptyMutation, emptyVars, gql);
     const data = (emptyJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
     return { userErrors: data?.userErrors ?? [] };
   }
@@ -830,7 +877,7 @@ export async function writeInventoryCountsChunked(
           { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
         ],
       };
-      const singleJson = gql ? await gql(singleMutation, singleVars) : (await safeJsonFromResponseForLoader(await admin.graphql(singleMutation, { variables: singleVars }), {})) as Record<string, unknown>;
+      const singleJson = await metafieldSetWithRetry(admin, singleMutation, singleVars, gql);
       const data = (singleJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
       return { userErrors: data?.userErrors ?? [] };
     }
@@ -853,7 +900,7 @@ export async function writeInventoryCountsChunked(
   for (let i = 0; i < metafields.length; i += METAFIELDS_SET_MAX) {
     const batch = metafields.slice(i, i + METAFIELDS_SET_MAX);
     const chunkVars = { metafields: batch };
-    const chunkJson = gql ? await gql(chunkMutation, chunkVars) : (await safeJsonFromResponseForLoader(await admin.graphql(chunkMutation, { variables: chunkVars }), {})) as Record<string, unknown>;
+    const chunkJson = await metafieldSetWithRetry(admin, chunkMutation, chunkVars, gql);
     const data = (chunkJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
     if (data?.userErrors?.length) return { userErrors: data.userErrors };
   }
@@ -894,7 +941,7 @@ export async function writeInventoryCountsChunked(
   for (let i = 0; i < listMetafields.length; i += METAFIELDS_SET_MAX) {
     const batch = listMetafields.slice(i, i + METAFIELDS_SET_MAX);
     const listVars = { metafields: batch };
-    const listJson = gql ? await gql(listChunkMutation, listVars) : (await safeJsonFromResponseForLoader(await admin.graphql(listChunkMutation, { variables: listVars }), {})) as Record<string, unknown>;
+    const listJson = await metafieldSetWithRetry(admin, listChunkMutation, listVars, gql);
     const data = (listJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
     if (data?.userErrors?.length) return { userErrors: data.userErrors };
   }
@@ -906,11 +953,10 @@ export async function writeInventoryCountsChunked(
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
     ],
   };
-  if (gql) {
-    await gql(setNextMutation, setNextVars);
-  } else {
-    await admin.graphql(setNextMutation, { variables: setNextVars });
-  }
+  // setNext は棚卸ID連番カウンタとバージョン更新。失敗しても本体データは保存済みのため非クリティカル扱い
+  await metafieldSetWithRetry(admin, setNextMutation, setNextVars, gql).catch((e) => {
+    console.warn("[writeInventoryCountsChunked] setNext write failed (non-critical):", (e as Error)?.message ?? e);
+  });
   return { userErrors: [] };
 }
 
@@ -1569,10 +1615,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 }
 
-function generateId(prefix: string): string {
-  const timestamp = Date.now();
-  const random = Math.random().toString(36).substring(2, 9);
-  return `${prefix}_${timestamp}_${random}`;
+function generateId(prefix: string, existingIds: string[] = []): string {
+  let id: string;
+  let attempts = 0;
+  do {
+    const random = randomBytes(6).toString("hex"); // 48-bit entropy
+    id = `${prefix}_${Date.now()}_${random}`;
+    attempts++;
+    if (attempts > 100) break; // safety valve
+  } while (existingIds.includes(id));
+  return id;
 }
 
 /** #C0001 形式の countName から数値を取得。# なし（C0017）にも対応。パースできない場合は 0 */
@@ -3501,7 +3553,7 @@ export async function action({ request }: ActionFunctionArgs) {
         Object.keys(inventoryItemIdsByGroup).length > 0 ? inventoryItemIdsByGroup : undefined;
 
       const newCount: InventoryCount = {
-        id: generateId("count"),
+        id: generateId("count", inventoryCounts.map((c) => c.id)),
         countName: assignedCountName,
         locationId,
         locationName: loc?.name,
@@ -4278,7 +4330,12 @@ export async function action({ request }: ActionFunctionArgs) {
     const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(groupId)) ?? groupId;
     (groupItemsMap as Record<string, unknown[]>)[key] = entry;
     const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : count.productGroupId ? [count.productGroupId] : [];
-    const allDone = allIds.length > 0 && allIds.every((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0);
+    const allDone = allIds.length > 0 && allIds.every((id) => {
+      const items = getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id);
+      return items.length > 0 && (items as Array<{ actualQuantity?: number | null }>).some(
+        (item) => item.actualQuantity != null
+      );
+    });
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
         ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
@@ -5799,7 +5856,7 @@ export default function InventoryCountPage() {
                       >
                         商品グループ設定
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         棚卸で使う商品グループを作成・編集します。作成方法を選び、グループ内容を設定してください。
                       </s-text>
                     </div>
@@ -5814,7 +5871,7 @@ export default function InventoryCountPage() {
                       }}
                     >
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">商品グループ</s-text>
+                        <s-text type="strong">商品グループ</s-text>
                         <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
                         <button
                           type="button"
@@ -5875,11 +5932,11 @@ export default function InventoryCountPage() {
                               <span style={{ fontWeight: 600, fontSize: "14px", whiteSpace: "normal" }}>「{editingGroup.name}」編集中</span>
                             </div>
                           )}
-                          <s-text emphasis="bold" size="small">コレクション検索</s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text type="strong">コレクション検索</s-text>
+                          <s-text color="subdued">
                             グループ名を入力し、コレクションを検索して選択し、グループを作成します。検索結果のみ表示されるため、多数のコレクションがあるストアでも軽く使えます。
                           </s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             並び順：コレクション選択順＋コレクション表示順
                           </s-text>
                           <s-text-field
@@ -5940,7 +5997,7 @@ export default function InventoryCountPage() {
                             </button>
                           </div>
                           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               {showOnlySelectedCollection
                                 ? `選択済み: ${displayCollections.length}件`
                                 : displayCollections.length <= ITEMS_PER_PAGE
@@ -5992,7 +6049,7 @@ export default function InventoryCountPage() {
                           <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                             {displayCollections.length === 0 ? (
                               <s-box padding="base">
-                                <s-text tone="subdued" size="small">
+                                <s-text color="subdued">
                                   {showOnlySelectedCollection ? "選択済みのコレクションがありません" : collectionSearchFetcher.state === "submitting" ? "検索中..." : collectionSearchFetcher.data?.collections?.length === 0 && collectionSearchQuery.trim() ? "別キーワードで検索してください" : "コレクション名を入力して検索してください"}
                                 </s-text>
                               </s-box>
@@ -6144,7 +6201,7 @@ export default function InventoryCountPage() {
                             </div>
                           )}
                           {selectedCollectionIds.length > 0 && (
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               選択中: {selectedCollectionIds.length}件
                             </s-text>
                           )}
@@ -6203,11 +6260,11 @@ export default function InventoryCountPage() {
                               <span style={{ fontWeight: 600, fontSize: "14px", whiteSpace: "normal" }}>「{editingGroup.name}」編集中</span>
                             </div>
                           )}
-                          <s-text emphasis="bold" size="small">商品検索</s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text type="strong">商品検索</s-text>
+                          <s-text color="subdued">
                             グループ名を入力し、SKU・商品名で検索して選択し、グループを作成します。検索結果のみ表示されるため、商品が多いストアでも軽く使えます。
                           </s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             並び順：選択順
                           </s-text>
                           <s-text-field
@@ -6268,7 +6325,7 @@ export default function InventoryCountPage() {
                             </button>
                           </div>
                           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               {showOnlySelectedSku
                                 ? `選択済み: ${displaySkuVariants.length}件`
                                 : displaySkuVariants.length <= ITEMS_PER_PAGE
@@ -6355,7 +6412,7 @@ export default function InventoryCountPage() {
                               );
                             }) : (
                               <s-box padding="base">
-                                <s-text tone="subdued" size="small">
+                                <s-text color="subdued">
                                   {showOnlySelectedSku ? "選択済みの商品がありません" : skuSearchFetcher.state === "submitting" ? "検索中..." : (skuSearchFetcher.data?.variants?.length === 0 && skuSearchQuery.trim()) ? "別キーワードで検索してください" : "キーワードを入力して検索してください"}
                                 </s-text>
                               </s-box>
@@ -6401,7 +6458,7 @@ export default function InventoryCountPage() {
                             </div>
                           )}
                           {(selectedSkuVariants.length > 0 || editingSkuOnlyPreservedIds.length > 0) && (
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               {editingGroupId && editingSkuOnlyPreservedIds.length > 0
                                 ? `選択中: ${selectedSkuVariants.length}件（一覧外のSKU: ${editingSkuOnlyPreservedIds.length}件を含む）`
                                 : `選択中: ${selectedSkuVariants.length}件`}
@@ -6457,15 +6514,15 @@ export default function InventoryCountPage() {
                       {/* 3. CSVアップロード（仕入同様: アップロード後にリスト表示 → チェックで選択 → グループを追加） */}
                       {groupCreateMethod === "csv" && (
                         <s-stack gap="base">
-                          <s-text emphasis="bold" size="small">CSVアップロード（グループ名＋SKU）</s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text type="strong">CSVアップロード（グループ名＋SKU）</s-text>
+                          <s-text color="subdued">
                             テンプレートをダウンロードしてCSVを作成し、アップロードしてください。アップロード後にリストが表示されるので、チェックした行だけ「グループを追加」で追加します。
                           </s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             並び順：グループ名行順＋CSV行順
                           </s-text>
                           <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                            <s-text tone="subdued" size="small">インポート時の動作</s-text>
+                            <s-text color="subdued">インポート時の動作</s-text>
                             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                               <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
                                 <input
@@ -6556,7 +6613,7 @@ export default function InventoryCountPage() {
                           {csvPreviewRows.length > 0 && (
                             <>
                               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                                <s-text tone="subdued" size="small">
+                                <s-text color="subdued">
                                   {csvShowOnlySelected
                                     ? `選択済み: ${csvPreviewSelected.size}件`
                                     : `表示: ${csvPreviewRows.length}件 / 選択中: ${csvPreviewSelected.size}件`}
@@ -6672,16 +6729,16 @@ export default function InventoryCountPage() {
                               </button>
                             </>
                           )}
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             登録済みをCSVダウンロードで現在のグループ（SKU指定のみ）を取得できます。編集して「上書き」で再アップロードすると同じグループ名のSKUが置き換わります。
                           </s-text>
                           {fetcher.data && (fetcher.data as { ok?: boolean; imported?: number }).imported !== undefined && (fetcher.data as { ok?: boolean; imported?: number }).ok === true && (
-                            <s-text tone="success" size="small">
+                            <s-text tone="success">
                               {(fetcher.data as { imported: number }).imported}件のグループをインポートしました
                             </s-text>
                           )}
                           {fetcher.data && (fetcher.data as { ok?: boolean; error?: string }).error && (
-                            <s-text tone="critical" size="small">
+                            <s-text tone="critical">
                               {(fetcher.data as { error: string }).error}
                             </s-text>
                           )}
@@ -6703,17 +6760,17 @@ export default function InventoryCountPage() {
                     }}
                   >
                     <s-stack gap="base">
-                      <s-stack direction="inline" gap="base" inlineAlignment="space-between">
-                        <s-text emphasis="bold" size="large">登録済み商品グループ</s-text>
+                      <s-stack direction="inline" gap="base" justifyContent="space-between">
+                        <s-text type="strong">登録済み商品グループ</s-text>
                         {productGroups.length > 0 && (
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             {productGroups.length}件のグループ
                           </s-text>
                         )}
                       </s-stack>
                       {productGroups.length === 0 ? (
                         <s-box padding="base" background="subdued">
-                          <s-text tone="subdued">商品グループが登録されていません</s-text>
+                          <s-text color="subdued">商品グループが登録されていません</s-text>
                         </s-box>
                       ) : (
                         <s-stack gap="base">
@@ -6742,14 +6799,14 @@ export default function InventoryCountPage() {
                                 <s-stack gap="base">
                                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
-                                      <s-text emphasis="bold">{g.name}</s-text>
-                                      <s-text tone="subdued" size="small">
+                                      <s-text type="strong">{g.name}</s-text>
+                                      <s-text color="subdued">
                                         {isSkuOnly ? `SKU指定: ${skuCount}件` : `合計: 選択 ${groupSelectedTotal} / ${groupTotalTotal}`}
                                       </s-text>
                                     </div>
                                     <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
                                       <s-button
-                                        size="small"
+                                       
                                         onClick={() => {
                                           setEditingGroupId(g.id);
                                           setGroupName(g.name);
@@ -6775,7 +6832,7 @@ export default function InventoryCountPage() {
                                         編集
                                       </s-button>
                                       <s-button
-                                        size="small"
+                                       
                                         tone="critical"
                                         onClick={() => handleDeleteGroup(g.id)}
                                       >
@@ -6906,15 +6963,15 @@ export default function InventoryCountPage() {
                                         e.currentTarget.style.backgroundColor = "#ffffff";
                                       }}
                                     >
-                                      <s-text tone="subdued" size="small">
+                                      <s-text color="subdued">
                                         SKU一覧（{skuCount}件）を確認・編集
                                       </s-text>
-                                      <s-text tone="subdued" size="small">
+                                      <s-text color="subdued">
                                         クリックで「商品検索」で一覧を表示
                                       </s-text>
                                     </div>
                                   ) : (
-                                    <s-text tone="subdued" size="small">コレクション: なし</s-text>
+                                    <s-text color="subdued">コレクション: なし</s-text>
                                   )}
                                 </s-stack>
                               </s-box>
@@ -6947,7 +7004,7 @@ export default function InventoryCountPage() {
                       >
                         棚卸ID発行
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         ロケーションと商品グループを選んで棚卸IDを発行します。発行後はPOS側で棚卸を行えます。
                       </s-text>
                     </div>
@@ -6962,12 +7019,12 @@ export default function InventoryCountPage() {
                       }}
                     >
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">棚卸ID発行</s-text>
+                        <s-text type="strong">棚卸ID発行</s-text>
                         <s-divider />
                         {/* Step 1: ロケーション選択 */}
                         <s-stack gap="base">
-                          <s-text emphasis="bold" size="small">1. ロケーション選択</s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text type="strong">1. ロケーション選択</s-text>
+                          <s-text color="subdued">
                             棚卸を行うロケーションを1つ選びます。
                           </s-text>
                           <s-text-field
@@ -6979,7 +7036,7 @@ export default function InventoryCountPage() {
                           />
                           <div style={{ maxHeight: "220px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
                             {filteredLocations.length === 0 ? (
-                              <s-text tone="subdued" size="small">ロケーションが見つかりません</s-text>
+                              <s-text color="subdued">ロケーションが見つかりません</s-text>
                             ) : (
                               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                                 {filteredLocations.map((loc) => {
@@ -7004,7 +7061,7 @@ export default function InventoryCountPage() {
                             )}
                           </div>
                           {createLocationId && (
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               選択中: {locations.find((l) => l.id === createLocationId)?.name || createLocationId}
                             </s-text>
                           )}
@@ -7013,13 +7070,13 @@ export default function InventoryCountPage() {
 
                         {/* Step 2: 商品グループ選択 */}
                         <s-stack gap="base">
-                          <s-text emphasis="bold" size="small">2. 商品グループ選択（複数可）</s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text type="strong">2. 商品グループ選択（複数可）</s-text>
+                          <s-text color="subdued">
                             対象の商品グループを1つ以上選びます。
                           </s-text>
                           <div style={{ maxHeight: "240px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
                             {productGroups.length === 0 ? (
-                              <s-text tone="subdued" size="small">商品グループがありません。先に「商品グループ設定」で作成してください。</s-text>
+                              <s-text color="subdued">商品グループがありません。先に「商品グループ設定」で作成してください。</s-text>
                             ) : (
                               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                                 {productGroups.map((g) => {
@@ -7060,7 +7117,7 @@ export default function InventoryCountPage() {
                             )}
                           </div>
                           {createProductGroupIds.length > 0 && (
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               選択中: {createProductGroupIds.length}グループ
                             </s-text>
                           )}
@@ -7107,7 +7164,7 @@ export default function InventoryCountPage() {
                               >
                                 棚卸IDを修復
                               </button>
-                              <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "-4px" }}>
+                              <s-text color="subdued" style={{ display: "block", marginTop: "-4px" }}>
                                 表示が空白の棚卸IDに番号を再付与します。一覧に0件と出ていても、メタフィールドにデータがあれば修復できます。POS・履歴を再読み込みすると反映されます。
                               </s-text>
                             </>
@@ -7115,45 +7172,45 @@ export default function InventoryCountPage() {
                         </div>
                         {false && fetcher.data?.ok && typeof (fetcher.data as { repaired?: number }).repaired === "number" && (
                           <s-box padding="base" background="subdued">
-                            <s-text emphasis="bold" tone="success">
+                            <s-text type="strong" tone="success">
                               棚卸IDを{(fetcher.data as { repaired: number }).repaired}件修復しました。
                             </s-text>
-                            <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
+                            <s-text color="subdued" style={{ display: "block", marginTop: "4px" }}>
                               POS・履歴タブを再読み込みすると反映されます。
                             </s-text>
                           </s-box>
                         )}
                         {fetcher.data?.ok && (fetcher.data as { restored?: boolean }).restored === true && (
                           <s-box padding="base" background="subdued">
-                            <s-text emphasis="bold" tone="success">
+                            <s-text type="strong" tone="success">
                               棚卸を復元しました（指定のID・ロケーション・グループで現在在庫のまま完了確定）。
                             </s-text>
                           </s-box>
                         )}
                         {fetcher.data?.ok && (fetcher.data as { redistributed?: boolean }).redistributed === true && (
                           <s-box padding="base" background="subdued">
-                            <s-text emphasis="bold" tone="success">
+                            <s-text type="strong" tone="success">
                               グループ振り分けを修正しました。一覧を更新するにはページを再読み込みしてください。
                             </s-text>
                           </s-box>
                         )}
                         {fetcher.data?.ok && (fetcher.data as { groupsCompleted?: boolean }).groupsCompleted === true && (
                           <s-box padding="base" background="subdued">
-                            <s-text emphasis="bold" tone="success">
+                            <s-text type="strong" tone="success">
                               商品グループをすべて完了にしました（現在在庫で確定）。一覧を更新するにはページを再読み込みしてください。
                             </s-text>
                           </s-box>
                         )}
                         {fetcher.data?.ok && fetcher.data.inventoryCountId && (
                           <s-box padding="base" background="subdued">
-                            <s-text emphasis="bold" tone="success">
+                            <s-text type="strong" tone="success">
                               発行完了: {fetcher.data.countName ?? fetcher.data.inventoryCountId}
                             </s-text>
-                            <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "4px" }}>
+                            <s-text color="subdued" style={{ display: "block", marginTop: "4px" }}>
                               履歴タブで確認・CSV出力できます。
                             </s-text>
                             {fetcher.data.inventoryItemIdsOmittedDueToSize && (
-                              <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "6px" }}>
+                              <s-text color="subdued" style={{ display: "block", marginTop: "6px" }}>
                                 商品数が多いため、POSではコレクションから商品を読み込みます。
                               </s-text>
                             )}
@@ -7176,7 +7233,7 @@ export default function InventoryCountPage() {
                       }}
                     >
                     <s-stack gap="base">
-                      <s-text emphasis="bold" size="large">発行の流れ</s-text>
+                      <s-text type="strong">発行の流れ</s-text>
                       <s-box padding="base" background="subdued" style={{ borderRadius: "8px" }}>
                         <s-stack gap="base">
                           <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
@@ -7193,9 +7250,9 @@ export default function InventoryCountPage() {
                           </div>
                         </s-stack>
                       </s-box>
-                      <s-text emphasis="bold" size="small">直近の発行</s-text>
+                      <s-text type="strong">直近の発行</s-text>
                       {inventoryCounts.length === 0 ? (
-                        <s-text tone="subdued" size="small">まだ発行されていません。</s-text>
+                        <s-text color="subdued">まだ発行されていません。</s-text>
                       ) : (
                         <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
                           <s-stack gap="base">
@@ -7218,7 +7275,7 @@ export default function InventoryCountPage() {
                               </div>
                             ))}
                           </s-stack>
-                          <s-text tone="subdued" size="small" style={{ display: "block", marginTop: "8px" }}>
+                          <s-text color="subdued" style={{ display: "block", marginTop: "8px" }}>
                             一覧は「履歴」タブで確認できます。
                           </s-text>
                         </div>
@@ -7247,7 +7304,7 @@ export default function InventoryCountPage() {
                       >
                         棚卸履歴
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         条件で絞り込みを行い、棚卸履歴を表示します。
                       </s-text>
                     </div>
@@ -7261,12 +7318,12 @@ export default function InventoryCountPage() {
                       }}
                     >
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">フィルター</s-text>
-                        <s-text tone="subdued" size="small">
+                        <s-text type="strong">フィルター</s-text>
+                        <s-text color="subdued">
                           ロケーション・ステータスを選ぶと一覧が絞り込まれます。
                         </s-text>
                         <s-divider />
-                        <s-text emphasis="bold" size="small">ロケーション</s-text>
+                        <s-text type="strong">ロケーション</s-text>
                         <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                           <div
                             onClick={() => setLocationFilters(new Set())}
@@ -7321,7 +7378,7 @@ export default function InventoryCountPage() {
                             );
                           })}
                         </div>
-                        <s-text emphasis="bold" size="small">ステータス</s-text>
+                        <s-text type="strong">ステータス</s-text>
                         <div style={{ maxHeight: "180px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                           <div
                             onClick={() => setStatusFilters(new Set())}
@@ -7389,8 +7446,8 @@ export default function InventoryCountPage() {
                       }}
                     >
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">ソート</s-text>
-                        <s-text tone="subdued" size="small">
+                        <s-text type="strong">ソート</s-text>
+                        <s-text color="subdued">
                           棚卸IDの表示順を選びます。
                         </s-text>
                         <s-divider />
@@ -7444,12 +7501,12 @@ export default function InventoryCountPage() {
                     }}
                   >
                     <s-stack gap="base">
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         表示: {filteredCounts.length}件 / {inventoryCounts.length}件
                       </s-text>
                       {filteredCounts.length === 0 ? (
                         <s-box padding="base">
-                          <s-text tone="subdued">履歴がありません</s-text>
+                          <s-text color="subdued">履歴がありません</s-text>
                         </s-box>
                       ) : (
                         <s-stack gap="none">
@@ -7561,19 +7618,19 @@ export default function InventoryCountPage() {
                               }}
                             >
                               <s-text
-                                emphasis="bold"
+                                type="strong"
                                 style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
                               >
                                 {countName}
                               </s-text>
-                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
+                              <s-text color="subdued" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
                                 {date}
                               </s-text>
                             </div>
                             <div style={{ marginBottom: "2px" }}>
                               <s-text
-                                tone="subdued"
-                                size="small"
+                                color="subdued"
+                               
                                 style={{
                                   whiteSpace: "nowrap",
                                   overflow: "hidden",
@@ -7586,8 +7643,8 @@ export default function InventoryCountPage() {
                             </div>
                             <div>
                               <s-text
-                                tone="subdued"
-                                size="small"
+                                color="subdued"
+                               
                                 style={{
                                   whiteSpace: "nowrap",
                                   overflow: "hidden",
@@ -7606,10 +7663,10 @@ export default function InventoryCountPage() {
                                 marginTop: "4px",
                               }}
                             >
-                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
+                              <s-text color="subdued" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
                                 <span style={getStatusBadgeStyle(getDisplayStatusForCount(displayCount))}>{statusLabel}</span>
                               </s-text>
-                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                              <s-text color="subdued" style={{ whiteSpace: "nowrap" }}>
                                 {isDetailLoading ? "…" : `${itemCount}件・実数${totalQty}${hasIncompleteGroup ? "/-" : currentQty > 0 ? `/${currentQty}` : "/-"}`}
                               </s-text>
                             </div>

@@ -28,7 +28,7 @@ function isTransientError(errorSummary: string | undefined): boolean {
   );
 }
 
-const API_VERSION = "2025-10";
+const API_VERSION = "2026-01";
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",

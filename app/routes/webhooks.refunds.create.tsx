@@ -8,7 +8,7 @@ import { logInventoryChange, getShopTimezoneAndDate, getLocationName, getInvento
 import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
-const API_VERSION = "2025-10";
+const API_VERSION = "2026-01";
 
 /**
  * line_item_id 検索失敗時のフォールバック: GraphQL Refund API で inventory_item_id を取得

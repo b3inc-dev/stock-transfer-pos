@@ -13,7 +13,7 @@ import {
   type InventoryCount,
 } from "./app.inventory-count";
 
-const API_VERSION = "2025-10";
+const API_VERSION = "2026-01";
 
 function shopFromDest(dest: string): string {
   try {

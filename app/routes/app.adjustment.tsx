@@ -5,6 +5,7 @@ import { useLoaderData, useFetcher, useSearchParams } from "react-router";
 import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
 import { getDateInShopTimezone, extractDateFromISO, getShopTimezone } from "../utils/timezone";
+import type { LocationNode, AdjustmentEntryItem, AdjustmentEntry } from "../types";
 
 const ADJUSTMENT_NS = "stock_transfer_pos";
 const ADJUSTMENT_KEY = "adjustment_entries_v1";
@@ -25,36 +26,8 @@ const ADJUSTMENT_DETAIL_COLUMN_IDS = [
 ] as const;
 const DEFAULT_ADJUSTMENT_CSV_COLUMNS = [...ADJUSTMENT_CSV_COLUMN_IDS];
 
-export type LocationNode = { id: string; name: string };
-
-export type AdjustmentEntryItem = {
-  id?: string;
-  inventoryItemId: string;
-  variantId?: string;
-  sku?: string;
-  barcode?: string;
-  title?: string;
-  option1?: string;
-  option2?: string;
-  option3?: string;
-  currentQuantity?: number;
-  quantity: number;
-};
-
-export type AdjustmentEntry = {
-  id: string;
-  adjustmentName?: string;
-  locationId: string;
-  locationName?: string;
-  date: string;
-  memo: string;
-  staffMemberId?: string | null;
-  staffName?: string | null;
-  items: AdjustmentEntryItem[];
-  status: "active" | "cancelled";
-  createdAt: string;
-  cancelledAt?: string;
-};
+// 型定義は app/types.ts に集約。後方互換のため re-export する
+export type { LocationNode, AdjustmentEntryItem, AdjustmentEntry } from "../types";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { admin } = await authenticate.admin(request);
@@ -641,7 +614,7 @@ export default function AdjustmentPage() {
                       >
                         調整履歴
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         条件で絞り込みを行い、調整履歴を表示します。
                       </s-text>
                     </div>
@@ -656,12 +629,12 @@ export default function AdjustmentPage() {
                       }}
                     >
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">フィルター</s-text>
-                        <s-text tone="subdued" size="small">
+                        <s-text type="strong">フィルター</s-text>
+                        <s-text color="subdued">
                           ロケーション・ステータスを選ぶと一覧が絞り込まれます。
                         </s-text>
                         <s-divider />
-                        <s-text emphasis="bold" size="small">ロケーション</s-text>
+                        <s-text type="strong">ロケーション</s-text>
                         <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                           <div
                             onClick={() => setLocationFilters(new Set())}
@@ -711,7 +684,7 @@ export default function AdjustmentPage() {
                             );
                           })}
                         </div>
-                        <s-text emphasis="bold" size="small">ステータス</s-text>
+                        <s-text type="strong">ステータス</s-text>
                         <div style={{ maxHeight: "180px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                           <div
                             onClick={() => setStatusFilters(new Set())}
@@ -767,8 +740,8 @@ export default function AdjustmentPage() {
                     {/* ソート: 調整ID 昇順 / 降順 */}
                     <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
                       <s-stack gap="base">
-                        <s-text emphasis="bold" size="large">ソート</s-text>
-                        <s-text tone="subdued" size="small">調整IDの表示順を選びます。</s-text>
+                        <s-text type="strong">ソート</s-text>
+                        <s-text color="subdued">調整IDの表示順を選びます。</s-text>
                         <s-divider />
                         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                           <div onClick={() => setIdSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: idSortOrder === "desc" ? "#eff6ff" : "transparent", border: idSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
@@ -797,7 +770,7 @@ export default function AdjustmentPage() {
                   >
                   <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         表示: {filteredEntries.length}件 / {estimatedTotal}
                       </s-text>
                       {(pageInfo.hasPreviousPage || pageInfo.hasNextPage) && (
@@ -846,7 +819,7 @@ export default function AdjustmentPage() {
                     </div>
                     {filteredEntries.length === 0 ? (
             <s-box padding="base">
-              <s-text tone="subdued">履歴がありません</s-text>
+              <s-text color="subdued">履歴がありません</s-text>
             </s-box>
           ) : (
             <s-stack gap="none">
@@ -897,19 +870,19 @@ export default function AdjustmentPage() {
                           }}
                         >
                           <s-text
-                            emphasis="bold"
+                            type="strong"
                             style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
                           >
                             {adjustmentName}
                           </s-text>
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
+                          <s-text color="subdued" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
                             {date}
                           </s-text>
                         </div>
                         <div style={{ marginBottom: "2px" }}>
                           <s-text
-                            tone="subdued"
-                            size="small"
+                            color="subdued"
+                           
                             style={{
                               whiteSpace: "nowrap",
                               overflow: "hidden",
@@ -922,8 +895,8 @@ export default function AdjustmentPage() {
                         </div>
                         <div>
                           <s-text
-                            tone="subdued"
-                            size="small"
+                            color="subdued"
+                           
                             style={{
                               whiteSpace: "nowrap",
                               overflow: "hidden",
@@ -942,7 +915,7 @@ export default function AdjustmentPage() {
                             marginTop: "4px",
                           }}
                         >
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
+                          <s-text color="subdued" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
                             <span style={getStatusBadgeStyle(entry.status)}>{STATUS_LABEL[entry.status] || entry.status}</span>
                             {entry.cancelledAt && (
                               <span style={{ marginLeft: "8px" }}>
@@ -950,7 +923,7 @@ export default function AdjustmentPage() {
                               </span>
                             )}
                           </s-text>
-                          <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                          <s-text color="subdued" style={{ whiteSpace: "nowrap" }}>
                             {itemCount}件・合計{totalQty}
                           </s-text>
                         </div>

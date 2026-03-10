@@ -57,10 +57,10 @@ export default function PlanPage() {
             }}
           >
             {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-            <s-text emphasis="bold">全機能をご利用いただけます</s-text>
+            <s-text type="strong">全機能をご利用いただけます</s-text>
             <div style={{ marginTop: "8px" }}>
               {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-              <s-text tone="subdued" size="small">
+              <s-text color="subdued">
                 このアプリでは料金プランの選択はありません。
               </s-text>
             </div>
@@ -124,10 +124,10 @@ export default function PlanPage() {
             }}
           >
             {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-            <s-text emphasis="bold">開発ストアのため課金は発生しません</s-text>
+            <s-text type="strong">開発ストアのため課金は発生しません</s-text>
             <div style={{ marginTop: "4px" }}>
               {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-              <s-text tone="subdued" size="small">
+              <s-text color="subdued">
                 全機能をご利用いただけます。本番ストアでは下記の料金が適用されます。
               </s-text>
             </div>

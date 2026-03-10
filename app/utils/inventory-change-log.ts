@@ -2,7 +2,9 @@
 // 在庫変動履歴を記録する共通ユーティリティ関数
 
 import db from "../db.server";
-import { getDateInShopTimezone } from "./timezone";
+import { getDateInShopTimezone, getShopTimezone } from "./timezone";
+import type { InventoryActivity } from "../types";
+
 export type InventoryChangeLogData = {
   shop: string;
   timestamp: Date;
@@ -11,76 +13,64 @@ export type InventoryChangeLogData = {
   sku: string;
   locationId: string;
   locationName: string;
-  activity: "inbound_transfer" | "outbound_transfer" | "loss_entry" | "inventory_count" | "adjustment" | "purchase_entry" | "purchase_cancel" | "order_sales" | "refund" | "order_cancel" | "admin_webhook";
-  delta: number | null; // 変動量（+/-、nullの場合は直前値が取れなかった）
-  quantityAfter: number | null; // 変動後数量（取れない場合はnull）
-  sourceType: string; // 変動の原因種別（activityと同じ値）
-  sourceId?: string | null; // 参照元ID（Transfer ID、loss_...、count_...、purchase_...、order_...等）
-  adjustmentGroupId?: string | null; // InventoryAdjustmentGroup ID（取れる場合）
-  idempotencyKey: string; // 二重登録防止用キー
-  note?: string | null; // 備考（アプリ実行分で取れる場合のみ）
+  activity: InventoryActivity;
+  delta: number | null;
+  quantityAfter: number | null;
+  sourceType: string;
+  sourceId?: string | null;
+  adjustmentGroupId?: string | null;
+  idempotencyKey: string;
+  note?: string | null;
   /** ショップタイムゾーンで計算した日付（YYYY-MM-DD）。渡すとUTCフォールバックを使わず一貫した日付になる */
   date?: string | null;
 };
 
+const IS_DEV = process.env.NODE_ENV !== "production";
+
 /**
  * ProductVariantからInventoryItem IDとSKUを取得する
- * @param admin Shopify Admin APIクライアント
- * @param variantId ProductVariant ID（GID形式）
- * @returns InventoryItem ID、SKU、variantIdのタプル
  */
 export async function getVariantInfo(
-  admin: { request: (options: { data: string; variables?: any }) => Promise<any> },
+  admin: { graphql: (q: string, v?: Record<string, unknown>) => Promise<Response> },
   variantId: string
 ): Promise<{ inventoryItemId: string | null; sku: string; variantId: string }> {
   try {
-    const resp = await admin.request({
-      data: `
-        #graphql
-        query GetVariant($id: ID!) {
-          productVariant(id: $id) {
-            id
-            sku
-            inventoryItem {
-              id
-            }
-          }
+    const resp = await admin.graphql(
+      `#graphql
+      query GetVariant($id: ID!) {
+        productVariant(id: $id) {
+          id
+          sku
+          inventoryItem { id }
         }
-      `,
-      variables: { id: variantId },
-    });
-    // shopify.clients.GraphqlのrequestメソッドはJSONを直接返す
-    const data = resp && typeof resp.json === "function" ? await resp.json() : resp;
-    const variant = data?.data?.productVariant;
+      }`,
+      { variables: { id: variantId } }
+    );
+    const { data } = await resp.json() as { data?: { productVariant?: { id: string; sku: string; inventoryItem?: { id: string } } } };
+    const variant = data?.productVariant;
     return {
-      inventoryItemId: variant?.inventoryItem?.id || null,
-      sku: variant?.sku || "",
-      variantId: variant?.id || variantId,
+      inventoryItemId: variant?.inventoryItem?.id ?? null,
+      sku: variant?.sku ?? "",
+      variantId: variant?.id ?? variantId,
     };
   } catch (error) {
-    console.error("Failed to get variant info:", error);
+    console.error("[getVariantInfo] Failed:", error);
     return { inventoryItemId: null, sku: "", variantId };
   }
 }
 
 /**
  * 在庫変動履歴を記録する共通関数
- * @param data 在庫変動履歴のデータ
- * @returns 成功した場合true、失敗した場合false
  */
 export async function logInventoryChange(data: InventoryChangeLogData): Promise<boolean> {
   try {
-    if (!db || typeof (db as any).inventoryChangeLog === "undefined") {
-      console.warn("[logInventoryChange] InventoryChangeLog model not found in Prisma client. Please restart the dev server.");
-      return false;
+    const date = data.date ?? getDateInShopTimezone(data.timestamp, "UTC");
+
+    if (IS_DEV) {
+      console.log(`[logInventoryChange] shop=${data.shop} activity=${data.activity} item=${data.inventoryItemId} location=${data.locationId} delta=${data.delta} date=${date}`);
     }
 
-    // 呼び出し元でショップタイムゾーンから date を渡すとそれを使用（Webhook・仕入等で統一）。未指定時はUTCで計算
-    const date = data.date ?? getDateInShopTimezone(data.timestamp, "UTC");
-    
-    console.log(`[logInventoryChange] Saving log: shop=${data.shop}, activity=${data.activity}, item=${data.inventoryItemId}, location=${data.locationId}, delta=${data.delta}, date=${date}`);
-
-    await (db as any).inventoryChangeLog.create({
+    await db.inventoryChangeLog.create({
       data: {
         shop: data.shop,
         timestamp: data.timestamp,
@@ -101,204 +91,153 @@ export async function logInventoryChange(data: InventoryChangeLogData): Promise<
       },
     });
 
-    console.log(`[logInventoryChange] Log saved successfully`);
     return true;
   } catch (error) {
-    console.error("[logInventoryChange] Error logging inventory change:", error);
+    console.error("[logInventoryChange] Error:", error);
     return false;
   }
 }
 
 /**
  * ショップのタイムゾーンを取得して日付を計算する
- * @param admin Shopify Admin APIクライアント
- * @param timestamp タイムスタンプ
- * @returns タイムゾーンと日付のタプル
  */
 export async function getShopTimezoneAndDate(
-  admin: { request: (options: { data: string; variables?: any }) => Promise<any> },
+  admin: { graphql: (q: string, v?: Record<string, unknown>) => Promise<Response> },
   timestamp: Date
 ): Promise<{ timezone: string; date: string }> {
-  try {
-    const resp = await admin.request({
-      data: `
-        #graphql
-        query GetShopTimezone {
-          shop {
-            ianaTimezone
-          }
-        }
-      `,
-    });
-    // shopify.clients.GraphqlのrequestメソッドはJSONを直接返す
-    const data = resp && typeof resp.json === "function" ? await resp.json() : resp;
-    const timezone = data?.data?.shop?.ianaTimezone || "UTC";
-    const date = getDateInShopTimezone(timestamp, timezone);
-    return { timezone, date };
-  } catch (error) {
-    console.error("Failed to get shop timezone:", error);
-    return { timezone: "UTC", date: getDateInShopTimezone(timestamp, "UTC") };
-  }
+  const timezone = await getShopTimezone(admin);
+  const date = getDateInShopTimezone(timestamp, timezone);
+  return { timezone, date };
 }
 
 /**
  * InventoryItemからSKUとvariantIdを取得する
- * @param admin Shopify Admin APIクライアント
- * @param inventoryItemId InventoryItem ID（GID形式）
- * @returns SKUとvariantIdのタプル
  */
 export async function getInventoryItemInfo(
-  admin: { request: (options: { data: string; variables?: any }) => Promise<any> },
+  admin: { graphql: (q: string, v?: Record<string, unknown>) => Promise<Response> },
   inventoryItemId: string
 ): Promise<{ sku: string; variantId: string | null }> {
   try {
-    const resp = await admin.request({
-      data: `
-        #graphql
-        query GetInventoryItem($id: ID!) {
-          inventoryItem(id: $id) {
-            id
-            variant {
-              id
-              sku
-            }
-          }
+    const resp = await admin.graphql(
+      `#graphql
+      query GetInventoryItem($id: ID!) {
+        inventoryItem(id: $id) {
+          id
+          variant { id sku }
         }
-      `,
-      variables: { id: inventoryItemId },
-    });
-    // shopify.clients.GraphqlのrequestメソッドはJSONを直接返す
-    const data = resp && typeof resp.json === "function" ? await resp.json() : resp;
-    const variant = data?.data?.inventoryItem?.variant;
+      }`,
+      { variables: { id: inventoryItemId } }
+    );
+    const { data } = await resp.json() as { data?: { inventoryItem?: { variant?: { id: string; sku: string } } } };
+    const variant = data?.inventoryItem?.variant;
     return {
-      sku: variant?.sku || "",
-      variantId: variant?.id || null,
+      sku: variant?.sku ?? "",
+      variantId: variant?.id ?? null,
     };
   } catch (error) {
-    console.error("Failed to get inventory item info:", error);
+    console.error("[getInventoryItemInfo] Failed:", error);
     return { sku: "", variantId: null };
   }
 }
 
 /**
  * Locationからロケーション名を取得する
- * @param admin Shopify Admin APIクライアント
- * @param locationId Location ID（GID形式）
- * @returns ロケーション名
  */
 export async function getLocationName(
-  admin: { request: (options: { data: string; variables?: any }) => Promise<any> },
+  admin: { graphql: (q: string, v?: Record<string, unknown>) => Promise<Response> },
   locationId: string
 ): Promise<string> {
   try {
-    const resp = await admin.request({
-      data: `
-        #graphql
-        query GetLocation($id: ID!) {
-          location(id: $id) {
-            id
-            name
-          }
-        }
-      `,
-      variables: { id: locationId },
-    });
-    // shopify.clients.GraphqlのrequestメソッドはJSONを直接返す
-    const data = resp && typeof resp.json === "function" ? await resp.json() : resp;
-    return data?.data?.location?.name || locationId;
+    const resp = await admin.graphql(
+      `#graphql
+      query GetLocation($id: ID!) {
+        location(id: $id) { id name }
+      }`,
+      { variables: { id: locationId } }
+    );
+    const { data } = await resp.json() as { data?: { location?: { name: string } } };
+    return data?.location?.name ?? locationId;
   } catch (error) {
-    console.error("Failed to get location name:", error);
+    console.error("[getLocationName] Failed:", error);
     return locationId;
   }
 }
 
 /**
  * 在庫調整の結果から変動履歴を記録する（複数商品対応）
- * @param admin Shopify Admin APIクライアント
- * @param shop ショップ識別子
- * @param changes 在庫変更の配列
- * @param activity アクティビティ種別
- * @param sourceId 参照元ID
- * @param adjustmentGroupId InventoryAdjustmentGroup ID（取れる場合）
- * @param note 備考
- * @returns 成功した件数
  */
 export async function logInventoryChangesFromAdjustment(
-  admin: { request: (options: { data: string; variables?: any }) => Promise<any> },
+  admin: { graphql: (q: string, v?: Record<string, unknown>) => Promise<Response> },
   shop: string,
   changes: Array<{ inventoryItemId: string; locationId: string; delta: number }>,
-  activity: InventoryChangeLogData["activity"],
+  activity: InventoryActivity,
   sourceId?: string | null,
   adjustmentGroupId?: string | null,
   note?: string | null
 ): Promise<number> {
   if (!changes || changes.length === 0) return 0;
 
-  const { timezone, date: baseDate } = await getShopTimezoneAndDate(admin, new Date());
+  const { date: baseDate } = await getShopTimezoneAndDate(admin, new Date());
   let successCount = 0;
 
-  // 各変更に対してログを記録
   for (const change of changes) {
     try {
-      // 商品情報とロケーション情報を並列取得
       const [itemInfo, locationName] = await Promise.all([
         getInventoryItemInfo(admin, change.inventoryItemId),
         getLocationName(admin, change.locationId),
       ]);
 
-      // 変動後の数量を取得（InventoryLevelから）
+      // 変動後の数量を取得
       let quantityAfter: number | null = null;
       try {
-        const levelResp = await admin.request({
-          data: `
-            #graphql
-            query GetInventoryLevel($itemId: ID!) {
-              inventoryItem(id: $itemId) {
-                inventoryLevels(first: 250) {
-                  edges {
-                    node {
-                      location {
-                        id
-                      }
-                      quantities(names: ["available"]) {
-                        name
-                        quantity
-                      }
-                    }
+        const levelResp = await admin.graphql(
+          `#graphql
+          query GetInventoryLevel($itemId: ID!) {
+            inventoryItem(id: $itemId) {
+              inventoryLevels(first: 250) {
+                edges {
+                  node {
+                    location { id }
+                    quantities(names: ["available"]) { name quantity }
                   }
                 }
               }
             }
-          `,
-          variables: { itemId: change.inventoryItemId },
-        });
-        // shopify.clients.GraphqlのrequestメソッドはJSONを直接返す
-        const levelData = levelResp && typeof levelResp.json === "function" ? await levelResp.json() : levelResp;
-        // 特定のロケーションに一致するInventoryLevelを検索
-        const levels = levelData?.data?.inventoryItem?.inventoryLevels?.edges || [];
-        const matchingLevel = levels.find(
-          (edge: any) => edge?.node?.location?.id === change.locationId
+          }`,
+          { variables: { itemId: change.inventoryItemId } }
         );
-        if (matchingLevel?.node?.quantities?.[0]) {
+        const levelJson = await levelResp.json() as {
+          data?: {
+            inventoryItem?: {
+              inventoryLevels?: {
+                edges: Array<{
+                  node: {
+                    location: { id: string };
+                    quantities: Array<{ name: string; quantity: number }>;
+                  };
+                }>;
+              };
+            };
+          };
+        };
+        const levels = levelJson.data?.inventoryItem?.inventoryLevels?.edges ?? [];
+        const matchingLevel = levels.find((edge) => edge.node.location.id === change.locationId);
+        if (matchingLevel?.node.quantities[0]) {
           quantityAfter = matchingLevel.node.quantities[0].quantity;
         }
       } catch (error) {
-        console.error("Failed to get inventory level:", error);
-        // quantityAfterはnullのまま続行
+        console.error("[logInventoryChangesFromAdjustment] Failed to get inventory level:", error);
       }
 
-      // 二重登録防止用キーを生成
-      // sourceIdがある場合はそれを使用、ない場合はタイムスタンプを秒単位に丸めて使用
-      // Date.now()は使用しない（同じ操作でも異なるキーになってしまうため）
       const timestampRounded = new Date(Math.floor(Date.now() / 1000) * 1000);
-      const idempotencyKey = sourceId 
+      const idempotencyKey = sourceId
         ? `${shop}_${activity}_${change.inventoryItemId}_${change.locationId}_${sourceId}`
         : `${shop}_${activity}_${change.inventoryItemId}_${change.locationId}_${timestampRounded.toISOString()}`;
 
       const logData: InventoryChangeLogData = {
         shop,
         timestamp: new Date(),
-        date: baseDate, // ショップタイムゾーンで計算済み
+        date: baseDate,
         inventoryItemId: change.inventoryItemId,
         variantId: itemInfo.variantId,
         sku: itemInfo.sku,
@@ -314,10 +253,9 @@ export async function logInventoryChangesFromAdjustment(
         note,
       };
 
-      const success = await logInventoryChange(logData);
-      if (success) successCount++;
+      if (await logInventoryChange(logData)) successCount++;
     } catch (error) {
-      console.error(`Error logging inventory change for item ${change.inventoryItemId}:`, error);
+      console.error(`[logInventoryChangesFromAdjustment] Error for item ${change.inventoryItemId}:`, error);
     }
   }
 

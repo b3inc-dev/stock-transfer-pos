@@ -3,121 +3,29 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator, useSearchParams } from "react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { authenticate } from "../shopify.server";
+import { parseSettings } from "../utils/schemas";
+import type {
+  LocationNode,
+  DestinationGroup,
+  CarrierOption,
+  LossReasonOption,
+  OrderDestinationOption,
+  SupplierOption,
+  OrderCsvColumn,
+  SettingsV1,
+} from "../types";
 
-export type LocationNode = { id: string; name: string };
-
-export type DestinationGroup = {
-  id: string;
-  name: string;
-  locationIds: string[]; // ✅ origin も必ず含める（POS側で所属グループ判定に使う）
-};
-
-export type CarrierOption = {
-  id: string;
-  label: string; // POSに出す表示名（例：ヤマト運輸）
-  company: string; // Shopifyプリセットの company（例：Yamato (JA)）
-  sortOrder?: number; // 表示順（小さい順、デフォルト: 999）
-};
-
-export type LossReasonOption = {
-  id: string;
-  label: string; // ロス区分名（例：破損、紛失）
-  sortOrder?: number; // 表示順（小さい順、デフォルト: 999）
-};
-
-export type OrderDestinationOption = {
-  id: string;
-  name: string; // 発注先名（例: 本社）
-  code?: string; // 任意コード
-  sortOrder?: number; // 表示順（小さい順、デフォルト: 999）
-};
-
-export type SupplierOption = {
-  id: string;
-  name: string; // 仕入先名
-  code?: string; // 仕入先コード（任意：社内管理用など）
-  sortOrder?: number; // 表示順（小さい順、デフォルト: 999）
-};
-
-// CSV出力項目の定義
-export type OrderCsvColumn = 
-  | "orderId"           // 発注ID
-  | "orderName"         // 名称
-  | "locationName"       // 発注店舗
-  | "destination"        // 発注先
-  | "destinationCode"    // 発注先コード（発注先マスタのコード）
-  | "date"              // 日付
-  | "desiredDeliveryDate" // 希望納品日
-  | "staffName"         // 担当者
-  | "note"              // 備考
-  | "status"            // ステータス
-  | "productTitle"      // 商品名
-  | "sku"               // SKU
-  | "barcode"           // JAN
-  | "option1"           // オプション1
-  | "option2"           // オプション2
-  | "option3"           // オプション3
-  | "quantity"          // 数量
-  | "arrivalDate"       // 入荷日（追加項目）
-  | "inspectionDate"    // 検品日（追加項目）
-  | "cost"              // 原価（追加項目）
-  | "price"             // 販売価格（追加項目）
-;
-
-export type SettingsV1 = {
-  version: 1;
-  destinationGroups?: DestinationGroup[]; // 非推奨（後方互換性のため残す）
-  carriers: CarrierOption[];
-  suppliers?: SupplierOption[]; // 仕入で使用する仕入先設定（旧：purchase.suppliersに移行予定）
-  lossReasons?: LossReasonOption[]; // ロス区分設定（破損/紛失 など）
-  loss?: {
-    allowCustomReason?: boolean; // 「その他（自由入力）」を許可するかどうか（デフォルト: true）
-    csvExportColumns?: string[]; // ロス履歴CSV出力項目（並び順を含む）
-  };
-  order?: {
-    useDestinationMaster?: boolean; // 発注先マスタを使用するかどうか（true=使用, false=発注先項目を表示しない）
-    useDesiredDeliveryDate?: boolean; // 「希望納品日」フィールドを表示するかどうか（デフォルト: true）
-    desiredDeliveryQuickDays?: number[]; // 「希望納品日」ボタンのプリセット日数（例: [1,2,3,7,30]）
-    desiredDeliveryQuickDayLabels?: Record<string, string>; // 日数ごとのカスタムボタン名（キーは日数の文字列。未設定時は日数から自動表示）
-    destinations?: OrderDestinationOption[]; // 発注先マスタ一覧
-    csvExportColumns?: OrderCsvColumn[]; // CSV出力項目（並び順を含む）
-    csvExportColumnLabels?: Partial<Record<OrderCsvColumn, string>>; // CSV出力項目のカスタムラベル（項目名変更用）
-  };
-  purchase?: {
-    suppliers?: SupplierOption[]; // 仕入で使用する仕入先設定（ここが正：発注もこのリストを使用）
-    allowCustomSupplier?: boolean; // 「その他（仕入先入力）」を表示するかどうか（デフォルト: true）
-    csvExportColumns?: string[]; // 仕入履歴CSV出力項目（並び順を含む）
-  };
-  // 追加設定項目
-  visibleLocationIds?: string[]; // 表示ロケーション選択設定（空配列=全ロケーション表示）
-  outbound?: {
-    allowForceCancel?: boolean; // 強制キャンセル処理許可（デフォルト: true）
-    historyInitialLimit?: number; // 出庫履歴（Transfer）初回件数。API上限250、推奨100
-    shippingRequired?: boolean; // 配送情報を必須にする（true=必須：優先1・翌日・午前中、false=任意：直接入力・日付空白・未選択）
-    allowCustomCarrier?: boolean; // 「その他（配送会社入力）」を表示するかどうか（デフォルト: true）
-    arrivalQuickDays?: number[]; // 「到着予定日」ボタンのプリセット日数（例: [1,2]）
-    arrivalQuickDayLabels?: Record<string, string>; // 日数ごとのカスタムボタン名（キーは日数の文字列）
-  };
-  inbound?: {
-    allowOverReceive?: boolean; // 過剰入庫許可（デフォルト: true）
-    allowExtraReceive?: boolean; // 予定外入庫許可（デフォルト: true）
-    listInitialLimit?: number; // 入庫リスト（Transfer）初回件数。API上限250、推奨100
-    csvExportColumns?: string[]; // 入出庫履歴CSV出力項目（出庫は入庫と連動。並び順を含む）
-  };
-  inventoryCount?: {
-    allowExtraCount?: boolean; // 予定外棚卸許可（デフォルト: true）
-    csvExportColumns?: string[]; // 棚卸履歴CSV出力項目（並び順を含む、明細モード用）
-  };
-  adjustment?: {
-    csvExportColumns?: string[]; // 調整履歴CSV出力項目（並び順を含む）
-  };
-  productList?: {
-    initialLimit?: number; // 商品リスト（追加行表示）初回件数。lineItems上限250、推奨250
-  };
-  searchList?: {
-    initialLimit?: number; // 検索リスト（検索結果表示）初回件数。productVariants上限50、推奨50
-  };
-};
+// 型定義は app/types.ts に集約。後方互換のため re-export する
+export type {
+  LocationNode,
+  DestinationGroup,
+  CarrierOption,
+  LossReasonOption,
+  OrderDestinationOption,
+  SupplierOption,
+  OrderCsvColumn,
+  SettingsV1,
+} from "../types";
 
 const NS = "stock_transfer_pos";
 const KEY = "settings_v1";
@@ -436,7 +344,7 @@ function sanitizeSettings(input: any): SettingsV1 {
     const desiredDeliveryQuickDaysRaw = Array.isArray(input.order.desiredDeliveryQuickDays)
       ? input.order.desiredDeliveryQuickDays
       : [];
-    const desiredDeliveryQuickDaysSanitized = Array.from(
+    const desiredDeliveryQuickDaysSanitized = Array.from<number>(
       new Set(
         desiredDeliveryQuickDaysRaw
           .map((v: any) => Number(v))
@@ -581,7 +489,7 @@ function sanitizeSettings(input: any): SettingsV1 {
     const arrivalQuickDaysRaw = Array.isArray(input.outbound.arrivalQuickDays)
       ? input.outbound.arrivalQuickDays
       : [];
-    const arrivalQuickDaysSanitized = Array.from(
+    const arrivalQuickDaysSanitized = Array.from<number>(
       new Set(
         arrivalQuickDaysRaw
           .map((v: any) => Number(v))
@@ -1628,7 +1536,7 @@ export default function SettingsPage() {
       const cur = s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
       const has = cur.includes(day);
       let next = has ? cur.filter((v) => v !== day) : [...cur, day];
-      next = Array.from(new Set(next)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
+      next = Array.from<number>(new Set(next)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
       if (next.length === 0) next = [1, 2, 3, 7, 30];
       const labels = { ...(s.order?.desiredDeliveryQuickDayLabels ?? {}) };
       if (has) delete labels[String(day)];
@@ -1721,7 +1629,7 @@ export default function SettingsPage() {
       if (i < 0) return s;
       const updated = [...cur];
       updated[i] = newDay;
-      const uniq = Array.from(new Set(updated)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
+      const uniq = Array.from<number>(new Set(updated)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
       const labels = { ...(s.order?.desiredDeliveryQuickDayLabels ?? {}) };
       delete labels[String(oldDay)];
       return {
@@ -1776,7 +1684,7 @@ export default function SettingsPage() {
       const cur = s.outbound?.arrivalQuickDays ?? [1, 2];
       const has = cur.includes(day);
       let next = has ? cur.filter((v) => v !== day) : [...cur, day];
-      next = Array.from(new Set(next)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
+      next = Array.from<number>(new Set(next)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
       if (next.length === 0) next = [1, 2];
       const labels = { ...(s.outbound?.arrivalQuickDayLabels ?? {}) };
       delete labels[String(day)];
@@ -1852,7 +1760,7 @@ export default function SettingsPage() {
       if (i < 0) return s;
       const updated = [...cur];
       updated[i] = newDay;
-      const uniq = Array.from(new Set(updated)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
+      const uniq = Array.from<number>(new Set(updated)).filter((v) => v > 0 && v <= 365).sort((a, b) => a - b);
       const labels = { ...(s.outbound?.arrivalQuickDayLabels ?? {}) };
       delete labels[String(oldDay)];
       return {
@@ -1979,7 +1887,7 @@ export default function SettingsPage() {
                       >
                         店舗設定
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         POS側で表示するロケーションを選択します。
                         <br />
                         全て表示のまま＝全ロケーション表示。項目を選ぶとそのロケーションのみ表示されます。
@@ -2131,7 +2039,7 @@ export default function SettingsPage() {
                       >
                         アプリ表示件数（初回読み込み）
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         履歴一覧・商品リスト・検索リストごとに初回表示件数を設定します。
                       </s-text>
                     </div>
@@ -2148,12 +2056,11 @@ export default function SettingsPage() {
                         <s-stack gap="base">
                           {/* 履歴一覧リスト：出庫履歴・入庫履歴・ロス履歴に適用。outbound.historyInitialLimit と inbound.listInitialLimit を同じ値で設定 */}
                           <s-text-field
-                            type="text"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
+
+
+
                             label="履歴一覧リスト"
                             value={String(settings.outbound?.historyInitialLimit ?? 100)}
-                            helpText={displayCountErrors.historyList}
                             tone={displayCountErrors.historyList ? "critical" : undefined}
                             onInput={(e: any) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 250, 100);
@@ -2180,18 +2087,18 @@ export default function SettingsPage() {
                               }
                             }}
                           />
-                          <s-text tone="subdued" size="small">
+                          {displayCountErrors.historyList && <s-text tone="critical">{displayCountErrors.historyList}</s-text>}
+                          <s-text color="subdued">
                             出庫・入庫・ロス履歴の一覧。最大250件、推奨100件。
                           </s-text>
 
                           {/* 商品リスト：出庫・入庫・ロス等の商品リスト（追加行表示）に適用 */}
                           <s-text-field
-                            type="text"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
+
+
+
                             label="商品リスト"
                             value={String(settings.productList?.initialLimit ?? 250)}
-                            helpText={displayCountErrors.productList}
                             tone={displayCountErrors.productList ? "critical" : undefined}
                             onInput={(e: any) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 250, 250);
@@ -2214,18 +2121,18 @@ export default function SettingsPage() {
                               }
                             }}
                           />
-                          <s-text tone="subdued" size="small">
+                          {displayCountErrors.productList && <s-text tone="critical">{displayCountErrors.productList}</s-text>}
+                          <s-text color="subdued">
                             出庫・入庫・ロス等の商品リスト初回表示。最大250件、推奨250件。
                           </s-text>
 
                           {/* 検索リスト：検索結果表示に適用。API上限50 */}
                           <s-text-field
-                            type="text"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
+
+
+
                             label="検索リスト"
                             value={String(settings.searchList?.initialLimit ?? 50)}
-                            helpText={displayCountErrors.searchList}
                             tone={displayCountErrors.searchList ? "critical" : undefined}
                             onInput={(e: any) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 50, 50);
@@ -2248,7 +2155,8 @@ export default function SettingsPage() {
                               }
                             }}
                           />
-                          <s-text tone="subdued" size="small">
+                          {displayCountErrors.searchList && <s-text tone="critical">{displayCountErrors.searchList}</s-text>}
+                          <s-text color="subdued">
                             検索結果の初回表示。API制限により最大50件。
                           </s-text>
                         </s-stack>
@@ -2283,7 +2191,7 @@ export default function SettingsPage() {
                       >
                         出庫設定
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         出庫処理で強制キャンセル（在庫を戻す処理）を許可するかどうかを設定します。
                       </s-text>
                     </div>
@@ -2375,7 +2283,7 @@ export default function SettingsPage() {
                       >
                         配送情報
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         任意：配送業者＝直接入力・日付空白・時間未選択。
                         <br />
                         必須：配送業者＝配送設定の表示順1・翌日日付・午前中をデフォルトで入力します。
@@ -2393,8 +2301,8 @@ export default function SettingsPage() {
                         }}
                       >
                         <s-stack gap="base">
-                          <s-stack gap="extraTight">
-                            <s-stack direction="inline" gap="base" inlineAlignment="start">
+                          <s-stack gap="small-100">
+                            <s-stack direction="inline" gap="base" justifyContent="start">
                               <label
                                 style={{
                                   display: "flex",
@@ -2443,19 +2351,19 @@ export default function SettingsPage() {
                           <s-divider />
 
                           {/* 到着予定日ボタン設定：チェック・並び順・ボタン名・日数・上下（初期で1日後・2日後） */}
-                          <s-stack gap="extraTight">
-                            <s-text emphasis="bold" size="small">
+                          <s-stack gap="small-100">
+                            <s-text type="strong">
                               「到着予定日」ボタン設定
                             </s-text>
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               出庫の「到着予定日」に表示する「◯日後」ボタンを選択し、並び順を変更できます。
                             </s-text>
                             {arrivalDaysList.length === 0 ? (
                               <s-box padding="base">
-                                <s-text tone="subdued">ボタンがありません。下の「日数を追加」で追加してください。</s-text>
+                                <s-text color="subdued">ボタンがありません。下の「日数を追加」で追加してください。</s-text>
                               </s-box>
                             ) : (
-                              <s-stack gap="tight">
+                              <s-stack gap="small">
                                 {arrivalDaysList.map((day, index) => (
                                   <div
                                     key={day}
@@ -2513,7 +2421,7 @@ export default function SettingsPage() {
                                       }}
                                     />
                                     <input
-                                      type="text"
+
                                       value={settings.outbound?.arrivalQuickDayLabels?.[String(day)] ?? ""}
                                       onChange={(e) =>
                                         updateArrivalDayLabel(day, (e.target as HTMLInputElement).value)
@@ -2551,16 +2459,16 @@ export default function SettingsPage() {
                                       }}
                                       title="日数（1〜365）"
                                     />
-                                    <s-stack direction="inline" gap="tight">
+                                    <s-stack direction="inline" gap="small">
                                       <s-button
-                                        size="small"
+                                       
                                         disabled={index === 0}
                                         onClick={() => moveArrivalDayUp(day)}
                                       >
                                         ↑
                                       </s-button>
                                       <s-button
-                                        size="small"
+                                       
                                         disabled={index === arrivalDaysList.length - 1}
                                         onClick={() => moveArrivalDayDown(day)}
                                       >
@@ -2571,7 +2479,7 @@ export default function SettingsPage() {
                                 ))}
                               </s-stack>
                             )}
-                            <s-stack direction="inline" gap="small" inlineAlignment="start" style={{ marginTop: 8 }}>
+                            <s-stack direction="inline" gap="small" justifyContent="start" style={{ marginTop: 8 }}>
                               <s-text-field
                                 label="任意の日数（1〜365）"
                                 value={outboundQuickDayInput}
@@ -2580,14 +2488,14 @@ export default function SettingsPage() {
                                 style={{ maxWidth: 140 }}
                               />
                               <s-button
-                                kind="secondary"
+                                variant="secondary"
                                 onClick={() => {
                                   const n = Number(outboundQuickDayInput);
                                   if (!Number.isFinite(n) || n <= 0 || n > 365) return;
                                   setSettings((s) => {
                                     const cur = s.outbound?.arrivalQuickDays ?? [1, 2];
                                     let next = [...cur, n];
-                                    next = Array.from(new Set(next)).filter(
+                                    next = Array.from<number>(new Set(next)).filter(
                                       (v) => v > 0 && v <= 365
                                     );
                                     next.sort((a, b) => a - b);
@@ -2637,7 +2545,7 @@ export default function SettingsPage() {
                       >
                         配送設定
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         アプリ表示名と Shopify のプリセット company を設定します。
                         <br />
                         例：Yamato (JA) / Sagawa (JA) / Japan Post (JA)
@@ -2658,11 +2566,11 @@ export default function SettingsPage() {
                           {/* 「その他（配送会社入力）」表示フラグ */}
                           <s-stack gap="base">
                             <s-stack direction="inline" gap="small" alignItems="center">
-                              <s-text emphasis="bold" size="small">
+                              <s-text type="strong">
                                 「その他（配送会社入力）」の表示
                               </s-text>
                             </s-stack>
-                            <s-stack direction="inline" gap="base" inlineAlignment="start">
+                            <s-stack direction="inline" gap="base" justifyContent="start">
                               <label
                                 style={{
                                   display: "flex",
@@ -2721,23 +2629,23 @@ export default function SettingsPage() {
                           {showCarrierPresets ? (
                             <s-box padding="base" background="subdued">
                               <s-stack gap="base">
-                                <s-text emphasis="bold" size="small">
+                                <s-text type="strong">
                                   グローバル（代表）
                                 </s-text>
-                                <s-stack gap="tight">
+                                <s-stack gap="small">
                                   {COMPANY_PRESETS_GLOBAL.map((name) => (
-                                    <s-text key={name} tone="subdued" size="small">
+                                    <s-text key={name} color="subdued">
                                       • {name}
                                     </s-text>
                                   ))}
                                 </s-stack>
                                 <s-divider />
-                                <s-text emphasis="bold" size="small">
+                                <s-text type="strong">
                                   日本（追加分）
                                 </s-text>
-                                <s-stack gap="tight">
+                                <s-stack gap="small">
                                   {COMPANY_PRESETS_JP_EXTRA.map((name) => (
-                                    <s-text key={name} tone="subdued" size="small">
+                                    <s-text key={name} color="subdued">
                                       • {name}
                                     </s-text>
                                   ))}
@@ -2748,7 +2656,7 @@ export default function SettingsPage() {
 
                           {settings.carriers.length === 0 ? (
                             <s-box padding="base">
-                              <s-text tone="subdued">
+                              <s-text color="subdued">
                                 配送会社が登録されていません
                               </s-text>
                             </s-box>
@@ -2760,9 +2668,9 @@ export default function SettingsPage() {
                                     <s-stack
                                       direction="inline"
                                       gap="base"
-                                      inlineAlignment="space-between"
+                                      justifyContent="space-between"
                                     >
-                                      <s-text emphasis="bold" size="small">
+                                      <s-text type="strong">
                                         表示順: {index + 1}
                                       </s-text>
                                     </s-stack>
@@ -2785,15 +2693,15 @@ export default function SettingsPage() {
                                       onChange={(e: any) =>
                                         updateCarrier(c.id, { company: readValue(e) })
                                       }
-                                      helpText="例：Yamato (JA) / Sagawa (JA) / Japan Post (JA)"
                                     />
+                                    <s-text color="subdued">例：Yamato (JA) / Sagawa (JA) / Japan Post (JA)</s-text>
                                     <s-stack
                                       direction="inline"
                                       gap="base"
-                                      inlineAlignment="center"
+                                      justifyContent="center"
                                     >
                                       <s-button
-                                        size="small"
+                                       
                                         onClick={() =>
                                           updateCarrier(c.id, { company: "Yamato (JA)" })
                                         }
@@ -2801,7 +2709,7 @@ export default function SettingsPage() {
                                         Yamato
                                       </s-button>
                                       <s-button
-                                        size="small"
+                                       
                                         onClick={() =>
                                           updateCarrier(c.id, { company: "Sagawa (JA)" })
                                         }
@@ -2809,7 +2717,7 @@ export default function SettingsPage() {
                                         Sagawa
                                       </s-button>
                                       <s-button
-                                        size="small"
+                                       
                                         onClick={() =>
                                           updateCarrier(c.id, {
                                             company: "Japan Post (JA)",
@@ -2818,24 +2726,24 @@ export default function SettingsPage() {
                                       >
                                         Japan Post
                                       </s-button>
-                                      <s-box inlineSize="fill" />
+                                      <s-box inlineSize="100%" />
                                       <s-button
                                         tone="critical"
-                                        size="small"
+                                       
                                         onClick={() => removeCarrier(c.id)}
                                       >
                                         削除
                                       </s-button>
-                                      <s-stack direction="inline" gap="tight">
+                                      <s-stack direction="inline" gap="small">
                                         <s-button
-                                          size="small"
+                                         
                                           disabled={index === 0}
                                           onClick={() => moveCarrierUp(c.id)}
                                         >
                                           ↑
                                         </s-button>
                                         <s-button
-                                          size="small"
+                                         
                                           disabled={index === settings.carriers.length - 1}
                                           onClick={() => moveCarrierDown(c.id)}
                                         >
@@ -2853,7 +2761,7 @@ export default function SettingsPage() {
                             <s-stack
                               direction="inline"
                               gap="base"
-                              inlineAlignment="start"
+                              justifyContent="start"
                             >
                               <s-button onClick={addCarrier}>配送会社を追加</s-button>
                               <s-button onClick={resetCarriersToDefault}>
@@ -2893,7 +2801,7 @@ export default function SettingsPage() {
                       >
                         過剰入庫許可
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         予定数量を超える入庫を許可するかどうかを設定します。
                       </s-text>
                     </div>
@@ -2985,7 +2893,7 @@ export default function SettingsPage() {
                       >
                         予定外入庫許可
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         予定にない商品の入庫を許可するかどうかを設定します。
                       </s-text>
                     </div>
@@ -3061,7 +2969,7 @@ export default function SettingsPage() {
                   <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                     <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                       <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>入出庫履歴CSV出力項目設定</div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         入出庫履歴のCSV出力時に含める項目を選択し、並び順を変更できます。出庫は入庫と同じ設定を共有します。チェックを外すとその項目は出力されません。
                         <br />
                         <br />
@@ -3077,17 +2985,17 @@ export default function SettingsPage() {
                         <s-stack gap="base">
                           <div>
                             {historyCsvColumns.length === 0 ? (
-                              <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                              <s-box padding="base"><s-text color="subdued">選択された項目がありません</s-text></s-box>
                             ) : (
-                              <s-stack gap="tight">
+                              <s-stack gap="small">
                                 {historyCsvColumns.map((col, index) => (
                                   <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
                                     <input type="checkbox" checked={true} onChange={() => toggleHistoryCsvColumn(col)} disabled={historyCsvColumns.length === 1} style={{ cursor: historyCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
                                     <input type="number" min={1} max={historyCsvColumns.length} defaultValue={index + 1} key={`${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= historyCsvColumns.length) moveHistoryCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.inbound?.csvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
                                     <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{HISTORY_CSV_ID_TO_LABEL[col] ?? col}</span>
-                                    <s-stack direction="inline" gap="tight">
-                                      <s-button size="small" disabled={index === 0} onClick={() => moveHistoryCsvColumnUp(col)}>↑</s-button>
-                                      <s-button size="small" disabled={index === historyCsvColumns.length - 1} onClick={() => moveHistoryCsvColumnDown(col)}>↓</s-button>
+                                    <s-stack direction="inline" gap="small">
+                                      <s-button disabled={index === 0} onClick={() => moveHistoryCsvColumnUp(col)}>↑</s-button>
+                                      <s-button disabled={index === historyCsvColumns.length - 1} onClick={() => moveHistoryCsvColumnDown(col)}>↓</s-button>
                                     </s-stack>
                                   </div>
                                 ))}
@@ -3096,11 +3004,11 @@ export default function SettingsPage() {
                           </div>
                           <s-divider />
                           <div>
-                            <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                            <s-text type="strong" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
                             {HISTORY_CSV_COLUMN_IDS.filter((c) => !historyCsvColumns.includes(c)).length === 0 ? (
-                              <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                              <s-box padding="base"><s-text color="subdued">すべての項目が選択されています</s-text></s-box>
                             ) : (
-                              <s-stack gap="tight">
+                              <s-stack gap="small">
                                 {HISTORY_CSV_COLUMN_IDS.filter((c) => !historyCsvColumns.includes(c)).map((col) => (
                                   <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
                                     <input type="checkbox" checked={false} onChange={() => toggleHistoryCsvColumn(col)} />
@@ -3111,8 +3019,8 @@ export default function SettingsPage() {
                             )}
                           </div>
                           <s-box padding="base">
-                            <s-stack direction="inline" gap="base" inlineAlignment="start">
-                              <s-button size="small" onClick={resetHistoryCsvColumns}>デフォルトに戻す</s-button>
+                            <s-stack direction="inline" gap="base" justifyContent="start">
+                              <s-button onClick={resetHistoryCsvColumns}>デフォルトに戻す</s-button>
                             </s-stack>
                           </s-box>
                         </s-stack>
@@ -3146,7 +3054,7 @@ export default function SettingsPage() {
                     >
                       仕入先設定
                     </div>
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       仕入先と仕入先コードを登録します。
                       <br />
                       例：倉庫名や卸業者やメーカー名などを登録しておくと、仕入履歴の集計がしやすくなります。
@@ -3166,11 +3074,11 @@ export default function SettingsPage() {
                       {/* 「その他（仕入先入力）」表示フラグ */}
                       <s-stack gap="base" style={{ marginBottom: 16 }}>
                         <s-stack direction="inline" gap="small" alignItems="center">
-                          <s-text emphasis="bold" size="small">
+                          <s-text type="strong">
                             「その他（仕入先入力）」の表示
                           </s-text>
                         </s-stack>
-                        <s-stack direction="inline" gap="base" inlineAlignment="start">
+                        <s-stack direction="inline" gap="base" justifyContent="start">
                           <label
                             style={{
                               display: "flex",
@@ -3224,7 +3132,7 @@ export default function SettingsPage() {
                       </s-stack>
                       {(!settings.suppliers || settings.suppliers.length === 0) ? (
                         <s-box padding="base">
-                          <s-text tone="subdued">
+                          <s-text color="subdued">
                             仕入先が登録されていません
                           </s-text>
                         </s-box>
@@ -3236,9 +3144,9 @@ export default function SettingsPage() {
                                 <s-stack
                                   direction="inline"
                                   gap="base"
-                                  inlineAlignment="space-between"
+                                  justifyContent="space-between"
                                 >
-                                  <s-text emphasis="bold" size="small">
+                                  <s-text type="strong">
                                     表示順: {index + 1}
                                   </s-text>
                                 </s-stack>
@@ -3261,27 +3169,27 @@ export default function SettingsPage() {
                                   onChange={(e: any) =>
                                     updateSupplier(sp.id, { code: readValue(e) })
                                   }
-                                  helpText="任意の管理用コード（空欄でも問題ありません）"
                                 />
-                                <s-stack direction="inline" gap="base" inlineAlignment="end">
-                                  <s-box inlineSize="fill" />
+                                <s-text color="subdued">任意の管理用コード（空欄でも問題ありません）</s-text>
+                                <s-stack direction="inline" gap="base" justifyContent="end">
+                                  <s-box inlineSize="100%" />
                                   <s-button
                                     tone="critical"
-                                    size="small"
+                                   
                                     onClick={() => removeSupplier(sp.id)}
                                   >
                                     削除
                                   </s-button>
-                                  <s-stack direction="inline" gap="tight">
+                                  <s-stack direction="inline" gap="small">
                                     <s-button
-                                      size="small"
+                                     
                                       disabled={index === 0}
                                       onClick={() => moveSupplierUp(sp.id)}
                                     >
                                       ↑
                                     </s-button>
                                     <s-button
-                                      size="small"
+                                     
                                       disabled={
                                         index === (settings.suppliers ?? []).length - 1
                                       }
@@ -3298,7 +3206,7 @@ export default function SettingsPage() {
                       )}
 
                       <s-box padding="base">
-                        <s-stack direction="inline" gap="base" inlineAlignment="start">
+                        <s-stack direction="inline" gap="base" justifyContent="start">
                           <s-button onClick={addSupplier}>仕入先を追加</s-button>
                         </s-stack>
                       </s-box>
@@ -3312,7 +3220,7 @@ export default function SettingsPage() {
                 <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>仕入履歴CSV出力項目設定</div>
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       仕入履歴のCSV出力時に含める項目を選択し、並び順を変更できます。チェックを外すとその項目は出力されません。
                       <br />
                       <br />
@@ -3328,17 +3236,17 @@ export default function SettingsPage() {
                       <s-stack gap="base">
                         <div>
                           {purchaseCsvColumns.length === 0 ? (
-                            <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                            <s-box padding="base"><s-text color="subdued">選択された項目がありません</s-text></s-box>
                           ) : (
-                            <s-stack gap="tight">
+                            <s-stack gap="small">
                               {purchaseCsvColumns.map((col, index) => (
                                 <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
                                   <input type="checkbox" checked={true} onChange={() => togglePurchaseCsvColumn(col)} disabled={purchaseCsvColumns.length === 1} style={{ cursor: purchaseCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
                                   <input type="number" min={1} max={purchaseCsvColumns.length} defaultValue={index + 1} key={`p-${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= purchaseCsvColumns.length) movePurchaseCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.purchase?.csvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
                                   <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{PURCHASE_CSV_ID_TO_LABEL[col] ?? col}</span>
-                                  <s-stack direction="inline" gap="tight">
-                                    <s-button size="small" disabled={index === 0} onClick={() => movePurchaseCsvColumnUp(col)}>↑</s-button>
-                                    <s-button size="small" disabled={index === purchaseCsvColumns.length - 1} onClick={() => movePurchaseCsvColumnDown(col)}>↓</s-button>
+                                  <s-stack direction="inline" gap="small">
+                                    <s-button disabled={index === 0} onClick={() => movePurchaseCsvColumnUp(col)}>↑</s-button>
+                                    <s-button disabled={index === purchaseCsvColumns.length - 1} onClick={() => movePurchaseCsvColumnDown(col)}>↓</s-button>
                                   </s-stack>
                                 </div>
                               ))}
@@ -3347,11 +3255,11 @@ export default function SettingsPage() {
                         </div>
                         <s-divider />
                         <div>
-                          <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                          <s-text type="strong" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
                           {PURCHASE_CSV_COLUMN_IDS.filter((c) => !purchaseCsvColumns.includes(c)).length === 0 ? (
-                            <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                            <s-box padding="base"><s-text color="subdued">すべての項目が選択されています</s-text></s-box>
                           ) : (
-                            <s-stack gap="tight">
+                            <s-stack gap="small">
                               {PURCHASE_CSV_COLUMN_IDS.filter((c) => !purchaseCsvColumns.includes(c)).map((col) => (
                                 <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
                                   <input type="checkbox" checked={false} onChange={() => togglePurchaseCsvColumn(col)} />
@@ -3362,8 +3270,8 @@ export default function SettingsPage() {
                           )}
                         </div>
                         <s-box padding="base">
-                          <s-stack direction="inline" gap="base" inlineAlignment="start">
-                            <s-button size="small" onClick={resetPurchaseCsvColumns}>デフォルトに戻す</s-button>
+                          <s-stack direction="inline" gap="base" justifyContent="start">
+                            <s-button onClick={resetPurchaseCsvColumns}>デフォルトに戻す</s-button>
                           </s-stack>
                         </s-box>
                       </s-stack>
@@ -3398,7 +3306,7 @@ export default function SettingsPage() {
                       >
                         仕入先マスタの使用
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         POSアプリで仕入先マスタを使用するかどうかを設定します。
                         <br />
                         未使用にすると、仕入先項目が表示されません。
@@ -3416,8 +3324,8 @@ export default function SettingsPage() {
                         }}
                       >
                         <s-stack gap="base">
-                          <s-stack gap="extraTight">
-                            <s-stack direction="inline" gap="base" inlineAlignment="start">
+                          <s-stack gap="small-100">
+                            <s-stack direction="inline" gap="base" justifyContent="start">
                               <label
                                 style={{
                                   display: "flex",
@@ -3499,7 +3407,7 @@ export default function SettingsPage() {
                       >
                         希望納品日の使用
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         POSアプリで希望納品日を使用するかどうかを設定します。
                         <br />
                         未使用にすると、希望納品日項目が表示されません。
@@ -3517,8 +3425,8 @@ export default function SettingsPage() {
                         }}
                       >
                         <s-stack gap="base">
-                          <s-stack gap="extraTight">
-                            <s-stack direction="inline" gap="base" inlineAlignment="start">
+                          <s-stack gap="small-100">
+                            <s-stack direction="inline" gap="base" justifyContent="start">
                               <label
                                 style={{
                                   display: "flex",
@@ -3573,19 +3481,19 @@ export default function SettingsPage() {
                           <s-divider />
 
                           {/* 希望納品日ボタン設定：チェックボックス＋並び順＋項目名＋日数＋上下入れ替え（CSV出力項目に似たUI） */}
-                          <s-stack gap="extraTight">
-                            <s-text emphasis="bold" size="small">
+                          <s-stack gap="small-100">
+                            <s-text type="strong">
                               「希望納品日」ボタン設定
                             </s-text>
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               発注条件画面に表示する「◯日後」ボタンを選択し、並び順を変更できます。
                             </s-text>
                             {desiredDeliveryDaysList.length === 0 ? (
                               <s-box padding="base">
-                                <s-text tone="subdued">ボタンがありません。下の「日数を追加」で追加してください。</s-text>
+                                <s-text color="subdued">ボタンがありません。下の「日数を追加」で追加してください。</s-text>
                               </s-box>
                             ) : (
-                              <s-stack gap="tight">
+                              <s-stack gap="small">
                                 {desiredDeliveryDaysList.map((day, index) => (
                                   <div
                                     key={day}
@@ -3645,7 +3553,7 @@ export default function SettingsPage() {
                                       }}
                                     />
                                     <input
-                                      type="text"
+
                                       value={settings.order?.desiredDeliveryQuickDayLabels?.[String(day)] ?? ""}
                                       onChange={(e) =>
                                         updateDesiredDeliveryDayLabel(day, (e.target as HTMLInputElement).value)
@@ -3683,16 +3591,16 @@ export default function SettingsPage() {
                                       }}
                                       title="日数（1〜365）"
                                     />
-                                    <s-stack direction="inline" gap="tight">
+                                    <s-stack direction="inline" gap="small">
                                       <s-button
-                                        size="small"
+                                       
                                         disabled={index === 0}
                                         onClick={() => moveDesiredDeliveryDayUp(day)}
                                       >
                                         ↑
                                       </s-button>
                                       <s-button
-                                        size="small"
+                                       
                                         disabled={index === desiredDeliveryDaysList.length - 1}
                                         onClick={() => moveDesiredDeliveryDayDown(day)}
                                       >
@@ -3703,7 +3611,7 @@ export default function SettingsPage() {
                                 ))}
                               </s-stack>
                             )}
-                            <s-stack direction="inline" gap="small" inlineAlignment="start" style={{ marginTop: 8 }}>
+                            <s-stack direction="inline" gap="small" justifyContent="start" style={{ marginTop: 8 }}>
                               <s-text-field
                                 label="任意の日数（1〜365）"
                                 value={orderQuickDayInput}
@@ -3712,7 +3620,7 @@ export default function SettingsPage() {
                                 style={{ maxWidth: 140 }}
                               />
                               <s-button
-                                kind="secondary"
+                                variant="secondary"
                                 onClick={() => {
                                   const n = Number(orderQuickDayInput);
                                   if (!Number.isFinite(n) || n <= 0 || n > 365) return;
@@ -3720,7 +3628,7 @@ export default function SettingsPage() {
                                     const cur =
                                       s.order?.desiredDeliveryQuickDays ?? [1, 2, 3, 7, 30];
                                     let next = [...cur, n];
-                                    next = Array.from(new Set(next)).filter(
+                                    next = Array.from<number>(new Set(next)).filter(
                                       (v) => v > 0 && v <= 365
                                     );
                                     next.sort((a, b) => a - b);
@@ -3774,7 +3682,7 @@ export default function SettingsPage() {
                       >
                         CSV出力項目設定
                       </div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         発注CSV出力時に含める項目を選択し、並び順を変更できます。
                         <br />
                         チェックを外すとその項目はCSVに出力されません。
@@ -3805,10 +3713,10 @@ export default function SettingsPage() {
                           <div>
                             {(settings.order?.csvExportColumns || DEFAULT_ORDER_CSV_COLUMNS).length === 0 ? (
                               <s-box padding="base">
-                                <s-text tone="subdued">選択された項目がありません</s-text>
+                                <s-text color="subdued">選択された項目がありません</s-text>
                               </s-box>
                             ) : (
-                              <s-stack gap="tight">
+                              <s-stack gap="small">
                                 {(settings.order?.csvExportColumns || DEFAULT_ORDER_CSV_COLUMNS).map((col, index) => (
                                   <div
                                     key={col}
@@ -3861,7 +3769,7 @@ export default function SettingsPage() {
                                     />
                                     <div style={{ position: "relative", flex: 1, minWidth: "100px" }}>
                                       <input
-                                        type="text"
+
                                         value={settings.order?.csvExportColumnLabels?.[col] ?? ""}
                                         onChange={(e) => updateCsvColumnLabel(col, e.target.value)}
                                         onBlur={(e) => {
@@ -3901,16 +3809,16 @@ export default function SettingsPage() {
                                         </span>
                                       )}
                                     </div>
-                                    <s-stack direction="inline" gap="tight">
+                                    <s-stack direction="inline" gap="small">
                                       <s-button
-                                        size="small"
+                                       
                                         disabled={index === 0}
                                         onClick={() => moveCsvColumnUp(col)}
                                       >
                                         ↑
                                       </s-button>
                                       <s-button
-                                        size="small"
+                                       
                                         disabled={
                                           index === (settings.order?.csvExportColumns || DEFAULT_ORDER_CSV_COLUMNS).length - 1
                                         }
@@ -3929,15 +3837,15 @@ export default function SettingsPage() {
 
                           {/* 未選択の項目（チェックボックスで追加可能） */}
                           <div>
-                            <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>
+                            <s-text type="strong" style={{ marginBottom: 8, display: "block" }}>
                               未選択の項目
                             </s-text>
                             {ALL_CSV_COLUMNS.filter((col) => !(settings.order?.csvExportColumns || DEFAULT_ORDER_CSV_COLUMNS).includes(col)).length === 0 ? (
                               <s-box padding="base">
-                                <s-text tone="subdued">すべての項目が選択されています</s-text>
+                                <s-text color="subdued">すべての項目が選択されています</s-text>
                               </s-box>
                             ) : (
-                              <s-stack gap="tight">
+                              <s-stack gap="small">
                                 {ALL_CSV_COLUMNS.filter((col) => !(settings.order?.csvExportColumns || DEFAULT_ORDER_CSV_COLUMNS).includes(col)).map((col) => (
                                   <label
                                     key={col}
@@ -3966,8 +3874,8 @@ export default function SettingsPage() {
                           </div>
 
                           <s-box padding="base">
-                            <s-stack direction="inline" gap="base" inlineAlignment="start">
-                              <s-button size="small" onClick={resetCsvColumns}>
+                            <s-stack direction="inline" gap="base" justifyContent="start">
+                              <s-button onClick={resetCsvColumns}>
                                 デフォルトに戻す
                               </s-button>
                             </s-stack>
@@ -4003,7 +3911,7 @@ export default function SettingsPage() {
                     >
                       ロス理由設定
                     </div>
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       ロス登録で選べる「ロス区分（理由）」を設定します。
                       <br />
                       例：破損 / 紛失 などをあらかじめ登録しておくと、POSでのロス登録時に選択するだけで入力できます。
@@ -4022,10 +3930,10 @@ export default function SettingsPage() {
                     >
                       {/* 「その他（理由入力）」表示フラグ */}
                       <s-stack gap="base" style={{ marginBottom: 16 }}>
-                        <s-text emphasis="bold" size="small">
+                        <s-text type="strong">
                           「その他（理由入力）」を表示
                         </s-text>
-                        <s-stack direction="inline" gap="base" inlineAlignment="start">
+                        <s-stack direction="inline" gap="base" justifyContent="start">
                           <label
                             style={{
                               display: "flex",
@@ -4079,7 +3987,7 @@ export default function SettingsPage() {
                       </s-stack>
                       {(!settings.lossReasons || settings.lossReasons.length === 0) ? (
                         <s-box padding="base">
-                          <s-text tone="subdued">
+                          <s-text color="subdued">
                             ロス区分が登録されていません。
                             <br />
                             「ロス区分を追加」ボタンから、破損・紛失などの区分を登録してください。
@@ -4093,9 +4001,9 @@ export default function SettingsPage() {
                                 <s-stack
                                   direction="inline"
                                   gap="base"
-                                  inlineAlignment="space-between"
+                                  justifyContent="space-between"
                                 >
-                                  <s-text emphasis="bold" size="small">
+                                  <s-text type="strong">
                                     表示順: {index + 1}
                                   </s-text>
                                 </s-stack>
@@ -4108,27 +4016,27 @@ export default function SettingsPage() {
                                   onChange={(e: any) =>
                                     updateLossReason(lr.id, { label: readValue(e) })
                                   }
-                                  helpText="例）破損、紛失、その他 など"
                                 />
-                                <s-stack direction="inline" gap="base" inlineAlignment="end">
-                                  <s-box inlineSize="fill" />
+                                <s-text color="subdued">例）破損、紛失、その他 など</s-text>
+                                <s-stack direction="inline" gap="base" justifyContent="end">
+                                  <s-box inlineSize="100%" />
                                   <s-button
                                     tone="critical"
-                                    size="small"
+                                   
                                     onClick={() => removeLossReason(lr.id)}
                                   >
                                     削除
                                   </s-button>
-                                  <s-stack direction="inline" gap="tight">
+                                  <s-stack direction="inline" gap="small">
                                     <s-button
-                                      size="small"
+                                     
                                       disabled={index === 0}
                                       onClick={() => moveLossReasonUp(lr.id)}
                                     >
                                       ↑
                                     </s-button>
                                     <s-button
-                                      size="small"
+                                     
                                       disabled={
                                         index === (settings.lossReasons ?? []).length - 1
                                       }
@@ -4145,7 +4053,7 @@ export default function SettingsPage() {
                       )}
 
                       <s-box padding="base">
-                        <s-stack direction="inline" gap="base" inlineAlignment="start">
+                        <s-stack direction="inline" gap="base" justifyContent="start">
                           <s-button onClick={addLossReason}>ロス区分を追加</s-button>
                         </s-stack>
                       </s-box>
@@ -4159,7 +4067,7 @@ export default function SettingsPage() {
                 <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>ロス履歴CSV出力項目設定</div>
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       ロス履歴のCSV出力時に含める項目を選択し、並び順を変更できます。チェックを外すとその項目は出力されません。
                       <br />
                       <br />
@@ -4175,17 +4083,17 @@ export default function SettingsPage() {
                       <s-stack gap="base">
                         <div>
                           {lossCsvColumns.length === 0 ? (
-                            <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                            <s-box padding="base"><s-text color="subdued">選択された項目がありません</s-text></s-box>
                           ) : (
-                            <s-stack gap="tight">
+                            <s-stack gap="small">
                               {lossCsvColumns.map((col, index) => (
                                 <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
                                   <input type="checkbox" checked={true} onChange={() => toggleLossCsvColumn(col)} disabled={lossCsvColumns.length === 1} style={{ cursor: lossCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
                                   <input type="number" min={1} max={lossCsvColumns.length} defaultValue={index + 1} key={`l-${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= lossCsvColumns.length) moveLossCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.loss?.csvExportColumns ?? DEFAULT_LOSS_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
                                   <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{LOSS_CSV_ID_TO_LABEL[col] ?? col}</span>
-                                  <s-stack direction="inline" gap="tight">
-                                    <s-button size="small" disabled={index === 0} onClick={() => moveLossCsvColumnUp(col)}>↑</s-button>
-                                    <s-button size="small" disabled={index === lossCsvColumns.length - 1} onClick={() => moveLossCsvColumnDown(col)}>↓</s-button>
+                                  <s-stack direction="inline" gap="small">
+                                    <s-button disabled={index === 0} onClick={() => moveLossCsvColumnUp(col)}>↑</s-button>
+                                    <s-button disabled={index === lossCsvColumns.length - 1} onClick={() => moveLossCsvColumnDown(col)}>↓</s-button>
                                   </s-stack>
                                 </div>
                               ))}
@@ -4194,11 +4102,11 @@ export default function SettingsPage() {
                         </div>
                         <s-divider />
                         <div>
-                          <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                          <s-text type="strong" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
                           {LOSS_CSV_COLUMN_IDS.filter((c) => !lossCsvColumns.includes(c)).length === 0 ? (
-                            <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                            <s-box padding="base"><s-text color="subdued">すべての項目が選択されています</s-text></s-box>
                           ) : (
-                            <s-stack gap="tight">
+                            <s-stack gap="small">
                               {LOSS_CSV_COLUMN_IDS.filter((c) => !lossCsvColumns.includes(c)).map((col) => (
                                 <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
                                   <input type="checkbox" checked={false} onChange={() => toggleLossCsvColumn(col)} />
@@ -4209,8 +4117,8 @@ export default function SettingsPage() {
                           )}
                         </div>
                         <s-box padding="base">
-                          <s-stack direction="inline" gap="base" inlineAlignment="start">
-                            <s-button size="small" onClick={resetLossCsvColumns}>デフォルトに戻す</s-button>
+                          <s-stack direction="inline" gap="base" justifyContent="start">
+                            <s-button onClick={resetLossCsvColumns}>デフォルトに戻す</s-button>
                           </s-stack>
                         </s-box>
                       </s-stack>
@@ -4236,7 +4144,7 @@ export default function SettingsPage() {
                   >
                     <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                       <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>予定外棚卸許可</div>
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         予定にない商品の棚卸を許可するかどうかを設定します。
                       </s-text>
                     </div>
@@ -4288,7 +4196,7 @@ export default function SettingsPage() {
                 <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>棚卸履歴CSV出力項目設定</div>
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       棚卸履歴のCSV出力時に含める項目を選択し、並び順を変更できます。明細ありのCSVに適用されます。チェックを外すとその項目は出力されません。
                       <br />
                       <br />
@@ -4304,17 +4212,17 @@ export default function SettingsPage() {
                       <s-stack gap="base">
                         <div>
                           {stocktakeCsvColumns.length === 0 ? (
-                            <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                            <s-box padding="base"><s-text color="subdued">選択された項目がありません</s-text></s-box>
                           ) : (
-                            <s-stack gap="tight">
+                            <s-stack gap="small">
                               {stocktakeCsvColumns.map((col, index) => (
                                 <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
                                   <input type="checkbox" checked={true} onChange={() => toggleStocktakeCsvColumn(col)} disabled={stocktakeCsvColumns.length === 1} style={{ cursor: stocktakeCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
                                   <input type="number" min={1} max={stocktakeCsvColumns.length} defaultValue={index + 1} key={`st-${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= stocktakeCsvColumns.length) moveStocktakeCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.inventoryCount?.csvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
                                   <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{STOCKTAKE_CSV_ID_TO_LABEL[col] ?? col}</span>
-                                  <s-stack direction="inline" gap="tight">
-                                    <s-button size="small" disabled={index === 0} onClick={() => moveStocktakeCsvColumnUp(col)}>↑</s-button>
-                                    <s-button size="small" disabled={index === stocktakeCsvColumns.length - 1} onClick={() => moveStocktakeCsvColumnDown(col)}>↓</s-button>
+                                  <s-stack direction="inline" gap="small">
+                                    <s-button disabled={index === 0} onClick={() => moveStocktakeCsvColumnUp(col)}>↑</s-button>
+                                    <s-button disabled={index === stocktakeCsvColumns.length - 1} onClick={() => moveStocktakeCsvColumnDown(col)}>↓</s-button>
                                   </s-stack>
                                 </div>
                               ))}
@@ -4323,11 +4231,11 @@ export default function SettingsPage() {
                         </div>
                         <s-divider />
                         <div>
-                          <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                          <s-text type="strong" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
                           {STOCKTAKE_CSV_COLUMN_IDS.filter((c) => !stocktakeCsvColumns.includes(c)).length === 0 ? (
-                            <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                            <s-box padding="base"><s-text color="subdued">すべての項目が選択されています</s-text></s-box>
                           ) : (
-                            <s-stack gap="tight">
+                            <s-stack gap="small">
                               {STOCKTAKE_CSV_COLUMN_IDS.filter((c) => !stocktakeCsvColumns.includes(c)).map((col) => (
                                 <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
                                   <input type="checkbox" checked={false} onChange={() => toggleStocktakeCsvColumn(col)} />
@@ -4338,8 +4246,8 @@ export default function SettingsPage() {
                           )}
                         </div>
                         <s-box padding="base">
-                          <s-stack direction="inline" gap="base" inlineAlignment="start">
-                            <s-button size="small" onClick={resetStocktakeCsvColumns}>デフォルトに戻す</s-button>
+                          <s-stack direction="inline" gap="base" justifyContent="start">
+                            <s-button onClick={resetStocktakeCsvColumns}>デフォルトに戻す</s-button>
                           </s-stack>
                         </s-box>
                       </s-stack>
@@ -4357,7 +4265,7 @@ export default function SettingsPage() {
                 <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 260px", minWidth: 0 }}>
                     <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>調整履歴CSV出力項目設定</div>
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       調整履歴のCSV出力時に含める項目を選択し、並び順を変更できます。チェックを外すとその項目は出力されません。
                     </s-text>
                   </div>
@@ -4366,17 +4274,17 @@ export default function SettingsPage() {
                       <s-stack gap="base">
                         <div>
                           {adjustmentCsvColumns.length === 0 ? (
-                            <s-box padding="base"><s-text tone="subdued">選択された項目がありません</s-text></s-box>
+                            <s-box padding="base"><s-text color="subdued">選択された項目がありません</s-text></s-box>
                           ) : (
-                            <s-stack gap="tight">
+                            <s-stack gap="small">
                               {adjustmentCsvColumns.map((col, index) => (
                                 <div key={col} style={{ position: "relative", display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", background: "#f6f6f7", borderRadius: "6px" }}>
                                   <input type="checkbox" checked={true} onChange={() => toggleAdjustmentCsvColumn(col)} disabled={adjustmentCsvColumns.length === 1} style={{ cursor: adjustmentCsvColumns.length === 1 ? "not-allowed" : "pointer" }} />
                                   <input type="number" min={1} max={adjustmentCsvColumns.length} defaultValue={index + 1} key={`adj-${col}-${index}`} onChange={(e) => { const n = parseInt(e.target.value, 10); if (!isNaN(n) && n >= 1 && n <= adjustmentCsvColumns.length) moveAdjustmentCsvColumnToPosition(col, n); }} onBlur={(e) => { const v = parseInt(e.target.value, 10); const cur = settings.adjustment?.csvExportColumns ?? DEFAULT_ADJUSTMENT_CSV_COLUMNS_IDS; const i = cur.indexOf(col); if (isNaN(v) || v < 1 || v > cur.length) e.target.value = String(i + 1); }} style={{ width: 50, padding: "4px 6px", fontSize: 12, textAlign: "center", border: "1px solid #e1e3e5", borderRadius: 4 }} />
                                   <span style={{ flex: 1, minWidth: "100px", fontSize: 13 }}>{ADJUSTMENT_CSV_ID_TO_LABEL[col] ?? col}</span>
-                                  <s-stack direction="inline" gap="tight">
-                                    <s-button size="small" disabled={index === 0} onClick={() => moveAdjustmentCsvColumnUp(col)}>↑</s-button>
-                                    <s-button size="small" disabled={index === adjustmentCsvColumns.length - 1} onClick={() => moveAdjustmentCsvColumnDown(col)}>↓</s-button>
+                                  <s-stack direction="inline" gap="small">
+                                    <s-button disabled={index === 0} onClick={() => moveAdjustmentCsvColumnUp(col)}>↑</s-button>
+                                    <s-button disabled={index === adjustmentCsvColumns.length - 1} onClick={() => moveAdjustmentCsvColumnDown(col)}>↓</s-button>
                                   </s-stack>
                                 </div>
                               ))}
@@ -4385,11 +4293,11 @@ export default function SettingsPage() {
                         </div>
                         <s-divider />
                         <div>
-                          <s-text emphasis="bold" size="small" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
+                          <s-text type="strong" style={{ marginBottom: 8, display: "block" }}>未選択の項目</s-text>
                           {ADJUSTMENT_CSV_COLUMN_IDS.filter((c) => !adjustmentCsvColumns.includes(c)).length === 0 ? (
-                            <s-box padding="base"><s-text tone="subdued">すべての項目が選択されています</s-text></s-box>
+                            <s-box padding="base"><s-text color="subdued">すべての項目が選択されています</s-text></s-box>
                           ) : (
-                            <s-stack gap="tight">
+                            <s-stack gap="small">
                               {ADJUSTMENT_CSV_COLUMN_IDS.filter((c) => !adjustmentCsvColumns.includes(c)).map((col) => (
                                 <label key={col} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 6, cursor: "pointer", border: "1px solid #e1e3e5" }}>
                                   <input type="checkbox" checked={false} onChange={() => toggleAdjustmentCsvColumn(col)} />
@@ -4400,8 +4308,8 @@ export default function SettingsPage() {
                           )}
                         </div>
                         <s-box padding="base">
-                          <s-stack direction="inline" gap="base" inlineAlignment="start">
-                            <s-button size="small" onClick={resetAdjustmentCsvColumns}>デフォルトに戻す</s-button>
+                          <s-stack direction="inline" gap="base" justifyContent="start">
+                            <s-button onClick={resetAdjustmentCsvColumns}>デフォルトに戻す</s-button>
                           </s-stack>
                         </s-box>
                       </s-stack>

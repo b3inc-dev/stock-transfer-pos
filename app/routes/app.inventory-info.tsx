@@ -1079,7 +1079,7 @@ export default function InventoryInfoPage() {
                         在庫高
                       </div>
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         条件で絞り込みを行い、在庫高を表示します。
                       </s-text>
                     </div>
@@ -1091,7 +1091,7 @@ export default function InventoryInfoPage() {
                       return (
                         <div style={{ marginTop: 8, padding: "10px 12px", background: "#f6f6f7", borderRadius: 8, border: "1px solid #e1e3e5" }}>
                           {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             <strong>在庫高自動保存のトークン有効期限：{expStr}</strong>
                             <br />
                             管理画面を開くと自動で延長更新されます。
@@ -1116,9 +1116,9 @@ export default function InventoryInfoPage() {
                     {/* @ts-expect-error s-stack は App Bridge の Web コンポーネント */}
                     <s-stack gap="base">
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                      <s-text emphasis="bold" size="large">フィルター</s-text>
+                      <s-text type="strong">フィルター</s-text>
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                      <s-text tone="subdued" size="small">
+                      <s-text color="subdued">
                         ロケーションを選ぶと一覧が絞り込まれます。
                       </s-text>
                       {/* @ts-expect-error s-divider は App Bridge の Web コンポーネント */}
@@ -1126,7 +1126,7 @@ export default function InventoryInfoPage() {
                       
                       {/* 日付選択＋本日集計（同一行・改行なし・スマホではみ出さない） */}
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                      <s-text emphasis="bold" size="small">日付</s-text>
+                      <s-text type="strong">日付</s-text>
                       <div
                         style={{
                           display: "flex",
@@ -1191,7 +1191,7 @@ export default function InventoryInfoPage() {
                       {/* 本日集計の注釈 */}
                       <div style={{ marginTop: "4px" }}>
                         {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                        <s-text tone="subdued" size="small">
+                        <s-text color="subdued">
                           本日集計表示はSKU数ロケーション数により時間を要する可能性があります。
                         </s-text>
                       </div>
@@ -1199,7 +1199,7 @@ export default function InventoryInfoPage() {
                       {firstSnapshotDate && (
                         <div style={{ marginTop: "4px" }}>
                           {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                          <s-text tone="subdued" size="small">
+                          <s-text color="subdued">
                             {firstSnapshotDate.replace(/-/g, "/")}以降の履歴を確認できます。
                           </s-text>
                         </div>
@@ -1207,7 +1207,7 @@ export default function InventoryInfoPage() {
                       
                       {/* ロケーション選択 */}
                       {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                      <s-text emphasis="bold" size="small">ロケーション</s-text>
+                      <s-text type="strong">ロケーション</s-text>
                       <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                         <div
                           onClick={handleSelectAllLocations}
@@ -1521,7 +1521,7 @@ export default function InventoryInfoPage() {
                 {snapshots.length === 0 && isToday && (
                   <div style={{ marginTop: "16px", padding: "16px", background: "#f6f6f7", borderRadius: "8px", border: "1px solid #e1e3e5" }}>
                     {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                    <s-text tone="subdued" size="small">
+                    <s-text color="subdued">
                       本日集計を実行すると表示されます。上記フィルターの「本日集計」ボタンを押してください。
                     </s-text>
                   </div>
@@ -1653,7 +1653,7 @@ export default function InventoryInfoPage() {
                       return (
                         <div style={{ marginTop: "12px", textAlign: "left" }}>
                           {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                          <s-text tone="subdued" size="small" style={{ fontSize: "12px" }}>
+                          <s-text color="subdued" style={{ fontSize: "12px" }}>
                             保存日時：{displayTime}
                           </s-text>
                         </div>
@@ -1685,7 +1685,7 @@ export default function InventoryInfoPage() {
                         >
                           在庫変動履歴
                         </div>
-                        <s-text tone="subdued" size="small">
+                        <s-text color="subdued">
                           条件で絞り込みを行い、在庫変動履歴を表示します。
                         </s-text>
                       </div>
@@ -1697,7 +1697,7 @@ export default function InventoryInfoPage() {
                         return (
                           <div style={{ marginTop: 8, padding: "10px 12px", background: "#f6f6f7", borderRadius: 8, border: "1px solid #e1e3e5" }}>
                             {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-                            <s-text tone="subdued" size="small">
+                            <s-text color="subdued">
                               <strong>在庫変動履歴自動保存のトークン有効期限：{expStr}</strong>
                               <br />
                               管理画面を開くと自動で延長更新されます。
@@ -1718,14 +1718,14 @@ export default function InventoryInfoPage() {
                         }}
                       >
                         <s-stack gap="base">
-                          <s-text emphasis="bold" size="large">フィルター</s-text>
-                          <s-text tone="subdued" size="small">
+                          <s-text type="strong">フィルター</s-text>
+                          <s-text color="subdued">
                             条件を選ぶと一覧が絞り込まれます。
                           </s-text>
                           <s-divider />
 
                           {/* 期間選択 */}
-                          <s-text emphasis="bold" size="small">期間</s-text>
+                          <s-text type="strong">期間</s-text>
                           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                               <label style={{ fontSize: "14px", fontWeight: 500, flexShrink: 0, minWidth: "70px" }}>開始日:</label>
@@ -1768,7 +1768,7 @@ export default function InventoryInfoPage() {
                           </div>
 
                           {/* ロケーション選択 */}
-                          <s-text emphasis="bold" size="small">ロケーション</s-text>
+                          <s-text type="strong">ロケーション</s-text>
                           <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                             <div
                               onClick={() => {
@@ -1815,7 +1815,7 @@ export default function InventoryInfoPage() {
 
                           {/* 商品検索 */}
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                            <s-text emphasis="bold" size="small">商品検索</s-text>
+                            <s-text type="strong">商品検索</s-text>
                             <div style={{ display: "flex", gap: "8px" }}>
                               <button
                                 type="button"
@@ -1896,7 +1896,7 @@ export default function InventoryInfoPage() {
                           {(changeHistorySearchVariants.length > 0 || (changeHistoryShowSelectedProducts && changeHistorySelectedProductsInfo.size > 0)) && (
                             <>
                               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", flexWrap: "wrap" }}>
-                                <s-text tone="subdued" size="small">
+                                <s-text color="subdued">
                                   {changeHistorySelectedInventoryItemIds.size > 0
                                     ? `選択中: ${changeHistorySelectedInventoryItemIds.size}件 / 表示: ${changeHistoryShowSelectedProducts ? Array.from(changeHistorySelectedProductsInfo.values()).length : changeHistorySearchVariants.length}件`
                                     : `表示: ${changeHistorySearchVariants.length}件`}
@@ -2006,7 +2006,7 @@ export default function InventoryInfoPage() {
                           )}
 
                           {/* アクティビティ種別 */}
-                          <s-text emphasis="bold" size="small">アクティビティ種別</s-text>
+                          <s-text type="strong">アクティビティ種別</s-text>
                           <div style={{ maxHeight: "200px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
                             <div
                               onClick={() => setChangeHistoryActivityTypes(new Set())}
@@ -2060,7 +2060,7 @@ export default function InventoryInfoPage() {
                           </div>
 
                           {/* 並び順 */}
-                          <s-text emphasis="bold" size="small">並び順</s-text>
+                          <s-text type="strong">並び順</s-text>
                           <div style={{ display: "flex", gap: "12px" }}>
                             <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
                               <input
@@ -2120,14 +2120,14 @@ export default function InventoryInfoPage() {
                         {/* 一覧表示 */}
                         {!hasExplicitFilters ? (
                           <div style={{ padding: "24px", textAlign: "center" }}>
-                            <s-text tone="subdued" size="large">
+                            <s-text color="subdued">
                               フィルターを設定して「フィルター適用」ボタンを押すと、在庫変動履歴が表示されます。
                             </s-text>
                           </div>
                         ) : changeHistoryLogs && changeHistoryLogs.length > 0 ? (
                           <>
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
-                              <s-text tone="subdued" size="small">
+                              <s-text color="subdued">
                                 {chRangeDisplay} / {chTotalDisplay}
                               </s-text>
                               <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
@@ -2300,7 +2300,7 @@ export default function InventoryInfoPage() {
                             </div>
                             {/* 注釈情報 */}
                             <div style={{ marginTop: "12px", padding: "8px 12px", backgroundColor: "#f6f6f7", borderRadius: "6px", border: "1px solid #e1e3e5" }}>
-                              <s-text tone="subdued" size="small" style={{ fontSize: "11px", lineHeight: "1.4" }}>
+                              <s-text color="subdued" style={{ fontSize: "11px", lineHeight: "1.4" }}>
                                 変動数が「-」の場合は備考列に理由（例：直前ログが存在しなかったため）を表示しています。
                                 <br />
                                 CSVダウンロード制限：一括処理最大50,000件となっています。超過する場合は検索条件にて件数のご調整をお願いします。
@@ -2309,7 +2309,7 @@ export default function InventoryInfoPage() {
                           </>
                         ) : (
                           <div style={{ padding: "24px", textAlign: "center" }}>
-                            <s-text tone="subdued" size="large">
+                            <s-text color="subdued">
                               在庫変動履歴が見つかりませんでした
                             </s-text>
                           </div>

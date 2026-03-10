@@ -8,7 +8,7 @@ import { logInventoryChange, getShopTimezoneAndDate, getLocationName } from "../
 import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
-const API_VERSION = "2025-10";
+const API_VERSION = "2026-01";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {

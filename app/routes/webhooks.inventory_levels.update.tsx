@@ -7,7 +7,7 @@ import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
-const API_VERSION = "2025-10";
+const API_VERSION = "2026-01";
 
 /** オンライン受注で inventory_levels/update が orders/updated より先に届いた場合に、OrderPendingLocation の登録を待つための待機・再検索 */
 const PENDING_ORDER_WAIT_MS = 2500;

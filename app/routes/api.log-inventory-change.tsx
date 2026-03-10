@@ -9,10 +9,10 @@ import { getDateInShopTimezone } from "../utils/timezone";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
-const API_VERSION = "2025-10";
+const API_VERSION = "2026-01";
 
 /** admin_webhook 検索の recentFrom: API が Webhook より数分遅れて届いても確実に拾うため、「現在」から最大でこの秒数まで遡る（名古屋パルコ型の「管理」のまま残る防止） */
-const RECENT_FROM_NOW_MAX_SEC = 15 * 60; // 15分
+const RECENT_FROM_NOW_MAX_SEC = 30 * 60; // 30分
 
 // dest が "https://xxx.myshopify.com" のときホスト名だけにする（findSessionsByShop は "xxx.myshopify.com" で保存されている）
 function shopFromDest(dest: string): string {

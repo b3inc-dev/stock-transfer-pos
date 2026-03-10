@@ -14,7 +14,7 @@ import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session"
 
 export type { DailyInventorySnapshot, InventorySnapshotsData } from "../utils/inventory-snapshot";
 
-const API_VERSION = "2025-10";
+const API_VERSION = "2026-01";
 
 /** 同時に処理するショップ数（ストア増加時の実行時間短縮用）。環境変数 SNAPSHOT_CONCURRENCY で上書き可能 */
 const DEFAULT_CONCURRENCY = 3;
