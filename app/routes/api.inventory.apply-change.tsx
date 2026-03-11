@@ -11,6 +11,7 @@ import {
   setInventoryQuantitiesServer,
   fetchCurrentQuantityServer,
 } from "../utils/inventory-set-quantities-server";
+import { ensureInventoryActivatedAtLocation } from "../utils/ensure-inventory-activated-server";
 
 /** 一時的な障害とみなしてリトライするか（429/5xx/ネットワーク系） */
 function isTransientError(errorSummary: string | undefined): boolean {
@@ -75,6 +76,7 @@ function referenceDocumentUriForActivity(activity: string, refId: string | null)
   const id = refId.startsWith("gid://") ? refId.split("/").pop() : refId;
   if (activity === "loss_entry") return `gid://stock-transfer-pos/LossEntry/${id}`;
   if (activity === "purchase_entry" || activity === "purchase_cancel") return `gid://stock-transfer-pos/PurchaseEntry/${id}`;
+  if (activity === "adjustment") return `gid://stock-transfer-pos/AdjustmentEntry/${id}`;
   return `gid://stock-transfer-pos/InventoryCount/${id}`;
 }
 
@@ -276,6 +278,42 @@ export async function action({ request }: ActionFunctionArgs) {
     });
 
     const shopifyItems = lineRecords.map((l) => ({ inventoryItemId: l.inventoryItemId, quantity: l.quantityAfter }));
+    // 在庫レベルがないアイテムを先に有効化（調整・棚卸で「not stocked at the location」エラーを防ぐ）
+    let activateResult = await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems);
+    const maxActivateRetries = 2;
+    for (let r = 0; r < maxActivateRetries && (activateResult.errors?.length ?? 0) > 0; r++) {
+      const failedGids = new Set(activateResult.errors?.map((e) => e.inventoryItemId) ?? []);
+      const toItemGid = (id: string) =>
+        /^\d+$/.test(String(id).trim()) ? `gid://shopify/InventoryItem/${String(id).trim()}` : String(id).trim();
+      const failedItems = shopifyItems.filter((q) => failedGids.has(toItemGid(q.inventoryItemId)));
+      if (failedItems.length === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000 * (r + 1)));
+      activateResult = await ensureInventoryActivatedAtLocation(admin, locationId, failedItems);
+    }
+    if ((activateResult.errors?.length ?? 0) > 0) {
+      const errSummary = activateResult.errors?.map((e) => e.message).join(" / ") ?? "在庫有効化に失敗しました";
+      for (const l of lineRecords) {
+        await db.inventoryChangeEventLine.update({
+          where: { id: l.id },
+          data: { lineStatus: "failed", errorMessage: errSummary },
+        });
+      }
+      await db.inventoryChangeEvent.update({
+        where: { id: event.id },
+        data: { status: "failed", errorSummary: errSummary },
+      });
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: errSummary,
+          eventId: event.id,
+          appEventId,
+          status: "failed",
+        }),
+        { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+
     const refUri = referenceDocumentUriForActivity(activity, referenceDocumentUri);
     let result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
     if (!result.ok && isTransientError(result.error)) {
