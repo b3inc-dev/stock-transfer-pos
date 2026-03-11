@@ -7,6 +7,7 @@ import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import "@shopify/polaris/build/esm/styles.css";
 
 import { authenticate } from "../shopify.server";
+import { AppNavBar } from "../components/AppNavBar";
 import type { ActiveSubscription } from "../utils/billing";
 import {
   getPlanFromActiveSubscriptions,
@@ -307,6 +308,8 @@ export default function App() {
         {distribution === "public" && <s-link href="/app/plan">料金プラン</s-link>}
       {/* @ts-expect-error s-app-nav 閉じタグ */}
       </s-app-nav>
+      {/* 上部メニュー（s-app-nav が表示されない環境用・常に表示） */}
+      <AppNavBar shopPlan={shopPlan} />
       {shopPlan.locationPlanMismatch && (
         <div
           style={{
