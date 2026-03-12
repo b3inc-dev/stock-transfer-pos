@@ -1124,6 +1124,12 @@ export function InboundListScreen({
         }
         extraDeltasMerged = extraDeltas;
 
+        // 入庫先ロケーションに在庫が有効化されていない場合に備え、受領前に全明細を事前有効化（"not stocked at location" エラーを防ぐ）
+        const allInventoryItemIds = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
+        if (allInventoryItemIds.length > 0) {
+          await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIds });
+        }
+
         let receivedItemsForLog = [];
         if (plannedItems.length > 0) {
           try {
@@ -1266,6 +1272,11 @@ export function InboundListScreen({
         if (!hasAnyAction) {
           toast(finalize ? "送信する差分がありません" : "一部入庫として送る差分がありません");
           return false;
+        }
+        // 入庫先ロケーションに在庫が有効化されていない場合に備え、受領前に全明細を事前有効化（"not stocked at location" エラーを防ぐ）
+        const allInventoryItemIdsMulti = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
+        if (allInventoryItemIdsMulti.length > 0) {
+          await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIdsMulti });
         }
         const overflowMap = new Map();
         const multiReceivedDeltas = [];
@@ -1528,6 +1539,12 @@ export function InboundListScreen({
       return true;
     } catch (e) {
       toast(`入庫確定エラー: ${toUserMessage(e)}`);
+      // エラー後にシップメントをリロードして最新状態を反映（部分成功時にreadOnlyになりボタンをグレーアウトさせるため、再試行による二重在庫調整を防ぐ）
+      if (!isMultipleMode && shipment?.id) {
+        loadShipmentById(shipment.id).catch(() => {});
+      } else if (isMultipleMode && Array.isArray(inbound?.selectedShipmentIds) && inbound.selectedShipmentIds.length > 0) {
+        loadMultipleShipments(inbound.selectedShipmentIds).catch(() => {});
+      }
       return false;
     } finally {
       if (mountedRef.current) setReceiveSubmitting(false);

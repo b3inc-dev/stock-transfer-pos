@@ -484,6 +484,7 @@ export function InventoryCountList({
   // ✅ まとめて表示：グループごと読込ボタンでどのグループを読み込み中か（読込中は「読込中...」表示）
   const [loadingGroupId, setLoadingGroupId] = useState(null);
   const loadingGroupIdRef = useRef(null); // ✅ 二重発火防止（onClick/onPress両方で呼ばれる場合）
+  const submitLockRef = useRef(false); // ✅ 確定処理の二重送信防止（onClick/onPress競合 + エラー後の再試行ロック）
   const loadingMoreRef = useRef(false); // ✅ さらに読み込むの二重発火防止（入庫・出庫と同様）
   const hasMoreProductsRef = useRef(false); // ✅ タップ時に最新の hasMoreProducts を参照（スタレ閉じ込め防止）
   const collectionPageInfoRef = useRef(null); // ✅ コレクション経路の「さらに読み込む」用（前回の pageInfo を after で渡す）
@@ -2007,6 +2008,9 @@ export function InventoryCountList({
   }, [lines]);
 
   const handleComplete = useCallback(async () => {
+    if (submitLockRef.current) return false; // 二重送信防止（onClick/onPress競合・エラー後の連打）
+    submitLockRef.current = true;
+    try {
     if (!count) {
       toast("棚卸情報が見つかりません");
       return false;
@@ -2223,6 +2227,9 @@ export function InventoryCountList({
       console.error("[InventoryCountList] handleComplete error:", e);
       setSubmitting(false);
       return false;
+    }
+    } finally {
+      submitLockRef.current = false; // ロック解除（成功・失敗問わず）
     }
   }, [count, itemsToAdjust, lines, onAfterConfirm, productGroupId, targetProductGroupIds, buildGroupItemsEntry]);
 
