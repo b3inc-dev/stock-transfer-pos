@@ -4,7 +4,8 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import shopify from "../shopify.server";
 import db from "../db.server";
-import { logInventoryChange, getShopTimezoneAndDate, getLocationName } from "../utils/inventory-change-log";
+import { logInventoryChange } from "../utils/inventory-change-log";
+import { getDateInShopTimezone } from "../utils/timezone";
 import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
@@ -165,8 +166,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
       const locationIdRaw = orderLocationId?.replace(/^gid:\/\/shopify\/Location\//, "") ?? orderLocationId;
       if (orderLocationId && order.line_items && order.line_items.length > 0 && db && typeof (db as any).inventoryChangeLog !== "undefined") {
-        const { date: cancelDate } = await getShopTimezoneAndDate(admin, cancelledAt);
-        const locationName = await getLocationName(admin, orderLocationId);
+        // タイムゾーン取得（admin は .request() インターフェースのため直接取得）
+        let shopTimezoneForCancel = "UTC";
+        try {
+          const tzResp = await admin.request({ data: `#graphql query GetShopTimezone { shop { ianaTimezone } }` });
+          const tzData = tzResp && typeof tzResp.json === "function" ? await tzResp.json() : tzResp;
+          shopTimezoneForCancel = tzData?.data?.shop?.ianaTimezone || "UTC";
+        } catch { /* UTC にフォールバック */ }
+        const cancelDate = getDateInShopTimezone(cancelledAt, shopTimezoneForCancel);
+        // ロケーション名取得
+        let locationName = orderLocationId;
+        try {
+          const locResp = await admin.request({
+            data: `#graphql query GetLocation($id: ID!) { location(id: $id) { id name } }`,
+            variables: { id: orderLocationId },
+          });
+          const locData = locResp && typeof locResp.json === "function" ? await locResp.json() : locResp;
+          locationName = locData?.data?.location?.name || orderLocationId;
+        } catch { /* orderLocationId をフォールバックとして使用 */ }
         for (const lineItem of order.line_items) {
           const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
           if (!lineItem.variant_id || lineItemQty <= 0) continue;
@@ -584,17 +601,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               }
               
               // 直近のadmin_webhookを検索（注文更新日時を基準に30分前〜5分後。注文編集で作成が古くても編集直後の行を拾う）
-              const inventoryItemIdCandidates = [
-                inventoryItemId,
-                inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, ""),
-                `gid://shopify/InventoryItem/${inventoryItemId}`,
-              ].filter((id, index, arr) => arr.indexOf(id) === index);
-              
-              const locationIdCandidates = [
-                orderLocationId,
-                orderLocationId.replace(/^gid:\/\/shopify\/Location\//, ""),
-                `gid://shopify/Location/${orderLocationId}`,
-              ].filter((id, index, arr) => arr.indexOf(id) === index);
+              // 二重GIDを防ぐため、先に生IDを取り出してからGID形式を構築する
+              const rawItemIdForCand2 = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "");
+              const inventoryItemIdCandidates = [rawItemIdForCand2, `gid://shopify/InventoryItem/${rawItemIdForCand2}`]
+                .filter((id, index, arr) => arr.indexOf(id) === index);
+
+              const rawLocIdForCand2 = orderLocationId.replace(/^gid:\/\/shopify\/Location\//, "");
+              const locationIdCandidates = [rawLocIdForCand2, `gid://shopify/Location/${rawLocIdForCand2}`]
+                .filter((id, index, arr) => arr.indexOf(id) === index);
               
               if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
                 const existingAdminLog = await findWithAdminWebhookRetry(

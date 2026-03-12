@@ -229,7 +229,9 @@ export async function logInventoryChangesFromAdjustment(
         console.error("[logInventoryChangesFromAdjustment] Failed to get inventory level:", error);
       }
 
-      const timestampRounded = new Date(Math.floor(Date.now() / 1000) * 1000);
+      // sourceId がある場合は決定論的なキー、ない場合は分単位に丸めたタイムスタンプで冪等ウィンドウを1分に拡大
+      // （秒単位だと1秒以内のリトライで別キーになり二重記録が発生する可能性があるため）
+      const timestampRounded = new Date(Math.floor(Date.now() / 60000) * 60000);
       const idempotencyKey = sourceId
         ? `${shop}_${activity}_${change.inventoryItemId}_${change.locationId}_${sourceId}`
         : `${shop}_${activity}_${change.inventoryItemId}_${change.locationId}_${timestampRounded.toISOString()}`;

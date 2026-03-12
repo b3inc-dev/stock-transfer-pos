@@ -5,7 +5,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
 import db from "../db.server";
-import { getDateInShopTimezone } from "../utils/timezone";
+import { getDateInShopTimezone, getShopTimezone } from "../utils/timezone";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import {
   setInventoryQuantitiesServer,
@@ -47,9 +47,7 @@ function shopFromDest(dest: string): string {
 }
 
 function secretToKey(secret: string): Uint8Array {
-  const key = new Uint8Array(secret.length);
-  for (let i = 0; i < secret.length; i++) key[i] = secret.charCodeAt(i);
-  return key;
+  return new TextEncoder().encode(secret);
 }
 
 async function decodePOSToken(token: string): Promise<{ dest?: string } | null> {
@@ -116,12 +114,8 @@ export async function action({ request }: ActionFunctionArgs) {
 
     let sessionToken: { dest?: string } | null = await decodePOSToken(token);
     if (!sessionToken?.dest) {
-      try {
-        const auth = await authenticate.pos(request);
-        sessionToken = auth.sessionToken;
-      } catch (err) {
-        throw err;
-      }
+      const auth = await authenticate.pos(request);
+      sessionToken = auth.sessionToken;
     }
     const dest = sessionToken?.dest;
     if (!dest) {
@@ -206,7 +200,41 @@ export async function action({ request }: ActionFunctionArgs) {
       },
     };
 
+    // 冪等性チェック: 同一 appEventId が既に存在する場合は既存結果を返す（POS リトライ対策）
+    // ★ delta→quantityAfter 正規化（Shopify API 呼び出しを伴う）より前に実行することで、
+    //   リトライ時の不要な API 呼び出しとレートリミット消費を防ぐ。
+    const existingEvent = await db.inventoryChangeEvent.findUnique({
+      where: { appEventId },
+      include: { lines: true },
+    }).catch(() => null);
+    if (existingEvent) {
+      if (existingEvent.status === "completed") {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            eventId: existingEvent.id,
+            appEventId,
+            status: "completed",
+            appliedCount: existingEvent.lines.length,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+      const isProcessing = existingEvent.status === "pending" || existingEvent.status === "applying";
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: existingEvent.errorSummary || "Event already exists with status: " + existingEvent.status,
+          eventId: existingEvent.id,
+          appEventId,
+          status: existingEvent.status,
+        }),
+        { status: isProcessing ? 202 : 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+
     // delta のみのエントリは現在値を取得して quantityAfter に正規化（ロス・仕入用）
+    // 冪等性チェック通過後にのみ実行することで、リトライ時の無駄な API 呼び出しを防ぐ。
     const entries: ApplyChangeEntry[] = [];
     for (const e of entriesParsed) {
       let qtyAfter = e.quantityAfter;
@@ -247,7 +275,9 @@ export async function action({ request }: ActionFunctionArgs) {
     const lineRecords: { id: string; inventoryItemId: string; quantityAfter: number; delta: number | null; quantityBefore: number | null; variantId: string | null; sku: string }[] = [];
 
     for (const e of entries) {
-      const delta = e.delta ?? (e.quantityBefore != null ? e.quantityAfter - e.quantityBefore : null);
+      // e.quantityAfter はこのループに入る前に null チェック済み（null の場合は continue で除外）
+      const qAfter = e.quantityAfter as number;
+      const delta = e.delta ?? (e.quantityBefore != null ? qAfter - e.quantityBefore : null);
       const line = await db.inventoryChangeEventLine.create({
         data: {
           eventId: event.id,
@@ -264,7 +294,7 @@ export async function action({ request }: ActionFunctionArgs) {
       lineRecords.push({
         id: line.id,
         inventoryItemId: e.inventoryItemId,
-        quantityAfter: e.quantityAfter,
+        quantityAfter: qAfter,
         delta,
         quantityBefore: e.quantityBefore ?? null,
         variantId: e.variantId ?? null,
@@ -324,7 +354,9 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const rawLocId = toRawId(locationId);
     const resolvedLocationName = locationName || rawLocId || locationId;
-    const dateUtc = getDateInShopTimezone(requestedAt, "UTC");
+    // ショップのタイムゾーンで日付を計算（UTC固定だと日本など非UTCショップで日付がずれる）
+    const shopTimezone = await getShopTimezone(admin).catch(() => "UTC");
+    const shopDate = getDateInShopTimezone(requestedAt, shopTimezone);
 
     if (result.ok) {
       for (const l of lineRecords) {
@@ -347,7 +379,7 @@ export async function action({ request }: ActionFunctionArgs) {
           create: {
             shop,
             timestamp: requestedAt,
-            date: dateUtc,
+            date: shopDate,
             inventoryItemId: rawItemId,
             variantId: l.variantId,
             sku: l.sku,
@@ -385,6 +417,8 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const errorSummary = result.error || "Shopify API error";
+    // partiallyApplied: チャンク分割時にロールバック失敗→一部の在庫が変更済みの状態
+    const finalStatus = result.partiallyApplied ? "partial_failed" : "failed";
     for (const l of lineRecords) {
       await db.inventoryChangeEventLine.update({
         where: { id: l.id },
@@ -393,7 +427,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
     await db.inventoryChangeEvent.update({
       where: { id: event.id },
-      data: { status: "failed", errorSummary },
+      data: { status: finalStatus, errorSummary },
     });
 
     return new Response(
@@ -402,7 +436,8 @@ export async function action({ request }: ActionFunctionArgs) {
         error: errorSummary,
         eventId: event.id,
         appEventId,
-        status: "failed",
+        status: finalStatus,
+        partiallyApplied: result.partiallyApplied ?? false,
       }),
       { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );

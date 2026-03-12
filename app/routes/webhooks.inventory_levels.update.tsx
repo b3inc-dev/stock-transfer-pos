@@ -41,9 +41,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return new Response("Invalid topic", { status: 400 });
     }
 
-    // Webhookのペイロード全体をログ出力（デバッグ用）
-    console.log(`[inventory_levels/update] Full webhook payload:`, JSON.stringify(payload, null, 2));
-
     // Webhookのペイロードから在庫情報を取得
     const inventoryLevel = payload as {
       inventory_item_id?: string;
@@ -88,9 +85,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     let adjustmentGroupId: string | null = inventoryLevel.inventory_adjustment_group_id || null;
     let sourceId: string | null = null;
 
+    // adminクライアント: if(session) の外で宣言し、else if(adjustmentGroupId && session) でも参照できるようにする
+    let admin: { request: (options: { data: string; variables?: any }) => Promise<any> } | null = null;
+
     if (session) {
       // adminクライアントを作成（ロケーション名・SKU・種別判定に使用）
-      let admin: { request: (options: { data: string; variables?: any }) => Promise<any> };
       if (shopify?.clients?.Graphql) {
         admin = shopify.clients.Graphql({ session });
       } else {
@@ -103,66 +102,79 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
-              "X-Shopify-Access-Token": accessToken,
-            },
-            body: JSON.stringify({
-              query: options.data.replace(/^#graphql\s*/m, "").trim(),
-              variables: options.variables || {},
-            }),
-          });
-          return response;
-        },
-      };
-    }
+                "X-Shopify-Access-Token": accessToken,
+              },
+              body: JSON.stringify({
+                query: options.data.replace(/^#graphql\s*/m, "").trim(),
+                variables: options.variables || {},
+              }),
+            });
+            return response;
+          },
+        };
+      }
 
-      const shopTimezoneResp = await admin.request({
-        data: `
-          #graphql
-          query GetShopTimezone {
-            shop {
-              ianaTimezone
-            }
-          }
-        `,
-      });
-      const shopTimezoneData = await shopTimezoneResp.json();
-      shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
-
-      // ロケーション名を取得（GraphQL）
-      const locationResp = await admin.request({
-        data: `
-          #graphql
-          query GetLocation($id: ID!) {
-            location(id: $id) {
-              id
-              name
-            }
-          }
-        `,
-        variables: { id: locationId },
-      });
-      const locationData = await locationResp.json();
-      locationName = locationData?.data?.location?.name || locationIdRaw;
-
-      // SKUを取得（InventoryItemから）
-      const itemResp = await admin.request({
-        data: `
-          #graphql
-          query GetInventoryItem($id: ID!) {
-            inventoryItem(id: $id) {
-              id
-              variant {
-                id
-                sku
+      // タイムゾーン取得（失敗時は UTC にフォールバック）
+      try {
+        const shopTimezoneResp = await admin!.request({
+          data: `
+            #graphql
+            query GetShopTimezone {
+              shop {
+                ianaTimezone
               }
             }
-          }
-        `,
-        variables: { id: inventoryItemId },
-      });
-      const itemData = await itemResp.json();
-      sku = itemData?.data?.inventoryItem?.variant?.sku || "";
-      variantId = itemData?.data?.inventoryItem?.variant?.id || null;
+          `,
+        });
+        const shopTimezoneData = await shopTimezoneResp.json();
+        shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
+      } catch (tzErr) {
+        console.warn(`[inventory_levels/update] タイムゾーン取得失敗、UTC にフォールバック:`, tzErr);
+      }
+
+      // ロケーション名を取得（GraphQL）、失敗時は locationIdRaw をフォールバックとして使用
+      try {
+        const locationResp = await admin!.request({
+          data: `
+            #graphql
+            query GetLocation($id: ID!) {
+              location(id: $id) {
+                id
+                name
+              }
+            }
+          `,
+          variables: { id: locationId },
+        });
+        const locationData = await locationResp.json();
+        locationName = locationData?.data?.location?.name || locationIdRaw;
+      } catch (locErr) {
+        console.warn(`[inventory_levels/update] ロケーション名取得失敗、ID をフォールバックとして使用:`, locErr);
+      }
+
+      // SKUを取得（InventoryItemから）、失敗しても処理継続
+      try {
+        const itemResp = await admin!.request({
+          data: `
+            #graphql
+            query GetInventoryItem($id: ID!) {
+              inventoryItem(id: $id) {
+                id
+                variant {
+                  id
+                  sku
+                }
+              }
+            }
+          `,
+          variables: { id: inventoryItemId },
+        });
+        const itemData = await itemResp.json();
+        sku = itemData?.data?.inventoryItem?.variant?.sku || "";
+        variantId = itemData?.data?.inventoryItem?.variant?.id || null;
+      } catch (itemErr) {
+        console.warn(`[inventory_levels/update] SKU・variantId 取得失敗、空値を使用:`, itemErr);
+      }
 
       // 入庫・出庫・ロス・棚卸・仕入をすべて「同じ処理」にするため、Webhook では種別を判定しない。
       // 常に admin_webhook（管理）で保存し、POS/アプリの api/log-inventory-change が正しい activity で上書きする。
@@ -228,8 +240,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (prevAvailable !== null) {
           // 直前のログがある場合: 通常の計算
           delta = available - prevAvailable;
-        } else if (adjustmentGroupId && session) {
+        } else if (adjustmentGroupId && session && admin) {
           // 直前のログがない場合: inventory_adjustment_group_idがあればそこからdeltaを取得
+          // admin は if(session) ブロックで初期化済み（null でないことをガード済み）
           try {
             console.log(`[inventory_levels/update] No previous log found, fetching delta from InventoryAdjustmentGroup: ${adjustmentGroupId}`);
             const adjustmentGroupIdGid = adjustmentGroupId.startsWith("gid://") ? adjustmentGroupId : `gid://shopify/InventoryAdjustmentGroup/${adjustmentGroupId}`;

@@ -4,7 +4,8 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import shopify from "../shopify.server";
 import db from "../db.server";
-import { logInventoryChange, getShopTimezoneAndDate, getLocationName, getInventoryItemInfo } from "../utils/inventory-change-log";
+import { logInventoryChange } from "../utils/inventory-change-log";
+import { getDateInShopTimezone } from "../utils/timezone";
 import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
@@ -166,8 +167,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // 返品作成日時を取得
     const refundCreatedAt = refund.created_at ? new Date(refund.created_at) : new Date();
 
-    // タイムゾーンと日付を取得
-    const { timezone, date } = await getShopTimezoneAndDate(admin, refundCreatedAt);
+    // タイムゾーンと日付を取得（admin は .request() インターフェースのため直接取得）
+    let shopTimezone = "UTC";
+    try {
+      const tzResp = await admin.request({ data: `#graphql query GetShopTimezone { shop { ianaTimezone } }` });
+      const tzData = tzResp && typeof tzResp.json === "function" ? await tzResp.json() : tzResp;
+      shopTimezone = tzData?.data?.shop?.ianaTimezone || "UTC";
+    } catch { /* UTC にフォールバック */ }
+    const date = getDateInShopTimezone(refundCreatedAt, shopTimezone);
 
     // 返品された商品ごとに在庫変動を記録
     for (const refundLineItem of refund.refund_line_items) {
@@ -290,8 +297,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
         }
 
-        // ロケーション名を取得
-        const locationName = await getLocationName(admin, locationId);
+        // ロケーション名を取得（admin は .request() インターフェースのため直接取得）
+        let locationName = locationId;
+        try {
+          const locResp = await admin.request({
+            data: `#graphql query GetLocation($id: ID!) { location(id: $id) { id name } }`,
+            variables: { id: locationId },
+          });
+          const locData = locResp && typeof locResp.json === "function" ? await locResp.json() : locResp;
+          locationName = locData?.data?.location?.name || locationId;
+        } catch { /* locationId をフォールバックとして使用 */ }
 
         // 変動後の数量を取得（InventoryLevelから）
         let quantityAfter: number | null = null;
@@ -336,16 +351,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
 
         // 直前の在庫値を取得（delta計算用）。inventory_levels/update は数値IDで保存するため、GID/数値両形式を候補にする。
+        // 時間範囲を最近30日に限定: 長期間変動がないアイテムで古いログを「直前」として扱い、
+        // 誤ったdeltaが計算されることを防ぐ。
         let delta: number | null = null;
         try {
           if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
             const prevItemCandidates = [inventoryItemId, rawItemId, `gid://shopify/InventoryItem/${rawItemId}`].filter((id, i, arr) => arr.indexOf(id) === i);
             const prevLocCandidates = [locationId, rawLocId, rawLocId ? `gid://shopify/Location/${rawLocId}` : null].filter(Boolean);
+            const thirtyDaysAgo = new Date(refundCreatedAt.getTime() - 30 * 24 * 60 * 60 * 1000);
             const prevLog = await (db as any).inventoryChangeLog.findFirst({
               where: {
                 shop,
                 inventoryItemId: { in: prevItemCandidates },
                 locationId: { in: prevLocCandidates },
+                timestamp: { gte: thirtyDaysAgo, lte: refundCreatedAt },
               },
               orderBy: {
                 timestamp: "desc",
@@ -408,17 +427,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         try {
           if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
             // inventoryItemIdとlocationIdの候補を準備（GID形式と数値形式の両方を考慮）
-            const inventoryItemIdCandidates = [
-              inventoryItemId,
-              inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, ""),
-              `gid://shopify/InventoryItem/${inventoryItemId}`,
-            ].filter((id, index, arr) => arr.indexOf(id) === index); // 重複を除去
+            // 二重GIDを防ぐため、先に生IDを取り出してからGID形式を構築する
+            const rawItemIdForCand = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "");
+            const inventoryItemIdCandidates = [rawItemIdForCand, `gid://shopify/InventoryItem/${rawItemIdForCand}`]
+              .filter((id, index, arr) => arr.indexOf(id) === index);
 
-            const locationIdCandidates = [
-              locationId,
-              locationId.replace(/^gid:\/\/shopify\/Location\//, ""),
-              `gid://shopify/Location/${locationId}`,
-            ].filter((id, index, arr) => arr.indexOf(id) === index); // 重複を除去
+            const rawLocIdForCand = locationId.replace(/^gid:\/\/shopify\/Location\//, "");
+            const locationIdCandidates = [rawLocIdForCand, `gid://shopify/Location/${rawLocIdForCand}`]
+              .filter((id, index, arr) => arr.indexOf(id) === index);
 
             // 検索範囲: 30分前〜「返品作成+5分」と「現在+2分」の遅い方（inventory_levels/update が先に届いた場合を拾う）
             const searchFrom = new Date(refundCreatedAt.getTime() - 30 * 60 * 1000); // 30分前

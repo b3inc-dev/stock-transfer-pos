@@ -10,8 +10,7 @@ import type { AdminGraphql } from "./inventory-set-quantities-server";
 function toLocationGid(locationId: string): string {
   const s = String(locationId || "").trim();
   if (s.startsWith("gid://")) return s;
-  const raw = s.startsWith("gid://") ? s.split("/").pop() : s.replace(/^gid:\/\/[^/]+\//, "");
-  return raw ? `gid://shopify/Location/${raw}` : s;
+  return s ? `gid://shopify/Location/${s}` : s;
 }
 
 function toInventoryItemGid(inventoryItemId: string): string | null {
@@ -98,6 +97,13 @@ export async function ensureInventoryActivatedAtLocation(
         const hasLevel = !!(node as any)?.inventoryLevel?.id;
         const tracked = (node as any)?.tracked === true;
         if (!hasLevel || !tracked) {
+          if (!tracked) {
+            console.warn(
+              `[ensureInventoryActivatedAtLocation] inventoryItem ${inventoryItemId} の在庫追跡 (tracked) が false です。` +
+              `inventorySetQuantities の実行に必要なため自動で true に変更します。` +
+              `ショップオーナーが意図的に追跡を無効にしている場合は設定を再確認してください。`
+            );
+          }
           toProcess.push({
             inventoryItemId,
             needsTrackedUpdate: !tracked,
@@ -136,10 +142,12 @@ export async function ensureInventoryActivatedAtLocation(
 
     let lastError: string | null = null;
     let succeeded = false;
+    // needsTrackedUpdate が失敗した場合に needsActivate をスキップするためのフラグ
+    let trackedUpdateFailed = false;
 
     for (let attempt = 1; attempt <= maxAttempts && !succeeded; attempt++) {
       try {
-        if (needsTrackedUpdate) {
+        if (needsTrackedUpdate && !trackedUpdateFailed) {
           const updateRes = await graphql(
             admin,
             `#graphql
@@ -161,6 +169,10 @@ export async function ensureInventoryActivatedAtLocation(
               await delayMs(800 * attempt);
               continue;
             }
+            // 最大試行回数を消費しても失敗 → needsActivate もスキップしてエラーを記録
+            trackedUpdateFailed = true;
+            errors.push({ inventoryItemId, message: lastError });
+            break;
           } else {
             await delayMs(1000);
           }

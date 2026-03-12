@@ -78,14 +78,17 @@ function toInventoryItemGid(inventoryItemId: string): string | null {
 
 /**
  * 指定チャンクの inventoryItemId について、locationId の現在の available 数量を一括取得する。
- * キー: inventoryItemGid (gid://shopify/InventoryItem/...) → 取得できなかった場合は 0。
+ * 返り値: quantities（取得成功分）と failedGids（取得失敗分）を分離して返す。
+ * 失敗分を 0 にフォールバックしないことで、ロールバック時に在庫が誤って 0 にリセットされる
+ * 問題を防ぐ。
  */
 async function fetchChunkQuantities(
   admin: { graphql: AdminGraphql },
   locationGid: string,
   inventoryItemGids: string[]
-): Promise<Map<string, number>> {
-  const result = new Map<string, number>();
+): Promise<{ quantities: Map<string, number>; failedGids: string[] }> {
+  const quantities = new Map<string, number>();
+  const failedGids: string[] = [];
   // 1件ずつ取得（既存の fetchCurrentQuantityServer と同じ方式）
   for (const itemGid of inventoryItemGids) {
     try {
@@ -98,14 +101,20 @@ async function fetchChunkQuantities(
             }
           }
         `, { id: itemGid, loc: locationGid });
-      const quantities = (json as any)?.data?.inventoryItem?.inventoryLevel?.quantities;
-      const q = Array.isArray(quantities) ? quantities.find((x: { name?: string }) => x?.name === "available") : null;
-      result.set(itemGid, Number(q?.quantity ?? 0) || 0);
+      const quantitiesArr = (json as any)?.data?.inventoryItem?.inventoryLevel?.quantities;
+      const q = Array.isArray(quantitiesArr) ? quantitiesArr.find((x: { name?: string }) => x?.name === "available") : null;
+      if (q?.quantity != null) {
+        quantities.set(itemGid, Number(q.quantity));
+      } else {
+        // inventoryLevel が未設定のアイテム（ロケーションに紐付いていない）は 0 として扱う
+        quantities.set(itemGid, 0);
+      }
     } catch {
-      result.set(itemGid, 0);
+      // ネットワーク障害等で取得不能な場合はロールバック不可として扱う
+      failedGids.push(itemGid);
     }
   }
-  return result;
+  return { quantities, failedGids };
 }
 
 /**
@@ -117,7 +126,7 @@ export async function setInventoryQuantitiesServer(
   locationId: string,
   items: Array<{ inventoryItemId: string; quantity: number }>,
   referenceDocumentUri?: string | null
-): Promise<{ ok: boolean; invalidCount?: number; error?: string; rolledBack?: boolean }> {
+): Promise<{ ok: boolean; invalidCount?: number; error?: string; rolledBack?: boolean; partiallyApplied?: boolean }> {
   const locationGid = toLocationGid(locationId);
   const quantities = (items ?? [])
     .filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.quantity)))
@@ -139,7 +148,12 @@ export async function setInventoryQuantitiesServer(
         : `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`;
 
   // チャンクごとの適用前スナップショット（ロールバック用）
-  const beforeStates: Array<{ chunkIndex: number; quantities: Array<{ inventoryItemId: string; quantity: number }> }> = [];
+  // canRollback: false のチャンクが存在する場合はロールバックを中断し、呼び出し元に通知する
+  const beforeStates: Array<{
+    chunkIndex: number;
+    quantities: Array<{ inventoryItemId: string; quantity: number }>;
+    canRollback: boolean;
+  }> = [];
 
   for (let i = 0; i < validQuantities.length; i += INVENTORY_SET_QUANTITIES_MAX) {
     const chunk = validQuantities.slice(i, i + INVENTORY_SET_QUANTITIES_MAX);
@@ -147,10 +161,19 @@ export async function setInventoryQuantitiesServer(
 
     // 適用前の数量を取得してスナップショットを保存
     const chunkItemGids = chunk.map((q) => q.inventoryItemId);
-    const beforeMap = await fetchChunkQuantities(admin, locationGid, chunkItemGids);
+    const { quantities: beforeMap, failedGids } = await fetchChunkQuantities(admin, locationGid, chunkItemGids);
+    if (failedGids.length > 0) {
+      console.warn(
+        `[inventory-set-quantities-server] チャンク${chunkIndex}のスナップショット取得失敗 (${failedGids.length}件): ${failedGids.join(", ")} ` +
+        `― このチャンクが失敗した場合のロールバックは安全に実行できません`
+      );
+    }
     beforeStates.push({
       chunkIndex,
-      quantities: chunkItemGids.map((gid) => ({ inventoryItemId: gid, quantity: beforeMap.get(gid) ?? 0 })),
+      quantities: chunkItemGids
+        .filter((gid) => !failedGids.includes(gid))
+        .map((gid) => ({ inventoryItemId: gid, quantity: beforeMap.get(gid) ?? 0 })),
+      canRollback: failedGids.length === 0,
     });
 
     const input: Record<string, unknown> = {
@@ -200,6 +223,19 @@ export async function setInventoryQuantitiesServer(
         // 最初のチャンクが失敗 — ロールバック不要
         return { ok: false, error: chunkError, rolledBack: false };
       }
+
+      // スナップショット取得が失敗していたチャンクがある場合、安全にロールバックできないため中断する
+      const nonRollbackable = appliedSnapshots.filter((s) => !s.canRollback);
+      if (nonRollbackable.length > 0) {
+        const msg =
+          `[inventory-set-quantities-server] チャンク${nonRollbackable.map((s) => s.chunkIndex).join(",")}の` +
+          `スナップショット取得が失敗しているためロールバック不可 — 手動復旧が必要です。` +
+          ` 元のエラー: ${chunkError}。` +
+          ` スナップショット: ${JSON.stringify(appliedSnapshots)}`;
+        console.error(msg);
+        return { ok: false, error: chunkError, rolledBack: false, partiallyApplied: true };
+      }
+
       let rollbackOk = true;
       let rollbackErrorMsg = "";
       // 逆順でロールバック
@@ -248,7 +284,7 @@ export async function setInventoryQuantitiesServer(
           ` 元のエラー: ${chunkError}。ロールバックエラー: ${rollbackErrorMsg}。` +
           ` スナップショット: ${JSON.stringify(appliedSnapshots)}`
         );
-        return { ok: false, error: chunkError, rolledBack: false };
+        return { ok: false, error: chunkError, rolledBack: false, partiallyApplied: true };
       }
       return { ok: false, error: chunkError, rolledBack: true };
     }
@@ -306,7 +342,8 @@ export async function adjustInventoryQuantitiesServer(
     .filter((x): x is { inventoryItemId: string; delta: number } => x != null);
   const invalidCount = (changes ?? []).length - valid.length;
   if (valid.length === 0) {
-    return { ok: false, invalidCount, error: "有効な変更がありません" };
+    // delta=0 のみ、または有効なアイテムが存在しない場合は変更なしで成功として扱う
+    return { ok: true, invalidCount };
   }
   const uri = referenceDocumentUri
     ? (referenceDocumentUri.startsWith("gid://") ? referenceDocumentUri : `gid://stock-transfer-pos/LossEntry/${referenceDocumentUri}`)
