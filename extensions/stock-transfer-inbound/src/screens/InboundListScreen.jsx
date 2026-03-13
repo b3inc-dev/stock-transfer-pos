@@ -503,6 +503,13 @@ export function InboundListScreen({
           setRows(baseRows);
         }
       }, signal);
+
+      // バックグラウンドで入庫先ロケーションへの在庫有効化を先行実行
+      // 確定ボタン押下時には既に有効化が完了している状態を狙う（fire-and-forget）
+      const preActivateIds = [...new Set((s.lineItems ?? []).map((li) => String(li.inventoryItemId || "").trim()).filter(Boolean))];
+      if (preActivateIds.length > 0 && locationGid && !signal?.aborted) {
+        ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: preActivateIds }).catch(() => {});
+      }
     } catch (e) {
       if (signal?.aborted) return;
       safeSet(mountedRef, () => setShipmentError(toUserMessage(e)), signal);
@@ -619,6 +626,12 @@ export function InboundListScreen({
       }, signal);
 
       safeSet(mountedRef, () => setShipmentLoading(false), signal);
+
+      // バックグラウンドで入庫先ロケーションへの在庫有効化を先行実行（fire-and-forget）
+      const preActivateIdsMulti = [...new Set(results.flatMap((s) => (s?.lineItems ?? []).map((li) => String(li.inventoryItemId || "").trim())).filter(Boolean))];
+      if (preActivateIdsMulti.length > 0 && locationGid && !signal?.aborted) {
+        ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: preActivateIdsMulti }).catch(() => {});
+      }
 
       // 二相ロード: 非同期で監査ログ over を反映
       try {
