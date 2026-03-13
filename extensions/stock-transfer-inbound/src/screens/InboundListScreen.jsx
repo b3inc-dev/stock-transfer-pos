@@ -1137,18 +1137,8 @@ export function InboundListScreen({
         }
         extraDeltasMerged = extraDeltas;
 
-        // 入庫先ロケーションに在庫が有効化されていない場合に備え、受領前に全明細を事前有効化（"not stocked at location" エラーを防ぐ）
+        // 伝票明細はShopifyの在庫移管に含まれるため、通常は入庫先で既に有効化されている想定。受領を先に試し、失敗時のみ有効化してリトライする。
         const allInventoryItemIds = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
-        if (allInventoryItemIds.length > 0) {
-          const activateResult = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIds });
-          if (!activateResult?.ok) {
-            // 有効化に失敗しても受領を続行する（Shopify Transfer APIが処理できる可能性があるため）
-            // 受領自体が失敗した場合は outer catch でエラーとして表示される
-            const msg = (activateResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
-            toast(`警告: 在庫有効化に一部失敗しました（受領を続行）: ${msg}`);
-          }
-        }
-
         let receivedItemsForLog = [];
         if (plannedItems.length > 0) {
           try {
@@ -1156,7 +1146,18 @@ export function InboundListScreen({
             receivedItemsForLog = plannedItems;
           } catch (e) {
             const msg = String(e?.message || e || "");
-            if (!/quantity|unreceived|exceed|max|greater|less/i.test(msg)) throw e;
+            const isNotStockedAtDest = /配送先|not stocked|inventory.*location|アイテムの在庫がありません|no inventory at/i.test(msg);
+            if (isNotStockedAtDest && allInventoryItemIds.length > 0) {
+              const actResult = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIds });
+              if (!actResult?.ok) {
+                const errMsg = (actResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
+                throw new Error(`入庫先で在庫を有効化できませんでした。${errMsg} しばらくしてから再度「確定」を押してください。`);
+              }
+              await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: plannedItems });
+              receivedItemsForLog = plannedItems;
+            } else if (!/quantity|unreceived|exceed|max|greater|less/i.test(msg)) {
+              throw e;
+            } else {
             const overflowMap = new Map();
             const cappedItems = rows.map((r) => {
               const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
@@ -1193,6 +1194,7 @@ export function InboundListScreen({
                 m.set(kk, (m.get(kk) || 0) + vv);
               });
               extraDeltasMerged = Array.from(m.entries()).map(([inventoryItemId, delta]) => ({ inventoryItemId, delta }));
+            }
             }
           }
         }
@@ -1300,16 +1302,8 @@ export function InboundListScreen({
           toast(finalize ? "送信する差分がありません" : "一部入庫として送る差分がありません");
           return false;
         }
-        // 入庫先ロケーションに在庫が有効化されていない場合に備え、受領前に全明細を事前有効化（"not stocked at location" エラーを防ぐ）
+        // 伝票明細はShopifyの在庫移管に含まれるため、通常は入庫先で既に有効化されている想定。受領を先に試し、失敗時のみ有効化してリトライする。
         const allInventoryItemIdsMulti = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
-        if (allInventoryItemIdsMulti.length > 0) {
-          const activateResultMulti = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIdsMulti });
-          if (!activateResultMulti?.ok) {
-            // 有効化に失敗しても受領を続行する（Shopify Transfer APIが処理できる可能性があるため）
-            const msg = (activateResultMulti?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
-            toast(`警告: 在庫有効化に一部失敗しました（受領を続行）: ${msg}`);
-          }
-        }
         const overflowMap = new Map();
         const multiReceivedDeltas = [];
         for (const [sid, sRows] of byShipment) {
@@ -1323,7 +1317,21 @@ export function InboundListScreen({
             }
           } catch (e) {
             const msg = String(e?.message || e || "");
-            if (!/quantity|unreceived|exceed|max|greater|less/i.test(msg)) throw e;
+            const isNotStockedAtDest = /配送先|not stocked|inventory.*location|アイテムの在庫がありません|no inventory at/i.test(msg);
+            if (isNotStockedAtDest && allInventoryItemIdsMulti.length > 0) {
+              const actResultMulti = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIdsMulti });
+              if (!actResultMulti?.ok) {
+                const errMsg = (actResultMulti?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
+                throw new Error(`入庫先で在庫を有効化できませんでした。${errMsg} しばらくしてから再度「確定」を押してください。`);
+              }
+              await receiveShipmentWithFallbackV2({ shipmentId: sid, items: plannedItems });
+              for (const p of plannedItems) {
+                const row = rowByLineId.get(String(p.shipmentLineItemId || "").trim());
+                if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
+              }
+            } else if (!/quantity|unreceived|exceed|max|greater|less/i.test(msg)) {
+              throw e;
+            } else {
             const cappedItems = sRows.map((r) => {
               const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
               const inventoryItemId = String(r.inventoryItemId || "").trim();
@@ -1346,6 +1354,7 @@ export function InboundListScreen({
                 const row = sRows.find((r) => String(r.shipmentLineItemId || "").trim() === String(p.shipmentLineItemId || "").trim());
                 if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
               }
+            }
             }
           }
         }
@@ -1443,10 +1452,15 @@ export function InboundListScreen({
 
       if (extraDeltasMerged.length > 0) {
         const inventoryItemIds = extraDeltasMerged.map((d) => d.inventoryItemId);
-        const act = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds });
+        // 予定外入荷は伝票に含まれないため、入庫先で在庫有効化が必須。確実に有効化してから在庫調整する（1回リトライ）。
+        let act = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds });
+        if (!act?.ok) {
+          await new Promise((r) => setTimeout(r, 800));
+          act = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds });
+        }
         if (!act?.ok) {
           const msg = (act?.errors || []).map((e) => `${e.inventoryItemId}: ${e.message}`).filter(Boolean).join("\n") || "在庫の有効化に失敗しました";
-          throw new Error(msg);
+          throw new Error(`予定外入荷の在庫を有効化できませんでした。${msg} しばらくしてから再度「確定」を押してください。`);
         }
         // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
         const transferIdStr = String(transferId || "").trim();
