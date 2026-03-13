@@ -1129,8 +1129,10 @@ export function InboundListScreen({
         if (allInventoryItemIds.length > 0) {
           const activateResult = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIds });
           if (!activateResult?.ok) {
+            // 有効化に失敗しても受領を続行する（Shopify Transfer APIが処理できる可能性があるため）
+            // 受領自体が失敗した場合は outer catch でエラーとして表示される
             const msg = (activateResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
-            throw new Error(`在庫有効化エラー: ${msg}`);
+            toast(`警告: 在庫有効化に一部失敗しました（受領を続行）: ${msg}`);
           }
         }
 
@@ -1286,8 +1288,9 @@ export function InboundListScreen({
         if (allInventoryItemIdsMulti.length > 0) {
           const activateResultMulti = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIdsMulti });
           if (!activateResultMulti?.ok) {
+            // 有効化に失敗しても受領を続行する（Shopify Transfer APIが処理できる可能性があるため）
             const msg = (activateResultMulti?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
-            throw new Error(`在庫有効化エラー: ${msg}`);
+            toast(`警告: 在庫有効化に一部失敗しました（受領を続行）: ${msg}`);
           }
         }
         const overflowMap = new Map();

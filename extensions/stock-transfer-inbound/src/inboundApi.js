@@ -459,6 +459,37 @@ export async function ensureInventoryActivatedAtLocation({ locationId, inventory
     }
   }
 
+  // フェーズ3: 最終確認パス — 失敗として記録されたアイテムでも実際に inventoryLevel が
+  // 存在する場合は成功扱いにする（API の非同期反映・競合状態への対策）
+  if (errors.length > 0) {
+    const failedIds = errors.map((e) => e.inventoryItemId).filter(Boolean);
+    for (let i = 0; i < failedIds.length; i += 50) {
+      const chunk = failedIds.slice(i, i + 50);
+      try {
+        const finalCheck = await adminGraphql(
+          `#graphql query FinalCheck($ids: [ID!]!, $locationId: ID!) {
+            nodes(ids: $ids) {
+              ... on InventoryItem { id inventoryLevel(locationId: $locationId) { id } }
+            }
+          }`,
+          { ids: chunk, locationId }
+        );
+        for (const node of finalCheck?.nodes ?? []) {
+          const inventoryItemId = String(node?.id || "").trim();
+          if (!inventoryItemId || !node?.inventoryLevel?.id) continue;
+          // level が存在した → errors から除いて activated に移す
+          const idx = errors.findIndex((e) => e.inventoryItemId === inventoryItemId);
+          if (idx !== -1) {
+            errors.splice(idx, 1);
+            activated.push({ inventoryItemId, locationId });
+          }
+        }
+      } catch {
+        // 最終確認自体が失敗しても errors はそのまま保持
+      }
+    }
+  }
+
   return { ok: errors.length === 0, activated, errors };
 }
 
