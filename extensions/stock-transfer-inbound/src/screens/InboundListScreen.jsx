@@ -10,6 +10,7 @@ import {
   fetchPendingTransfersForDestination,
   fetchVariantAvailable,
   loadInboundDraft,
+  repairInboundRowTitles,
   saveInboundDraft,
   clearInboundDraft,
   readInboundAuditLog,
@@ -481,18 +482,25 @@ export function InboundListScreen({
         draft = null;
       }
 
-      safeSet(mountedRef, () => {
-        setShipment(s);
-        if (draft) {
-          // 下書き復元時も表示用の title/sku は必ず API の baseRows を採用（draft.rows の title で上書きしない）
-          const nextRows = baseRows.map((r) => {
+      let rowsToSet = draft
+        ? baseRows.map((r) => {
             const saved = draft.rows?.find((x) => x.shipmentLineItemId === r.shipmentLineItemId);
             if (!saved) return r;
             const savedQty = Math.max(0, Math.floor(Number(saved.receiveQty || 0)));
             const nextQty = clampReceiveQty_(r, savedQty);
             return { ...r, receiveQty: nextQty };
-          });
-          setRows(nextRows);
+          })
+        : baseRows;
+      if (signal?.aborted) return;
+      rowsToSet = await repairInboundRowTitles(rowsToSet, { signal });
+      if (signal?.aborted) return;
+
+      const finalRows = rowsToSet;
+      const hasDraft = !!draft;
+      safeSet(mountedRef, () => {
+        setShipment(s);
+        setRows(finalRows);
+        if (hasDraft) {
           setExtras(Array.isArray(draft.extras) ? draft.extras : []);
           setOnlyUnreceived(!!draft.onlyUnreceived);
           setReason(String(draft.reason || ""));
@@ -500,8 +508,6 @@ export function InboundListScreen({
           setAckWarning(false);
           setDraftSavedAt(draft.savedAt || null);
           toast("下書きを復元しました");
-        } else {
-          setRows(baseRows);
         }
       }, signal);
 
@@ -603,12 +609,18 @@ export function InboundListScreen({
         });
       });
 
+      if (signal?.aborted) return;
+      let multiRowsToSet = await repairInboundRowTitles(allRows, { signal });
+      if (signal?.aborted) return;
+
+      const hasDraftMulti = !!draft;
+      const draftForMulti = draft;
       safeSet(mountedRef, () => {
         setShipment(results[0] || null);
-        setRows(allRows);
+        setRows(multiRowsToSet);
         setShipmentError("");
-        if (draft) {
-          setExtras(Array.isArray(draft.extras) ? draft.extras.map((x, i) => ({
+        if (hasDraftMulti && draftForMulti) {
+          setExtras(Array.isArray(draftForMulti.extras) ? draftForMulti.extras.map((x, i) => ({
             key: x.key || `extra-${i}-${x.inventoryItemId || ""}`,
             inventoryItemId: String(x.inventoryItemId || "").trim(),
             title: x.title || x.sku || "(unknown)",
@@ -617,11 +629,11 @@ export function InboundListScreen({
             imageUrl: x.imageUrl || "",
             receiveQty: Math.max(0, Number(x.receiveQty || 0)),
           })) : []);
-          setOnlyUnreceived(!!draft.onlyUnreceived);
-          setReason(String(draft.reason || ""));
-          setNote(String(draft.note || ""));
+          setOnlyUnreceived(!!draftForMulti.onlyUnreceived);
+          setReason(String(draftForMulti.reason || ""));
+          setNote(String(draftForMulti.note || ""));
           setAckWarning(false);
-          setDraftSavedAt(draft.savedAt || null);
+          setDraftSavedAt(draftForMulti.savedAt || null);
           toast("下書きを復元しました");
         }
       }, signal);

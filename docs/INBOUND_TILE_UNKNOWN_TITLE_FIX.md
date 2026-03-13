@@ -56,9 +56,20 @@
 - `allRows` 組み立て時のフォールバックに `li.id` を追加し、  
   `title: li.title || li.sku || li.inventoryItemId || li.id || "(unknown)"` に統一。
 
+## 自動保存復元後も (unknown) になる要因（追加）
+
+- **API 取得直後の resolve でも解消しないケース**: ネットワーク遅延や API の一時的な不整合で、`fetchInventoryShipmentEnriched` 内の `resolveMissingLineItemTitles_` が失敗したり、nodes が null を返す場合がある。その場合、baseRows に (unknown) が残ったままになる。
+- **タイル／拡張の違い**: 入庫画面が「タイル拡張（ModalOutbound）の受領タブ」か「入庫専用拡張（stock-transfer-inbound）」かで、データ取得のタイミングや draft の適用順が異なる可能性がある。いずれにせよ、**復元後に一度でも (unknown) が残っていれば、表示前に修復する**必要がある。
+
+## 追加対応：復元時の必ず修復（2024 以降）
+
+- **repairInboundRowTitles**（inboundApi.js）を追加。行配列のうち `title === "(unknown)"` かつ `inventoryItemId` があるものを、nodes(ids) で取得してタイトルを上書きする。
+- **単一・複数シップメント共通**: API 取得＋draft マージで rows を組み立てた**後**、`setRows` の**前**に必ず `repairInboundRowTitles(rowsToSet, { signal })` を実行する。これにより「自動保存復元時に (unknown) が発生した場合でも、表示前に修復してから復元する」ようにした。
+
 ## 結果
 
 - API で `inventoryItem` / `variant` が null でも、`inventoryItemId` があれば nodes でタイトル解決を試みるため、(unknown) になる件数を削減できる。
 - 解決できなくても、lineItem.id を表示に使うため、完全な (unknown) を減らせる。
 - 下書き復元時も「常に API の baseRows の title を使う」ことをコードで明示し、古い下書きの title で上書きしないようにした。
+- **復元後の行に対し、表示前に必ず repairInboundRowTitles をかけるため、自動保存復元時にも (unknown) が残らないよう修復してから復元する。**
 - これにより、商品リストが正しく表示され、在庫有効化・確定処理で必要な inventoryItemId と表示の対応が取りやすくなり、在庫有効化エラーの一因を抑えられる。

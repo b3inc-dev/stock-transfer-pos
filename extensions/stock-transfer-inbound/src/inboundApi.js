@@ -175,6 +175,54 @@ async function resolveMissingLineItemTitles_(lineItems, adminGraphql, signal) {
   });
 }
 
+/**
+ * 入庫リストの行配列のうち title が "(unknown)" のものを nodes(ids) で取得して修復する。
+ * 自動保存復元後など、API 取得時には解消されなかった (unknown) を確実に修復するために使う。
+ */
+export async function repairInboundRowTitles(rows, opts = {}) {
+  const signal = opts?.signal;
+  const needRepair = (rows || []).filter(
+    (r) => (r.title === "(unknown)" || !String(r.title || "").trim()) && r.inventoryItemId
+  );
+  if (needRepair.length === 0) return rows;
+  const ids = [...new Set(needRepair.map((r) => r.inventoryItemId).filter(Boolean))];
+  const titleByInventoryItemId = new Map();
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    try {
+      const q = `#graphql
+        query ResolveInventoryItemTitles($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on InventoryItem {
+              id
+              variant { product { title } title }
+            }
+          }
+        }`;
+      const d = await adminGraphql(q, { ids: chunk }, { signal });
+      const nodes = Array.isArray(d?.nodes) ? d.nodes : [];
+      nodes.forEach((node) => {
+        const id = node?.id;
+        if (!id) return;
+        const v = node?.variant;
+        const productTitle = String(v?.product?.title || "").trim();
+        const variantTitle = String(v?.title || "").trim();
+        const title =
+          productTitle && variantTitle
+            ? `${productTitle} / ${variantTitle}`
+            : (variantTitle || productTitle || "");
+        if (title) titleByInventoryItemId.set(id, title);
+      });
+    } catch (_) {}
+  }
+  return (rows || []).map((r) => {
+    if ((r.title !== "(unknown)" && String(r.title || "").trim()) || !r.inventoryItemId) return r;
+    const resolved = titleByInventoryItemId.get(r.inventoryItemId);
+    if (!resolved) return r;
+    return { ...r, title: resolved };
+  });
+}
+
 export async function fetchInventoryShipmentEnriched(id, opts = {}) {
   const includeImages = opts?.includeImages !== false;
   const signal = opts?.signal;
