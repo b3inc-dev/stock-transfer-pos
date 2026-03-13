@@ -1127,7 +1127,11 @@ export function InboundListScreen({
         // 入庫先ロケーションに在庫が有効化されていない場合に備え、受領前に全明細を事前有効化（"not stocked at location" エラーを防ぐ）
         const allInventoryItemIds = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
         if (allInventoryItemIds.length > 0) {
-          await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIds });
+          const activateResult = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIds });
+          if (!activateResult?.ok) {
+            const msg = (activateResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
+            throw new Error(`在庫有効化エラー: ${msg}`);
+          }
         }
 
         let receivedItemsForLog = [];
@@ -1206,13 +1210,17 @@ export function InboundListScreen({
               };
             }).filter((d) => d && d.inventoryItemId && d.delta > 0);
             if (rejectedDeltas.length > 0) {
-              await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds: rejectedDeltas.map((d) => d.inventoryItemId) });
+              const activateOriginResult = await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds: rejectedDeltas.map((d) => d.inventoryItemId) });
+              if (!activateOriginResult?.ok) {
+                const msg = (activateOriginResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "出庫元在庫の有効化に失敗しました";
+                toast(`警告: 出庫元への在庫有効化に失敗しました（入庫は完了）: ${msg}`);
+              }
               // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
               const transferIdStr = String(transferId || "").trim();
               const transferIdMatch = transferIdStr.match(/(\d+)$/);
               const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
-              await adjustInventoryAtLocationWithFallback({ 
-                locationId: originLocationId, 
+              await adjustInventoryAtLocationWithFallback({
+                locationId: originLocationId,
                 deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
                 referenceDocumentUri: transferIdForUri || null
               });
@@ -1276,7 +1284,11 @@ export function InboundListScreen({
         // 入庫先ロケーションに在庫が有効化されていない場合に備え、受領前に全明細を事前有効化（"not stocked at location" エラーを防ぐ）
         const allInventoryItemIdsMulti = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
         if (allInventoryItemIdsMulti.length > 0) {
-          await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIdsMulti });
+          const activateResultMulti = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIdsMulti });
+          if (!activateResultMulti?.ok) {
+            const msg = (activateResultMulti?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
+            throw new Error(`在庫有効化エラー: ${msg}`);
+          }
         }
         const overflowMap = new Map();
         const multiReceivedDeltas = [];
@@ -1361,7 +1373,11 @@ export function InboundListScreen({
           });
           rejectedDeltas = Array.from(merged.values());
           if (rejectedDeltas.length > 0) {
-            await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds: rejectedDeltas.map((d) => d.inventoryItemId) });
+            const activateOriginResultMulti = await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds: rejectedDeltas.map((d) => d.inventoryItemId) });
+            if (!activateOriginResultMulti?.ok) {
+              const msg = (activateOriginResultMulti?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "出庫元在庫の有効化に失敗しました";
+              toast(`警告: 出庫元への在庫有効化に失敗しました（入庫は完了）: ${msg}`);
+            }
             // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
             const transferIdStr = String(transferId || "").trim();
             const transferIdMatch = transferIdStr.match(/(\d+)$/);
@@ -1432,7 +1448,11 @@ export function InboundListScreen({
         if (!originLocationId) {
           toast("警告: 出庫元のlocationIdが取得できませんでした（出庫元の在庫調整をスキップします）");
         } else {
-          await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds });
+          const activateExtrasOriginResult = await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds });
+          if (!activateExtrasOriginResult?.ok) {
+            const msg = (activateExtrasOriginResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "出庫元在庫の有効化に失敗しました";
+            toast(`警告: 出庫元への在庫有効化に失敗しました（予定外入庫は完了）: ${msg}`);
+          }
           const originDeltas = extraDeltasMerged.map((d) => ({
             inventoryItemId: d.inventoryItemId,
             delta: -Math.max(0, Math.floor(Number(d.delta || 0))),

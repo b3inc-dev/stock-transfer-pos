@@ -305,8 +305,13 @@ export async function ensureInventoryActivatedAtLocation({ locationId, inventory
     .map((x) => String(x || "").trim())
     .filter(Boolean);
   if (!locationId || ids.length === 0) return { ok: true, activated: [], errors: [] };
+
   const activated = [];
   const errors = [];
+  const toProcess = [];
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // フェーズ1: tracked と inventoryLevel の状態を一括確認（50件ずつ）
   for (let i = 0; i < ids.length; i += 50) {
     const chunk = ids.slice(i, i + 50);
     try {
@@ -321,33 +326,139 @@ export async function ensureInventoryActivatedAtLocation({ locationId, inventory
         { ids: chunk, locationId }
       );
       const nodes = Array.isArray(q?.nodes) ? q.nodes : [];
+      const processedIds = new Set();
       for (const node of nodes) {
         const inventoryItemId = String(node?.id || "").trim();
         if (!inventoryItemId) continue;
+        processedIds.add(inventoryItemId);
         const hasLevel = !!node?.inventoryLevel?.id;
-        if (hasLevel) {
+        const tracked = node?.tracked === true;
+        if (!hasLevel || !tracked) {
+          toProcess.push({ inventoryItemId, needsTrackedUpdate: !tracked, needsActivate: !hasLevel });
+        } else {
           activated.push({ inventoryItemId, locationId });
-          continue;
         }
-        try {
-          await adminGraphql(
-            `#graphql mutation Activate($inventoryItemId: ID!, $locationId: ID!) {
-              inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
-                inventoryLevel { id }
-                userErrors { field message }
-              }
-            }`,
-            { inventoryItemId, locationId }
-          );
-          activated.push({ inventoryItemId, locationId });
-        } catch (e) {
-          errors.push({ inventoryItemId, message: String(e?.message || e) });
+      }
+      // nodesに含まれなかったID（存在しない or null）は安全のため有効化対象に追加
+      for (const id of chunk) {
+        if (!processedIds.has(id)) {
+          toProcess.push({ inventoryItemId: id, needsTrackedUpdate: true, needsActivate: true });
         }
       }
     } catch (e) {
-      for (const id of chunk) errors.push({ inventoryItemId: id, message: String(e?.message || e) });
+      // 一括確認失敗時は個別有効化を試みる
+      for (const inventoryItemId of chunk) {
+        toProcess.push({ inventoryItemId, needsTrackedUpdate: true, needsActivate: true });
+      }
     }
   }
+
+  // フェーズ2: tracked=false のアイテムを追跡ON → inventoryActivate（リトライ最大4回）
+  const maxAttempts = 4;
+  for (let idx = 0; idx < toProcess.length; idx++) {
+    const { inventoryItemId, needsTrackedUpdate, needsActivate } = toProcess[idx];
+    if (idx > 0) await delay(150);
+
+    let lastError = null;
+    let succeeded = false;
+
+    for (let attempt = 1; attempt <= maxAttempts && !succeeded; attempt++) {
+      try {
+        // tracked=false の場合は inventoryItemUpdate で追跡を有効化
+        if (needsTrackedUpdate) {
+          const updateRes = await adminGraphql(
+            `#graphql mutation UpdateInventoryItem($id: ID!, $input: InventoryItemInput!) {
+              inventoryItemUpdate(id: $id, input: $input) {
+                inventoryItem { id tracked }
+                userErrors { field message }
+              }
+            }`,
+            { id: inventoryItemId, input: { tracked: true } }
+          );
+          const updateErrs = updateRes?.inventoryItemUpdate?.userErrors ?? [];
+          if (updateErrs.length > 0) {
+            lastError = updateErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "在庫追跡の有効化に失敗しました";
+            if (attempt < maxAttempts) {
+              await delay(800 * attempt);
+              continue;
+            }
+            errors.push({ inventoryItemId, message: lastError });
+            break;
+          }
+          // tracked更新後、反映を待つ
+          await delay(1000);
+        }
+
+        if (!needsActivate) {
+          activated.push({ inventoryItemId, locationId });
+          succeeded = true;
+          break;
+        }
+
+        // inventoryActivate でロケーションに在庫レベルを作成
+        const actRes = await adminGraphql(
+          `#graphql mutation Activate($inventoryItemId: ID!, $locationId: ID!) {
+            inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
+              inventoryLevel { id }
+              userErrors { field message }
+            }
+          }`,
+          { inventoryItemId, locationId }
+        );
+        const payload = actRes?.inventoryActivate;
+        const userErrs = payload?.userErrors ?? [];
+
+        if (userErrs.length > 0) {
+          const errMsg = userErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "unknown";
+          // 既に有効化されている場合は成功とみなす（inventoryLevelが存在するか確認）
+          if (/already|既に|activated|在庫レベル|already has/i.test(errMsg)) {
+            const check = await adminGraphql(
+              `#graphql query CheckLevel($ids: [ID!]!, $locationId: ID!) {
+                nodes(ids: $ids) {
+                  ... on InventoryItem { id inventoryLevel(locationId: $locationId) { id } }
+                }
+              }`,
+              { ids: [inventoryItemId], locationId }
+            );
+            const node = (check?.nodes ?? [])[0];
+            if (node?.inventoryLevel?.id) {
+              activated.push({ inventoryItemId, locationId });
+              succeeded = true;
+              break;
+            }
+          }
+          lastError = errMsg;
+          if (attempt < maxAttempts) {
+            await delay(800 * attempt);
+            continue;
+          }
+          errors.push({ inventoryItemId, message: lastError });
+          break;
+        }
+
+        if (payload?.inventoryLevel?.id) {
+          activated.push({ inventoryItemId, locationId });
+          succeeded = true;
+        } else {
+          lastError = "inventoryLevel が返されませんでした";
+          if (attempt < maxAttempts) {
+            await delay(800 * attempt);
+            continue;
+          }
+          errors.push({ inventoryItemId, message: lastError });
+        }
+        break;
+      } catch (e) {
+        lastError = String(e?.message || e);
+        if (attempt < maxAttempts) {
+          await delay(800 * attempt);
+          continue;
+        }
+        errors.push({ inventoryItemId, message: lastError });
+      }
+    }
+  }
+
   return { ok: errors.length === 0, activated, errors };
 }
 
