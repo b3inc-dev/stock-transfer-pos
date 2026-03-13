@@ -9753,6 +9753,55 @@ async function fetchTransfersForOriginAll(originLocationGid, opts = {}) {
 /* =========================
 /* Shipment fetch */
 
+/** (unknown) の lineItems を inventoryItemId で nodes 問い合わせしてタイトル解決（inbound と同様） */
+async function resolveMissingLineItemTitlesTile_(lineItems, adminGraphql, signal) {
+  const needResolve = (lineItems || []).filter(
+    (li) => (li.title === "(unknown)" || !String(li.title || "").trim()) && li.inventoryItemId
+  );
+  if (needResolve.length === 0) return lineItems;
+  const ids = [...new Set(needResolve.map((li) => li.inventoryItemId).filter(Boolean))];
+  const titleByInventoryItemId = new Map();
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    try {
+      const q = `#graphql
+        query ResolveInventoryItemTitles($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on InventoryItem {
+              id
+              variant { product { title } title }
+            }
+          }
+        }`;
+      const d = await adminGraphql(q, { ids: chunk }, { signal });
+      const nodes = Array.isArray(d?.nodes) ? d.nodes : [];
+      nodes.forEach((node) => {
+        const id = node?.id;
+        if (!id) return;
+        const v = node?.variant;
+        const productTitle = String(v?.product?.title || "").trim();
+        const variantTitle = String(v?.title || "").trim();
+        const title =
+          productTitle && variantTitle
+            ? `${productTitle} / ${variantTitle}`
+            : (variantTitle || productTitle || "");
+        if (title) titleByInventoryItemId.set(id, title);
+      });
+    } catch (_) {}
+  }
+  return lineItems.map((li) => {
+    if ((li.title !== "(unknown)" && String(li.title || "").trim()) || !li.inventoryItemId) return li;
+    const resolved = titleByInventoryItemId.get(li.inventoryItemId);
+    if (!resolved) return li;
+    return {
+      ...li,
+      title: resolved,
+      productTitle: li.productTitle || resolved.split(" / ")[0] || "",
+      variantTitle: li.variantTitle || resolved.split(" / ")[1] || "",
+    };
+  });
+}
+
 async function fetchInventoryShipmentEnriched(id, opts = {}) {
   const includeImages = opts?.includeImages !== false;
   const signal = opts?.signal;
@@ -9823,20 +9872,21 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
           barcode: v?.barcode ?? "",
           productTitle,
           variantTitle,
-          // 互換用（他が title を参照しても崩れない）
+          // 互換用（他が title を参照しても崩れない）。li.id を最終フォールバックにし、(unknown) を減らす
           title:
             productTitle && variantTitle
               ? `${productTitle} / ${variantTitle}`
-              : (variantTitle || productTitle || v?.sku || li.inventoryItem?.id || "(unknown)"),
+              : (variantTitle || productTitle || v?.sku || li.inventoryItem?.id || li.id || "(unknown)"),
           imageUrl,
         };
       });
 
+      const resolvedLineItems = await resolveMissingLineItemTitlesTile_(lineItems, adminGraphql, signal);
       return {
         id: s.id,
         status: s.status,
         tracking: s.tracking ?? null,
-        lineItems,
+        lineItems: resolvedLineItems,
         pageInfo: s.lineItems?.pageInfo || { hasNextPage: false, endCursor: null },
       };
     } catch (e) {
@@ -9902,16 +9952,17 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
         title:
           productTitle && variantTitle
             ? `${productTitle} / ${variantTitle}`
-            : (variantTitle || productTitle || v?.sku || li.inventoryItem?.id || "(unknown)"),
+            : (variantTitle || productTitle || v?.sku || li.inventoryItem?.id || li.id || "(unknown)"),
         imageUrl: "",
       };
     });
 
+    const resolvedLineItems = await resolveMissingLineItemTitlesTile_(lineItems, adminGraphql, signal);
     return {
       id: s2.id,
       status: s2.status,
       tracking: s2.tracking ?? null,
-      lineItems,
+      lineItems: resolvedLineItems,
       pageInfo: s2.lineItems?.pageInfo || { hasNextPage: false, endCursor: null },
     };
   } catch (e) {
@@ -9940,22 +9991,24 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
   const s3 = d3?.inventoryShipment;
   if (!s3?.id) throw new Error("Shipment が見つかりませんでした");
 
+  let minLineItems = (s3.lineItems?.nodes ?? []).map((li) => ({
+    id: li.id,
+    quantity: Number(li.quantity ?? 0),
+    inventoryItemId: li.inventoryItem?.id ?? null,
+    variantId: null,
+    sku: "",
+    barcode: "",
+    productTitle: "",
+    variantTitle: "",
+    title: li.inventoryItem?.id || li.id || "(unknown)",
+    imageUrl: "",
+  }));
+  minLineItems = await resolveMissingLineItemTitlesTile_(minLineItems, adminGraphql, signal);
   return {
     id: s3.id,
     status: s3.status,
     tracking: s3.tracking ?? null,
-    lineItems: (s3.lineItems?.nodes ?? []).map((li) => ({
-      id: li.id,
-      quantity: Number(li.quantity ?? 0),
-      inventoryItemId: li.inventoryItem?.id ?? null,
-      variantId: null,
-      sku: "",
-      barcode: "",
-      productTitle: "",
-      variantTitle: "",
-      title: li.inventoryItem?.id ?? "(unknown)",
-      imageUrl: "",
-    })),
+    lineItems: minLineItems,
     pageInfo: s3.lineItems?.pageInfo || { hasNextPage: false, endCursor: null },
   };
 }

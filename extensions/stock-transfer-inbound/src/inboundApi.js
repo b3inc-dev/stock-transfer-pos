@@ -121,6 +121,60 @@ export async function fetchTransfersForDestinationAll(destinationLocationGid, op
   return { transfers, pageInfo };
 }
 
+/**
+ * lineItems のうち title が "(unknown)" または未設定で inventoryItemId があるものを、
+ * nodes(ids) で InventoryItem.variant から商品名を取得して補完する（API で variant が null になる場合の対策）。
+ */
+async function resolveMissingLineItemTitles_(lineItems, adminGraphql, signal) {
+  const needResolve = (lineItems || []).filter(
+    (li) => (li.title === "(unknown)" || !String(li.title || "").trim()) && li.inventoryItemId
+  );
+  if (needResolve.length === 0) return lineItems;
+  const ids = [...new Set(needResolve.map((li) => li.inventoryItemId).filter(Boolean))];
+  const titleByInventoryItemId = new Map();
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    try {
+      const q = `#graphql
+        query ResolveInventoryItemTitles($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on InventoryItem {
+              id
+              variant { product { title } title }
+            }
+          }
+        }`;
+      const d = await adminGraphql(q, { ids: chunk }, { signal });
+      const nodes = Array.isArray(d?.nodes) ? d.nodes : [];
+      nodes.forEach((node) => {
+        const id = node?.id;
+        if (!id) return;
+        const v = node?.variant;
+        const productTitle = String(v?.product?.title || "").trim();
+        const variantTitle = String(v?.title || "").trim();
+        const title =
+          productTitle && variantTitle
+            ? `${productTitle} / ${variantTitle}`
+            : (variantTitle || productTitle || "");
+        if (title) titleByInventoryItemId.set(id, title);
+      });
+    } catch (_) {
+      // 解決失敗時はそのまま（既存の (unknown) や lineItem.id フォールバックに任せる）
+    }
+  }
+  return lineItems.map((li) => {
+    if ((li.title !== "(unknown)" && String(li.title || "").trim()) || !li.inventoryItemId) return li;
+    const resolved = titleByInventoryItemId.get(li.inventoryItemId);
+    if (!resolved) return li;
+    return {
+      ...li,
+      title: resolved,
+      productTitle: li.productTitle || resolved.split(" / ")[0] || "",
+      variantTitle: li.variantTitle || resolved.split(" / ")[1] || "",
+    };
+  });
+}
+
 export async function fetchInventoryShipmentEnriched(id, opts = {}) {
   const includeImages = opts?.includeImages !== false;
   const signal = opts?.signal;
@@ -155,7 +209,7 @@ export async function fetchInventoryShipmentEnriched(id, opts = {}) {
       const d = await adminGraphql(qImg, { id: shipmentId, first, after }, { signal });
       const s = d?.inventoryShipment;
       if (!s?.id) throw new Error("配送が見つかりませんでした");
-      const lineItems = (s.lineItems?.nodes ?? []).map((li) => {
+      let lineItems = (s.lineItems?.nodes ?? []).map((li) => {
         const v = li.inventoryItem?.variant;
         const productTitle = String(v?.product?.title || "").trim();
         const variantTitle = String(v?.title || "").trim();
@@ -172,10 +226,11 @@ export async function fetchInventoryShipmentEnriched(id, opts = {}) {
           barcode: v?.barcode ?? "",
           productTitle,
           variantTitle,
-          title: productTitle && variantTitle ? `${productTitle} / ${variantTitle}` : (variantTitle || productTitle || v?.sku || li.inventoryItem?.id || "(unknown)"),
+          title: productTitle && variantTitle ? `${productTitle} / ${variantTitle}` : (variantTitle || productTitle || v?.sku || li.inventoryItem?.id || li.id || "(unknown)"),
           imageUrl: String(imageUrl || "").trim(),
         };
       });
+      lineItems = await resolveMissingLineItemTitles_(lineItems, adminGraphql, signal);
       return { id: s.id, status: s.status, tracking: s.tracking ?? null, lineItems, pageInfo: s.lineItems?.pageInfo || { hasNextPage: false, endCursor: null } };
     } catch (e) {
       const msg = String(e?.message ?? e);
@@ -202,7 +257,7 @@ export async function fetchInventoryShipmentEnriched(id, opts = {}) {
   const d = await adminGraphql(qNoImg, { id: shipmentId, first, after }, { signal });
   const s = d?.inventoryShipment;
   if (!s?.id) throw new Error("配送が見つかりませんでした");
-  const lineItems = (s.lineItems?.nodes ?? []).map((li) => {
+  let lineItems = (s.lineItems?.nodes ?? []).map((li) => {
     const v = li.inventoryItem?.variant;
     const productTitle = String(v?.product?.title || "").trim();
     const variantTitle = String(v?.title || "").trim();
@@ -218,10 +273,11 @@ export async function fetchInventoryShipmentEnriched(id, opts = {}) {
       barcode: v?.barcode ?? "",
       productTitle,
       variantTitle,
-      title: productTitle && variantTitle ? `${productTitle} / ${variantTitle}` : (variantTitle || productTitle || v?.sku || li.inventoryItem?.id || "(unknown)"),
+      title: productTitle && variantTitle ? `${productTitle} / ${variantTitle}` : (variantTitle || productTitle || v?.sku || li.inventoryItem?.id || li.id || "(unknown)"),
       imageUrl: "",
     };
   });
+  lineItems = await resolveMissingLineItemTitles_(lineItems, adminGraphql, signal);
   return { id: s.id, status: s.status, tracking: s.tracking ?? null, lineItems, pageInfo: s.lineItems?.pageInfo || { hasNextPage: false, endCursor: null } };
 }
 

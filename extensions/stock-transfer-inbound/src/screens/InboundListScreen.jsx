@@ -460,7 +460,7 @@ export function InboundListScreen({
           key: li.id,
           shipmentLineItemId: li.id,
           inventoryItemId: li.inventoryItemId,
-          title: li.title || li.sku || li.inventoryItemId || "(unknown)",
+          title: li.title || li.sku || li.inventoryItemId || li.id || "(unknown)",
           sku: li.sku || "",
           barcode: li.barcode || "",
           imageUrl: li.imageUrl || "",
@@ -484,6 +484,7 @@ export function InboundListScreen({
       safeSet(mountedRef, () => {
         setShipment(s);
         if (draft) {
+          // 下書き復元時も表示用の title/sku は必ず API の baseRows を採用（draft.rows の title で上書きしない）
           const nextRows = baseRows.map((r) => {
             const saved = draft.rows?.find((x) => x.shipmentLineItemId === r.shipmentLineItemId);
             if (!saved) return r;
@@ -588,7 +589,7 @@ export function InboundListScreen({
             shipmentId: s.id,
             shipmentLabel,
             inventoryItemId: li.inventoryItemId,
-            title: li.title || li.sku || li.inventoryItemId || "(unknown)",
+            title: li.title || li.sku || li.inventoryItemId || li.id || "(unknown)",
             sku: li.sku || "",
             barcode: li.barcode || "",
             imageUrl: li.imageUrl || "",
@@ -701,7 +702,7 @@ export function InboundListScreen({
           key: li.id,
           shipmentLineItemId: li.id,
           inventoryItemId: li.inventoryItemId,
-          title: li.title || li.sku || li.inventoryItemId || "(unknown)",
+          title: li.title || li.sku || li.inventoryItemId || li.id || "(unknown)",
           sku: li.sku || "",
           barcode: li.barcode || "",
           imageUrl: li.imageUrl || "",
