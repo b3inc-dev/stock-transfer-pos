@@ -1234,11 +1234,15 @@ export function InboundListScreen({
               const transferIdStr = String(transferId || "").trim();
               const transferIdMatch = transferIdStr.match(/(\d+)$/);
               const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
-              await adjustInventoryAtLocationWithFallback({
-                locationId: originLocationId,
-                deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
-                referenceDocumentUri: transferIdForUri || null
-              });
+              try {
+                await adjustInventoryAtLocationWithFallback({
+                  locationId: originLocationId,
+                  deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
+                  referenceDocumentUri: transferIdForUri || null
+                });
+              } catch (adjustErr) {
+                toast(`警告: 出庫元の在庫調整に失敗しました（入庫は完了）: ${adjustErr?.message || adjustErr}`);
+              }
               const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
               await logInventoryChangeToApi({
                 activity: "inbound_transfer",
@@ -1398,11 +1402,15 @@ export function InboundListScreen({
             const transferIdStr = String(transferId || "").trim();
             const transferIdMatch = transferIdStr.match(/(\d+)$/);
             const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
-            await adjustInventoryAtLocationWithFallback({
-              locationId: originLocationId,
-              deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
-              referenceDocumentUri: transferIdForUri || null
-            });
+            try {
+              await adjustInventoryAtLocationWithFallback({
+                locationId: originLocationId,
+                deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
+                referenceDocumentUri: transferIdForUri || null
+              });
+            } catch (adjustErr) {
+              toast(`警告: 出庫元の在庫調整に失敗しました（入庫は完了）: ${adjustErr?.message || adjustErr}`);
+            }
             const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
             await logInventoryChangeToApi({
               activity: "inbound_transfer",
@@ -1445,11 +1453,15 @@ export function InboundListScreen({
         const transferIdMatch = transferIdStr.match(/(\d+)$/);
         const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
         
-        await adjustInventoryAtLocationWithFallback({
-          locationId: locationGid,
-          deltas: extraDeltasMerged,
-          referenceDocumentUri: transferIdForUri || null
-        });
+        try {
+          await adjustInventoryAtLocationWithFallback({
+            locationId: locationGid,
+            deltas: extraDeltasMerged,
+            referenceDocumentUri: transferIdForUri || null
+          });
+        } catch (adjustErr) {
+          toast(`警告: 入庫先の在庫調整に失敗しました（入庫は完了）: ${adjustErr?.message || adjustErr}`);
+        }
         const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
         console.log(`[InboundListScreen] Calling logInventoryChangeToApi for inbound_transfer: locationId=${locationGid}, deltas.length=${extraDeltasMerged?.length || 0}, sourceId=${transferIdForUri}`);
         await logInventoryChangeToApi({
@@ -1473,11 +1485,15 @@ export function InboundListScreen({
             inventoryItemId: d.inventoryItemId,
             delta: -Math.max(0, Math.floor(Number(d.delta || 0))),
           }));
-          await adjustInventoryAtLocationWithFallback({
-            locationId: originLocationId,
-            deltas: originDeltas,
-            referenceDocumentUri: transferIdForUri || null
-          });
+          try {
+            await adjustInventoryAtLocationWithFallback({
+              locationId: originLocationId,
+              deltas: originDeltas,
+              referenceDocumentUri: transferIdForUri || null
+            });
+          } catch (adjustErr) {
+            toast(`警告: 出庫元の在庫調整に失敗しました（入庫は完了）: ${adjustErr?.message || adjustErr}`);
+          }
           const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
           console.log(`[InboundListScreen] Calling logInventoryChangeToApi for outbound_transfer: locationId=${originLocationId}, deltas.length=${originDeltas?.length || 0}, sourceId=${transferIdForUri}`);
           await logInventoryChangeToApi({

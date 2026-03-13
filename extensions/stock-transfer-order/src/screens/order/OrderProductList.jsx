@@ -873,21 +873,17 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
         createdAt: new Date().toISOString(),
       };
 
+      await writeOrderEntries([entry, ...existing]);
+      if (SHOPIFY?.storage?.delete) {
+        await Promise.all([
+          SHOPIFY.storage.delete(ORDER_DRAFT_KEY),
+          SHOPIFY.storage.delete(ORDER_CONDITIONS_DRAFT_KEY),
+        ]).catch((e) => console.error("Failed to clear order draft:", e));
+      }
       toast("発注リストを保存しました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
-      setSubmitting(false);
-      // 残りはバックグラウンドで実行（メタフィールド保存・下書き削除）
-      Promise.all([
-        writeOrderEntries([entry, ...existing]),
-        SHOPIFY?.storage?.delete ? Promise.all([
-          SHOPIFY.storage.delete(ORDER_DRAFT_KEY),
-          SHOPIFY.storage.delete(ORDER_CONDITIONS_DRAFT_KEY),
-        ]).catch((e) => console.error("Failed to clear order draft:", e)) : Promise.resolve(),
-      ]).catch((e) => {
-        toast(`保存に失敗しました: ${e?.message ?? e}`);
-      });
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
