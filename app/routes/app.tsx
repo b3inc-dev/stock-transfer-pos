@@ -219,6 +219,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }
     }
 
+    // 公開アプリで Pro 未加入の場合は、Pro 専用画面への直接アクセスを禁止し料金プランへリダイレクト
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const proOnlyPaths = [
+      "/app/inventory-info",
+      "/app/purchase",
+      "/app/loss",
+      "/app/order",
+      "/app/inventory-count",
+      "/app/adjustment",
+    ];
+    const isProOnlyPath = proOnlyPaths.some((p) => path === p || path.startsWith(`${p}/`));
+    if (
+      shopPlan.distribution === "public" &&
+      shopPlan.plan !== "pro" &&
+      isProOnlyPath
+    ) {
+      return redirect("/app/plan");
+    }
+
     // eslint-disable-next-line no-undef
     return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle };
   } catch (e) {
