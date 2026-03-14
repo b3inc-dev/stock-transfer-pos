@@ -1,7 +1,6 @@
 // app/routes/app.plan.tsx - 料金プランページ（プラン選択＋プラン別機能の紹介）
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useLoaderData } from "react-router";
-import { redirect } from "react-router";
+import { useLoaderData, data, redirect } from "react-router";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getShopPlan } from "./app";
@@ -18,7 +17,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const storeHandle = session?.shop?.replace(".myshopify.com", "") ?? "";
     const pricingPlansUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${APP_HANDLE}/pricing_plans`;
 
-    return { shopPlan, pricingPlansUrl };
+    return data({ shopPlan, pricingPlansUrl }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Response(JSON.stringify({ error: msg }), {

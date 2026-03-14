@@ -1,7 +1,7 @@
 // app/routes/app.adjustment.tsx
 // 調整（簡易棚卸）履歴管理画面（調整履歴と同じデザインと機能）
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useFetcher, useSearchParams } from "react-router";
+import { useLoaderData, useFetcher, useSearchParams, data } from "react-router";
 import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
@@ -192,19 +192,22 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
-  return {
-    locations,
-    entries: needsUpdate ? entriesWithAdjustmentName : entries,
-    shopTimezone,
-    todayInShopTimezone,
-    adjustmentCsvExportColumns,
-    pageInfo: {
-      hasNextPage: false,
-      hasPreviousPage: false,
-      startCursor: null,
-      endCursor: null,
+  return data(
+    {
+      locations,
+      entries: needsUpdate ? entriesWithAdjustmentName : entries,
+      shopTimezone,
+      todayInShopTimezone,
+      adjustmentCsvExportColumns,
+      pageInfo: {
+        hasNextPage: false,
+        hasPreviousPage: false,
+        startCursor: null,
+        endCursor: null,
+      },
     },
-  };
+    { headers: { "Cache-Control": "private, no-store" } }
+  );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Response(JSON.stringify({ error: msg }), {

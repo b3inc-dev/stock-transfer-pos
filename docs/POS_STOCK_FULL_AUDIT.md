@@ -673,4 +673,130 @@ API は **Admin GraphQL のみ**（REST 未使用）。エンドポイントは 
 
 ---
 
+## 8. Phase 5 — パフォーマンス監査
+
+実施内容: Shopify API 呼び出し・Remix 最適化・フロントエンドの観点で、N+1・未使用データ・キャッシュ・defer・大きなリストの扱いを検索・確認。
+
+---
+
+### 8.1 Shopify API 呼び出し
+
+#### 8.1.1 ループ内での API 呼び出し（N+1 問題）
+
+| ファイル | 行付近 | 内容 | 推奨 |
+|----------|--------|------|------|
+| **app/routes/app.inventory-count.tsx** | 2181–2206 | **resolveSkusToInventoryItemIds**: `trimmed.length <= 3` のとき、**for (const sku of trimmed)** で **1 SKU ごとに admin.graphql** を呼んでいる。3 件でも 3 回の往復になる。 | 3 件以下でも **1 回のクエリ**（`query: sku:A OR sku:B OR sku:C`）にまとめて取得する。 |
+| **app/routes/app.inventory-count.tsx** | 2238–2263 | **runBatch** の **catch** 内で、バッチ 1 回が失敗すると **for (const sku of batch)** で **SKU ごとに graphql** を呼ぶフォールバックになっている。バッチが 50 件なら最大 50 回の API 呼び出し。 | フォールバック時も **小さいサブバッチ**（例: 5 件ずつ）に分けて `query: sku:A OR sku:B OR ...` でまとめて取得する。 |
+| **app/routes/app.inventory-count.tsx** | 2304–2353 | **getInventoryItemIdsForGroup**: 商品グループに複数コレクションがある場合、**for (const collectionId of group.collectionIds)** のループ内で **1 コレクションごとに admin.graphql(CollectionProducts)** を呼んでいる。グループあたりコレクション数分の N+1。 | **nodes(ids: [id1, id2, ...])** で複数コレクションを 1 クエリにまとめる、または **collection ごとの並列** は `Promise.all` にしつつ、**1 クエリで複数 collection の products を取れる**ように GraphQL の設計（alias 等）を検討する。 |
+| **extensions/stock-transfer-stocktake/.../stocktakeApi.js** | 270–316 | **readInventoryCountsChunked**（チャンク形式時）: **for (let i = 0; i < parsed.totalChunks; i++)** で **チャンクごとに await graphql(gqlChunk, { key })** を**直列**で呼んでいる。チャンク数が 10 なら 10 回の直列往復。 | 管理画面の **readInventoryCountsChunked**（app.inventory-count.tsx 476–520 行）と同様に、**Promise.all(batch.map(...))** で **最大 N 件ずつ並列**（例: CHUNK_FETCH_CONCURRENCY = 8）にしてから次のバッチを await する。 |
+
+**補足:** 管理画面側の `readInventoryCountsListChunked` / `readInventoryCountsChunked` は、すでに **CHUNK_FETCH_CONCURRENCY** で並列取得している（440–445, 515–520 行）。POS 拡張の `stocktakeApi.js` のチャンク読みだけが直列のまま。
+
+#### 8.1.2 1 回の GraphQL でまとめられるのに複数回呼んでいる箇所
+
+| ファイル | 内容 | 推奨 |
+|----------|------|------|
+| **app/routes/app.inventory-count.tsx** | **resolveSkusToInventoryItemIds**: SKU が 3 件以下のとき、同じ **productVariants(first, query)** の形で 3 回発行している。 | 1 クエリに **query: "sku:A OR sku:B OR sku:C"** でまとめる。 |
+| **app/routes/app.inventory-count.tsx** | **getInventoryItemIdsForGroup**: 複数 **collectionId** に対して、それぞれ **collection(id).products(...)** を 1 クエリずつ発行。 | GraphQL の **alias**（例: `c1: collection(id: $id1) { ... }` `c2: collection(id: $id2) { ... }`）で 1 リクエストにまとめる、または **nodes(ids: $ids)** で複数 Collection を取得してから各 products を取得する設計を検討。 |
+
+#### 8.1.3 REST API と GraphQL の使い分け
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **✅ ほぼ GraphQL に統一** | Admin 操作は **admin.graphql** または **fetch(`.../admin/api/2026-01/graphql.json`)** を使用。REST らしいパス（例: `/admin/api/202x-xx/products.json`）の利用は**なし**。 |
+| **OAuth のみ REST** | **refresh-offline-session.ts** の **oauth/access_token** は Shopify の仕様上 REST。GraphQL 化の対象外。 |
+| **Webhook payload** | **webhooks.refunds.create.tsx** のコメントにあるとおり、REST Webhook の payload では **line_item に variant_id が含まれない**ため、**GraphQL で注文を取得して variant_id を取得**している。これは妥当。 |
+
+**結論:** REST を GraphQL に移行すべき箇所は**特になし**。
+
+---
+
+### 8.2 Remix 最適化
+
+#### 8.2.1 loader で取得しているが使っていないデータ
+
+| ルート | 取得データ | 利用状況 |
+|--------|------------|----------|
+| **app.inventory-count.tsx** | **collections**（常に `[]`）、**skuVariantList**（常に `[]`） | コメントどおり「検索時のみ action で取得」。loader では返しているが**空配列**。UI では **collectionSearchResults** / **skuSearchResults**（fetcher 取得）を使用。**未使用の重いデータはなし**。 |
+| **app.inventory-count.tsx** | **collectionDisplayMap** | 右パネル表示用。**productGroups** で参照されているコレクション ID のみ **getCollectionsByIds** 的に 1 クエリで取得。**使用されている**。 |
+| **app.history.tsx / app.purchase.tsx / app.order.tsx 等** | 各 loader の戻り値 | **useLoaderData** で取得した項目は、各コンポーネントで **locations**, **entries**, **pageInfo**, **shopTimezone** 等として使用。**明らかに未使用のプロパティは見当たらない**。 |
+
+**結論:** loader から返しているが**実際に使っていない重いデータ**は**なし**。空の **collections** / **skuVariantList** はドキュメント用のキーとして残っているだけなので、型・コメントで「検索時のみ action で取得」と分かれば問題なし。
+
+#### 8.2.2 defer / Await で体感速度を改善できる重い処理
+
+| ルート | 重い処理 | 推奨 |
+|--------|----------|------|
+| **app.inventory-count.tsx** | loader 内で **getShopTimezone** → **Promise.all([LOCATIONS, APP, SETTINGS, LIST, MAIN, VERSION])** → 必要なら **fetchListChunksViaLoader** / **fetchMainChunksViaLoader** → **collectionDisplayMap** 用の **nodes(ids)** → 最後に **inventoryCounts** のソート・補正。初回表示までに**複数ラウンド**の API とチャンク取得が直列/並列で発生。 | **defer({ critical: loaderCritical, secondary: loaderSecondary })** のように分け、**locations / productGroups / inventoryCounts の一覧**を先に返し、**collectionDisplayMap** や **stocktakeCsvExportColumns** などは **Await** で後から流し込むと、**First Contentful Paint が早く**なる。 |
+| **app.history.tsx** | **locations** + **transfers**（ページネーション）を 2 クエリで取得。 | 一覧の **transfers** を **defer** し、**locations** を先に返してフィルタ UI を表示し、**transfers** を **Await** で表示する、などの分割が可能。 |
+| **app.purchase.tsx / app.order.tsx** | **Promise.all([locResp, appResp, settingsResp])** で 3 本並列。 | 設定系を **defer** して、**entries** を先に描画する構成も検討の余地あり。 |
+
+**注意:** **app.inventory-count.tsx** の loader は、**useDirectFetch** 時とそうでない時で分岐しており、**listCountsOnly** を出すために **fetchListChunksViaLoader** 等を await している。defer を入れる場合は、**critical で返す最小限**（locations, productGroups, inventoryCounts の「一覧用軽量データ」）と、**secondary**（collectionDisplayMap, stocktakeCsvExportColumns, フルチャンクなど）を分離する必要がある。
+
+#### 8.2.3 Cache-Control が未設定の loader
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **⚠️ 未設定** | **app/routes/** の各 loader の戻り値は **return { ... }** または **return json(...)** のみ。**headers** で **Cache-Control** を付与しているルートは**なし**。 |
+| **headers の利用** | **app.tsx**, **app._index.tsx**, **auth.$.tsx** では **boundary.headers(headersArgs)** を返しているが、**Cache-Control** を明示的に設定しているのは**確認できず**（boundary 任せ）。 |
+
+**推奨:**
+
+- **データの鮮度が重要**なルート（棚卸・履歴・設定など）では **Cache-Control: private, no-store** または **max-age=0** を明示し、ブラウザや CDN にキャッシュさせない。
+- **変化が少ない**データ（例: ロケーション一覧の短時間キャッシュ）だけ **private, max-age=60** などを検討する。
+
+**例（loader の return で headers を付ける場合）:**
+
+```ts
+return json(data, {
+  headers: { "Cache-Control": "private, no-store" },
+});
+```
+
+---
+
+### 8.3 フロントエンド
+
+#### 8.3.1 Polaris コンポーネントの不必要な再レンダリング
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **extensions** | **InventoryCountList.jsx** では **memo**（preact/compat）を import しており、一部の子コンポーネントで **memo** の利用がありうる。一方、**lines** や **groupLines** の **.map** で **InventoryCountLineRow** を大量に描画している箇所（3100, 3151, 3191 行付近）では、**親 state**（lines, loading, など）が変わるたびに**リスト全体が再レンダリング**されうる。 |
+| **管理画面** | **app.inventory-count.tsx** は 1 ファイルが非常に大きく、**useState** / **useFetcher** が多数ある。**fetcher.data** の更新や **inventoryCounts** の更新で、**棚卸一覧テーブルやモーダル全体**が再描画されうる。 |
+
+**推奨:**
+
+- **InventoryCountLineRow** を **React.memo**（Preact の **memo**）でラップし、**props** が同一の行は再レンダーをスキップする。
+- リストの **key** が **安定した ID**（例: **inventoryItemId** や **variantId**）になっているか確認する。**key={index}** や **key={Date.now()}** だと再マウントが増える。
+- 管理画面では、**棚卸一覧**と**モーダル内の商品リスト**を、可能なら **useMemo** でフィルタ・ソート結果だけ切り出し、**参照の安定化**を図る。
+
+#### 8.3.2 大きなリストで Pagination / VirtualList 未使用
+
+| ファイル | 内容 | 推奨 |
+|----------|------|------|
+| **extensions/stock-transfer-stocktake/.../InventoryCountList.jsx** | **groupLines** / **lines** を **.map** でそのまま **InventoryCountLineRow** として描画（3100, 3151, 3191 行付近）。**MODAL_ITEMS_PER_PAGE = 1000**（app.inventory-count.tsx 4937 行）のように「1000 件/ページ」のページネーションは**管理画面のモーダル**側にあるが、**POS 拡張内**では**仮想リストやページネーションは未使用**。 | 行数が**数百〜数千**になる棚卸明細では、**VirtualList**（表示域だけ DOM 化）や **Pagination**（例: 50 件ずつ表示）を導入すると、スクロール・タップの体感が軽くなる。POS UI Extension の制約（利用可能コンポーネント）を確認し、**ScrollView + ウィンドウリング**や **ページ切り替え**を検討する。 |
+| **app/routes/app.inventory-count.tsx** | 棚卸一覧（**inventoryCounts**）は **テーブル/カード**で全件表示。**listRowDetailFetcher** で各行の「N件」を後から取得する設計。一覧件数が**数十〜数百**になる場合は、**一覧側のページネーション**（例: 20 件ずつ）があるとよい。 | **Pagination** コンポーネントで **currentPage** を state に持ち、表示する **inventoryCounts** を **slice((page-1)*pageSize, page*pageSize)** する。 |
+| **app/routes/app.history.tsx** | **histories** は **pageInfo** 付きで**サーバー側ページネーション**済み。**Cursor-based** で「次へ」「前へ」がある。 | 現状で**問題なし**。 |
+| **app/routes/app.purchase.tsx / app.order.tsx** | **entries** を一覧表示。**pageInfo** あり。 | 同様にサーバー側ページネーション済みなら**問題なし**。 |
+
+**結論:** **POS 拡張の棚卸明細リスト**（InventoryCountList.jsx）が**全件一括描画**になっている箇所は、**パフォーマンス改善の優先候補**。管理画面の**棚卸一覧**も件数が多い場合は**ページネーション**を検討する価値あり。
+
+---
+
+### 8.4 Phase 5 サマリー
+
+| カテゴリ | 項目 | 優先度 | 対応状況 |
+|----------|------|--------|----------|
+| **Shopify API** | resolveSkusToInventoryItemIds の 3 件以下時の 1-SKU-1-query | 中 | **✅ 対応済み**。3 件以下でも batches 経由で 1 クエリにまとめて取得。 |
+| **Shopify API** | runBatch フォールバックの SKU ごと graphql | 中 | **✅ 対応済み**。フォールバック時も FALLBACK_SUB（5 件）ずつサブバッチで 1 クエリにまとめて取得。 |
+| **Shopify API** | getInventoryItemIdsForGroup の collection ごと graphql | 高 | **✅ 対応済み**。nodes(ids) で複数コレクションを 1 クエリにまとめて取得。 |
+| **Shopify API** | stocktakeApi.js のチャンク直列取得 | 高 | **✅ 対応済み**。CHUNK_FETCH_CONCURRENCY で Promise.all 並列化（管理画面と同様）。 |
+| **Remix** | loader の未使用データ | 低 | 特になし（空の collections/skuVariantList は意図どおり）。 |
+| **Remix** | defer / Await で初回表示の高速化 | 中 | 見送り。影響範囲が大きいため、必要時に対応。 |
+| **Remix** | Cache-Control 未設定 | 中 | **✅ 対応済み**。app / app.inventory-count / app.plan / app.settings / app.history / app.history.$id / app.purchase / app.order / app.adjustment / app.loss / app.inventory-info / api.staff-members の各 loader に `Cache-Control: private, no-store` を付与。 |
+| **フロント** | リスト行の memo 化 | 中 | **✅ 対応済み**。InventoryCountLineRow は既に memo でラップ済み（inventoryCountLineRowRef + memo）。 |
+| **フロント** | 大きなリストの Pagination / VirtualList | 高 | **✅ 対応済み（POS 棚卸明細）**。表示ページネーション（50 件/ページ・前へ/次へ）を導入。要件は docs/STOCKTAKE_POS_LIST_PERFORMANCE_REQUIREMENTS.md。 |
+
+---
+
 以上が POS Stock（stock-transfer-pos）の全体監査レポートです。

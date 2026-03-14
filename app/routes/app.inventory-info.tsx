@@ -1,7 +1,7 @@
 // app/routes/app.inventory-info.tsx
 // 在庫情報画面（在庫高表示・変動履歴）
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useSearchParams, useFetcher, useLocation } from "react-router";
+import { useLoaderData, useSearchParams, useFetcher, useLocation, data } from "react-router";
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
@@ -468,37 +468,40 @@ export async function loader({ request }: LoaderFunctionArgs) {
       }
     }
 
-    return {
-      locations,
-      selectedDate,
-      selectedLocationIds: Array.from(selectedLocationIds),
-      snapshots: filteredSnapshots,
-      summary,
-      isToday,
-      shopId,
-      shopName,
-      shopTimezone,
-      todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
-      firstSnapshotDate, // 最初のスナップショット日付（日付選択のmin属性用）
-      hasYesterdaySnapshot, // 前日分のスナップショットが既に保存されているか
-      yesterdayDateStr, // 前日の日付（YYYY-MM-DD）
-      snapshotRefreshTokenExpires, // 日次スナップショット用リフレッシュトークン有効期限（ISO文字列 or null）
-      todaySnapshotUpdatedAt, // 今日のスナップショットの最終更新時刻（ISO文字列 or null）
-      snapshotDisplayUpdatedAt, // 表示中スナップショットの保存日時（備考「保存日時」表示用）
-      firstChangeHistoryDate,
-      // 在庫変動履歴用のデータ
-      changeHistoryLogs: changeHistoryLogs || [],
-      changeHistoryPagination,
-      hasExplicitFilters, // フィルターが明示的に適用されているか（初回表示時のパフォーマンス改善用）
-      changeHistoryFilters: {
-        startDate,
-        endDate,
-        locationIds: changeHistoryLocationIds || [],
-        inventoryItemIds: inventoryItemIds || [],
-        activityTypes: activityTypes || [],
-        sortOrder: sortOrder || "desc",
+    return data(
+      {
+        locations,
+        selectedDate,
+        selectedLocationIds: Array.from(selectedLocationIds),
+        snapshots: filteredSnapshots,
+        summary,
+        isToday,
+        shopId,
+        shopName,
+        shopTimezone,
+        todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
+        firstSnapshotDate, // 最初のスナップショット日付（日付選択のmin属性用）
+        hasYesterdaySnapshot, // 前日分のスナップショットが既に保存されているか
+        yesterdayDateStr, // 前日の日付（YYYY-MM-DD）
+        snapshotRefreshTokenExpires, // 日次スナップショット用リフレッシュトークン有効期限（ISO文字列 or null）
+        todaySnapshotUpdatedAt, // 今日のスナップショットの最終更新時刻（ISO文字列 or null）
+        snapshotDisplayUpdatedAt, // 表示中スナップショットの保存日時（備考「保存日時」表示用）
+        firstChangeHistoryDate,
+        // 在庫変動履歴用のデータ
+        changeHistoryLogs: changeHistoryLogs || [],
+        changeHistoryPagination,
+        hasExplicitFilters, // フィルターが明示的に適用されているか（初回表示時のパフォーマンス改善用）
+        changeHistoryFilters: {
+          startDate,
+          endDate,
+          locationIds: changeHistoryLocationIds || [],
+          inventoryItemIds: inventoryItemIds || [],
+          activityTypes: activityTypes || [],
+          sortOrder: sortOrder || "desc",
+        },
       },
-    };
+      { headers: { "Cache-Control": "private, no-store" } }
+    );
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;
@@ -506,50 +509,53 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     try {
       const todayStr = new Date().toISOString().slice(0, 10);
-      return {
-        locations: [],
-        selectedDate: todayStr,
-        selectedLocationIds: [],
-        snapshots: [],
-        summary: {
-          totalQuantity: 0,
-          totalRetailValue: 0,
-          totalCompareAtPriceValue: 0,
-          totalCostValue: 0,
+      return data(
+        {
+          locations: [],
+          selectedDate: todayStr,
+          selectedLocationIds: [],
+          snapshots: [],
+          summary: {
+            totalQuantity: 0,
+            totalRetailValue: 0,
+            totalCompareAtPriceValue: 0,
+            totalCostValue: 0,
+          },
+          isToday: false,
+          shopId: "",
+          shopName: "",
+          shopTimezone: "UTC",
+          todayInShopTimezone: todayStr,
+          firstSnapshotDate: todayStr,
+          hasYesterdaySnapshot: false,
+          yesterdayDateStr: todayStr,
+          snapshotRefreshTokenExpires: null,
+          todaySnapshotUpdatedAt: null,
+          snapshotDisplayUpdatedAt: null,
+          firstChangeHistoryDate: null,
+          changeHistoryLogs: [],
+          changeHistoryPagination: {
+            total: 0,
+            startIndex: 0,
+            pageSize: 5000,
+            currentPage: 1,
+            totalPages: 0,
+            hasNextPage: false,
+            hasPreviousPage: false,
+          },
+          hasExplicitFilters: false,
+          changeHistoryFilters: {
+            startDate: todayStr,
+            endDate: todayStr,
+            locationIds: [],
+            inventoryItemIds: [],
+            activityTypes: [],
+            sortOrder: "desc",
+          },
+          error: errorMessage,
         },
-        isToday: false,
-        shopId: "",
-        shopName: "",
-        shopTimezone: "UTC",
-        todayInShopTimezone: todayStr,
-        firstSnapshotDate: todayStr,
-        hasYesterdaySnapshot: false,
-        yesterdayDateStr: todayStr,
-        snapshotRefreshTokenExpires: null,
-        todaySnapshotUpdatedAt: null,
-        snapshotDisplayUpdatedAt: null,
-        firstChangeHistoryDate: null,
-        changeHistoryLogs: [],
-        changeHistoryPagination: {
-          total: 0,
-          startIndex: 0,
-          pageSize: 5000,
-          currentPage: 1,
-          totalPages: 0,
-          hasNextPage: false,
-          hasPreviousPage: false,
-        },
-        hasExplicitFilters: false,
-        changeHistoryFilters: {
-          startDate: todayStr,
-          endDate: todayStr,
-          locationIds: [],
-          inventoryItemIds: [],
-          activityTypes: [],
-          sortOrder: "desc",
-        },
-        error: errorMessage,
-      };
+        { headers: { "Cache-Control": "private, no-store" } }
+      );
     } catch (fallbackError) {
       console.error("[inventory-info] Fallback object build failed:", fallbackError);
       throw new Response(

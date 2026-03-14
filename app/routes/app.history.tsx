@@ -1,6 +1,6 @@
 // app/routes/app.history.tsx
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useFetcher, useSearchParams } from "react-router";
+import { useLoaderData, useFetcher, useSearchParams, data } from "react-router";
 import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
@@ -281,24 +281,27 @@ export async function loader({ request }: LoaderFunctionArgs) {
       // 設定取得失敗時はデフォルトの並びのまま
     }
 
-    return {
-      locations,
-      histories: allHistories,
-      shopTimezone,
-      todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
-      historyCsvExportColumns,
-      pageInfo: {
-        hasNextPage: pageInfo.hasNextPage || false,
-        hasPreviousPage: pageInfo.hasPreviousPage || false,
-        startCursor: pageInfo.startCursor || null,
-        endCursor: pageInfo.endCursor || null,
+    return data(
+      {
+        locations,
+        histories: allHistories,
+        shopTimezone,
+        todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
+        historyCsvExportColumns,
+        pageInfo: {
+          hasNextPage: pageInfo.hasNextPage || false,
+          hasPreviousPage: pageInfo.hasPreviousPage || false,
+          startCursor: pageInfo.startCursor || null,
+          endCursor: pageInfo.endCursor || null,
+        },
+        pagination: {
+          total: Number.isFinite(total) ? total : null,
+          startIndex,
+          pageSize,
+        },
       },
-      pagination: {
-        total: Number.isFinite(total) ? total : null,
-        startIndex,
-        pageSize,
-      },
-    };
+      { headers: { "Cache-Control": "private, no-store" } }
+    );
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error("History loader error:", error);

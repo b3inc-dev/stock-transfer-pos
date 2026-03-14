@@ -2,7 +2,7 @@
 // 棚卸（商品グループ設定・棚卸ID発行・履歴管理）画面
 import { randomBytes } from "crypto";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useRevalidator } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator, data } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
@@ -41,6 +41,9 @@ const MAX_IDS_ARRAY_LENGTH = 2500;
 const MAX_CSV_BODY_LENGTH = 5 * 1024 * 1024; // 5MB
 const MAX_ID_FIELD_LENGTH = 200;
 const MAX_JSON_PAYLOAD_LENGTH = 2 * 1024 * 1024; // 2MB (items/groups 等)
+
+/** Phase5: loader の Cache-Control（データ鮮度を優先） */
+const LOADER_CACHE_HEADERS = { "Cache-Control": "private, no-store" as const };
 
 /** 許可する actionType（ホワイトリスト）。未定義の action は 400 で拒否する */
 const ALLOWED_ACTION_TYPES = new Set([
@@ -1617,20 +1620,23 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return rest;
   });
 
-  return {
-    locations,
-    collections,
-    collectionDisplayMap,
-    productGroups,
-    inventoryCounts: inventoryCountsForClient,
-    inventoryCountsVersion: Number(inventoryCountsVersion) || 1,
-    skuVariantList,
-    shopTimezone,
-    todayInShopTimezone,
-    stocktakeCsvExportColumns,
-    loadError: false as const,
-    loadErrorMessage: undefined,
-  };
+  return data(
+    {
+      locations,
+      collections,
+      collectionDisplayMap,
+      productGroups,
+      inventoryCounts: inventoryCountsForClient,
+      inventoryCountsVersion: Number(inventoryCountsVersion) || 1,
+      skuVariantList,
+      shopTimezone,
+      todayInShopTimezone,
+      stocktakeCsvExportColumns,
+      loadError: false as const,
+      loadErrorMessage: undefined,
+    },
+    { headers: LOADER_CACHE_HEADERS }
+  );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : undefined;
@@ -1639,20 +1645,23 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (/syntax\s*error|unexpected\s*end\s*of\s*file/i.test(String(message))) {
       console.error("SYNTAX_ERROR_ORIGIN [inventory-count loader] 上記の stack の先頭が発生箇所です:", stack ?? "no stack");
     }
-    return {
-      locations: [] as LocationNode[],
-      collections: [],
-      collectionDisplayMap: {} as Record<string, CollectionNode>,
-      productGroups: [] as ProductGroup[],
-      inventoryCounts: [] as InventoryCount[],
-      inventoryCountsVersion: 1,
-      skuVariantList: [],
-      shopTimezone: "Asia/Tokyo",
-      todayInShopTimezone: new Date().toISOString().slice(0, 10),
-      stocktakeCsvExportColumns: DEFAULT_STOCKTAKE_CSV_COLUMNS,
-      loadError: true as const,
-      loadErrorMessage: message,
-    };
+    return data(
+      {
+        locations: [] as LocationNode[],
+        collections: [],
+        collectionDisplayMap: {} as Record<string, CollectionNode>,
+        productGroups: [] as ProductGroup[],
+        inventoryCounts: [] as InventoryCount[],
+        inventoryCountsVersion: 1,
+        skuVariantList: [],
+        shopTimezone: "Asia/Tokyo",
+        todayInShopTimezone: new Date().toISOString().slice(0, 10),
+        stocktakeCsvExportColumns: DEFAULT_STOCKTAKE_CSV_COLUMNS,
+        loadError: true as const,
+        loadErrorMessage: message,
+      },
+      { headers: LOADER_CACHE_HEADERS }
+    );
   }
 }
 
@@ -2177,35 +2186,7 @@ async function resolveSkusToInventoryItemIds(
 
   const escapeSku = (s: string) => `sku:${s.replace(/"/g, '\\"')}`;
 
-  // ✅ 戻り値は常に入力 skus の並び順（CSV登録順の表示に合わせる）
-  if (trimmed.length <= 3) {
-    const ids: string[] = [];
-    for (const sku of trimmed) {
-      try {
-        const resp = await admin.graphql(
-          `#graphql
-            query VariantBySku($first: Int!, $query: String!) {
-              productVariants(first: $first, query: $query) {
-                nodes { id inventoryItem { id } }
-              }
-            }
-          `,
-          { variables: { first: 1, query: escapeSku(sku) } }
-        );
-        const json = await resp.json();
-        const nodes = json?.data?.productVariants?.nodes ?? [];
-        for (const node of nodes) {
-          if (node?.inventoryItem?.id && !ids.includes(node.inventoryItem.id)) {
-            ids.push(node.inventoryItem.id);
-          }
-        }
-      } catch {
-        // SKU resolve failed for this row; skip
-      }
-    }
-    return ids;
-  }
-
+  // ✅ Phase5: 3件以下でも1クエリにまとめる（N+1回避）。戻り値は常に入力 skus の並び順。
   const batches: string[][] = [];
   for (let i = 0; i < trimmed.length; i += SKU_BATCH_SIZE) {
     batches.push(trimmed.slice(i, i + SKU_BATCH_SIZE));
@@ -2237,8 +2218,13 @@ async function resolveSkusToInventoryItemIds(
       }
       return map;
     } catch {
+      // Phase5: フォールバックもサブバッチで1クエリにまとめる（SKUごとループを避ける）
+      const FALLBACK_SUB = 5;
       const map = new Map<string, string>();
-      for (const sku of batch) {
+      for (let i = 0; i < batch.length; i += FALLBACK_SUB) {
+        const sub = batch.slice(i, i + FALLBACK_SUB);
+        const q = sub.map(escapeSku).join(" OR ");
+        if (!q) continue;
         try {
           const resp = await admin.graphql(
             `#graphql
@@ -2248,7 +2234,7 @@ async function resolveSkusToInventoryItemIds(
                 }
               }
             `,
-            { variables: { first: 1, query: escapeSku(sku) } }
+            { variables: { first: sub.length + 5, query: q } }
           );
           const json = await resp.json();
           const nodes = json?.data?.productVariants?.nodes ?? [];
@@ -2290,6 +2276,7 @@ async function resolveSkusToInventoryItemIds(
  * 商品グループの inventoryItemIds を取得する。
  * 既に保存されていればそれを返し、なければコレクションまたはSKUから取得する。
  * 棚卸作成時に全グループ分の商品リストを count に保存するために使用。
+ * Phase5 パフォーマンス: 複数コレクションを nodes(ids) で1クエリにまとめて取得する。
  */
 async function getInventoryItemIdsForGroup(
   admin: { graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<Response> },
@@ -2299,18 +2286,17 @@ async function getInventoryItemIdsForGroup(
     return [...group.inventoryItemIds];
   }
   const ids: string[] = [];
-  if (group.collectionIds?.length) {
+  const collectionIds = group.collectionIds ?? [];
+  if (collectionIds.length > 0) {
     const collectionConfigs = group.collectionConfigs ?? [];
-    for (const collectionId of group.collectionIds) {
-      const config = collectionConfigs.find((c) => c.collectionId === collectionId);
-      const selectedVariantIds = config?.selectedVariantIds ?? [];
-      try {
-        const productsResp = await admin.graphql(
-          `#graphql
-            query CollectionProducts($id: ID!, $first: Int!) {
-              collection(id: $id) {
+    try {
+      const productsResp = await admin.graphql(
+        `#graphql
+          query CollectionProductsBatch($ids: [ID!]!) {
+            nodes(ids: $ids) {
+              ... on Collection {
                 id
-                products(first: $first) {
+                products(first: 250) {
                   nodes {
                     id
                     variants(first: 250) {
@@ -2323,14 +2309,21 @@ async function getInventoryItemIdsForGroup(
                 }
               }
             }
-          `,
-          { variables: { id: collectionId, first: 250 } }
-        );
-        const productsData = (await safeJsonFromResponse(productsResp)) as Record<string, unknown>;
-        const collection = (productsData?.data as Record<string, unknown>)?.collection as Record<string, unknown> | undefined;
-        if (collection) {
-          const nodes = (collection.products as Record<string, unknown> | undefined)?.nodes as Array<Record<string, unknown>> | undefined;
-          for (const product of nodes ?? []) {
+          }
+        `,
+        { variables: { ids: collectionIds } }
+      );
+      const productsData = (await safeJsonFromResponse(productsResp)) as Record<string, unknown>;
+      const nodes = (productsData?.data as Record<string, unknown>)?.nodes as Array<Record<string, unknown> | null> | undefined;
+      if (Array.isArray(nodes)) {
+        for (let idx = 0; idx < nodes.length; idx++) {
+          const collection = nodes[idx];
+          const collectionId = collection && typeof collection === "object" ? (collection.id as string | undefined) : undefined;
+          const config = collectionId ? collectionConfigs.find((c) => c.collectionId === collectionId) : undefined;
+          const selectedVariantIds = config?.selectedVariantIds ?? [];
+          if (!collection || typeof collection !== "object") continue;
+          const productNodes = (collection.products as Record<string, unknown> | undefined)?.nodes as Array<Record<string, unknown>> | undefined;
+          for (const product of productNodes ?? []) {
             const variantNodes = (product.variants as Record<string, unknown> | undefined)?.nodes as Array<Record<string, unknown>> | undefined;
             for (const variant of variantNodes ?? []) {
               const invItem = (variant as Record<string, unknown>)?.inventoryItem as Record<string, unknown> | undefined;
@@ -2346,9 +2339,9 @@ async function getInventoryItemIdsForGroup(
             }
           }
         }
-      } catch (e) {
-        console.error(`Failed to get inventoryItemIds from collection ${collectionId}:`, e);
       }
+    } catch (e) {
+      console.error(`Failed to get inventoryItemIds from collections:`, e);
     }
   }
   if (ids.length > 0) return ids;

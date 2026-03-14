@@ -16,6 +16,8 @@ const BATCH_WRITE_DELAY_MS = 350;
 const INVENTORY_SET_QUANTITIES_MAX = 250;
 /** write 開始前の待機（ms）。read 直後の連続呼び出しでスロットに当たりにくくする */
 const WRITE_START_DELAY_MS = 300;
+/** チャンク並列取得数（管理画面と同一。502/タイムアウト・レート制限のバランス） */
+const CHUNK_FETCH_CONCURRENCY = 8;
 
 /** 一覧用軽量メタフィールド（id, locationId, status, countName, createdAt, productGroupIds のみ） */
 const INVENTORY_COUNTS_LIST_KEY = "inventory_counts_list_v1";
@@ -267,8 +269,10 @@ export async function readInventoryCountsRaw() {
   const partsByCountId = new Map();
   const CHUNK_READ_MAX_RETRIES = 3;
   const CHUNK_READ_RETRY_DELAY_MS = 1500;
-  for (let i = 0; i < parsed.totalChunks; i++) {
-    const key = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`;
+
+  /** 1チャンクを取得（リトライ付き）。Phase5 パフォーマンス: 並列取得用 */
+  async function fetchOneChunk(chunkIndex) {
+    const key = `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${chunkIndex}`;
     const gqlChunk = `#graphql
       query InventoryCountChunk($key: String!) {
         currentAppInstallation {
@@ -291,27 +295,38 @@ export async function readInventoryCountsRaw() {
       }
     }
     if (lastChunkError != null) {
-      throw new Error(`棚卸チャンク${i}の読み取りに失敗しました（部分保存で他データが消えるのを防ぐため中断）: ${lastChunkError?.message ?? lastChunkError}`);
+      throw new Error(`棚卸チャンク${chunkIndex}の読み取りに失敗しました（部分保存で他データが消えるのを防ぐため中断）: ${lastChunkError?.message ?? lastChunkError}`);
     }
     if (chunkRaw == null) {
-      throw new Error(`棚卸チャンク${i}が存在しません。メタフィールドが欠落している可能性があります（上書きで他データが消えるのを防ぐため読み取りを中断します）。`);
+      throw new Error(`棚卸チャンク${chunkIndex}が存在しません。メタフィールドが欠落している可能性があります（上書きで他データが消えるのを防ぐため読み取りを中断します）。`);
     }
-    let chunk;
-    try {
-      chunk = JSON.parse(chunkRaw);
-    } catch (e) {
-      throw new Error(`棚卸チャンク${i}のパースに失敗しました: ${e?.message ?? e}`);
-    }
-    if (!Array.isArray(chunk)) {
-      throw new Error(`棚卸チャンク${i}が配列ではありません（上書きで他データが消えるのを防ぐため中断）`);
-    }
-    for (const el of chunk) {
-      if (el && typeof el === "object" && el._part === true) {
-        const list = partsByCountId.get(el.countId) ?? [];
-        list.push(el);
-        partsByCountId.set(el.countId, list);
-      } else {
-        fullCounts.push(el);
+    return { chunkIndex, chunkRaw };
+  }
+
+  const totalChunks = parsed.totalChunks;
+  const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i);
+  for (let start = 0; start < chunkIndices.length; start += CHUNK_FETCH_CONCURRENCY) {
+    const batch = chunkIndices.slice(start, start + CHUNK_FETCH_CONCURRENCY);
+    const batchResults = await Promise.all(batch.map((i) => fetchOneChunk(i)));
+    batchResults.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    for (const { chunkIndex, chunkRaw } of batchResults) {
+      let chunk;
+      try {
+        chunk = JSON.parse(chunkRaw);
+      } catch (e) {
+        throw new Error(`棚卸チャンク${chunkIndex}のパースに失敗しました: ${e?.message ?? e}`);
+      }
+      if (!Array.isArray(chunk)) {
+        throw new Error(`棚卸チャンク${chunkIndex}が配列ではありません（上書きで他データが消えるのを防ぐため中断）`);
+      }
+      for (const el of chunk) {
+        if (el && typeof el === "object" && el._part === true) {
+          const list = partsByCountId.get(el.countId) ?? [];
+          list.push(el);
+          partsByCountId.set(el.countId, list);
+        } else {
+          fullCounts.push(el);
+        }
       }
     }
   }

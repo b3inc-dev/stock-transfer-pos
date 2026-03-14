@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
-import { Outlet, redirect, useLoaderData, useNavigation, useRouteError } from "react-router";
+import { Outlet, redirect, useLoaderData, useNavigation, useRouteError, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
@@ -242,7 +242,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
 
     // eslint-disable-next-line no-undef
-    return { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle };
+    return data(
+      { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle },
+      { headers: { "Cache-Control": "private, no-store" } }
+    );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : undefined;

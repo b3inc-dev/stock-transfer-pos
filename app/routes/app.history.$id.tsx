@@ -1,6 +1,6 @@
 // app/routes/app.history.$id.tsx
 import type { LoaderFunctionArgs } from "react-router";
-import { useLoaderData, useNavigate, useRouteError } from "react-router";
+import { useLoaderData, useNavigate, useRouteError, data } from "react-router";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import type { TransferLineItem } from "../types";
@@ -140,20 +140,23 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       ? transfer.origin?.location?.name || transfer.origin?.name || ""
       : transfer.destination?.location?.name || transfer.destination?.name || "";
 
-    return {
-      transfer: {
-        id: transfer.id,
-        name: transfer.name || "",
-        status: transfer.status || "",
-        note: transfer.note || "",
-        dateCreated: transfer.dateCreated || "",
-        type,
-        locationName,
-        originLocationName: transfer.origin?.location?.name || transfer.origin?.name || "",
-        destinationLocationName: transfer.destination?.location?.name || transfer.destination?.name || "",
+    return data(
+      {
+        transfer: {
+          id: transfer.id,
+          name: transfer.name || "",
+          status: transfer.status || "",
+          note: transfer.note || "",
+          dateCreated: transfer.dateCreated || "",
+          type,
+          locationName,
+          originLocationName: transfer.origin?.location?.name || transfer.origin?.name || "",
+          destinationLocationName: transfer.destination?.location?.name || transfer.destination?.name || "",
+        },
+        lineItems,
       },
-      lineItems,
-    };
+      { headers: { "Cache-Control": "private, no-store" } }
+    );
   } catch (error) {
     console.error("History detail loader error:", error);
     // エラーがResponseオブジェクトの場合はそのままthrow

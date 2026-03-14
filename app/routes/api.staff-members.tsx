@@ -57,8 +57,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     return new Response(
       JSON.stringify({ ok: true, staffMembers: staffList }),
-      { 
-        headers: { "Content-Type": "application/json" }
+      {
+        headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
       }
     );
   } catch (e: any) {

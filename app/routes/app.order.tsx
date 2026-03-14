@@ -1,7 +1,7 @@
 // app/routes/app.order.tsx
 // 発注履歴管理画面（入出庫履歴・ロス履歴と同じデザイン・機能を踏襲）
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useFetcher } from "react-router";
+import { useLoaderData, useFetcher, data } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
@@ -522,22 +522,25 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const todayInShopTimezone = getDateInShopTimezone(new Date(), shopTimezone);
 
   // loss/history と合わせるためのダミー pageInfo（今は全件クライアント側でページング）
-  return {
-    locations,
-    entries: entriesWithOrderName,
-    csvExportColumns, // CSV出力項目設定を返す
-    csvExportColumnLabels: settings?.order?.csvExportColumnLabels, // CSV出力項目のカスタムラベル
-    destinations, // 発注先マスタ
-    shopTimezone,
-    todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
-    useDesiredDeliveryDate: settings?.order?.useDesiredDeliveryDate ?? true,
-    pageInfo: {
-      hasNextPage: false,
-      hasPreviousPage: false,
-      startCursor: null as string | null,
-      endCursor: null as string | null,
+  return data(
+    {
+      locations,
+      entries: entriesWithOrderName,
+      csvExportColumns, // CSV出力項目設定を返す
+      csvExportColumnLabels: settings?.order?.csvExportColumnLabels, // CSV出力項目のカスタムラベル
+      destinations, // 発注先マスタ
+      shopTimezone,
+      todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
+      useDesiredDeliveryDate: settings?.order?.useDesiredDeliveryDate ?? true,
+      pageInfo: {
+        hasNextPage: false,
+        hasPreviousPage: false,
+        startCursor: null as string | null,
+        endCursor: null as string | null,
+      },
     },
-  };
+    { headers: { "Cache-Control": "private, no-store" } }
+  );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Response(JSON.stringify({ error: msg }), {

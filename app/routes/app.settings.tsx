@@ -1,6 +1,6 @@
 // app/routes/app.settings.tsx
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useRevalidator, useSearchParams } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator, useSearchParams, data } from "react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
@@ -691,8 +691,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       };
     }
 
-    // ✅ React Router template: json() を使わず、そのまま返す
-    return { locations, settings };
+    return data({ locations, settings }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error("Settings loader error:", error);

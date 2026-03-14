@@ -1,7 +1,7 @@
 // app/routes/app.purchase.tsx
 // 仕入履歴管理画面（ロス履歴・発注履歴と同じデザインと機能）
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useFetcher, useSearchParams, useRevalidator, useLocation } from "react-router";
+import { useLoaderData, useFetcher, useSearchParams, useRevalidator, useLocation, data } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
@@ -343,21 +343,24 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // サーバー側で「今日の日付」を計算
   const todayInShopTimezone = getDateInShopTimezone(new Date(), shopTimezone);
 
-  return {
-    locations,
-    entries,
-    suppliers,
-    carriers,
-    shopTimezone,
-    todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
-    purchaseCsvExportColumns,
-    pageInfo: {
-      hasNextPage: false,
-      hasPreviousPage: false,
-      startCursor: null as string | null,
-      endCursor: null as string | null,
+  return data(
+    {
+      locations,
+      entries,
+      suppliers,
+      carriers,
+      shopTimezone,
+      todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
+      purchaseCsvExportColumns,
+      pageInfo: {
+        hasNextPage: false,
+        hasPreviousPage: false,
+        startCursor: null as string | null,
+        endCursor: null as string | null,
+      },
     },
-  };
+    { headers: { "Cache-Control": "private, no-store" } }
+  );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Response(JSON.stringify({ error: msg }), {

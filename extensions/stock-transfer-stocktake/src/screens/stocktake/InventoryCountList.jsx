@@ -64,6 +64,8 @@ function inventoryCountDraftKeySingleGroup({ countId, locationId, productGroupId
   return inventoryCountDraftKey({ countId, locationId, productGroupId: g });
 }
 const CONFIRM_INVENTORY_COUNT_MODAL_ID = "confirm-inventory-count-modal";
+/** 表示ページネーション: 1ページあたりの表示件数（STOCKTAKE_POS_LIST_PERFORMANCE_REQUIREMENTS.md） */
+const LIST_ITEMS_PER_PAGE = 50;
 
 // groupItems のキー照合（GID と数値 ID の混在で取れない不具合対策。管理画面と POS で明細数が一致するようにする）
 function getGroupItemsByKey(groupItemsMap, groupId) {
@@ -490,6 +492,10 @@ export function InventoryCountList({
   const collectionPageInfoRef = useRef(null); // ✅ コレクション経路の「さらに読み込む」用（前回の pageInfo を after で渡す）
   const backgroundInventoryLoadIdRef = useRef(0); // ✅ リスト表示後の在庫バックグラウンド読込で、同一ロードかどうか判定（画面遷移・再読込時は更新しない）
   const loadCompletedRef = useRef(false); // ✅ 初回ロード完了まで「商品がありません」を出さない（コレクション→CSV の順で0件になる瞬間のチラつき防止）
+  // ✅ 表示ページネーション（STOCKTAKE_POS_LIST_PERFORMANCE_REQUIREMENTS.md）：1画面あたり LIST_ITEMS_PER_PAGE 件に制限
+  const [listPage, setListPage] = useState(1);
+  const [groupListPages, setGroupListPages] = useState({});
+  const [extraListPage, setExtraListPage] = useState(1);
 
   const denyEdit = useCallback(() => {
     if (!toastReadOnlyOnceRef.current) {
@@ -3077,6 +3083,16 @@ export function InventoryCountList({
                       );
                     }
                     
+                    const normalGroupLines = groupLines.filter((l) => !l.isExtra);
+                    const totalGroup = normalGroupLines.length;
+                    const totalGroupPages = Math.ceil(totalGroup / LIST_ITEMS_PER_PAGE) || 1;
+                    const groupPage = groupListPages[groupId] ?? 1;
+                    const currentGroupPage = Math.min(Math.max(1, groupPage), totalGroupPages);
+                    const groupStartIdx = (currentGroupPage - 1) * LIST_ITEMS_PER_PAGE;
+                    const displayedGroupLines = normalGroupLines.slice(groupStartIdx, groupStartIdx + LIST_ITEMS_PER_PAGE);
+                    const showGroupPagination = totalGroup > LIST_ITEMS_PER_PAGE;
+                    const groupRangeStart = groupStartIdx + 1;
+                    const groupRangeEnd = Math.min(groupStartIdx + LIST_ITEMS_PER_PAGE, totalGroup);
                     return (
                       <s-box key={groupId} padding="small" background={isGroupCompleted ? "subdued" : undefined}>
                         <s-stack gap="small">
@@ -3095,9 +3111,34 @@ export function InventoryCountList({
                               </s-text>
                             </s-stack>
                           </s-stack>
+                          {showGroupPagination && (
+                            <s-stack direction="inline" gap="small" alignItems="center">
+                              <s-text tone="subdued" size="small">
+                                {groupRangeStart}–{groupRangeEnd} / 全{totalGroup}件
+                              </s-text>
+                              <s-button
+                                kind="secondary"
+                                size="slim"
+                                disabled={currentGroupPage <= 1}
+                                onClick={() => setGroupListPages((prev) => ({ ...prev, [groupId]: Math.max(1, (prev[groupId] ?? 1) - 1) }))}
+                                onPress={() => setGroupListPages((prev) => ({ ...prev, [groupId]: Math.max(1, (prev[groupId] ?? 1) - 1) }))}
+                              >
+                                前へ
+                              </s-button>
+                              <s-button
+                                kind="secondary"
+                                size="slim"
+                                disabled={currentGroupPage >= totalGroupPages}
+                                onClick={() => setGroupListPages((prev) => ({ ...prev, [groupId]: Math.min(totalGroupPages, (prev[groupId] ?? 1) + 1) }))}
+                                onPress={() => setGroupListPages((prev) => ({ ...prev, [groupId]: Math.min(totalGroupPages, (prev[groupId] ?? 1) + 1) }))}
+                              >
+                                次へ
+                              </s-button>
+                            </s-stack>
+                          )}
                           <s-stack gap="none">
-                            {/* ✅ 予定外商品を除外して表示（予定外リストは最下部に別表示） */}
-                            {groupLines.filter((l) => !l.isExtra).map((l) => (
+                            {/* ✅ 予定外商品を除外して表示（予定外リストは最下部に別表示）。表示はページネーションで N 件ずつ。 */}
+                            {displayedGroupLines.map((l) => (
                               <InventoryCountLineRow
                                 key={l.id}
                                 line={l}
@@ -3143,12 +3184,45 @@ export function InventoryCountList({
                 );
               }
               if (normalLines.length === 0) return null;
+              const totalNormal = normalLines.length;
+              const totalPages = Math.ceil(totalNormal / LIST_ITEMS_PER_PAGE) || 1;
+              const currentPage = Math.min(Math.max(1, listPage), totalPages);
+              const startIdx = (currentPage - 1) * LIST_ITEMS_PER_PAGE;
+              const displayedLines = normalLines.slice(startIdx, startIdx + LIST_ITEMS_PER_PAGE);
+              const showPagination = totalNormal > LIST_ITEMS_PER_PAGE;
+              const rangeStart = startIdx + 1;
+              const rangeEnd = Math.min(startIdx + LIST_ITEMS_PER_PAGE, totalNormal);
               return (
                 <s-box key="inventory_count_list" padding="small">
                   <s-stack gap="small">
                     <s-text emphasis="bold">棚卸リスト</s-text>
+                    {showPagination && (
+                      <s-stack direction="inline" gap="small" alignItems="center">
+                        <s-text tone="subdued" size="small">
+                          {rangeStart}–{rangeEnd} / 全{totalNormal}件
+                        </s-text>
+                        <s-button
+                          kind="secondary"
+                          size="slim"
+                          disabled={currentPage <= 1}
+                          onClick={() => setListPage((p) => Math.max(1, p - 1))}
+                          onPress={() => setListPage((p) => Math.max(1, p - 1))}
+                        >
+                          前へ
+                        </s-button>
+                        <s-button
+                          kind="secondary"
+                          size="slim"
+                          disabled={currentPage >= totalPages}
+                          onClick={() => setListPage((p) => Math.min(totalPages, p + 1))}
+                          onPress={() => setListPage((p) => Math.min(totalPages, p + 1))}
+                        >
+                          次へ
+                        </s-button>
+                      </s-stack>
+                    )}
                     <s-stack gap="none">
-                      {normalLines.map((l) => (
+                      {displayedLines.map((l) => (
                         <InventoryCountLineRow
                           key={l.id}
                           line={l}
@@ -3178,17 +3252,50 @@ export function InventoryCountList({
             })()
           )}
 
-          {/* ✅ 予定外リスト（最下部に別表示、入庫リストと同じスタイル） */}
+          {/* ✅ 予定外リスト（最下部に別表示、入庫リストと同じスタイル）。表示はページネーションで N 件ずつ。 */}
           {(() => {
             const extraLines = lines.filter((l) => l.isExtra);
             if (extraLines.length === 0) return null;
+            const totalExtra = extraLines.length;
+            const totalExtraPages = Math.ceil(totalExtra / LIST_ITEMS_PER_PAGE) || 1;
+            const currentExtraPage = Math.min(Math.max(1, extraListPage), totalExtraPages);
+            const extraStartIdx = (currentExtraPage - 1) * LIST_ITEMS_PER_PAGE;
+            const displayedExtraLines = extraLines.slice(extraStartIdx, extraStartIdx + LIST_ITEMS_PER_PAGE);
+            const showExtraPagination = totalExtra > LIST_ITEMS_PER_PAGE;
+            const extraRangeStart = extraStartIdx + 1;
+            const extraRangeEnd = Math.min(extraStartIdx + LIST_ITEMS_PER_PAGE, totalExtra);
             return (
               <s-box key="inventory_count_extra_list" padding="small">
                 <s-stack gap="small">
                   {/* ✅ 入庫リストと同じタイトルスタイル */}
                   <s-text emphasis="bold">予定外リスト（リストにない商品）</s-text>
+                  {showExtraPagination && (
+                    <s-stack direction="inline" gap="small" alignItems="center">
+                      <s-text tone="subdued" size="small">
+                        {extraRangeStart}–{extraRangeEnd} / 全{totalExtra}件
+                      </s-text>
+                      <s-button
+                        kind="secondary"
+                        size="slim"
+                        disabled={currentExtraPage <= 1}
+                        onClick={() => setExtraListPage((p) => Math.max(1, p - 1))}
+                        onPress={() => setExtraListPage((p) => Math.max(1, p - 1))}
+                      >
+                        前へ
+                      </s-button>
+                      <s-button
+                        kind="secondary"
+                        size="slim"
+                        disabled={currentExtraPage >= totalExtraPages}
+                        onClick={() => setExtraListPage((p) => Math.min(totalExtraPages, p + 1))}
+                        onPress={() => setExtraListPage((p) => Math.min(totalExtraPages, p + 1))}
+                      >
+                        次へ
+                      </s-button>
+                    </s-stack>
+                  )}
                   <s-stack gap="none">
-                    {extraLines.map((l) => (
+                    {displayedExtraLines.map((l) => (
                       <InventoryCountLineRow
                         key={l.id}
                         line={l}
