@@ -162,7 +162,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     // 全履歴を整形（出庫・入庫を分類）
     const allHistories: TransferHistory[] = allNodes
-      .map((t: any) => {
+      .map((t: { id?: string; name?: string; status?: string; [key: string]: unknown }) => {
         const originId = t?.origin?.location?.id;
         const destinationId = t?.destination?.location?.id;
 
@@ -175,7 +175,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         // 過剰分: 加算しない（GraphQL receivedQuantity に既に含まれている）
         const extrasQuantity = extractExtrasQuantityFromNote(t.note || "");
         const rejectedQuantity = (Array.isArray(t?.shipments?.nodes) ? t.shipments.nodes : [])
-          .reduce((sum: number, s: any) => sum + Math.max(0, Number(s?.totalRejectedQuantity ?? 0)), 0);
+          .reduce((sum: number, s: { totalRejectedQuantity?: unknown }) => sum + Math.max(0, Number(s?.totalRejectedQuantity ?? 0)), 0);
         const receivedQuantityDisplay =
           Number(t.receivedQuantity ?? 0) - Number(rejectedQuantity) + Number(extrasQuantity);
 
@@ -274,7 +274,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       if (raw && typeof raw === "string") {
         const parsed = JSON.parse(raw);
         const arr = Array.isArray(parsed?.inbound?.csvExportColumns) ? parsed.inbound.csvExportColumns : [];
-        const valid = (arr as string[]).filter((id) => HISTORY_CSV_COLUMN_IDS.includes(id as any));
+        const valid = (arr as string[]).filter((id) => (HISTORY_CSV_COLUMN_IDS as readonly string[]).includes(id));
         if (valid.length > 0) historyCsvExportColumns = valid;
       }
     } catch {
@@ -416,7 +416,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // エラーチェック
     if (data?.errors) {
       console.error("Action - GraphQL errors:", data.errors);
-      return { error: `GraphQL error: ${data.errors.map((e: any) => e.message).join(", ")}` };
+      return { error: `GraphQL error: ${data.errors.map((e: { message?: string }) => e.message ?? "").join(", ")}` };
     }
     
     const transfer = data?.data?.inventoryTransfer;
@@ -482,7 +482,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const firstShipment = shipmentNodes[0];
       const firstShipmentId = firstShipment?.id || "";
       const displayId = shipmentNodes.length === 1 ? formatShipmentDisplayId(0) : transferLineDisplayId;
-      const fallbackStatus = firstShipment?.status || (transfer as any)?.status || "";
+      const fallbackStatus = firstShipment?.status || (transfer as { status?: string })?.status || "";
       for (const li of transfer.lineItems.nodes) {
         const inventoryItem = li?.inventoryItem;
         const variant = inventoryItem?.variant;
@@ -825,7 +825,7 @@ export default function HistoryPage() {
         
         // fetcher.submit()を呼び出して、完了を待つ
         // 前のリクエストのtransferIdを保存（変更検知用）
-        const previousTransferId = (fetcher.data as any)?.transferId;
+        const previousTransferId = (fetcher.data as { transferId?: string })?.transferId;
         fetcher.submit(formData, { method: "post" });
         
         // fetcher.stateが"idle"になるまで待つ（最大10秒）
@@ -841,7 +841,7 @@ export default function HistoryPage() {
         let dataReceived = false;
         while (waitCount < 100) {
           if (fetcher.data) {
-            const currentTransferId = (fetcher.data as any)?.transferId;
+            const currentTransferId = (fetcher.data as { transferId?: string })?.transferId;
             
             // transferIdが一致する場合
             if (currentTransferId === h.id) {
@@ -869,7 +869,7 @@ export default function HistoryPage() {
         if (fetcher.data && dataReceived) {
           // transferIdが一致することを確認（transferIdがある場合のみ）
           // ただし、transferIdがない場合は、lineItemsの存在を確認（モーダルと同じ方法）
-          const currentTransferId = (fetcher.data as any)?.transferId;
+          const currentTransferId = (fetcher.data as { transferId?: string })?.transferId;
           if (currentTransferId && currentTransferId !== h.id) {
             lineItems = [];
           } else if ('error' in fetcher.data) {
@@ -1008,8 +1008,10 @@ export default function HistoryPage() {
         const lineItems: TransferLineItem[] = Array.isArray(fetcher.data.lineItems) ? fetcher.data.lineItems : [];
         setModalLineItems(lineItems);
         // 配送単位グループ：API が groupedLineItems を返していればそれを使い、なければ lineItems から生成
-        if (Array.isArray((fetcher.data as any).groupedLineItems) && (fetcher.data as any).groupedLineItems.length > 0) {
-          setModalGroupedLineItems((fetcher.data as any).groupedLineItems);
+        type FetcherGroupedLineItems = { groupedLineItems?: unknown[] };
+        const fd = fetcher.data as FetcherGroupedLineItems;
+        if (Array.isArray(fd?.groupedLineItems) && fd.groupedLineItems.length > 0) {
+          setModalGroupedLineItems(fd.groupedLineItems);
         } else {
           const grouped: GroupedLineItemsEntry[] = [];
           const seen = new Set<string>();

@@ -43,7 +43,7 @@ async function processOneShop(sessionRecord: {
     const shopDomain = session.shop;
     const accessToken = session.accessToken || "";
     let admin = {
-      request: async (queryOrOpts: string | { data?: string; variables?: any }, maybeVars?: any) => {
+      request: async (queryOrOpts: string | { data?: string; variables?: Record<string, unknown> }, maybeVars?: Record<string, unknown>) => {
         const queryStr = typeof queryOrOpts === "string" ? queryOrOpts : (queryOrOpts.data || "");
         const variables = typeof queryOrOpts === "string" ? (maybeVars?.variables ?? maybeVars ?? {}) : (queryOrOpts.variables || {});
         const res = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
@@ -89,7 +89,7 @@ async function processOneShop(sessionRecord: {
     );
 
     if (userErrors.length > 0) {
-      return { success: false, error: `${sessionRecord.shop}: ${userErrors.map((e: any) => e.message).join(", ")}` };
+      return { success: false, error: `${sessionRecord.shop}: ${userErrors.map((e: { message?: string }) => e.message ?? "").join(", ")}` };
     }
     console.log(`Auto-saved snapshot for ${sessionRecord.shop} (${dateToSaveStr}${isEndOfDayRun ? ", 23:59 run" : ", 0:00 run"})`);
     return { success: true };

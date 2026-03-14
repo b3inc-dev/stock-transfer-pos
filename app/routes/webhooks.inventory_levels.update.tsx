@@ -6,6 +6,7 @@ import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
+import type { AdminGraphQLRequestClient } from "../types";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
 const API_VERSION = "2026-01";
@@ -87,7 +88,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     let sourceId: string | null = null;
 
     // adminクライアント: if(session) の外で宣言し、else if(adjustmentGroupId && session) でも参照できるようにする
-    let admin: { request: (options: { data: string; variables?: any }) => Promise<any> } | null = null;
+    let admin: AdminGraphQLRequestClient | null = null;
 
     if (session) {
       // adminクライアントを作成（ロケーション名・SKU・種別判定に使用）
@@ -98,7 +99,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const shopDomain = session.shop;
         const accessToken = session.accessToken;
         admin = {
-          request: async (options: { data: string; variables?: any }) => {
+          request: async (options: { data: string; variables?: Record<string, unknown> }) => {
             const response = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
               method: "POST",
               headers: {
@@ -215,11 +216,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     let existingLog = null;
 
     try {
-      if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+      if (db && typeof db.inventoryChangeLog !== "undefined") {
         // 直前ログ検索は「数値IDのみ」だと order_sales/refund（GID形式で保存）を拾えず delta が誤計算になるため、両形式を候補にする
         const prevItemCandidates = [inventoryItemIdRaw, `gid://shopify/InventoryItem/${inventoryItemIdRaw}`];
         const prevLocCandidates = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`];
-        const prevLog = await (db as any).inventoryChangeLog.findFirst({
+        const prevLog = await db.inventoryChangeLog.findFirst({
           where: {
             shop,
             inventoryItemId: { in: prevItemCandidates },
@@ -234,8 +235,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         // 強固な delta 算出: 直前ログの quantityAfter が null でも、同一商品・ロケーションで
         // quantityAfter が null でない直近1件を遡って取得し、変動数「-」を減らす
-        if (prevAvailable === null && db && typeof (db as any).inventoryChangeLog !== "undefined") {
-          const prevLogWithQty = await (db as any).inventoryChangeLog.findFirst({
+        if (prevAvailable === null && db && typeof db.inventoryChangeLog !== "undefined") {
+          const prevLogWithQty = await db.inventoryChangeLog.findFirst({
             where: {
               shop,
               inventoryItemId: { in: prevItemCandidates },
@@ -288,7 +289,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             });
             const adjustmentGroupData = await adjustmentGroupResp.json();
             const node = adjustmentGroupData?.data?.node;
-            const matchingChange = node?.changes?.find((change: any) => 
+            const matchingChange = node?.changes?.find((change: { delta?: unknown; [key: string]: unknown }) => 
               change?.inventoryItem?.id === inventoryItemId && change?.location?.id === locationId
             );
             if (matchingChange?.deltaQuantity !== undefined && matchingChange?.deltaQuantity !== null) {
@@ -314,7 +315,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         idempotencyKey = `${shop}:${inventoryItemIdRaw}:${locationIdRaw}:${updatedAtRounded.toISOString()}`;
 
         // 既に同じidempotencyKeyのログが存在する場合はスキップ（二重登録防止）
-        existingLog = await (db as any).inventoryChangeLog.findUnique({
+        existingLog = await db.inventoryChangeLog.findUnique({
           where: {
             shop_idempotencyKey: {
               shop,
@@ -345,10 +346,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // 重複チェック：同一イベントの重複送信のみスキップする（別イベントの行を上書きしない）
     // 既存行の quantityAfter が今回の available と一致する、または null（未確定）のときだけ「同一イベント」とみなし、
     // その行の quantityAfter を更新して return。一致しない場合は別イベントなので既存行は触らず新規作成へ進む。
-    if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+    if (db && typeof db.inventoryChangeLog !== "undefined") {
       const duplicateCheckThreshold = new Date(updatedAt.getTime() - 5 * 1000); // 5秒前
       const duplicateCheckTo = new Date(updatedAt.getTime() + 5 * 1000); // 5秒後
-      const duplicateAdminLog = await (db as any).inventoryChangeLog.findFirst({
+      const duplicateAdminLog = await db.inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: inventoryItemIdRaw,
@@ -365,7 +366,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             `[inventory_levels/update] Skipping duplicate admin_webhook log (same event): existing id=${duplicateAdminLog.id}, quantityAfter=${duplicateAdminLog.quantityAfter}`
           );
           if (duplicateAdminLog.quantityAfter !== available) {
-            await (db as any).inventoryChangeLog.update({
+            await db.inventoryChangeLog.update({
               where: { id: duplicateAdminLog.id },
               data: { quantityAfter: available },
             });
@@ -383,7 +384,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // 既存行の quantityAfter を最新値で更新する。
     // （POS/アプリの api/log-inventory-change、売上 orders.updated、返品 refunds.create で正しい種別が付いている）
     // そうしないと二重に「管理」で保存され、売上・返品・ロス等が「管理」で上書きされたように見える。
-    if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+    if (db && typeof db.inventoryChangeLog !== "undefined") {
       const knownActivities = [
         "loss_entry",
         "purchase_entry",
@@ -420,7 +421,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       // 過去30分前から未来5分後までの範囲で検索
       // （orders/updatedが先に来て、その後にinventory_levels/updateが来る場合も考慮）
-      let recentNonAdminLog = await (db as any).inventoryChangeLog.findFirst({
+      let recentNonAdminLog = await db.inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: { in: inventoryItemIdCandidates },
@@ -440,7 +441,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       // デバッグログ：検索結果を出力
       if (!recentNonAdminLog) {
         // より詳細なデバッグ：実際に存在するログを確認
-        const allRecentLogs = await (db as any).inventoryChangeLog.findMany({
+        const allRecentLogs = await db.inventoryChangeLog.findMany({
           where: {
             shop,
             inventoryItemId: { in: inventoryItemIdCandidates },
@@ -456,7 +457,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (allRecentLogs.length > 0) {
           console.log(
             `[inventory_levels/update] Found ${allRecentLogs.length} recent logs (but none match activity filter):`,
-            allRecentLogs.map((log: any) => ({
+            allRecentLogs.map((log: { id?: string; delta?: number | null; [key: string]: unknown }) => ({
               id: log.id,
               activity: log.activity,
               timestamp: log.timestamp,
@@ -480,14 +481,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             console.log(
               `[inventory_levels/update] Updating existing log from webhook: id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter=${recentNonAdminLog.quantityAfter} -> ${available}`
             );
-            await (db as any).inventoryChangeLog.update({
+            await db.inventoryChangeLog.update({
               where: { id: recentNonAdminLog.id },
               data: { quantityAfter: available },
             });
-          } catch (e: any) {
+          } catch (e: unknown) {
             console.error(
               "[inventory_levels/update] Failed to update existing log from webhook:",
-              e?.message || String(e)
+              e instanceof Error ? e.message : String(e)
             );
           }
           return new Response("OK", { status: 200 });
@@ -496,8 +497,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           // 大量入庫時: API が inbound_transfer で quantityAfter=null を作成→Webhook が後から届くパターン。新規 admin_webhook を作らず既存行を確定させる。
           // POS 由来で API が delta を入れられていない場合に備え、既存行の delta が null なら「直前の確定数量」から算出して補完する。
           let updateData: { quantityAfter: number; delta?: number } = { quantityAfter: available };
-          if (recentNonAdminLog.delta == null && db && typeof (db as any).inventoryChangeLog !== "undefined") {
-            const prevWithQty = await (db as any).inventoryChangeLog.findFirst({
+          if (recentNonAdminLog.delta == null && db && typeof db.inventoryChangeLog !== "undefined") {
+            const prevWithQty = await db.inventoryChangeLog.findFirst({
               where: {
                 shop,
                 inventoryItemId: { in: inventoryItemIdCandidates },
@@ -519,14 +520,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             console.log(
               `[inventory_levels/update] Existing log quantityAfter is null; updating to available (same event): id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter -> ${available}`
             );
-            await (db as any).inventoryChangeLog.update({
+            await db.inventoryChangeLog.update({
               where: { id: recentNonAdminLog.id },
               data: updateData,
             });
-          } catch (e: any) {
+          } catch (e: unknown) {
             console.error(
               "[inventory_levels/update] Failed to update existing log (quantityAfter null):",
-              e?.message || String(e)
+              e instanceof Error ? e.message : String(e)
             );
           }
           return new Response("OK", { status: 200 });
@@ -541,7 +542,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (!recentNonAdminLog) {
         const sameEventWindowFrom = new Date(updatedAt.getTime() - 2 * 60 * 1000); // 2分前
         const sameEventWindowTo = new Date(updatedAt.getTime() + 1 * 60 * 1000);   // 1分後
-        const recentAdminOnly = await (db as any).inventoryChangeLog.findFirst({
+        const recentAdminOnly = await db.inventoryChangeLog.findFirst({
           where: {
             shop,
             inventoryItemId: { in: inventoryItemIdCandidates },
@@ -554,7 +555,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (recentAdminOnly && (recentAdminOnly.quantityAfter === available || recentAdminOnly.quantityAfter == null)) {
           let updateSameEvent: { quantityAfter: number; delta?: number } = { quantityAfter: available };
           if (recentAdminOnly.delta == null) {
-            const prevForDelta = await (db as any).inventoryChangeLog.findFirst({
+            const prevForDelta = await db.inventoryChangeLog.findFirst({
               where: {
                 shop,
                 inventoryItemId: { in: inventoryItemIdCandidates },
@@ -568,7 +569,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               updateSameEvent.delta = available - prevForDelta.quantityAfter;
             }
           }
-          await (db as any).inventoryChangeLog.update({
+          await db.inventoryChangeLog.update({
             where: { id: recentAdminOnly.id },
             data: updateSameEvent,
           });
@@ -586,12 +587,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // 返品は refunds/create で RefundPendingLocation に登録。在庫増（delta>0）時にマッチすれば「返品」として記録。
     let pendingOrder: { orderId: string; quantity: number; locationId: string } | null = null;
     let pendingRefund: { refundId: string; orderId: string; quantity: number; locationId: string } | null = null;
-    if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+    if (db && typeof db.orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       // 空文字 "" は .filter(Boolean) で除かれるため使わない。ロケーション不明で登録された OrderPendingLocation（locationId=""）をマッチさせるため "" を必ず含める
       const orderLocCands = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""];
-      const allPendings = await (db as any).orderPendingLocation.findMany({
+      const allPendings = await db.orderPendingLocation.findMany({
         where: {
           shop,
           inventoryItemId: inventoryItemIdRaw,
@@ -620,11 +621,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // 在庫増（delta>0）の場合、RefundPendingLocation を検索（返品として記録）。短時間複数返品時は「変動前在庫 === available - 返品数」で正しい返品にマッチする。
     // 空文字 "" を検索に含める（refunds/create で location_id が空になるエッジケースに備え、OrderPendingLocation と同様に .filter(Boolean) は使わない）
-    if ((delta === null || (delta !== null && delta > 0)) && !pendingOrder && db && typeof (db as any).refundPendingLocation !== "undefined") {
+    if ((delta === null || (delta !== null && delta > 0)) && !pendingOrder && db && typeof db.refundPendingLocation !== "undefined") {
       const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`, ""];
-      const allRefundPendings = await (db as any).refundPendingLocation.findMany({
+      const allRefundPendings = await db.refundPendingLocation.findMany({
         where: {
           shop,
           inventoryItemId: inventoryItemIdRaw,
@@ -657,11 +658,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // 保存直前に OrderPendingLocation / RefundPendingLocation を再チェック（レース対策）
     // 処理開始時には無くても、その間に orders/updated や refunds/create が登録している場合がある
-    if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && db && typeof (db as any).orderPendingLocation !== "undefined") {
+    if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && db && typeof db.orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       const orderLocCandsAgain = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""];
-      const allAgain = await (db as any).orderPendingLocation.findMany({
+      const allAgain = await db.orderPendingLocation.findMany({
         where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsAgain }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
         orderBy: { orderCreatedAt: "desc" },
       });
@@ -681,11 +682,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         console.log(`[inventory_levels/update] Before create: matched OrderPendingLocation orderId=${pendingOrder.orderId}, quantity=${qty}, will save as order_sales`);
       }
     }
-    if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && db && typeof (db as any).refundPendingLocation !== "undefined") {
+    if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && db && typeof db.refundPendingLocation !== "undefined") {
       const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`, ""];
-      const allRefAgain = await (db as any).refundPendingLocation.findMany({
+      const allRefAgain = await db.refundPendingLocation.findMany({
         where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
         orderBy: { refundCreatedAt: "desc" },
       });
@@ -709,13 +710,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // まだ「管理」で保存しようとしている場合、orders/updated または refunds/create の登録を待って再検索する（完全反映のため）
     // Shopify は inventory_levels/update を先に送ることがあり、その時点では OrderPendingLocation / RefundPendingLocation がまだ無いため待機＋最大2回再検索
     if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && db) {
-      if (typeof (db as any).orderPendingLocation !== "undefined") {
+      if (typeof db.orderPendingLocation !== "undefined") {
       const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
       const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
       for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
         await sleep(PENDING_ORDER_WAIT_MS);
         const orderLocCandsRetry = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""];
-        const allRetry = await (db as any).orderPendingLocation.findMany({
+        const allRetry = await db.orderPendingLocation.findMany({
           where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsRetry }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
           orderBy: { orderCreatedAt: "desc" },
         });
@@ -737,13 +738,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
       }
       }
-      if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && typeof (db as any).refundPendingLocation !== "undefined") {
+      if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && typeof db.refundPendingLocation !== "undefined") {
         for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
           await sleep(PENDING_ORDER_WAIT_MS);
           const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
           const refundTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
           const locCands = [locationIdRaw, locationIdRaw.replace(/^gid:\/\/shopify\/Location\//, ""), `gid://shopify/Location/${locationIdRaw}`, ""];
-          const allRefRetry = await (db as any).refundPendingLocation.findMany({
+          const allRefRetry = await db.refundPendingLocation.findMany({
             where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: locCands }, refundCreatedAt: { gte: refundFrom, lte: refundTo } },
             orderBy: { refundCreatedAt: "desc" },
           });
@@ -768,11 +769,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // OrderPendingLocation にマッチした場合、既存の admin_webhook 行を order_sales に更新して新規行を作らない（20:11/20:14 型の二重「管理」防止）
-    if (pendingOrder && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+    if (pendingOrder && db && typeof db.inventoryChangeLog !== "undefined") {
       const searchFrom = new Date(updatedAt.getTime() - 30 * 60 * 1000);
       const searchTo = new Date(updatedAt.getTime() + 5 * 60 * 1000);
       const expectedPrevQty = available + pendingOrder.quantity;
-      let existingAdmin = await (db as any).inventoryChangeLog.findFirst({
+      let existingAdmin = await db.inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: inventoryItemIdRaw,
@@ -785,7 +786,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
       // 先に届いた Webhook が「売上後」の値で admin_webhook 保存している場合（quantityAfter=available）。その行を order_sales に更新して二重行を防ぐ
       if (!existingAdmin && available !== expectedPrevQty) {
-        existingAdmin = await (db as any).inventoryChangeLog.findFirst({
+        existingAdmin = await db.inventoryChangeLog.findFirst({
           where: {
             shop,
             inventoryItemId: inventoryItemIdRaw,
@@ -803,7 +804,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (existingAdmin) {
         const orderIdRef = `order_${pendingOrder.orderId}`;
         // 救済時は idempotencyKey を変更しない（orders/updated 等とキーが被ると P2002 になるため）
-        await (db as any).inventoryChangeLog.update({
+        await db.inventoryChangeLog.update({
           where: { id: existingAdmin.id },
           data: {
             activity: "order_sales",
@@ -814,8 +815,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             note: `注文: #${pendingOrder.orderId}`,
           },
         });
-        if (typeof (db as any).orderPendingLocation !== "undefined") {
-          await (db as any).orderPendingLocation.deleteMany({
+        if (typeof db.orderPendingLocation !== "undefined") {
+          await db.orderPendingLocation.deleteMany({
             where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw, locationId: pendingOrder.locationId },
           });
         }
@@ -825,13 +826,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // RefundPendingLocation にマッチした場合、既存の admin_webhook 行を refund に更新して新規行を作らない（売上と同様の二重防止）
-    if (pendingRefund && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+    if (pendingRefund && db && typeof db.inventoryChangeLog !== "undefined") {
       const searchFrom = new Date(updatedAt.getTime() - 30 * 60 * 1000);
       const searchTo = new Date(updatedAt.getTime() + 5 * 60 * 1000);
       const expectedPrevQty = available - pendingRefund.quantity; // 返品前の在庫数
       const inventoryItemIdCandidates = [inventoryItemIdRaw, `gid://shopify/InventoryItem/${inventoryItemIdRaw}`];
       const locationIdCandidates = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`];
-      let existingAdminRefund = await (db as any).inventoryChangeLog.findFirst({
+      let existingAdminRefund = await db.inventoryChangeLog.findFirst({
         where: {
           shop,
           inventoryItemId: { in: inventoryItemIdCandidates },
@@ -844,7 +845,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
       // 先に届いた Webhook が「返品後」の値で admin_webhook 保存している場合（quantityAfter=available）。その行を refund に更新して二重行を防ぐ
       if (!existingAdminRefund && available !== expectedPrevQty) {
-        existingAdminRefund = await (db as any).inventoryChangeLog.findFirst({
+        existingAdminRefund = await db.inventoryChangeLog.findFirst({
           where: {
             shop,
             inventoryItemId: { in: inventoryItemIdCandidates },
@@ -862,7 +863,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (existingAdminRefund) {
         const orderIdRef = `order_${pendingRefund.orderId}`;
         // 救済時は idempotencyKey を変更しない（refunds/create 等とキーが被ると P2002 になるため）
-        await (db as any).inventoryChangeLog.update({
+        await db.inventoryChangeLog.update({
           where: { id: existingAdminRefund.id },
           data: {
             activity: "refund",
@@ -873,8 +874,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             note: `返品: 注文 #${pendingRefund.orderId}`,
           },
         });
-        if (typeof (db as any).refundPendingLocation !== "undefined") {
-          await (db as any).refundPendingLocation.deleteMany({
+        if (typeof db.refundPendingLocation !== "undefined") {
+          await db.refundPendingLocation.deleteMany({
             where: { shop, refundId: pendingRefund.refundId, inventoryItemId: inventoryItemIdRaw, locationId: pendingRefund.locationId },
           });
         }
@@ -885,7 +886,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // 在庫変動ログを保存（deltaがnullでも記録する）
     try {
-      if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+      if (db && typeof db.inventoryChangeLog !== "undefined") {
         console.log(`[inventory_levels/update] Saving log: shop=${shop}, item=${inventoryItemIdRaw}, location=${locationIdRaw}, locationName=${locationName}, delta=${finalDelta}, quantityAfter=${available}, date=${date}, activity=${finalActivity}`);
         
         // deltaがnullの場合でも記録する。理由を note に残し、一覧で「-」の意味が分かるようにする。
@@ -896,7 +897,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           console.log(`[inventory_levels/update] Saving log with delta=null (first event or no prev log), note will explain`);
         }
 
-        await (db as any).inventoryChangeLog.create({
+        await db.inventoryChangeLog.create({
           data: {
             shop,
             timestamp: updatedAt,
@@ -917,14 +918,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           },
         });
         
-        if (pendingOrder && typeof (db as any).orderPendingLocation !== "undefined") {
-          await (db as any).orderPendingLocation.deleteMany({
+        if (pendingOrder && typeof db.orderPendingLocation !== "undefined") {
+          await db.orderPendingLocation.deleteMany({
             where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw, locationId: pendingOrder.locationId },
           });
           console.log(`[inventory_levels/update] Removed OrderPendingLocation for order ${pendingOrder.orderId}, item ${inventoryItemIdRaw}, locationId=${pendingOrder.locationId}`);
         }
-        if (pendingRefund && typeof (db as any).refundPendingLocation !== "undefined") {
-          await (db as any).refundPendingLocation.deleteMany({
+        if (pendingRefund && typeof db.refundPendingLocation !== "undefined") {
+          await db.refundPendingLocation.deleteMany({
             where: { shop, refundId: pendingRefund.refundId, inventoryItemId: inventoryItemIdRaw, locationId: pendingRefund.locationId },
           });
           console.log(`[inventory_levels/update] Removed RefundPendingLocation for refund ${pendingRefund.refundId}, item ${inventoryItemIdRaw}, locationId=${pendingRefund.locationId}`);

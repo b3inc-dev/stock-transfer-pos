@@ -141,7 +141,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (locationsData.errors) {
       console.error("Locations query errors:", locationsData.errors);
       const errList = Array.isArray(locationsData.errors)
-        ? locationsData.errors.map((e: any) => e?.message ?? String(e))
+        ? locationsData.errors.map((e: { message?: string }) => e?.message ?? String(e))
         : [String(locationsData.errors)];
       throw new Error(`ロケーション取得エラー: ${errList.join(", ")}`);
     }
@@ -242,9 +242,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     // ログ全体の最初の日付（この日より前は選択不可にする）
     let firstChangeHistoryDate: string | null = null;
-    if (session && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+    if (session && db) {
       try {
-        const firstLog = await (db as any).inventoryChangeLog.findFirst({
+        const firstLog = await db.inventoryChangeLog.findFirst({
           where: { shop: session.shop },
           orderBy: { date: "asc" },
           select: { date: true },
@@ -304,7 +304,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const changeHistoryPage = Math.max(1, parseInt(url.searchParams.get("changeHistoryPage") ?? "1", 10) || 1);
     const CHANGE_HISTORY_PAGE_SIZE = 5000;
 
-    let changeHistoryLogs: any[] = [];
+    let changeHistoryLogs: Array<{ variantId?: string | null; id?: string; date?: string; sku?: string; locationId?: string; locationName?: string; activity?: string; delta?: number | null; quantityAfter?: number | null; sourceType?: string; sourceId?: string | null; idempotencyKey?: string; note?: string | null; timestamp?: string; [key: string]: unknown }> = [];
     let changeHistoryPagination: {
       total: number;
       startIndex: number;
@@ -326,7 +326,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     // フィルターが明示的に適用されている場合のみデータを取得（初回表示時のパフォーマンス改善）
     if (isChangeHistoryTab && session && hasExplicitFilters) {
       try {
-        const whereClause: any = {
+        const whereClause: {
+          shop: string;
+          date: { gte: string; lte: string };
+          locationId?: { in: string[] };
+          inventoryItemId?: { in: string[] };
+          activity?: { in: string[] };
+        } = {
           shop: session.shop,
           date: {
             gte: startDate,
@@ -348,11 +354,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
         // タイムアウト対策：データベースクエリ全体に30秒のタイムアウトを設定
         const dbQueryPromise = (async () => {
-          if (!db || typeof (db as any).inventoryChangeLog === "undefined") {
+          if (!db) {
             return { logs: [], total: 0 };
           }
           const [logs, total] = await Promise.all([
-            (db as any).inventoryChangeLog.findMany({
+            db.inventoryChangeLog.findMany({
               where: whereClause,
               orderBy: {
                 timestamp: sortOrder === "asc" ? "asc" : "desc",
@@ -360,12 +366,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
               skip: (changeHistoryPage - 1) * CHANGE_HISTORY_PAGE_SIZE,
               take: CHANGE_HISTORY_PAGE_SIZE,
             }),
-            (db as any).inventoryChangeLog.count({ where: whereClause }),
+            db.inventoryChangeLog.count({ where: whereClause }),
           ]);
           return { logs, total };
         })();
 
-        const timeoutPromise = new Promise<{ logs: any[]; total: number }>((_, reject) =>
+        const timeoutPromise = new Promise<{ logs: Array<Record<string, unknown>>; total: number }>((_, reject) =>
           setTimeout(() => reject(new Error("Database query timeout (30s)")), 30000)
         );
 
@@ -384,7 +390,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         };
 
         // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
-        const variantIds = [...new Set(changeHistoryLogs.map((l: any) => l.variantId).filter(Boolean))] as string[];
+        const variantIds = [...new Set(changeHistoryLogs.map((l) => l.variantId).filter(Boolean))] as string[];
         const MAX_VARIANTS = 1500; // 商品名表示用：最大1500バリアントまで取得（制限撤廃に合わせて緩和）
         const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS);
         
@@ -413,7 +419,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
               // GraphQLエラーをチェック
               if (data?.errors) {
                 const errorMessages = Array.isArray(data.errors)
-                  ? data.errors.map((e: any) => e?.message ?? String(e)).join(", ")
+                  ? data.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ")
                   : String(data.errors);
                 console.error("[inventory-info] GraphQL error fetching variants:", errorMessages);
                 // エラーが発生しても処理を続行（商品名なしで表示）
@@ -444,7 +450,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
             }
           }
         }
-        changeHistoryLogs = changeHistoryLogs.map((log: any) => {
+        changeHistoryLogs = changeHistoryLogs.map((log) => {
           const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
           return {
             ...log,
@@ -613,7 +619,7 @@ export async function action({ request }: ActionFunctionArgs) {
       // スナップショットを保存
       const { userErrors } = await saveSnapshotsForDate(adminForSnapshot, shopId, savedSnapshots, newSnapshots, todayStr);
       if (userErrors.length > 0) {
-        return { ok: false, error: userErrors.map((e: any) => e.message).join(", ") };
+        return { ok: false, error: userErrors.map((e: { message?: string }) => e.message ?? "").join(", ") };
       }
       return { ok: true, saved: true, date: todayStr, message: "本日のスナップショットを保存しました。" };
     }
@@ -957,14 +963,15 @@ export default function InventoryInfoPage() {
 
   // 商品検索結果の処理
   useEffect(() => {
-    if (fetcher.data && (fetcher.data as any).ok && (fetcher.data as any).variants) {
-      const variants = (fetcher.data as any).variants;
+    type FetcherVariantsData = { ok?: boolean; variants?: Array<{ id?: string; sku?: string; barcode?: string; [key: string]: unknown }> };
+    if (fetcher.data && (fetcher.data as FetcherVariantsData).ok && (fetcher.data as FetcherVariantsData).variants) {
+      const variants = (fetcher.data as FetcherVariantsData).variants;
       setChangeHistorySearchVariants(variants);
       
       // 検索結果に含まれる選択済み商品の情報を更新
       setChangeHistorySelectedProductsInfo((prevInfo) => {
         const newInfo = new Map(prevInfo);
-        variants.forEach((v: any) => {
+        variants.forEach((v: { id?: string; sku?: string; barcode?: string; [key: string]: unknown }) => {
           if (changeHistorySelectedInventoryItemIds.has(v.inventoryItemId)) {
             newInfo.set(v.inventoryItemId, v);
           }

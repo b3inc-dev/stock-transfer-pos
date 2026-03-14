@@ -116,15 +116,15 @@ async function requestJson(admin: { request: AdminRequest }, data: string, varia
 export async function fetchAllInventoryItems(
   admin: { request: AdminRequest },
   pageSize: number = 250
-): Promise<any[]> {
-  const allItems: any[] = [];
+): Promise<unknown[]> {
+  const allItems: unknown[] = [];
   let hasNextPage = true;
   let cursor: string | null = null;
   while (hasNextPage) {
     const data = await requestJson(admin, INVENTORY_ITEMS_QUERY, { first: pageSize, after: cursor });
-    if (data?.errors) throw new Error(Array.isArray(data.errors) ? data.errors.map((e: any) => e?.message ?? String(e)).join(", ") : String(data.errors));
+    if (data?.errors) throw new Error(Array.isArray(data.errors) ? data.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ") : String(data.errors));
     const edges = data?.data?.inventoryItems?.edges ?? [];
-    const nodes = edges.map((e: any) => e.node);
+    const nodes = edges.map((e: { node: unknown }) => e.node);
     allItems.push(...nodes);
     hasNextPage = data?.data?.inventoryItems?.pageInfo?.hasNextPage ?? false;
     cursor = data?.data?.inventoryItems?.pageInfo?.endCursor ?? null;
@@ -134,7 +134,7 @@ export async function fetchAllInventoryItems(
 
 /** 在庫アイテム一覧からロケーション別スナップショットを集計 */
 export function aggregateSnapshotsFromItems(
-  items: any[],
+  items: unknown[],
   dateStr: string
 ): DailyInventorySnapshot[] {
   const locationMap = new Map<string, DailyInventorySnapshot>();
@@ -148,7 +148,7 @@ export function aggregateSnapshotsFromItems(
       const level = levelEdge.node;
       const locationId = level.location?.id;
       const locationName = level.location?.name ?? "";
-      const quantity = level.quantities?.find((q: any) => q.name === "available")?.quantity ?? 0;
+      const quantity = level.quantities?.find((q: { name?: string; quantity?: number }) => q.name === "available")?.quantity ?? 0;
       if (!locationId) continue;
       if (!locationMap.has(locationId)) {
         locationMap.set(locationId, {
@@ -180,7 +180,7 @@ export async function getSavedSnapshots(admin: { request: AdminRequest }): Promi
 }> {
   const data = await requestJson(admin, GET_SNAPSHOTS_QUERY);
   if (data?.errors)
-    throw new Error(Array.isArray(data.errors) ? data.errors.map((e: any) => e?.message ?? String(e)).join(", ") : String(data.errors));
+    throw new Error(Array.isArray(data.errors) ? data.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ") : String(data.errors));
   const shop = data?.data?.shop ?? {};
   const shopId = shop.id ?? "";
   const shopName = shop.name ?? "";
@@ -239,7 +239,7 @@ export async function fetchAndSaveSnapshotsForDate(
   const newSnapshots = aggregateSnapshotsFromItems(items, dateStr);
   const { userErrors } = await saveSnapshotsForDate(admin, shopId, savedSnapshots, newSnapshots, dateStr);
   if (userErrors.length > 0) {
-    return { ok: false, userErrors: userErrors.map((e: any) => e.message) };
+    return { ok: false, userErrors: userErrors.map((e: { message?: string }) => e.message ?? "") };
   }
   return { ok: true };
 }
@@ -352,7 +352,7 @@ export async function startBulkOperation(
       return {
         ok: false,
         userErrors: Array.isArray(data.errors)
-          ? data.errors.map((e: any) => e?.message ?? String(e))
+          ? data.errors.map((e: { message?: string }) => e?.message ?? String(e))
           : [String(data.errors)],
       };
     }
@@ -363,7 +363,7 @@ export async function startBulkOperation(
     if (userErrors.length > 0) {
       return {
         ok: false,
-        userErrors: userErrors.map((e: any) => e.message ?? String(e)),
+        userErrors: userErrors.map((e: { message?: string }) => e.message ?? String(e)),
       };
     }
 
@@ -404,7 +404,7 @@ export async function getCurrentBulkOperation(
       return {
         ok: false,
         error: Array.isArray(data.errors)
-          ? data.errors.map((e: any) => e?.message ?? String(e)).join(", ")
+          ? data.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ")
           : String(data.errors),
       };
     }
@@ -447,7 +447,7 @@ export async function downloadBulkOperationResult(
 
   const text = await response.text();
   const lines = text.trim().split("\n").filter((line) => line.trim());
-  const items: any[] = [];
+  const items: unknown[] = [];
 
   for (const line of lines) {
     try {
@@ -539,7 +539,7 @@ async function waitForBulkOperationAndSave(
       if (userErrors.length > 0) {
         return {
           ok: false,
-          userErrors: userErrors.map((e: any) => e.message),
+          userErrors: userErrors.map((e: { message?: string }) => e.message ?? ""),
         };
       }
 

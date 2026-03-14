@@ -4,6 +4,13 @@
  * 失敗しないための追求: 429/5xx 時にリトライする。
  */
 
+import type {
+  GraphQLUserError,
+  InventorySetQuantitiesJson,
+  InventoryAdjustQuantitiesJson,
+  QuantityNameValue,
+} from "../types/graphql-responses";
+
 const INVENTORY_SET_QUANTITIES_MAX = 250;
 
 /** Shopify API 呼び出しの最大リトライ回数（一時的なレート制限・サーバーエラー対策） */
@@ -101,8 +108,8 @@ async function fetchChunkQuantities(
             }
           }
         `, { id: itemGid, loc: locationGid });
-      const quantitiesArr = (json as any)?.data?.inventoryItem?.inventoryLevel?.quantities;
-      const q = Array.isArray(quantitiesArr) ? quantitiesArr.find((x: { name?: string }) => x?.name === "available") : null;
+      const quantitiesArr = (json as { data?: { inventoryItem?: { inventoryLevel?: { quantities?: QuantityNameValue[] } } } })?.data?.inventoryItem?.inventoryLevel?.quantities;
+      const q = Array.isArray(quantitiesArr) ? quantitiesArr.find((x) => x?.name === "available") : null;
       if (q?.quantity != null) {
         quantities.set(itemGid, Number(q.quantity));
       } else {
@@ -201,13 +208,14 @@ export async function setInventoryQuantitiesServer(
           }
         `, { input });
       if (!resp.ok) {
-        chunkError = (json as any)?.errors?.[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
+        const errJson = json as InventorySetQuantitiesJson;
+        chunkError = errJson?.errors?.[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
         chunkFailed = true;
       } else {
-        const data = (json as any)?.data?.inventorySetQuantities;
+        const data = (json as InventorySetQuantitiesJson)?.data?.inventorySetQuantities;
         const errs = data?.userErrors ?? [];
         if (errs.length) {
-          chunkError = errs.map((e: { message?: string }) => e.message).join(" / ");
+          chunkError = errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
           chunkFailed = true;
         }
       }
@@ -263,13 +271,14 @@ export async function setInventoryQuantitiesServer(
             `, { input: rollbackInput });
           if (!rbResp.ok) {
             rollbackOk = false;
-            rollbackErrorMsg = (rbJson as any)?.errors?.[0]?.message ?? rbResp.statusText ?? `HTTP ${rbResp.status}`;
+            const rbErrJson = rbJson as InventorySetQuantitiesJson;
+            rollbackErrorMsg = rbErrJson?.errors?.[0]?.message ?? rbResp.statusText ?? `HTTP ${rbResp.status}`;
           } else {
-            const rbData = (rbJson as any)?.data?.inventorySetQuantities;
+            const rbData = (rbJson as InventorySetQuantitiesJson)?.data?.inventorySetQuantities;
             const rbErrs = rbData?.userErrors ?? [];
             if (rbErrs.length) {
               rollbackOk = false;
-              rollbackErrorMsg = rbErrs.map((e: { message?: string }) => e.message).join(" / ");
+              rollbackErrorMsg = rbErrs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
             }
           }
         } catch (rbErr) {
@@ -313,8 +322,8 @@ export async function fetchCurrentQuantityServer(
           }
         }
       `, { id: itemGid, loc: locationGid });
-    const quantities = (json as any)?.data?.inventoryItem?.inventoryLevel?.quantities;
-    const q = Array.isArray(quantities) ? quantities.find((x: { name?: string }) => x?.name === "available") : null;
+    const data = (json as { data?: { inventoryItem?: { inventoryLevel?: { quantities?: QuantityNameValue[] } } } })?.data?.inventoryItem?.inventoryLevel?.quantities;
+    const q = Array.isArray(data) ? data.find((x) => x?.name === "available") : null;
     return Number(q?.quantity ?? 0) || 0;
   } catch {
     return 0;
@@ -366,13 +375,14 @@ export async function adjustInventoryQuantitiesServer(
           }
         `, { input });
       if (!resp.ok) {
-        const errMsg = (json as any)?.errors?.[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
+        const errJson = json as InventoryAdjustQuantitiesJson;
+        const errMsg = errJson?.errors?.[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
         return { ok: false, error: errMsg };
       }
-      const data = (json as any)?.data?.inventoryAdjustQuantities;
-      const errs = data?.userErrors ?? [];
+      const adjustData = (json as InventoryAdjustQuantitiesJson)?.data?.inventoryAdjustQuantities;
+      const errs = adjustData?.userErrors ?? [];
       if (errs.length) {
-        return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") };
+        return { ok: false, error: errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ") };
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

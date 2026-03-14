@@ -47,7 +47,7 @@ function normalizeInventoryItemGid(inventoryItemId: string): string {
 
 /** 仕入確定：在庫プラス調整を行う。失敗時はエラーを返し metafield は更新しない。 */
 async function executePurchaseReceive(
-  admin: { graphql: (q: string, v?: any) => Promise<any>; request: (options: { data: string; variables?: any }) => Promise<any> },
+  admin: { graphql: (q: string, v?: { variables?: Record<string, unknown> }) => Promise<Response>; request: (options: { data: string; variables?: Record<string, unknown> }) => Promise<Response> },
   entry: PurchaseEntry,
   shop: string
 ): Promise<{ ok: boolean; error?: string; adjustmentGroupId?: string | null }> {
@@ -83,13 +83,11 @@ async function executePurchaseReceive(
   console.log(`[executePurchaseReceive] Changes count: ${changes.length}, first change:`, changes[0] ? JSON.stringify(changes[0], null, 2) : "none");
   
   let resp: Response;
-  let data: any;
-  
+  let data: { data?: { inventoryAdjustQuantities?: { userErrors?: Array<{ message?: string }>; inventoryAdjustmentGroup?: { id?: string } } }; errors?: Array<{ message?: string }> };
   try {
     // admin.graphqlは第2引数に { variables: { ... } } 形式を期待する
     resp = await admin.graphql(mutation, { variables });
     data = await resp.json();
-    
     // デバッグ: レスポンス全体を確認
     console.log(`[executePurchaseReceive] Response status: ${resp.status}`);
     console.log(`[executePurchaseReceive] Response data:`, JSON.stringify(data, null, 2));
@@ -101,28 +99,28 @@ async function executePurchaseReceive(
     if (data?.data?.inventoryAdjustQuantities?.userErrors?.length > 0) {
       console.error(`[executePurchaseReceive] User errors:`, JSON.stringify(data?.data?.inventoryAdjustQuantities?.userErrors, null, 2));
     }
-  } catch (error: any) {
-    // エラーの詳細を確認
+  } catch (error: unknown) {
     console.error(`[executePurchaseReceive] Exception caught:`, error);
-    if (error?.response) {
+    const err = error as { response?: Response; body?: { errors?: Array<{ message?: string }> } };
+    if (err?.response) {
       try {
-        const errorData = await error.response.json();
+        const errorData = await err.response.json();
         console.error(`[executePurchaseReceive] Error response data:`, JSON.stringify(errorData, null, 2));
       } catch {
         console.error(`[executePurchaseReceive] Could not parse error response`);
       }
     }
-    if (error?.body?.errors) {
-      console.error(`[executePurchaseReceive] Error body errors:`, JSON.stringify(error.body.errors, null, 2));
+    if (err?.body?.errors) {
+      console.error(`[executePurchaseReceive] Error body errors:`, JSON.stringify(err.body.errors, null, 2));
     }
     throw error;
   }
-  
+
   const userErrors = data?.data?.inventoryAdjustQuantities?.userErrors ?? [];
   if (userErrors.length) {
-    return { ok: false, error: userErrors.map((e: { message?: string }) => e.message).join(" / ") };
+    return { ok: false, error: userErrors.map((e) => e.message ?? "").join(" / ") };
   }
-  
+
   const adjustmentGroupId = data?.data?.inventoryAdjustQuantities?.inventoryAdjustmentGroup?.id || null;
 
   // 在庫変動履歴を記録
@@ -136,8 +134,8 @@ async function executePurchaseReceive(
       adjustmentGroupId,
       entry.note || null
     );
-  } catch (error) {
-    console.error("Error logging inventory changes for purchase receive:", error);
+  } catch (logErr) {
+    console.error("Error logging inventory changes for purchase receive:", logErr);
     // ログ記録の失敗は無視して続行（在庫調整は成功している）
   }
 
@@ -146,7 +144,7 @@ async function executePurchaseReceive(
 
 /** 仕入キャンセル：在庫を戻す（received のときのみ）。冪等：既に cancelled なら何もしない。 */
 async function executePurchaseCancel(
-  admin: { graphql: (q: string, v?: any) => Promise<any>; request: (options: { data: string; variables?: any }) => Promise<any> },
+  admin: { graphql: (q: string, v?: { variables?: Record<string, unknown> }) => Promise<Response>; request: (options: { data: string; variables?: Record<string, unknown> }) => Promise<Response> },
   entry: PurchaseEntry,
   shop: string
 ): Promise<{ ok: boolean; error?: string; adjustmentGroupId?: string | null }> {
@@ -183,14 +181,10 @@ async function executePurchaseCancel(
   console.log(`[executePurchaseCancel] Changes count: ${changes.length}, first change:`, changes[0] ? JSON.stringify(changes[0], null, 2) : "none");
   
   let resp: Response;
-  let data: any;
-  
+  let data: { data?: { inventoryAdjustQuantities?: { userErrors?: Array<{ message?: string }>; inventoryAdjustmentGroup?: { id?: string } } }; errors?: Array<{ message?: string }> };
   try {
-    // admin.graphqlは第2引数に { variables: { ... } } 形式を期待する
     resp = await admin.graphql(mutation, { variables });
     data = await resp.json();
-    
-    // デバッグ: レスポンス全体を確認
     console.log(`[executePurchaseCancel] Response status: ${resp.status}`);
     console.log(`[executePurchaseCancel] Response data:`, JSON.stringify(data, null, 2));
     
@@ -199,21 +193,21 @@ async function executePurchaseCancel(
       console.error(`[executePurchaseCancel] GraphQL errors:`, JSON.stringify(data.errors, null, 2));
     }
     if (data?.data?.inventoryAdjustQuantities?.userErrors?.length > 0) {
-      console.error(`[executePurchaseCancel] User errors:`, JSON.stringify(data.data.inventoryAdjustQuantities.userErrors, null, 2));
+      console.error(`[executePurchaseCancel] User errors:`, JSON.stringify(data?.data?.inventoryAdjustQuantities?.userErrors, null, 2));
     }
-  } catch (error: any) {
-    // エラーの詳細を確認
+  } catch (error: unknown) {
     console.error(`[executePurchaseCancel] Exception caught:`, error);
-    if (error?.response) {
+    const err = error as { response?: Response; body?: { errors?: unknown } };
+    if (err?.response) {
       try {
-        const errorData = await error.response.json();
+        const errorData = await err.response.json();
         console.error(`[executePurchaseCancel] Error response data:`, JSON.stringify(errorData, null, 2));
       } catch {
         console.error(`[executePurchaseCancel] Could not parse error response`);
       }
     }
-    if (error?.body?.errors) {
-      console.error(`[executePurchaseCancel] Error body errors:`, JSON.stringify(error.body.errors, null, 2));
+    if (err?.body?.errors) {
+      console.error(`[executePurchaseCancel] Error body errors:`, JSON.stringify(err.body.errors, null, 2));
     }
     throw error;
   }
@@ -310,29 +304,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
       const list = parsed?.purchase?.suppliers ?? parsed?.suppliers ?? [];
       if (Array.isArray(list)) {
         suppliers = list
-          .map((sp: any) => ({
+          .map((sp: { id?: unknown; name?: unknown; code?: unknown }) => ({
             id: String(sp?.id ?? "").trim(),
             name: String(sp?.name ?? "").trim(),
             code: sp?.code ? String(sp.code).trim() : undefined,
           }))
-          .filter((sp: any) => sp.id && sp.name);
+          .filter((sp): sp is { id: string; name: string; code?: string } => !!(sp.id && sp.name));
       }
 
       const carrierList = parsed?.carriers ?? [];
       if (Array.isArray(carrierList)) {
         carriers = carrierList
-          .map((c: any) => ({
+          .map((c: { id?: unknown; label?: unknown; company?: unknown; sortOrder?: unknown }) => ({
             id: String(c?.id ?? "").trim(),
             label: String(c?.label ?? "").trim(),
             company: String(c?.company ?? "").trim(),
             sortOrder: Number.isFinite(Number(c?.sortOrder)) ? Number(c.sortOrder) : undefined,
           }))
-          .filter((c: any) => c.id && c.label && c.company)
-          .sort((a: any, b: any) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
+          .filter((c): c is { id: string; label: string; company: string; sortOrder?: number } => !!(c.id && c.label && c.company))
+          .sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
       }
 
       const cols = Array.isArray(parsed?.purchase?.csvExportColumns) ? parsed.purchase.csvExportColumns : [];
-      const valid = (cols as string[]).filter((id: string) => PURCHASE_CSV_COLUMN_IDS.includes(id as any));
+      const valid = (cols as string[]).filter((id: string) => (PURCHASE_CSV_COLUMN_IDS as readonly string[]).includes(id));
       if (valid.length > 0) purchaseCsvExportColumns = valid;
     } catch {
       suppliers = [];
@@ -754,7 +748,7 @@ export async function action({ request }: ActionFunctionArgs) {
           const variantNodes = variantData?.data?.nodes ?? [];
           if (variantNodes.length > 0) {
             const variantMap = new Map<string, { barcode?: string; option1?: string; option2?: string; option3?: string }>();
-            variantNodes.forEach((node: any) => {
+            variantNodes.forEach((node: { id?: string; barcode?: string; selectedOptions?: Array<{ value?: string }> }) => {
               if (node?.id) {
                 const opts = node.selectedOptions as Array<{ value?: string }> | undefined;
                 variantMap.set(node.id, {
@@ -794,9 +788,7 @@ export async function action({ request }: ActionFunctionArgs) {
       // adminオブジェクトにrequestメソッドを追加（logInventoryChangesFromAdjustment用）
       const adminWithRequest = {
         graphql: admin.graphql.bind(admin),
-        request: async (options: { data: string; variables?: any }) => {
-          // admin.graphqlをラップしてrequestメソッドとして使用
-          // admin.graphqlはResponseオブジェクトを返すので、そのまま返す
+        request: async (options: { data: string; variables?: Record<string, unknown> }) => {
           const resp = await admin.graphql(options.data, { variables: options.variables });
           return resp;
         },
@@ -804,10 +796,10 @@ export async function action({ request }: ActionFunctionArgs) {
       let receiveResult;
       try {
         receiveResult = await executePurchaseReceive(adminWithRequest, entry, shop);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error("[action receive] Error in executePurchaseReceive:", error);
-        // エラーオブジェクトから詳細を取得
-        const errorMessage = error?.message || error?.body?.errors?.[0]?.message || String(error);
+        const err = error as { message?: string; body?: { errors?: Array<{ message?: string }> } };
+        const errorMessage = err?.message ?? err?.body?.errors?.[0]?.message ?? String(error);
         return { error: `在庫調整に失敗しました: ${errorMessage}` };
       }
       if (!receiveResult.ok) {
@@ -856,9 +848,7 @@ export async function action({ request }: ActionFunctionArgs) {
       // adminオブジェクトにrequestメソッドを追加（logInventoryChangesFromAdjustment用）
       const adminWithRequest = {
         graphql: admin.graphql.bind(admin),
-        request: async (options: { data: string; variables?: any }) => {
-          // admin.graphqlをラップしてrequestメソッドとして使用
-          // admin.graphqlはResponseオブジェクトを返すので、そのまま返す
+        request: async (options: { data: string; variables?: Record<string, unknown> }) => {
           const resp = await admin.graphql(options.data, { variables: options.variables });
           return resp;
         },

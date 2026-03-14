@@ -306,3 +306,63 @@ export type PurchaseEntry = {
   receivedAt?: string;
   cancelledAt?: string;
 };
+
+// ==========================================================================
+// セッション・API 用（any 削減）
+// ==========================================================================
+
+/** findSessionsByShop で取得するセッションの形（POS/API ルートで使用） */
+export interface SessionWithShop {
+  id: string;
+  shop: string;
+  isOnline?: boolean;
+  expires?: number | Date;
+  refreshToken?: string | null;
+  accessToken: string;
+}
+
+/** sessionStorage に findSessionsByShop がある場合の型（PrismaSessionStorage の拡張） */
+export type SessionStorageWithFindByShop = {
+  findSessionsByShop(shop: string): Promise<SessionWithShop[]>;
+};
+
+/** Admin GraphQL の request のみ持つクライアント（Webhook 等で自前 fetch する場合） */
+export interface AdminGraphQLRequestClient {
+  request(options: { data: string; variables?: Record<string, unknown> }): Promise<Response>;
+}
+
+// ==========================================================================
+// 棚卸（inventory-count）用（any 削減）
+// ==========================================================================
+
+/** 棚卸オブジェクト／カウント一覧要素の共通形（groupItems, cancelledGroupIds 等） */
+export interface InventoryCountLike {
+  groupItems?: Record<string, unknown[]>;
+  cancelledGroupIds?: string[];
+  productGroupNames?: string[];
+  status?: string;
+  completedAt?: string;
+  items?: unknown[];
+  inventoryItemIds?: string[];
+  countName?: string;
+  [key: string]: unknown;
+}
+
+/** 棚卸明細1行（inventoryItemId, currentQuantity, actualQuantity, isExtra 等） */
+export interface InventoryCountEntryLike {
+  inventoryItemId?: string;
+  id?: string;
+  currentQuantity?: number;
+  actualQuantity?: number;
+  isExtra?: boolean;
+  groupId?: string;
+  barcode?: string;
+  sku?: string;
+  title?: string;
+  groupName?: string;
+  isGroupCompleted?: boolean;
+  [key: string]: unknown;
+}
+
+/** フォーム入力イベント（currentTarget / currentValue の value を読む用） */
+export type InputLikeEvent = { currentTarget?: { value?: string }; currentValue?: { value?: string } };

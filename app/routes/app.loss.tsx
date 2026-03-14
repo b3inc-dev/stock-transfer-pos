@@ -182,7 +182,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     try {
       const parsed = JSON.parse(settingsRaw);
       const cols = Array.isArray(parsed?.loss?.csvExportColumns) ? parsed.loss.csvExportColumns : [];
-      const valid = (cols as string[]).filter((id: string) => LOSS_CSV_COLUMN_IDS.includes(id as any));
+      const valid = (cols as string[]).filter((id: string) => (LOSS_CSV_COLUMN_IDS as readonly string[]).includes(id));
       if (valid.length > 0) lossCsvExportColumns = valid;
     } catch {
       // 失敗時はデフォルト

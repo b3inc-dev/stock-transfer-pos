@@ -95,9 +95,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     // lineItemsを集約（shipments経由で取得 - 既存の動作コードに準拠）
     const lineItems: TransferLineItem[] = [];
     if (Array.isArray(transfer?.shipments?.nodes)) {
-      transfer.shipments.nodes.forEach((shipment: any, shipmentIdx: number) => {
+      transfer.shipments.nodes.forEach((shipment: { id?: string; lineItems?: { nodes: unknown[] }; [key: string]: unknown }, shipmentIdx: number) => {
         if (Array.isArray(shipment?.lineItems?.nodes)) {
-          shipment.lineItems.nodes.forEach((li: any, liIdx: number) => {
+          shipment.lineItems.nodes.forEach((li: { id?: string; [key: string]: unknown }, liIdx: number) => {
             const inventoryItem = li?.inventoryItem;
             const variant = inventoryItem?.variant;
             const product = variant?.product;

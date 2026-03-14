@@ -5,6 +5,7 @@ import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
+import type { AdminGraphQLRequestClient } from "../types";
 import { logInventoryChange } from "../utils/inventory-change-log";
 import { getDateInShopTimezone } from "../utils/timezone";
 import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
@@ -90,7 +91,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // adminクライアントを作成
     // shopify.clientsが存在しない場合、sessionから直接GraphQLクライアントを作成
-    let admin: { request: (options: { data: string; variables?: any }) => Promise<any> };
+    let admin: AdminGraphQLRequestClient;
     
     if (shopify?.clients?.Graphql) {
       admin = shopify.clients.Graphql({ session });
@@ -102,7 +103,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       
       // GraphQLクライアントを直接作成
       admin = {
-        request: async (options: { data: string; variables?: any }) => {
+        request: async (options: { data: string; variables?: Record<string, unknown> }) => {
           const response = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
             method: "POST",
             headers: {
@@ -171,7 +172,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
       }
       const locationIdRaw = orderLocationId?.replace(/^gid:\/\/shopify\/Location\//, "") ?? orderLocationId;
-      if (orderLocationId && order.line_items && order.line_items.length > 0 && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+      if (orderLocationId && order.line_items && order.line_items.length > 0 && db && typeof db.inventoryChangeLog !== "undefined") {
         // タイムゾーン取得（admin は .request() インターフェースのため直接取得）
         let shopTimezoneForCancel = "UTC";
         try {
@@ -219,7 +220,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             if (!inventoryItemId) continue;
             const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
             const idempotencyKey = `${shop}_order_cancel_${order.id}_${rawItemId}_${locationIdRaw ?? orderLocationId}`;
-            const existing = await (db as any).inventoryChangeLog.findFirst({
+            const existing = await db.inventoryChangeLog.findFirst({
               where: { shop, idempotencyKey },
             });
             if (existing) {
@@ -233,7 +234,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             const locIdCandidates = [orderLocationId, locationIdRaw, `gid://shopify/Location/${locationIdRaw}`].filter(Boolean);
             const existingAdminForCancel = await findWithAdminWebhookRetry(
               () =>
-                (db as any).inventoryChangeLog.findFirst({
+                db.inventoryChangeLog.findFirst({
                   where: {
                     shop,
                     inventoryItemId: { in: itemIdCandidates },
@@ -250,7 +251,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               const delta = lineItemQty;
               // quantityAfter は inventory_levels/update で既に「戻り後」が入っているのでそのまま
               // 救済時は idempotencyKey を変更しない（P2002 防止）
-              await (db as any).inventoryChangeLog.update({
+              await db.inventoryChangeLog.update({
                 where: { id: existingAdminForCancel.id },
                 data: {
                   activity: "order_cancel",
@@ -304,14 +305,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (order.fulfillments && order.fulfillments.length > 0) {
       // 受注時を優先：この注文で order_sales が1件でも既にあれば配送完了時の救済は行わない（オンラインは別日に配送完了になるため）
       const orderIdRef = `order_${order.id}`;
-      const orderCreatedAt = (payload as any).created_at
-        ? new Date((payload as any).created_at)
+      const orderCreatedAt = (payload as { created_at?: string }).created_at
+        ? new Date((payload as { created_at?: string }).created_at)
         : new Date();
       const searchFrom = new Date(orderCreatedAt.getTime() - 30 * 60 * 1000);
       const searchTo = new Date(Math.max(orderCreatedAt.getTime() + 5 * 60 * 1000, Date.now() + 2 * 60 * 1000));
       let alreadyRecordedAtOrder: { id: number } | null = null;
-      if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-        alreadyRecordedAtOrder = await (db as any).inventoryChangeLog.findFirst({
+      if (db && typeof db.inventoryChangeLog !== "undefined") {
+        alreadyRecordedAtOrder = await db.inventoryChangeLog.findFirst({
           where: {
             shop,
             activity: "order_sales",
@@ -340,7 +341,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
         }
 
-        if (pendingItems.length > 0 && db && typeof (db as any).inventoryChangeLog !== "undefined") {
+        if (pendingItems.length > 0 && db && typeof db.inventoryChangeLog !== "undefined") {
           const variantIds = [...new Set(pendingItems.map((p) => p.variant_id))];
           const variantToInventoryItem = new Map<number, { inventoryItemId: string; rawItemId: string }>();
           for (const vid of variantIds) {
@@ -381,8 +382,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             else grouped.set(k, { rawItemId: info.rawItemId, inventoryItemId: info.inventoryItemId, locationIdRaw: p.locationIdRaw, locationIdGid: p.locationIdGid, quantity: p.quantity });
           }
 
-          if (db && typeof (db as any).orderPendingLocation !== "undefined") {
-            await (db as any).orderPendingLocation.deleteMany({
+          if (db && typeof db.orderPendingLocation !== "undefined") {
+            await db.orderPendingLocation.deleteMany({
               where: { shop, orderId: String(order.id) },
             });
           }
@@ -392,7 +393,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               const itemIdCandidates = [g.inventoryItemId, g.rawItemId, `gid://shopify/InventoryItem/${g.rawItemId}`].filter((id, i, arr) => arr.indexOf(id) === i);
               const locationIdCandidates = [g.locationIdRaw, g.locationIdGid, g.locationIdRaw?.startsWith("gid://") ? g.locationIdRaw : null].filter(Boolean) as string[];
 
-              const existingOrderSales = await (db as any).inventoryChangeLog.findFirst({
+              const existingOrderSales = await db.inventoryChangeLog.findFirst({
                 where: {
                   shop,
                   inventoryItemId: { in: itemIdCandidates },
@@ -406,7 +407,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
               const adminWebhookToUpdate = await findWithAdminWebhookRetry(
                 () =>
-                  (db as any).inventoryChangeLog.findFirst({
+                  db.inventoryChangeLog.findFirst({
                     where: {
                       shop,
                       inventoryItemId: { in: itemIdCandidates },
@@ -447,7 +448,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   }
                   const levels = levelData?.data?.inventoryItem?.inventoryLevels?.edges || [];
                   const locIdForMatch = g.locationIdGid ?? (g.locationIdRaw?.startsWith("gid://") ? g.locationIdRaw : `gid://shopify/Location/${g.locationIdRaw}`);
-                  const match = levels.find((e: any) => e?.node?.location?.id === locIdForMatch || e?.node?.location?.id === g.locationIdRaw);
+                  const match = levels.find((e: { node?: { location?: { id?: string } } }) => e?.node?.location?.id === locIdForMatch || e?.node?.location?.id === g.locationIdRaw);
                   if (match?.node?.quantities?.[0]?.quantity != null) quantityAfterRemediation = match.node.quantities[0].quantity;
                 } catch (e) {
                   console.warn(`[orders/updated] Could not fetch quantityAfter for remediation:`, e);
@@ -460,14 +461,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   note: `注文: #${order.id}`,
                 };
                 if (quantityAfterRemediation !== null) updateData.quantityAfter = quantityAfterRemediation;
-                await (db as any).inventoryChangeLog.update({
+                await db.inventoryChangeLog.update({
                   where: { id: adminWebhookToUpdate.id },
                   data: updateData,
                 });
                 console.log(`[orders/updated] Remediated admin_webhook to order_sales (fulfillments): id=${adminWebhookToUpdate.id}, order.id=${order.id}, item=${g.rawItemId}, locationId=${g.locationIdRaw}, delta=${orderDelta}`);
-              } else if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+              } else if (db && typeof db.orderPendingLocation !== "undefined") {
                 const locIdForPending = g.locationIdRaw ?? "";
-                await (db as any).orderPendingLocation.upsert({
+                await db.orderPendingLocation.upsert({
                   where: {
                     shop_orderId_inventoryItemId_locationId: { shop, orderId: String(order.id), inventoryItemId: g.rawItemId, locationId: locIdForPending },
                   },
@@ -498,12 +499,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         console.log(`[orders/updated] Processing order without fulfillments: order.id=${order.id}, line_items.length=${order.line_items.length}`);
         
         // 注文の作成日時を取得（fulfillmentがない場合は注文の作成日時を使用）
-        const orderCreatedAt = (payload as any).created_at 
-          ? new Date((payload as any).created_at)
+        const orderCreatedAt = (payload as { created_at?: string }).created_at 
+          ? new Date((payload as { created_at?: string }).created_at)
           : new Date();
         // 救済の時間窓は「注文の更新日時」基準にする（注文編集は作成から時間が経っていても、編集直後の admin_webhook を拾うため）
-        const orderUpdatedAt = (payload as any).updated_at
-          ? new Date((payload as any).updated_at)
+        const orderUpdatedAt = (payload as { updated_at?: string }).updated_at
+          ? new Date((payload as { updated_at?: string }).updated_at)
           : new Date();
         const searchFrom = new Date(orderUpdatedAt.getTime() - 30 * 60 * 1000);
         const searchTo = new Date(orderUpdatedAt.getTime() + 5 * 60 * 1000);
@@ -548,7 +549,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const rawOrderLocId = orderLocationId ? (orderLocationId.replace(/^gid:\/\/shopify\/Location\//, "") || orderLocationId) : "";
 
         // OrderPendingLocation を登録（inventory_levels/update が先に届いた場合でもマッチしやすくする）。同一注文で2ロケーション出荷に対応するため locationId を含める。
-        if (db && typeof (db as any).orderPendingLocation !== "undefined") {
+        if (db && typeof db.orderPendingLocation !== "undefined") {
           for (const lineItem of order.line_items) {
             const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
             if (!lineItem.variant_id || lineItemQty <= 0) continue;
@@ -571,7 +572,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
               if (!inventoryItemId) continue;
               const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
-              await (db as any).orderPendingLocation.upsert({
+              await db.orderPendingLocation.upsert({
                 where: {
                   shop_orderId_inventoryItemId_locationId: { shop, orderId: String(order.id), inventoryItemId: rawItemId, locationId: rawOrderLocId },
                 },
@@ -643,10 +644,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               const locationIdCandidates = [rawLocIdForCand2, `gid://shopify/Location/${rawLocIdForCand2}`]
                 .filter((id, index, arr) => arr.indexOf(id) === index);
               
-              if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+              if (db && typeof db.inventoryChangeLog !== "undefined") {
                 const existingAdminLog = await findWithAdminWebhookRetry(
                   () =>
-                    (db as any).inventoryChangeLog.findFirst({
+                    db.inventoryChangeLog.findFirst({
                       where: {
                         shop,
                         inventoryItemId: { in: inventoryItemIdCandidates },
@@ -666,7 +667,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   const orderDelta = -lineItemQty;
                   const rawItemIdForPending = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
                   // 救済時は idempotencyKey を変更しない（他経路で同じキーが既に使われていると P2002 になるため）
-                  await (db as any).inventoryChangeLog.update({
+                  await db.inventoryChangeLog.update({
                     where: { id: existingAdminLog.id },
                     data: {
                       activity: "order_sales",
@@ -678,8 +679,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                   });
                   console.log(`[orders/updated] Updated admin_webhook log to order_sales (no fulfillments): id=${existingAdminLog.id}`);
                   // 救済したため OrderPendingLocation を削除し、後の inventory_levels/update で二重記録にならないようにする
-                  if (typeof (db as any).orderPendingLocation !== "undefined") {
-                    await (db as any).orderPendingLocation.deleteMany({
+                  if (typeof db.orderPendingLocation !== "undefined") {
+                    await db.orderPendingLocation.deleteMany({
                       where: { shop, orderId: String(order.id), inventoryItemId: rawItemIdForPending, locationId: rawOrderLocId },
                     });
                   }

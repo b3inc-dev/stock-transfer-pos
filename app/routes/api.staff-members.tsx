@@ -48,7 +48,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
 
     const nodes = result.data?.staffMembers?.nodes ?? [];
-    const staffList = nodes.map((s: any) => ({
+    const staffList = nodes.map((s: { id?: string; name?: string; [key: string]: unknown }) => ({
       id: s.id,
       name: [s.firstName, s.lastName].filter(Boolean).join(" ") || s.email || s.id,
       email: s.email ?? "",
@@ -61,12 +61,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
         headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
       }
     );
-  } catch (e: any) {
+  } catch (e: unknown) {
+    const errMsg = e instanceof Error ? e.message : "Unknown error";
     const payload: { ok: false; error: string; stack?: string } = {
       ok: false,
-      error: e?.message || "Unknown error",
+      error: errMsg,
     };
-    if (process.env.NODE_ENV !== "production" && e?.stack) {
+    if (process.env.NODE_ENV !== "production" && e instanceof Error && e.stack) {
       payload.stack = e.stack;
     }
     return new Response(JSON.stringify(payload), {

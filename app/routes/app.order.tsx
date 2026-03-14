@@ -6,6 +6,7 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import type { SettingsV1, OrderCsvColumn, OrderDestinationOption, LocationNode, OrderRequestItem, OrderRequestEntry, PurchaseEntry } from "../types";
+import type { GraphQLUserError } from "../types/graphql-responses";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 
 const ORDER_NS = "stock_transfer_pos";
@@ -42,7 +43,8 @@ function normalizeInventoryItemGid(inventoryItemId: string): string {
   return s; // そのまま返す（既にGID形式の可能性）
 }
 
-async function createTransferForOrder(admin: any, entry: OrderRequestEntry, approvedItems: OrderRequestItem[]): Promise<{ transferId: string | null; error: string | null }> {
+type AdminGraphQL = { graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> };
+async function createTransferForOrder(admin: AdminGraphQL, entry: OrderRequestEntry, approvedItems: OrderRequestItem[]): Promise<{ transferId: string | null; error: string | null }> {
   try {
     const lineItems =
       Array.isArray(approvedItems) && approvedItems.length > 0
@@ -96,14 +98,14 @@ async function createTransferForOrder(admin: any, entry: OrderRequestEntry, appr
       
       // GraphQL エラー（ネットワークエラーなど）
       if (data.errors && data.errors.length > 0) {
-        const errorMessages = data.errors.map((e: any) => e.message || String(e)).join(" / ");
+        const errorMessages = data.errors.map((e: { message?: string }) => e.message || String(e)).join(" / ");
         return { transferId: null, error: `GraphQLエラー: ${errorMessages}` };
       }
 
       const payload = data?.data?.inventoryTransferCreateAsReadyToShip;
       const userErrors = payload?.userErrors ?? [];
       if (userErrors.length) {
-        const errorMessages = userErrors.map((e: any) => `${e.field || ""}: ${e.message || ""}`).join(" / ");
+        const errorMessages = userErrors.map((e: GraphQLUserError) => `${e.field ?? ""}: ${e.message ?? ""}`).join(" / ");
         return { transferId: null, error: `Transfer作成エラー: ${errorMessages}` };
       }
       
@@ -140,14 +142,14 @@ async function createTransferForOrder(admin: any, entry: OrderRequestEntry, appr
 
         const draftData = await draftResp.json();
         if (draftData.errors && draftData.errors.length > 0) {
-          const errorMessages = draftData.errors.map((e: any) => e.message || String(e)).join(" / ");
+          const errorMessages = draftData.errors.map((e: { message?: string }) => e.message || String(e)).join(" / ");
           return { transferId: null, error: `Draft作成エラー: ${errorMessages}` };
         }
 
         const draftPayload = draftData?.data?.inventoryTransferCreate;
         const draftUserErrors = draftPayload?.userErrors ?? [];
         if (draftUserErrors.length) {
-          const errorMessages = draftUserErrors.map((e: any) => `${e.field || ""}: ${e.message || ""}`).join(" / ");
+          const errorMessages = draftUserErrors.map((e: GraphQLUserError) => `${e.field ?? ""}: ${e.message ?? ""}`).join(" / ");
           return { transferId: null, error: `Draft作成エラー: ${errorMessages}` };
         }
 
@@ -175,14 +177,14 @@ async function createTransferForOrder(admin: any, entry: OrderRequestEntry, appr
 
         const markData = await markResp.json();
         if (markData.errors && markData.errors.length > 0) {
-          const errorMessages = markData.errors.map((e: any) => e.message || String(e)).join(" / ");
+          const errorMessages = markData.errors.map((e: { message?: string }) => e.message || String(e)).join(" / ");
           return { transferId: null, error: `ReadyToShipマークエラー: ${errorMessages}` };
         }
 
         const markPayload = markData?.data?.inventoryTransferMarkAsReadyToShip;
         const markUserErrors = markPayload?.userErrors ?? [];
         if (markUserErrors.length) {
-          const errorMessages = markUserErrors.map((e: any) => `${e.field || ""}: ${e.message || ""}`).join(" / ");
+          const errorMessages = markUserErrors.map((e: GraphQLUserError) => `${e.field ?? ""}: ${e.message ?? ""}`).join(" / ");
           return { transferId: null, error: `ReadyToShipマークエラー: ${errorMessages}` };
         }
 
@@ -204,7 +206,7 @@ async function createTransferForOrder(admin: any, entry: OrderRequestEntry, appr
 // =========================
 
 async function createPurchaseFromOrder(
-  admin: any,
+  admin: AdminGraphQL,
   orderEntry: OrderRequestEntry,
   approvedItems: OrderRequestItem[],
   appInstallationId: string
@@ -276,7 +278,7 @@ async function createPurchaseFromOrder(
       try {
         const settings = JSON.parse(settingsRaw);
         const destinations = settings?.order?.destinations || [];
-        const matchedDest = destinations.find((d: any) => d.name === orderEntry.destination);
+        const matchedDest = destinations.find((d: OrderDestinationOption) => d.name === orderEntry.destination);
         if (matchedDest) {
           supplierId = matchedDest.id;
           supplierName = matchedDest.name;
@@ -1243,11 +1245,13 @@ export default function OrderPage() {
       return;
     }
     
+    type FetcherDestinationUpdate = { ok: true; entryId: string; destination: string };
+    type FetcherStatusUpdate = { ok: true; status: string; entryId: string; transferError?: string; purchaseId?: string; purchaseName?: string; purchaseError?: string; transferId?: string };
     // 発注先更新の場合
     if ("ok" in fetcher.data && fetcher.data.ok && "destination" in fetcher.data) {
-      // 発注先更新の場合（先にチェック）
-      const entryId = (fetcher.data as any).entryId;
-      const newDestination = (fetcher.data as any).destination;
+      const data = fetcher.data as FetcherDestinationUpdate;
+      const entryId = data.entryId;
+      const newDestination = data.destination;
       // 同じレスポンスを2回処理しないようにする（entryId + destinationで一意に識別）
       const responseKey = `${entryId}:${newDestination}`;
       // 編集モードが有効な場合は処理を完全にスキップ（編集ボタンを押した直後の再実行を防ぐ）
@@ -1282,9 +1286,9 @@ export default function OrderPage() {
         }
       }
     } else if ("ok" in fetcher.data && fetcher.data.ok && "status" in fetcher.data) {
-      // 承認処理または承認取り消し処理の結果（statusが存在する場合のみ）
-      const status = (fetcher.data as any).status;
-      const entryId = (fetcher.data as any).entryId;
+      const statusData = fetcher.data as FetcherStatusUpdate;
+      const status = statusData.status;
+      const entryId = statusData.entryId;
       
       if (status === "pending") {
         // 承認取り消しの場合：entriesの状態を直接更新
@@ -1321,11 +1325,11 @@ export default function OrderPage() {
         return; // ここで処理を終了（商品リストの再取得を防ぐ）
       } else {
         // 承認の場合
-        const transferError = (fetcher.data as any).transferError;
-        const purchaseId = (fetcher.data as any).purchaseId;
-        const purchaseName = (fetcher.data as any).purchaseName;
-        const purchaseError = (fetcher.data as any).purchaseError;
-        const transferId = (fetcher.data as any).transferId;
+        const transferError = statusData.transferError;
+        const purchaseId = statusData.purchaseId;
+        const purchaseName = statusData.purchaseName;
+        const purchaseError = statusData.purchaseError;
+        const transferId = statusData.transferId;
         
         // entriesの状態を直接更新（リロードなしで反映）
         if (entryId && currentModalEntry) {

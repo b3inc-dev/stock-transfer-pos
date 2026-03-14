@@ -4,6 +4,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
+import type { SessionStorageWithFindByShop } from "../types";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
@@ -43,8 +44,8 @@ async function decodePOSToken(token: string): Promise<{ dest?: string } | null> 
       clockTolerance: 10,
     });
     return payload as { dest?: string };
-  } catch (e: any) {
-    console.warn("[api.log-inventory-change] decodeSessionToken error:", e?.message || String(e));
+  } catch (e: unknown) {
+    console.warn("[api.log-inventory-change] decodeSessionToken error:", e instanceof Error ? e.message : String(e));
     return null;
   }
 }
@@ -70,7 +71,7 @@ function toLocationGid(locationId: string, rawLocId: string): string {
 
 // ロケーション名が未設定またはラベル（出庫元）のとき、GraphQL で実ロケーション名を取得する
 async function resolveLocationName(
-  admin: { request: (opts: { data: string; variables?: any }) => Promise<Response> },
+  admin: { request: (opts: { data: string; variables?: Record<string, unknown> }) => Promise<Response> },
   locationId: string,
   rawLocId: string
 ): Promise<string> {
@@ -90,8 +91,8 @@ async function resolveLocationName(
     const locationData = await locationResp.json();
     const name = locationData?.data?.location?.name;
     return typeof name === "string" && name.trim() ? name.trim() : rawLocId || locationId;
-  } catch (e: any) {
-    console.warn("[api.log-inventory-change] resolveLocationName error:", e?.message || String(e));
+  } catch (e: unknown) {
+    console.warn("[api.log-inventory-change] resolveLocationName error:", e instanceof Error ? e.message : String(e));
     return rawLocId || locationId;
   }
 }
@@ -137,13 +138,14 @@ export async function action({ request }: ActionFunctionArgs) {
       try {
         const auth = await authenticate.pos(request);
         sessionToken = auth.sessionToken;
-      } catch (err: any) {
-        const is401 = err?.status === 401 || (err instanceof Response && err.status === 401);
-        console.warn("[api.log-inventory-change] POS auth failed:", is401 ? "Session token invalid. 上記の decodeSessionToken error を確認してください。" : String(err?.message || err));
+      } catch (err: unknown) {
+        const is401 = (err as { status?: number })?.status === 401 || (err instanceof Response && err.status === 401);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.warn("[api.log-inventory-change] POS auth failed:", is401 ? "Session token invalid. 上記の decodeSessionToken error を確認してください。" : errMsg);
         throw err;
       }
     }
-    const dest = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as any).dest;
+    const dest = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as { dest?: string }).dest;
     if (!dest) {
       return new Response(
         JSON.stringify({ ok: false, error: "No shop in session token" }),
@@ -154,12 +156,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const body = await request.json();
     // バッチ: body.entries が配列なら複数件、なければ body 1件として扱う（後方互換）
-    const entries: any[] = Array.isArray(body?.entries) && body.entries.length > 0 ? body.entries : [body];
-    
-    console.log(`[api.log-inventory-change] Request received: shop=${shop}, entries.length=${entries.length}, activities=${entries.map((e: any) => e?.activity).join(", ")}`);
+    const entries: unknown[] = Array.isArray(body?.entries) && body.entries.length > 0 ? body.entries : [body];
 
-    let sessions = await (sessionStorage as any).findSessionsByShop(shop);
-    let session = sessions?.find((s: any) => s.isOnline === false) ?? sessions?.[0];
+    console.log(`[api.log-inventory-change] Request received: shop=${shop}, entries.length=${entries.length}, activities=${entries.map((e: unknown) => (e as { activity?: string })?.activity).join(", ")}`);
+
+    const storage = sessionStorage as SessionStorageWithFindByShop;
+    let sessions = await storage.findSessionsByShop(shop);
+    let session = sessions?.find((s) => s.isOnline === false) ?? sessions?.[0];
 
     // オフラインアクセストークンが期限切れならリフレッシュ（在庫変動履歴の記録に同じトークンを使用するため）
     if (session) {
@@ -167,12 +170,12 @@ export async function action({ request }: ActionFunctionArgs) {
         ? new Date(typeof session.expires === "number" ? session.expires : (session.expires as Date).getTime())
         : null;
       await refreshOfflineSessionIfNeeded(session.id, session.shop, expiresDate, session.refreshToken ?? null);
-      const sessionsAfter = await (sessionStorage as any).findSessionsByShop(shop);
-      session = sessionsAfter?.find((s: any) => s.isOnline === false) ?? sessionsAfter?.[0];
+      const sessionsAfter = await storage.findSessionsByShop(shop);
+      session = sessionsAfter?.find((s) => s.isOnline === false) ?? sessionsAfter?.[0];
     }
 
     let shopTimezone = "UTC";
-    let admin: { request: (opts: { data: string; variables?: any }) => Promise<Response> } | null = null;
+    let admin: { request: (opts: { data: string; variables?: Record<string, unknown> }) => Promise<Response> } | null = null;
     if (session) {
       const shopDomain = session.shop;
       const accessToken = session.accessToken;
@@ -191,7 +194,7 @@ export async function action({ request }: ActionFunctionArgs) {
       };
       let adminObj = {
         graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => doRequest(q, opts?.variables),
-        request: (options: { data: string; variables?: any }) => doRequest(options.data, options.variables),
+        request: (options: { data: string; variables?: Record<string, unknown> }) => doRequest(options.data, options.variables),
       };
       admin = withGraphQLRetry(adminObj);
       const shopTimezoneResp = await admin.request({
@@ -252,7 +255,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
       if (!session) {
         const dateUtc = getDateInShopTimezone(ts, "UTC");
-        const existingLog = await (db as any).inventoryChangeLog.findUnique({
+        const existingLog = await db.inventoryChangeLog.findUnique({
           where: { shop_idempotencyKey: { shop, idempotencyKey } },
         });
         if (existingLog) {
@@ -264,7 +267,7 @@ export async function action({ request }: ActionFunctionArgs) {
             if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
             if (sourceId != null) updateData.sourceId = sourceId;
             if (adjustmentGroupId != null) updateData.adjustmentGroupId = adjustmentGroupId;
-            await (db as any).inventoryChangeLog.update({ where: { id: existingLog.id }, data: updateData });
+            await db.inventoryChangeLog.update({ where: { id: existingLog.id }, data: updateData });
             results.push({ ok: true, updated: true, id: existingLog.id });
           } else {
             results.push({ ok: true, message: "Log already exists", id: existingLog.id });
@@ -286,7 +289,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ];
         let recentAdminLog = await findWithAdminWebhookRetry<{ id: number }>(
           () =>
-            (db as any).inventoryChangeLog.findFirst({
+            db.inventoryChangeLog.findFirst({
               where: {
                 shop,
                 inventoryItemId: { in: inventoryItemIdCandidates },
@@ -315,7 +318,7 @@ export async function action({ request }: ActionFunctionArgs) {
           if (sku != null && sku !== "") updateData.sku = String(sku);
           if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
-          await (db as any).inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
+          await db.inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
           console.log(`[api.log-inventory-change] Updated admin_webhook log: id=${recentAdminLog.id}, new activity=${activity}`);
           results.push({ ok: true, updated: true, id: recentAdminLog.id });
           continue;
@@ -328,7 +331,7 @@ export async function action({ request }: ActionFunctionArgs) {
         // ただし API が order_sales/refund を送ったときだけ実行（ロス・入庫等で別注文の order_sales 行を上書きしない）
         if (activity === "order_sales" || activity === "refund") {
           const sameActivity = activity;
-          const recentSameLog = await (db as any).inventoryChangeLog.findFirst({
+          const recentSameLog = await db.inventoryChangeLog.findFirst({
             where: {
               shop,
               inventoryItemId: { in: inventoryItemIdCandidates },
@@ -342,7 +345,7 @@ export async function action({ request }: ActionFunctionArgs) {
             const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
             if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
             if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
-            await (db as any).inventoryChangeLog.update({ where: { id: recentSameLog.id }, data: updateData });
+            await db.inventoryChangeLog.update({ where: { id: recentSameLog.id }, data: updateData });
             console.log(`[api.log-inventory-change] Updated existing ${sameActivity} log (avoid duplicate): id=${recentSameLog.id}`);
             results.push({ ok: true, updated: true, id: recentSameLog.id });
             continue;
@@ -351,7 +354,7 @@ export async function action({ request }: ActionFunctionArgs) {
         // 入庫・出庫・ロス・棚卸・仕入の重複送信: 同一 item/location/activity の既存行があれば更新して新規作成しない
         const posActivities = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "adjustment", "purchase_entry", "purchase_cancel"];
         if (posActivities.includes(activity)) {
-          const recentSameActivityLog = await (db as any).inventoryChangeLog.findFirst({
+          const recentSameActivityLog = await db.inventoryChangeLog.findFirst({
             where: {
               shop,
               inventoryItemId: { in: inventoryItemIdCandidates },
@@ -365,13 +368,13 @@ export async function action({ request }: ActionFunctionArgs) {
             const updateDataPos: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null, note: null };
             if (delta !== undefined && delta !== null) updateDataPos.delta = Number(delta);
             if (quantityAfter !== undefined && quantityAfter !== null) updateDataPos.quantityAfter = Number(quantityAfter);
-            await (db as any).inventoryChangeLog.update({ where: { id: recentSameActivityLog.id }, data: updateDataPos });
+            await db.inventoryChangeLog.update({ where: { id: recentSameActivityLog.id }, data: updateDataPos });
             console.log(`[api.log-inventory-change] Updated existing ${activity} log (avoid duplicate): id=${recentSameActivityLog.id}`);
             results.push({ ok: true, updated: true, id: recentSameActivityLog.id });
             continue;
           }
         }
-        const log = await (db as any).inventoryChangeLog.create({
+        const log = await db.inventoryChangeLog.create({
           data: {
             shop,
             timestamp: ts,
@@ -396,7 +399,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
 
       const shopId = session.shop;
-      const existingLog = await (db as any).inventoryChangeLog.findUnique({
+      const existingLog = await db.inventoryChangeLog.findUnique({
         where: { shop_idempotencyKey: { shop: shopId, idempotencyKey } },
       });
       if (existingLog) {
@@ -408,7 +411,7 @@ export async function action({ request }: ActionFunctionArgs) {
           if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
           if (sourceId != null) updateData.sourceId = sourceId;
           if (adjustmentGroupId != null) updateData.adjustmentGroupId = adjustmentGroupId;
-          await (db as any).inventoryChangeLog.update({ where: { id: existingLog.id }, data: updateData });
+          await db.inventoryChangeLog.update({ where: { id: existingLog.id }, data: updateData });
           results.push({ ok: true, updated: true, id: existingLog.id });
         } else {
           results.push({ ok: true, message: "Log already exists", id: existingLog.id });
@@ -429,7 +432,7 @@ export async function action({ request }: ActionFunctionArgs) {
       ];
       let recentAdminLog = await findWithAdminWebhookRetry<{ id: number }>(
         () =>
-          (db as any).inventoryChangeLog.findFirst({
+          db.inventoryChangeLog.findFirst({
             where: {
               shop: shopId,
               inventoryItemId: { in: inventoryItemIdCandidates },
@@ -458,7 +461,7 @@ export async function action({ request }: ActionFunctionArgs) {
         if (sku != null && sku !== "") updateData.sku = String(sku);
         if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
         if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
-        await (db as any).inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
+        await db.inventoryChangeLog.update({ where: { id: recentAdminLog.id }, data: updateData });
         console.log(`[api.log-inventory-change] Updated admin_webhook log: id=${recentAdminLog.id}, new activity=${activity}`);
         results.push({ ok: true, updated: true, id: recentAdminLog.id });
         continue;
@@ -470,7 +473,7 @@ export async function action({ request }: ActionFunctionArgs) {
       // orders/updated が先に admin_webhook を order_sales に更新している場合、同じ変動で新規作成すると二重になる。既存の order_sales/refund を更新する（同種のみ）。
       if (activity === "order_sales" || activity === "refund") {
         const sameActivitySession = activity;
-        const recentSameLogSession = await (db as any).inventoryChangeLog.findFirst({
+        const recentSameLogSession = await db.inventoryChangeLog.findFirst({
           where: {
             shop: shopId,
             inventoryItemId: { in: inventoryItemIdCandidates },
@@ -484,7 +487,7 @@ export async function action({ request }: ActionFunctionArgs) {
           const updateDataSession: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
           if (delta !== undefined && delta !== null) updateDataSession.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateDataSession.quantityAfter = Number(quantityAfter);
-          await (db as any).inventoryChangeLog.update({ where: { id: recentSameLogSession.id }, data: updateDataSession });
+          await db.inventoryChangeLog.update({ where: { id: recentSameLogSession.id }, data: updateDataSession });
           console.log(`[api.log-inventory-change] Updated existing ${sameActivitySession} log (avoid duplicate): id=${recentSameLogSession.id}`);
           results.push({ ok: true, updated: true, id: recentSameLogSession.id });
           continue;
@@ -493,7 +496,7 @@ export async function action({ request }: ActionFunctionArgs) {
       // 入庫・出庫・ロス・棚卸・仕入の重複送信: 同一 item/location/activity の既存行があれば更新して新規作成しない（セッションあり）
       const posActivitiesSession = ["inbound_transfer", "outbound_transfer", "loss_entry", "inventory_count", "adjustment", "purchase_entry", "purchase_cancel"];
       if (posActivitiesSession.includes(activity)) {
-        const recentSameActivityLogSession = await (db as any).inventoryChangeLog.findFirst({
+        const recentSameActivityLogSession = await db.inventoryChangeLog.findFirst({
           where: {
             shop: shopId,
             inventoryItemId: { in: inventoryItemIdCandidates },
@@ -507,13 +510,13 @@ export async function action({ request }: ActionFunctionArgs) {
           const updateDataPosSession: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null, note: null };
           if (delta !== undefined && delta !== null) updateDataPosSession.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateDataPosSession.quantityAfter = Number(quantityAfter);
-          await (db as any).inventoryChangeLog.update({ where: { id: recentSameActivityLogSession.id }, data: updateDataPosSession });
+          await db.inventoryChangeLog.update({ where: { id: recentSameActivityLogSession.id }, data: updateDataPosSession });
           console.log(`[api.log-inventory-change] Updated existing ${activity} log (avoid duplicate): id=${recentSameActivityLogSession.id}`);
           results.push({ ok: true, updated: true, id: recentSameActivityLogSession.id });
           continue;
         }
       }
-      const log = await (db as any).inventoryChangeLog.create({
+      const log = await db.inventoryChangeLog.create({
         data: {
           shop: shopId,
           timestamp: timestamp ? new Date(timestamp) : new Date(),
@@ -544,10 +547,12 @@ export async function action({ request }: ActionFunctionArgs) {
       JSON.stringify(payload),
       { status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error("[api.log-inventory-change] Error:", e);
+    const errorMessage = e instanceof Error ? e.message : "Unknown error";
+    const stack = e instanceof Error ? e.stack : undefined;
     return new Response(
-      JSON.stringify({ ok: false, error: e?.message || "Unknown error", stack: e?.stack }),
+      JSON.stringify({ ok: false, error: errorMessage, ...(process.env.NODE_ENV !== "production" && stack ? { stack } : {}) }),
       { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }

@@ -4,6 +4,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
+import type { SessionStorageWithFindByShop } from "../types";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import {
@@ -104,7 +105,8 @@ export async function action({ request }: ActionFunctionArgs) {
   }
   const shop = shopFromDest(dest);
 
-  let sessions = await (sessionStorage as { findSessionsByShop: (shop: string) => Promise<Array<{ id: string; shop: string; expires?: number | Date; refreshToken?: string | null; accessToken: string }>> }).findSessionsByShop(shop);
+  const storage = sessionStorage as SessionStorageWithFindByShop;
+  let sessions = await storage.findSessionsByShop(shop);
   let session = sessions?.find((s) => s.isOnline === false) ?? sessions?.[0];
   if (session) {
     const expiresDate =
@@ -112,7 +114,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? new Date(typeof session.expires === "number" ? session.expires : (session.expires as Date).getTime())
         : null;
     await refreshOfflineSessionIfNeeded(session.id, session.shop, expiresDate, session.refreshToken ?? null);
-    const sessionsAfter = await (sessionStorage as { findSessionsByShop: (shop: string) => Promise<Array<{ id: string; shop: string; accessToken: string; isOnline?: boolean }>> }).findSessionsByShop(shop);
+    const sessionsAfter = await storage.findSessionsByShop(shop);
     session = sessionsAfter?.find((s) => s.isOnline === false) ?? sessionsAfter?.[0];
   }
   if (!session?.accessToken) {

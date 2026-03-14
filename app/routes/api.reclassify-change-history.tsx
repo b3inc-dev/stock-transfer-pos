@@ -62,7 +62,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // 備考のみクリア（「変動数は直前ログが…」を既知アクティビティ行から削除）
     if (clearStaleNoteOnly) {
       const staleNoteSubstring = "変動数は直前ログが";
-      const updated = await (db as any).inventoryChangeLog.updateMany({
+      const updated = await db.inventoryChangeLog.updateMany({
         where: {
           shop,
           note: { contains: staleNoteSubstring },
@@ -91,7 +91,7 @@ export async function action({ request }: ActionFunctionArgs) {
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
-    if (!ALLOWED_ACTIVITIES.includes(activity as any)) {
+    if (!(ALLOWED_ACTIVITIES as readonly string[]).includes(activity)) {
       return new Response(
         JSON.stringify({ ok: false, error: `activity must be one of: ${ALLOWED_ACTIVITIES.join(", ")}` }),
         { status: 400, headers: { "Content-Type": "application/json" } }
@@ -105,7 +105,7 @@ export async function action({ request }: ActionFunctionArgs) {
       return [raw, id, raw !== id ? `gid://shopify/Location/${raw}` : ""].filter(Boolean);
     });
 
-    const updated = await (db as any).inventoryChangeLog.updateMany({
+    const updated = await db.inventoryChangeLog.updateMany({
       where: {
         shop,
         locationId: { in: locationIdCandidates },

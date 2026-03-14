@@ -6,6 +6,7 @@ import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import db from "../db.server";
+import type { SessionStorageWithFindByShop } from "../types";
 import { getDateInShopTimezone, getShopTimezone } from "../utils/timezone";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import {
@@ -143,13 +144,14 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    const entriesParsed: ApplyChangeEntry[] = entriesRaw
+    type RawEntry = { inventoryItemId?: unknown; variantId?: unknown; sku?: unknown; quantityAfter?: unknown; quantityBefore?: unknown; delta?: unknown };
+    const entriesParsed: ApplyChangeEntry[] = (entriesRaw as RawEntry[])
       .filter(
-        (e: any) =>
+        (e) =>
           e?.inventoryItemId &&
           (Number.isFinite(Number(e?.quantityAfter)) || Number.isFinite(Number(e?.delta)))
       )
-      .map((e: any) => ({
+      .map((e) => ({
         inventoryItemId: String(e.inventoryItemId).trim(),
         variantId: e.variantId != null ? String(e.variantId) : null,
         sku: e.sku != null ? String(e.sku) : "",
@@ -165,8 +167,9 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    let sessions = await (sessionStorage as any).findSessionsByShop(shop);
-    let session = sessions?.find((s: any) => s.isOnline === false) ?? sessions?.[0];
+    const storage = sessionStorage as SessionStorageWithFindByShop;
+    let sessions = await storage.findSessionsByShop(shop);
+    let session = sessions?.find((s) => s.isOnline === false) ?? sessions?.[0];
     if (!session) {
       return new Response(
         JSON.stringify({ ok: false, error: "No offline session for shop" }),
@@ -174,9 +177,13 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    await refreshOfflineSessionIfNeeded(session.id, session.shop, session.expires, session.refreshToken ?? null);
-    const sessionsAfter = await (sessionStorage as any).findSessionsByShop(shop);
-    session = sessionsAfter?.find((s: any) => s.isOnline === false) ?? sessionsAfter?.[0];
+    const expiresDate =
+      session.expires != null
+        ? (session.expires instanceof Date ? session.expires : new Date(session.expires))
+        : null;
+    await refreshOfflineSessionIfNeeded(session.id, session.shop, expiresDate, session.refreshToken ?? null);
+    const sessionsAfter = await storage.findSessionsByShop(shop);
+    session = sessionsAfter?.find((s) => s.isOnline === false) ?? sessionsAfter?.[0];
     if (!session) {
       return new Response(
         JSON.stringify({ ok: false, error: "Session not found after refresh" }),
@@ -443,10 +450,11 @@ export async function action({ request }: ActionFunctionArgs) {
       }),
       { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error("[api.inventory.apply-change] Error:", e);
+    const message = e instanceof Error ? e.message : "Unknown error";
     return new Response(
-      JSON.stringify({ ok: false, error: e?.message || "Unknown error" }),
+      JSON.stringify({ ok: false, error: message }),
       { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }

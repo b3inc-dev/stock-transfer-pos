@@ -8,6 +8,7 @@ import db from "../db.server";
 import { logInventoryChange } from "../utils/inventory-change-log";
 import { getDateInShopTimezone } from "../utils/timezone";
 import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
+import type { AdminGraphQLRequestClient } from "../types";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
 const API_VERSION = "2026-01";
@@ -16,7 +17,7 @@ const API_VERSION = "2026-01";
  * line_item_id 検索失敗時のフォールバック: GraphQL Refund API で inventory_item_id を取得
  */
 async function getInventoryItemFromRefundGraphQL(
-  admin: { request: (opts: { data: string; variables?: any }) => Promise<any> },
+  admin: AdminGraphQLRequestClient,
   refundId: number,
   refundLineItem: { line_item_id?: number; quantity?: number; location_id?: number; restock_type?: string }
 ): Promise<{ variantId: string; inventoryItemId: string; sku: string } | null> {
@@ -55,7 +56,7 @@ async function getInventoryItemFromRefundGraphQL(
     }
     const refundNode = refundData?.data?.refund;
     const edges = refundNode?.refundLineItems?.edges || [];
-    const items = edges.map((e: any) => e?.node).filter(Boolean);
+    const items = edges.map((e: { node?: unknown }) => e?.node).filter(Boolean);
     const qty = refundLineItem.quantity ?? 1;
     const locId = refundLineItem.location_id ? `gid://shopify/Location/${refundLineItem.location_id}` : null;
     const restock = (refundLineItem.restock_type || "").toLowerCase();
@@ -140,8 +141,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // adminクライアントを作成
     // shopify.clientsが存在しない場合、sessionから直接GraphQLクライアントを作成
-    let admin: { request: (options: { data: string; variables?: any }) => Promise<any> };
-    
+    let admin: AdminGraphQLRequestClient;
+
     if (shopify?.clients?.Graphql) {
       admin = shopify.clients.Graphql({ session });
     } else {
@@ -152,7 +153,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       
       // GraphQLクライアントを直接作成
       admin = {
-        request: async (options: { data: string; variables?: any }) => {
+        request: async (options: { data: string; variables?: Record<string, unknown> }) => {
           const response = await fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
             method: "POST",
             headers: {
@@ -247,7 +248,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             ]
           : [];
         const matchingLineItem = lineItemIdCandidates.length > 0
-          ? order.lineItems.edges.find((edge: any) =>
+          ? order.lineItems.edges.find((edge: { node: { id?: string } }) =>
               lineItemIdCandidates.includes(edge.node.id) ||
               (edge.node.id && String(edge.node.id).endsWith(String(refundLineItem.line_item_id)))
             )
@@ -282,9 +283,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const rawLocId = String(refundLineItem.location_id ?? "");
 
         // 売上と同様: RefundPendingLocation を先に登録（inventory_levels/update が先に届いた場合のマッチ用）
-        if (db && typeof (db as any).refundPendingLocation !== "undefined") {
+        if (db) {
           try {
-            await (db as any).refundPendingLocation.upsert({
+            await db.refundPendingLocation.upsert({
               where: {
                 shop_refundId_inventoryItemId_locationId: {
                   shop,
@@ -355,7 +356,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const levels = levelData?.data?.inventoryItem?.inventoryLevels?.edges || [];
           const locIdAlt = locationId.startsWith("gid://") ? locationId.replace(/^gid:\/\/shopify\/Location\//, "") : `gid://shopify/Location/${locationId}`;
           const matchingLevel = levels.find(
-            (edge: any) => {
+            (edge: { node?: { location?: { id?: string }; quantities?: Array<{ quantity?: number }> } }) => {
               const id = edge?.node?.location?.id;
               return id === locationId || id === locIdAlt;
             }
@@ -372,11 +373,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // 誤ったdeltaが計算されることを防ぐ。
         let delta: number | null = null;
         try {
-          if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+          if (db) {
             const prevItemCandidates = [inventoryItemId, rawItemId, `gid://shopify/InventoryItem/${rawItemId}`].filter((id, i, arr) => arr.indexOf(id) === i);
             const prevLocCandidates = [locationId, rawLocId, rawLocId ? `gid://shopify/Location/${rawLocId}` : null].filter(Boolean);
             const thirtyDaysAgo = new Date(refundCreatedAt.getTime() - 30 * 24 * 60 * 60 * 1000);
-            const prevLog = await (db as any).inventoryChangeLog.findFirst({
+            const prevLog = await db.inventoryChangeLog.findFirst({
               where: {
                 shop,
                 inventoryItemId: { in: prevItemCandidates },
@@ -420,8 +421,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         // 既に同じidempotencyKeyのログが存在する場合はスキップ（二重登録防止）
         try {
-          if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
-            const existingLog = await (db as any).inventoryChangeLog.findUnique({
+          if (db) {
+            const existingLog = await db.inventoryChangeLog.findUnique({
               where: {
                 shop_idempotencyKey: {
                   shop,
@@ -442,7 +443,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // 既存のadmin_webhookログを検索して更新（inventory_levels/updateが先に来た場合の二重登録を防ぐ）
         let updatedExistingAdminLog = false;
         try {
-          if (db && typeof (db as any).inventoryChangeLog !== "undefined") {
+          if (db) {
             // inventoryItemIdとlocationIdの候補を準備（GID形式と数値形式の両方を考慮）
             // 二重GIDを防ぐため、先に生IDを取り出してからGID形式を構築する
             const rawItemIdForCand = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "");
@@ -459,7 +460,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
             const existingAdminLog = await findWithAdminWebhookRetry(
               () =>
-                (db as any).inventoryChangeLog.findFirst({
+                db.inventoryChangeLog.findFirst({
                   where: {
                     shop,
                     inventoryItemId: { in: inventoryItemIdCandidates },
@@ -477,7 +478,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 `[refunds/create] Found existing admin_webhook log to update: id=${existingAdminLog.id}, timestamp=${existingAdminLog.timestamp}, quantityAfter=${existingAdminLog.quantityAfter} -> ${quantityAfter}`
               );
               // 既存のadmin_webhookログをrefundに更新（救済時は idempotencyKey を変更しない＝P2002 防止）
-              await (db as any).inventoryChangeLog.update({
+              await db.inventoryChangeLog.update({
                 where: { id: existingAdminLog.id },
                 data: {
                   activity: "refund",
@@ -490,8 +491,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               });
               console.log(`[refunds/create] Updated admin_webhook log to refund: id=${existingAdminLog.id}`);
               updatedExistingAdminLog = true;
-              if (typeof (db as any).refundPendingLocation !== "undefined") {
-                await (db as any).refundPendingLocation.deleteMany({
+              if (db) {
+                await db.refundPendingLocation.deleteMany({
                   where: { shop, refundId: String(refund.id), inventoryItemId: rawItemId, locationId: rawLocId },
                 });
               }
@@ -523,8 +524,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             idempotencyKey,
             note: `返品: 注文 #${refund.order_id}`,
           });
-          if (typeof (db as any).refundPendingLocation !== "undefined") {
-            await (db as any).refundPendingLocation.deleteMany({
+          if (db) {
+            await db.refundPendingLocation.deleteMany({
               where: { shop, refundId: String(refund.id), inventoryItemId: rawItemId, locationId: rawLocId },
             });
           }

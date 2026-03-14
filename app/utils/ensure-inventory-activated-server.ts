@@ -6,6 +6,12 @@
  */
 
 import type { AdminGraphql } from "./inventory-set-quantities-server";
+import type {
+  InventoryItemNode,
+  NodesQueryData,
+  InventoryItemUpdatePayload,
+  InventoryActivatePayload,
+} from "../types/graphql-responses";
 
 function toLocationGid(locationId: string): string {
   const s = String(locationId || "").trim();
@@ -92,15 +98,15 @@ export async function ensureInventoryActivatedAtLocation(
         console.warn("[ensureInventoryActivatedAtLocation] CheckInventoryItems GraphQL errors:", result.errors);
         throw new Error(result.errors.map((e) => e?.message ?? String(e)).join(", "));
       }
-      const data = result?.data;
-      const nodes = Array.isArray((data as any)?.nodes) ? (data as any).nodes : [];
+      const data = result?.data as NodesQueryData | undefined;
+      const nodes: InventoryItemNode[] = Array.isArray(data?.nodes) ? data.nodes : [];
       const processedIds = new Set<string>();
       for (const node of nodes) {
-        const inventoryItemId = String((node as any)?.id || "").trim();
+        const inventoryItemId = String(node?.id ?? "").trim();
         if (!inventoryItemId) continue;
         processedIds.add(inventoryItemId);
-        const hasLevel = !!(node as any)?.inventoryLevel?.id;
-        const tracked = (node as any)?.tracked === true;
+        const hasLevel = !!(node?.inventoryLevel?.id);
+        const tracked = node?.tracked === true;
         if (!hasLevel || !tracked) {
           if (!tracked) {
             console.warn(
@@ -174,11 +180,11 @@ export async function ensureInventoryActivatedAtLocation(
             errors.push({ inventoryItemId, message: lastError });
             break;
           }
-          const updateData = (updateRes.data as any)?.inventoryItemUpdate;
+          const updateData = (updateRes.data as { inventoryItemUpdate?: InventoryItemUpdatePayload })?.inventoryItemUpdate;
           const updateErrs = updateData?.userErrors ?? [];
           if (updateErrs.length > 0) {
             lastError =
-              updateErrs.map((e: { message?: string }) => e?.message).filter(Boolean).join(" / ") ||
+              updateErrs.map((e) => e?.message).filter(Boolean).join(" / ") ||
               "在庫追跡の有効化に失敗しました";
             if (attempt < maxAttempts) {
               await delayMs(800 * attempt);
@@ -240,11 +246,11 @@ export async function ensureInventoryActivatedAtLocation(
           errors.push({ inventoryItemId, message: lastError ?? "在庫有効化に失敗しました" });
           break;
         }
-        const payload = (actRes.data as any)?.inventoryActivate;
+        const payload = (actRes.data as { inventoryActivate?: InventoryActivatePayload })?.inventoryActivate;
         const userErrs = payload?.userErrors ?? [];
         if (userErrs.length > 0) {
           const errMsg =
-            userErrs.map((e: { message?: string }) => e?.message).filter(Boolean).join(" / ") ||
+            userErrs.map((e) => e?.message).filter(Boolean).join(" / ") ||
             "unknown";
           const alreadyActivated = /already|既に|activated|在庫レベル|already has/i.test(errMsg);
           if (alreadyActivated) {
@@ -264,8 +270,9 @@ export async function ensureInventoryActivatedAtLocation(
             if (check?.errors?.length) {
               // チェック失敗時はスキップ（既に有効化済みの可能性）
             }
-            const node = ((check.data as any)?.nodes ?? [])[0];
-            if ((node as any)?.inventoryLevel?.id) {
+            const nodes = (check.data as NodesQueryData)?.nodes ?? [];
+            const node = nodes[0];
+            if (node?.inventoryLevel?.id) {
               succeeded = true;
               break;
             }

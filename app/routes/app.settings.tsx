@@ -14,6 +14,7 @@ import type {
   SupplierOption,
   OrderCsvColumn,
   SettingsV1,
+  InputLikeEvent,
 } from "../types";
 
 // 型定義は app/types.ts に集約。後方互換のため re-export する
@@ -208,7 +209,7 @@ function safeParseSettings(raw: unknown): SettingsV1 {
   return defaultSettings();
 }
 
-function sanitizeSettings(input: any): SettingsV1 {
+function sanitizeSettings(input: Record<string, unknown> | null | undefined): SettingsV1 {
   const s: SettingsV1 = {
     version: 1,
     destinationGroups: [], // 後方互換性のため残す（非推奨）
@@ -225,7 +226,7 @@ function sanitizeSettings(input: any): SettingsV1 {
     outbound: {
       allowForceCancel: true,
       historyInitialLimit: 100,
-      shippingRequired: Boolean(input?.outbound?.shippingRequired),
+      shippingRequired: Boolean(input?.outbound && typeof input.outbound === "object" && (input.outbound as Record<string, unknown>).shippingRequired),
       arrivalQuickDays: [1, 2],
     },
     inbound: {
@@ -237,35 +238,43 @@ function sanitizeSettings(input: any): SettingsV1 {
     searchList: { initialLimit: 50 },
   };
 
-  // 後方互換性のため、destinationGroupsは読み込むが表示しない
   const groups = Array.isArray(input?.destinationGroups) ? input.destinationGroups : [];
   s.destinationGroups = groups
-    .map((g: any) => ({
-      id: String(g?.id ?? "").trim(),
-      name: String(g?.name ?? "").trim(),
-      locationIds: Array.isArray(g?.locationIds) ? g.locationIds.map((x: any) => String(x)) : [],
-    }))
+    .map((g: unknown) => {
+      const gr = g as { id?: unknown; name?: unknown; locationIds?: unknown[] };
+      return {
+        id: String(gr?.id ?? "").trim(),
+        name: String(gr?.name ?? "").trim(),
+        locationIds: Array.isArray(gr?.locationIds) ? gr.locationIds.map((x) => String(x)) : [],
+      };
+    })
     .filter((g: DestinationGroup) => g.id && g.name);
 
   const carriers = Array.isArray(input?.carriers) ? input.carriers : [];
   s.carriers = carriers
-    .map((c: any) => ({
-      id: String(c?.id ?? "").trim(),
-      label: String(c?.label ?? "").trim(),
-      company: String(c?.company ?? "").trim(),
-      sortOrder: Number.isFinite(Number(c?.sortOrder)) ? Number(c.sortOrder) : 999,
-    }))
+    .map((c: unknown) => {
+      const cr = c as { id?: unknown; label?: unknown; company?: unknown; sortOrder?: unknown };
+      return {
+        id: String(cr?.id ?? "").trim(),
+        label: String(cr?.label ?? "").trim(),
+        company: String(cr?.company ?? "").trim(),
+        sortOrder: Number.isFinite(Number(cr?.sortOrder)) ? Number(cr.sortOrder) : 999,
+      };
+    })
     .filter((c: CarrierOption) => c.id && c.label && c.company)
     .sort((a: CarrierOption, b: CarrierOption) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999)); // 表示順でソート
 
   // ロス区分設定
   const lossReasonsRaw = Array.isArray(input?.lossReasons) ? input.lossReasons : [];
   s.lossReasons = lossReasonsRaw
-    .map((r: any) => ({
-      id: String(r?.id ?? "").trim() || String(r?.label ?? "").trim(),
-      label: String(r?.label ?? "").trim() || String(r?.id ?? "").trim(),
-      sortOrder: Number.isFinite(Number(r?.sortOrder)) ? Number(r.sortOrder) : 999,
-    }))
+    .map((r: unknown) => {
+      const rr = r as { id?: unknown; label?: unknown; sortOrder?: unknown };
+      return {
+        id: String(rr?.id ?? "").trim() || String(rr?.label ?? "").trim(),
+        label: String(rr?.label ?? "").trim() || String(rr?.id ?? "").trim(),
+        sortOrder: Number.isFinite(Number(rr?.sortOrder)) ? Number(rr.sortOrder) : 999,
+      };
+    })
     .filter((r: LossReasonOption) => r.id && r.label)
     .sort((a: LossReasonOption, b: LossReasonOption) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
 
@@ -274,17 +283,17 @@ function sanitizeSettings(input: any): SettingsV1 {
     s.lossReasons = DEFAULT_LOSS_REASONS.map((r) => ({ ...r }));
   }
 
-  // ロス設定（「その他（自由入力）」許可フラグ）
   if (input?.loss && typeof input.loss === "object") {
-    const lossCols = Array.isArray(input.loss.csvExportColumns)
-      ? (input.loss.csvExportColumns as string[]).filter((id) =>
-          LOSS_CSV_COLUMN_IDS.includes(id as any)
+    const lossObj = input.loss as { csvExportColumns?: unknown[]; allowCustomReason?: boolean };
+    const lossCols = Array.isArray(lossObj.csvExportColumns)
+      ? (lossObj.csvExportColumns as string[]).filter((id) =>
+          (LOSS_CSV_COLUMN_IDS as readonly string[]).includes(id)
         )
       : [];
     s.loss = {
       allowCustomReason:
-        typeof input.loss.allowCustomReason === "boolean"
-          ? input.loss.allowCustomReason
+        typeof lossObj.allowCustomReason === "boolean"
+          ? lossObj.allowCustomReason
           : true,
       csvExportColumns:
         lossCols.length > 0 ? lossCols : DEFAULT_LOSS_CSV_COLUMNS_IDS,
@@ -300,7 +309,7 @@ function sanitizeSettings(input: any): SettingsV1 {
   if (input?.purchase && typeof input.purchase === "object") {
     const purchaseCols = Array.isArray(input.purchase.csvExportColumns)
       ? (input.purchase.csvExportColumns as string[]).filter((id) =>
-          PURCHASE_CSV_COLUMN_IDS.includes(id as any)
+          (PURCHASE_CSV_COLUMN_IDS as readonly string[]).includes(id)
         )
       : [];
     s.purchase = {
@@ -323,14 +332,17 @@ function sanitizeSettings(input: any): SettingsV1 {
   // 仕入先設定（旧フィールド。purchase.suppliers が正）
   const suppliers = Array.isArray(input?.suppliers) ? input.suppliers : [];
   s.suppliers = suppliers
-    .map((sp: any) => ({
-      id: String(sp?.id ?? "").trim(),
-      name: String(sp?.name ?? "").trim(),
-      code: sp?.code ? String(sp.code).trim() : undefined,
-      sortOrder: Number.isFinite(Number(sp?.sortOrder)) ? Number(sp.sortOrder) : 999,
-    }))
-    .filter((sp: SupplierOption) => sp.id && sp.name)
-    .sort((a: SupplierOption, b: SupplierOption) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
+    .map((sp: unknown) => {
+      const spr = sp as { id?: unknown; name?: unknown; code?: unknown; sortOrder?: unknown };
+      return {
+        id: String(spr?.id ?? "").trim(),
+      name: String(spr?.name ?? "").trim(),
+      code: spr?.code ? String(spr.code).trim() : undefined,
+      sortOrder: Number.isFinite(Number(spr?.sortOrder)) ? Number(spr.sortOrder) : 999,
+    };
+    })
+    .filter((sp): sp is SupplierOption => !!(sp.id && sp.name))
+    .sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
 
   // 発注先マスタ設定（order.destinations）
   if (input?.order && typeof input.order === "object") {
@@ -348,33 +360,36 @@ function sanitizeSettings(input: any): SettingsV1 {
     const desiredDeliveryQuickDaysSanitized = Array.from<number>(
       new Set(
         desiredDeliveryQuickDaysRaw
-          .map((v: any) => Number(v))
+          .map((v: unknown) => Number(v))
           .filter((n) => Number.isFinite(n) && n > 0 && n <= 365)
       )
     ).sort((a, b) => a - b);
     const destinationsRaw = Array.isArray(input.order.destinations) ? input.order.destinations : [];
     const destinations: OrderDestinationOption[] = destinationsRaw
-      .map((od: any) => ({
-        id: String(od?.id ?? "").trim(),
-        name: String(od?.name ?? "").trim(),
-        code: od?.code ? String(od.code).trim() : undefined,
-        sortOrder: Number.isFinite(Number(od?.sortOrder)) ? Number(od.sortOrder) : 999,
-      }))
+      .map((od: unknown) => {
+        const o = od as { id?: unknown; name?: unknown; code?: unknown; sortOrder?: unknown };
+        return {
+        id: String(o?.id ?? "").trim(),
+        name: String(o?.name ?? "").trim(),
+        code: o?.code ? String(o.code).trim() : undefined,
+        sortOrder: Number.isFinite(Number(o?.sortOrder)) ? Number(o.sortOrder) : 999,
+      };
+      })
       .filter((od: OrderDestinationOption) => od.id && od.name)
       .sort((a: OrderDestinationOption, b: OrderDestinationOption) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
 
     // CSV出力項目設定
     const csvColumnsRaw = Array.isArray(input.order.csvExportColumns) ? input.order.csvExportColumns : [];
     const csvColumns: OrderCsvColumn[] = csvColumnsRaw
-      .filter((col: any) => {
+      .filter((col: unknown) => {
         const validColumns: OrderCsvColumn[] = [
           "orderId", "orderName", "locationName", "destination", "destinationCode", "date", "desiredDeliveryDate",
           "staffName", "note", "status", "productTitle", "sku", "barcode",
           "option1", "option2", "option3", "quantity", "arrivalDate", "inspectionDate", "cost", "price"
         ];
-        return validColumns.includes(col);
+        return validColumns.includes(col as OrderCsvColumn);
       })
-      .map((col: any) => col as OrderCsvColumn);
+      .map((col: unknown) => col as OrderCsvColumn);
     
     // デフォルト項目が空の場合はデフォルトを設定
     const csvExportColumns = csvColumns.length > 0 ? csvColumns : [...DEFAULT_ORDER_CSV_COLUMNS];
@@ -395,14 +410,17 @@ function sanitizeSettings(input: any): SettingsV1 {
     // purchase.suppliers を正とし、order.destinations はそこから自動生成する
     const purchaseSuppliersRaw = Array.isArray(input?.purchase?.suppliers) ? input.purchase.suppliers : [];
     const purchaseSuppliersFromPurchase: SupplierOption[] = purchaseSuppliersRaw
-      .map((sp: any) => ({
-        id: String(sp?.id ?? "").trim(),
-        name: String(sp?.name ?? "").trim(),
-        code: sp?.code ? String(sp.code).trim() : undefined,
-        sortOrder: Number.isFinite(Number(sp?.sortOrder)) ? Number(sp.sortOrder) : 999,
-      }))
-      .filter((sp: SupplierOption) => sp.id && sp.name)
-      .sort((a: SupplierOption, b: SupplierOption) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
+      .map((sp: unknown) => {
+        const spr = sp as { id?: unknown; name?: unknown; code?: unknown; sortOrder?: unknown };
+        return {
+        id: String(spr?.id ?? "").trim(),
+        name: String(spr?.name ?? "").trim(),
+        code: spr?.code ? String(spr.code).trim() : undefined,
+        sortOrder: Number.isFinite(Number(spr?.sortOrder)) ? Number(spr.sortOrder) : 999,
+      };
+      })
+      .filter((sp): sp is SupplierOption => !!(sp.id && sp.name))
+      .sort((a, b) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
 
     // 後方互換: purchase.suppliers が空のときだけ、旧 suppliers / 旧 order.destinations から復元
     const fallbackSuppliers: SupplierOption[] =
@@ -458,12 +476,15 @@ function sanitizeSettings(input: any): SettingsV1 {
     if (input?.purchase && typeof input.purchase === "object") {
       const purchaseSuppliersRaw = Array.isArray(input.purchase.suppliers) ? input.purchase.suppliers : [];
       const purchaseSuppliers: SupplierOption[] = purchaseSuppliersRaw
-        .map((sp: any) => ({
-          id: String(sp?.id ?? "").trim(),
-          name: String(sp?.name ?? "").trim(),
-          code: sp?.code ? String(sp.code).trim() : undefined,
-          sortOrder: Number.isFinite(Number(sp?.sortOrder)) ? Number(sp.sortOrder) : 999,
-        }))
+        .map((sp: unknown) => {
+          const spr = sp as { id?: unknown; name?: unknown; code?: unknown; sortOrder?: unknown };
+          return {
+            id: String(spr?.id ?? "").trim(),
+            name: String(spr?.name ?? "").trim(),
+            code: spr?.code ? String(spr.code).trim() : undefined,
+            sortOrder: Number.isFinite(Number(spr?.sortOrder)) ? Number(spr.sortOrder) : 999,
+          };
+        })
         .filter((sp: SupplierOption) => sp.id && sp.name)
         .sort((a: SupplierOption, b: SupplierOption) => (a.sortOrder ?? 999) - (b.sortOrder ?? 999));
 
@@ -482,7 +503,7 @@ function sanitizeSettings(input: any): SettingsV1 {
 
   // 表示ロケーション選択設定
   if (Array.isArray(input?.visibleLocationIds)) {
-    s.visibleLocationIds = input.visibleLocationIds.map((id: any) => String(id)).filter(Boolean);
+    s.visibleLocationIds = input.visibleLocationIds.map((id: unknown) => String(id)).filter(Boolean);
   }
 
   // 出庫設定
@@ -493,7 +514,7 @@ function sanitizeSettings(input: any): SettingsV1 {
     const arrivalQuickDaysSanitized = Array.from<number>(
       new Set(
         arrivalQuickDaysRaw
-          .map((v: any) => Number(v))
+          .map((v: unknown) => Number(v))
           .filter((n) => Number.isFinite(n) && n > 0 && n <= 365)
       )
     ).sort((a, b) => a - b);
@@ -536,7 +557,7 @@ function sanitizeSettings(input: any): SettingsV1 {
   if (input?.inbound && typeof input.inbound === "object") {
     const inboundCols = Array.isArray(input.inbound.csvExportColumns)
       ? (input.inbound.csvExportColumns as string[]).filter((id) =>
-          HISTORY_CSV_COLUMN_IDS.includes(id as any)
+          (HISTORY_CSV_COLUMN_IDS as readonly string[]).includes(id)
         )
       : [];
     s.inbound = {
@@ -577,7 +598,7 @@ function sanitizeSettings(input: any): SettingsV1 {
   if (input?.inventoryCount && typeof input.inventoryCount === "object") {
     const stocktakeCols = Array.isArray(input.inventoryCount.csvExportColumns)
       ? (input.inventoryCount.csvExportColumns as string[]).filter((id) =>
-          STOCKTAKE_CSV_COLUMN_IDS.includes(id as any)
+          (STOCKTAKE_CSV_COLUMN_IDS as readonly string[]).includes(id)
         )
       : [];
     s.inventoryCount = {
@@ -594,7 +615,7 @@ function sanitizeSettings(input: any): SettingsV1 {
   if (input?.adjustment && typeof input.adjustment === "object") {
     const adjustmentCols = Array.isArray(input.adjustment.csvExportColumns)
       ? (input.adjustment.csvExportColumns as string[]).filter((id) =>
-          ADJUSTMENT_CSV_COLUMN_IDS.includes(id as any)
+          (ADJUSTMENT_CSV_COLUMN_IDS as readonly string[]).includes(id)
         )
       : [];
     s.adjustment = {
@@ -708,18 +729,18 @@ export async function action({ request }: ActionFunctionArgs) {
   const form = await request.formData();
 
   const raw = String(form.get("settings") ?? "");
-  let incoming: any;
+  let incoming: unknown;
   try {
     incoming = JSON.parse(raw);
   } catch {
     return { ok: false, error: "settings JSON が不正です" as const };
   }
 
-  if (incoming?.version !== 1) {
+  if (incoming == null || typeof incoming !== "object" || (incoming as { version?: number }).version !== 1) {
     return { ok: false, error: "settings version が不正です" as const };
   }
 
-  const settings = sanitizeSettings(incoming);
+  const settings = sanitizeSettings(incoming as Record<string, unknown>);
 
   const appInstResp = await admin.graphql(
     `#graphql
@@ -763,7 +784,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const saveJson = await saveResp.json();
   const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
   if (errs.length) {
-    return { ok: false, error: errs.map((e: any) => e.message).join(" / ") as const };
+    return { ok: false, error: errs.map((e: { message?: string }) => e.message ?? "").join(" / ") as const };
   }
 
   return { ok: true, settings };
@@ -819,7 +840,7 @@ export default function SettingsPage() {
     searchList?: string;
   }>({});
 
-  const readValue = (e: any) => String(e?.currentTarget?.value ?? e?.currentValue?.value ?? "");
+  const readValue = (e: InputLikeEvent) => String(e?.currentTarget?.value ?? e?.currentValue?.value ?? "");
 
   const DISPLAY_COUNT_ERROR_MSG = "値を確認してください。半角数字で入力をお願いします。";
 
@@ -846,10 +867,11 @@ export default function SettingsPage() {
     return { value: clamped, displayValue: String(clamped), error: hasRangeError ? DISPLAY_COUNT_ERROR_MSG : null, shouldUpdate: true };
   };
 
+  type FetcherSaveData = { ok?: boolean; error?: string; settings?: SettingsV1 };
   const saving = fetcher.state !== "idle";
-  const saveOk = fetcher.data && (fetcher.data as any).ok === true;
+  const saveOk = fetcher.data && (fetcher.data as FetcherSaveData).ok === true;
   const saveErr =
-    fetcher.data && (fetcher.data as any).ok === false ? (fetcher.data as any).error : null;
+    fetcher.data && (fetcher.data as FetcherSaveData).ok === false ? (fetcher.data as FetcherSaveData).error : null;
 
   // 変更有無（初期値と比較）＋入力エラー有無でボタン活性/非活性を制御
   const isDirty = useMemo(
@@ -867,7 +889,7 @@ export default function SettingsPage() {
   // 保存成功したらサニタイズ後の settings で state を更新（同じ fetcher.data で二重適用しない）
   const lastAppliedFetcherDataRef = useRef<unknown>(null);
   useEffect(() => {
-    const data = fetcher.data as any;
+    const data = fetcher.data as FetcherSaveData | undefined;
     if (!data?.ok || !data?.settings) return;
     if (lastAppliedFetcherDataRef.current === data) return;
     lastAppliedFetcherDataRef.current = data;
@@ -880,7 +902,7 @@ export default function SettingsPage() {
   const [showSavedFeedback, setShowSavedFeedback] = useState(false);
   const lastShowSavedFeedbackRef = useRef<unknown>(null);
   useEffect(() => {
-    const data = fetcher.data as any;
+    const data = fetcher.data as FetcherSaveData | undefined;
     if (!data?.ok || lastShowSavedFeedbackRef.current === data) return;
     lastShowSavedFeedbackRef.current = data;
     setShowSavedFeedback(true);
@@ -2070,7 +2092,7 @@ export default function SettingsPage() {
                             label="履歴一覧リスト"
                             value={String(settings.outbound?.historyInitialLimit ?? 100)}
                             tone={displayCountErrors.historyList ? "critical" : undefined}
-                            onInput={(e: any) => {
+                            onInput={(e: InputLikeEvent) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 250, 100);
                               setDisplayCountErrors((prev) => ({ ...prev, historyList: r.error ?? undefined }));
                               if (r.shouldUpdate) {
@@ -2082,7 +2104,7 @@ export default function SettingsPage() {
                                 }));
                               }
                             }}
-                            onChange={(e: any) => {
+                            onChange={(e: InputLikeEvent) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 250, 100);
                               setDisplayCountErrors((prev) => ({ ...prev, historyList: r.error ?? undefined }));
                               if (r.shouldUpdate) {
@@ -2108,7 +2130,7 @@ export default function SettingsPage() {
                             label="商品リスト"
                             value={String(settings.productList?.initialLimit ?? 250)}
                             tone={displayCountErrors.productList ? "critical" : undefined}
-                            onInput={(e: any) => {
+                            onInput={(e: InputLikeEvent) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 250, 250);
                               setDisplayCountErrors((prev) => ({ ...prev, productList: r.error ?? undefined }));
                               if (r.shouldUpdate) {
@@ -2118,7 +2140,7 @@ export default function SettingsPage() {
                                 }));
                               }
                             }}
-                            onChange={(e: any) => {
+                            onChange={(e: InputLikeEvent) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 250, 250);
                               setDisplayCountErrors((prev) => ({ ...prev, productList: r.error ?? undefined }));
                               if (r.shouldUpdate) {
@@ -2142,7 +2164,7 @@ export default function SettingsPage() {
                             label="検索リスト"
                             value={String(settings.searchList?.initialLimit ?? 50)}
                             tone={displayCountErrors.searchList ? "critical" : undefined}
-                            onInput={(e: any) => {
+                            onInput={(e: InputLikeEvent) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 50, 50);
                               setDisplayCountErrors((prev) => ({ ...prev, searchList: r.error ?? undefined }));
                               if (r.shouldUpdate) {
@@ -2152,7 +2174,7 @@ export default function SettingsPage() {
                                 }));
                               }
                             }}
-                            onChange={(e: any) => {
+                            onChange={(e: InputLikeEvent) => {
                               const r = parseDisplayCountInput(readValue(e), 1, 50, 50);
                               setDisplayCountErrors((prev) => ({ ...prev, searchList: r.error ?? undefined }));
                               if (r.shouldUpdate) {
@@ -2491,8 +2513,8 @@ export default function SettingsPage() {
                               <s-text-field
                                 label="任意の日数（1〜365）"
                                 value={outboundQuickDayInput}
-                                onInput={(e: any) => setOutboundQuickDayInput(readValue(e))}
-                                onChange={(e: any) => setOutboundQuickDayInput(readValue(e))}
+                                onInput={(e: InputLikeEvent) => setOutboundQuickDayInput(readValue(e))}
+                                onChange={(e: InputLikeEvent) => setOutboundQuickDayInput(readValue(e))}
                                 style={{ maxWidth: 140 }}
                               />
                               <s-button
@@ -2685,20 +2707,20 @@ export default function SettingsPage() {
                                     <s-text-field
                                       label="表示名（POSに出す）"
                                       value={c.label}
-                                      onInput={(e: any) =>
+                                      onInput={(e: InputLikeEvent) =>
                                         updateCarrier(c.id, { label: readValue(e) })
                                       }
-                                      onChange={(e: any) =>
+                                      onChange={(e: InputLikeEvent) =>
                                         updateCarrier(c.id, { label: readValue(e) })
                                       }
                                     />
                                     <s-text-field
                                       label="company（Shopifyプリセット）"
                                       value={c.company}
-                                      onInput={(e: any) =>
+                                      onInput={(e: InputLikeEvent) =>
                                         updateCarrier(c.id, { company: readValue(e) })
                                       }
-                                      onChange={(e: any) =>
+                                      onChange={(e: InputLikeEvent) =>
                                         updateCarrier(c.id, { company: readValue(e) })
                                       }
                                     />
@@ -3161,20 +3183,20 @@ export default function SettingsPage() {
                                 <s-text-field
                                   label="仕入先"
                                   value={sp.name}
-                                  onInput={(e: any) =>
+                                  onInput={(e: InputLikeEvent) =>
                                     updateSupplier(sp.id, { name: readValue(e) })
                                   }
-                                  onChange={(e: any) =>
+                                  onChange={(e: InputLikeEvent) =>
                                     updateSupplier(sp.id, { name: readValue(e) })
                                   }
                                 />
                                 <s-text-field
                                   label="仕入先コード（任意）"
                                   value={sp.code ?? ""}
-                                  onInput={(e: any) =>
+                                  onInput={(e: InputLikeEvent) =>
                                     updateSupplier(sp.id, { code: readValue(e) })
                                   }
-                                  onChange={(e: any) =>
+                                  onChange={(e: InputLikeEvent) =>
                                     updateSupplier(sp.id, { code: readValue(e) })
                                   }
                                 />
@@ -3623,8 +3645,8 @@ export default function SettingsPage() {
                               <s-text-field
                                 label="任意の日数（1〜365）"
                                 value={orderQuickDayInput}
-                                onInput={(e: any) => setOrderQuickDayInput(readValue(e))}
-                                onChange={(e: any) => setOrderQuickDayInput(readValue(e))}
+                                onInput={(e: InputLikeEvent) => setOrderQuickDayInput(readValue(e))}
+                                onChange={(e: InputLikeEvent) => setOrderQuickDayInput(readValue(e))}
                                 style={{ maxWidth: 140 }}
                               />
                               <s-button
@@ -4018,10 +4040,10 @@ export default function SettingsPage() {
                                 <s-text-field
                                   label="ロス区分名"
                                   value={lr.label}
-                                  onInput={(e: any) =>
+                                  onInput={(e: InputLikeEvent) =>
                                     updateLossReason(lr.id, { label: readValue(e) })
                                   }
-                                  onChange={(e: any) =>
+                                  onChange={(e: InputLikeEvent) =>
                                     updateLossReason(lr.id, { label: readValue(e) })
                                   }
                                 />
