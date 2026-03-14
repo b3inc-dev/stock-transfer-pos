@@ -35,6 +35,45 @@ const INVENTORY_COUNTS_CHUNK_KEY_PREFIX = "inventory_counts_v1_c";
 const METAFIELDS_SET_MAX = 25;
 const ADMIN_GRAPHQL_API_VERSION = "2026-01";
 
+/** Phase4 セキュリティ: action の formData バリデーション用上限 */
+const MAX_SEARCH_QUERY_LENGTH = 500;
+const MAX_IDS_ARRAY_LENGTH = 2500;
+const MAX_CSV_BODY_LENGTH = 5 * 1024 * 1024; // 5MB
+const MAX_ID_FIELD_LENGTH = 200;
+const MAX_JSON_PAYLOAD_LENGTH = 2 * 1024 * 1024; // 2MB (items/groups 等)
+
+/** 許可する actionType（ホワイトリスト）。未定義の action は 400 で拒否する */
+const ALLOWED_ACTION_TYPES = new Set([
+  "search_variants_by_sku",
+  "searchCollectionsForInventoryCount",
+  "searchVariantsForInventoryCount",
+  "getCollectionsByIds",
+  "getVariantsByInventoryItemIds",
+  "getVariantsBySkus",
+  "repair_count_names",
+  "metafield_health",
+  "metafield_repair",
+  "restore_count_as_completed",
+  "redistribute_count_group_items",
+  "ensure_count_groups_completed",
+  "sort_counts_by_count_name",
+  "save_product_group",
+  "delete_product_group",
+  "preview_csv_inventory_count",
+  "import_product_groups_csv",
+  "create_inventory_count",
+  "get_collection_products",
+  "get_incomplete_group_products",
+  "get_count_full",
+  "update_stocktake_quantity",
+  "confirm_stocktake_group",
+  "reset_stocktake_group",
+  "confirm_stocktake_all",
+  "reset_stocktake_all",
+  "cancel_stocktake_group",
+  "cancel_stocktake",
+]);
+
 /** 商品グループ保存用メタフィールド（本體・ID一覧・ID→名前）。POS の一覧で軽量読取用 */
 function productGroupsMetafields(
   ownerId: string,
@@ -2331,12 +2370,26 @@ export async function action({ request }: ActionFunctionArgs) {
       : undefined;
   const expectedVersionNum = Number.isInteger(expectedVersion) ? expectedVersion : undefined;
 
+  if (!actionType || typeof actionType !== "string" || !ALLOWED_ACTION_TYPES.has(actionType.trim())) {
+    return new Response(
+      JSON.stringify({ ok: false, error: "Invalid action type" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+  const actionTypeNorm = actionType.trim();
+
   try {
   // SKU検索は metafield 不要のため先に実行（ownerId 未取得で早期 return されないようにする）
-  if (actionType === "search_variants_by_sku") {
+  if (actionTypeNorm === "search_variants_by_sku") {
     const query = (formData.get("query") as string)?.trim();
     if (!query || query.length < 1) {
       return { ok: true, variants: [] };
+    }
+    if (query.length > MAX_SEARCH_QUERY_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `検索語は${MAX_SEARCH_QUERY_LENGTH}文字以内で指定してください` }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
     try {
       const resp = await admin.graphql(
@@ -2374,9 +2427,15 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // 棚卸: コレクション検索（検索結果のみ返す。全件読み込みを避ける）
-  if (actionType === "searchCollectionsForInventoryCount") {
+  if (actionTypeNorm === "searchCollectionsForInventoryCount") {
     const query = String(formData.get("query") ?? "").trim();
     if (!query) return { ok: true, collections: [] };
+    if (query.length > MAX_SEARCH_QUERY_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `検索語は${MAX_SEARCH_QUERY_LENGTH}文字以内で指定してください` }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     try {
       const gql = `#graphql
         query SearchCollections($first: Int!, $query: String!) {
@@ -2404,9 +2463,15 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // 棚卸: バリアント検索（SKU・商品名。仕入と同様に検索結果のみ返す）
-  if (actionType === "searchVariantsForInventoryCount") {
+  if (actionTypeNorm === "searchVariantsForInventoryCount") {
     const query = String(formData.get("query") ?? "").trim();
     if (!query) return { ok: true, variants: [] };
+    if (query.length > MAX_SEARCH_QUERY_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `検索語は${MAX_SEARCH_QUERY_LENGTH}文字以内で指定してください` }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     try {
       const gql = `#graphql
         query SearchVariantsForInventoryCount($first: Int!, $query: String!) {
@@ -2452,7 +2517,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // 棚卸: 編集時・選択済み表示用にコレクション id/title を取得
-  if (actionType === "getCollectionsByIds") {
+  if (actionTypeNorm === "getCollectionsByIds") {
     const idsStr = formData.get("ids") as string;
     let ids: string[] = [];
     try {
@@ -2460,6 +2525,12 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!Array.isArray(ids)) ids = [];
     } catch {}
     if (ids.length === 0) return { ok: true, collections: [] };
+    if (ids.length > MAX_IDS_ARRAY_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `IDは${MAX_IDS_ARRAY_LENGTH}件まで指定できます` }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     try {
       const gql = `#graphql
         query GetCollectionNodes($ids: [ID!]!) {
@@ -2488,7 +2559,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // 棚卸: 編集時・選択済み表示用に inventoryItemId からバリアント情報を取得（nodes(ids) は250件までなのでチャンク分割）
-  if (actionType === "getVariantsByInventoryItemIds") {
+  if (actionTypeNorm === "getVariantsByInventoryItemIds") {
     const idsStr = formData.get("ids") as string;
     let ids: string[] = [];
     try {
@@ -2496,6 +2567,12 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!Array.isArray(ids)) ids = [];
     } catch {}
     if (ids.length === 0) return { ok: true, variants: [] };
+    if (ids.length > MAX_IDS_ARRAY_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `IDは${MAX_IDS_ARRAY_LENGTH}件まで指定できます` }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     try {
       const gql = `#graphql
         query GetInventoryItemNodes($ids: [ID!]!) {
@@ -2553,7 +2630,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // 棚卸: 編集時・CSV由来など「skus はあるが inventoryItemIds が空」のグループ用に SKU からバリアント情報を取得（nodes(ids) は250件までなのでチャンク分割）
-  if (actionType === "getVariantsBySkus") {
+  if (actionTypeNorm === "getVariantsBySkus") {
     const skusStr = formData.get("skus") as string;
     let skus: string[] = [];
     try {
@@ -2561,6 +2638,12 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!Array.isArray(skus)) skus = [];
     } catch {}
     if (skus.length === 0) return { ok: true, variants: [] };
+    if (skus.length > MAX_IDS_ARRAY_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `SKUは${MAX_IDS_ARRAY_LENGTH}件まで指定できます` }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     try {
       const ids = await resolveSkusToInventoryItemIds(admin, skus);
       if (ids.length === 0) return { ok: true, variants: [] };
@@ -2633,7 +2716,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
   }
 
-  if (actionType === "repair_count_names") {
+  if (actionTypeNorm === "repair_count_names") {
     try {
       const counts = await readInventoryCountsChunked(admin);
       const countsWithName = ensureCountNamesOnCounts(counts);
@@ -2651,7 +2734,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  if (actionType === "metafield_health") {
+  if (actionTypeNorm === "metafield_health") {
     try {
       const health = await getMetafieldHealth(admin, session);
       return { ok: true, health } as const;
@@ -2661,7 +2744,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  if (actionType === "metafield_repair") {
+  if (actionTypeNorm === "metafield_repair") {
     try {
       const health = await getMetafieldHealth(admin, session);
       if (health.status === "ok" && health.mainKey !== "chunked") {
@@ -2688,18 +2771,18 @@ export async function action({ request }: ActionFunctionArgs) {
 
   // 現在のデータを取得（商品グループは常に取得。棚卸フルデータは create 以外で取得。create はチャンクを読まず append で発行する）
   const needInventoryCounts =
-    actionType === "update_stocktake_quantity" ||
-    actionType === "confirm_stocktake_group" ||
-    actionType === "reset_stocktake_group" ||
-    actionType === "confirm_stocktake_all" ||
-    actionType === "reset_stocktake_all" ||
-    actionType === "cancel_stocktake_group" ||
-    actionType === "cancel_stocktake" ||
-    actionType === "get_count_full" ||
-    actionType === "restore_count_as_completed" ||
-    actionType === "redistribute_count_group_items" ||
-    actionType === "ensure_count_groups_completed" ||
-    actionType === "sort_counts_by_count_name";
+    actionTypeNorm === "update_stocktake_quantity" ||
+    actionTypeNorm === "confirm_stocktake_group" ||
+    actionTypeNorm === "reset_stocktake_group" ||
+    actionTypeNorm === "confirm_stocktake_all" ||
+    actionTypeNorm === "reset_stocktake_all" ||
+    actionTypeNorm === "cancel_stocktake_group" ||
+    actionTypeNorm === "cancel_stocktake" ||
+    actionTypeNorm === "get_count_full" ||
+    actionTypeNorm === "restore_count_as_completed" ||
+    actionTypeNorm === "redistribute_count_group_items" ||
+    actionTypeNorm === "ensure_count_groups_completed" ||
+    actionTypeNorm === "sort_counts_by_count_name";
   const [currentResp, inventoryCountsFromChunked] = await Promise.all([
     admin.graphql(
       `#graphql
@@ -2724,7 +2807,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // ✅ 欠損した棚卸を「指定の棚卸ID・ロケーション・商品グループ」で復元し、現在在庫で完了確定する（一時対応）
-  if (actionType === "restore_count_as_completed") {
+  if (actionTypeNorm === "restore_count_as_completed") {
     const countId = (formData.get("countId") as string)?.trim();
     const countName = (formData.get("countName") as string)?.trim();
     const locationIdParam = (formData.get("locationId") as string)?.trim();
@@ -2732,6 +2815,17 @@ export async function action({ request }: ActionFunctionArgs) {
     const productGroupNamesStr = formData.get("productGroupNames") as string | null;
     if (!countId || !countName || !locationIdParam || !productGroupIdsStr) {
       return { ok: false, error: "countId, countName, locationId, productGroupIds は必須です" as const };
+    }
+    if (
+      countId.length > MAX_ID_FIELD_LENGTH ||
+      countName.length > MAX_ID_FIELD_LENGTH ||
+      locationIdParam.length > MAX_ID_FIELD_LENGTH ||
+      productGroupIdsStr.length > MAX_JSON_PAYLOAD_LENGTH
+    ) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "パラメータの長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
     let productGroupIds: string[] = [];
     let productGroupNames: string[] | undefined;
@@ -2866,7 +2960,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // ✅ 復元時に1グループにまとめて保存されてしまった棚卸の groupItems を、商品グループごとに正しく振り分け直す
-  if (actionType === "redistribute_count_group_items") {
+  if (actionTypeNorm === "redistribute_count_group_items") {
     const countId = (formData.get("countId") as string)?.trim();
     if (!countId) return { ok: false, error: "countId は必須です" as const };
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
@@ -2933,7 +3027,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // ✅ 履歴棚卸で「IDは完了だが商品グループが全て未完了」の状態を解消：各グループの現在在庫を取得し、グループごとに完了として保存する
-  if (actionType === "ensure_count_groups_completed") {
+  if (actionTypeNorm === "ensure_count_groups_completed") {
     const countId = (formData.get("countId") as string)?.trim();
     if (!countId) return { ok: false, error: "countId は必須です" as const };
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
@@ -3049,7 +3143,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // ✅ 一度だけ：棚卸一覧を棚卸ID（#C0001, #C0002…）の数値順に並び替えて保存する（main 全件をソートして list/main 両方書き直す）
-  if (actionType === "sort_counts_by_count_name") {
+  if (actionTypeNorm === "sort_counts_by_count_name") {
     const sorted = [...inventoryCounts].sort((a, b) => {
       const na = parseCountNameNumber((a as { countName?: string }).countName);
       const nb = parseCountNameNumber((b as { countName?: string }).countName);
@@ -3060,12 +3154,27 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true, sortedByCountName: true } as const;
   }
 
-  if (actionType === "save_product_group") {
+  if (actionTypeNorm === "save_product_group") {
     const id = formData.get("id") as string;
     const name = formData.get("name") as string;
     const collectionIdsStr = formData.get("collectionIds") as string;
-    const collectionIds = collectionIdsStr ? collectionIdsStr.split(",").filter(Boolean) : [];
     const collectionConfigsStr = formData.get("collectionConfigs") as string;
+    const inventoryItemIdsStr = formData.get("inventoryItemIds") as string;
+    const skusStr = formData.get("skus") as string;
+    if (
+      (id && id.length > MAX_ID_FIELD_LENGTH) ||
+      (name && name.length > MAX_ID_FIELD_LENGTH) ||
+      (collectionIdsStr && collectionIdsStr.length > MAX_JSON_PAYLOAD_LENGTH) ||
+      (collectionConfigsStr && collectionConfigsStr.length > MAX_JSON_PAYLOAD_LENGTH) ||
+      (inventoryItemIdsStr && inventoryItemIdsStr.length > MAX_JSON_PAYLOAD_LENGTH) ||
+      (skusStr && skusStr.length > MAX_JSON_PAYLOAD_LENGTH)
+    ) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "パラメータの長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const collectionIds = collectionIdsStr ? collectionIdsStr.split(",").filter(Boolean) : [];
     let collectionConfigs: CollectionConfig[] = [];
     if (collectionConfigsStr) {
       try {
@@ -3074,8 +3183,6 @@ export async function action({ request }: ActionFunctionArgs) {
         collectionConfigs = [];
       }
     }
-    const inventoryItemIdsStr = formData.get("inventoryItemIds") as string;
-    const skusStr = formData.get("skus") as string;
     let directInventoryItemIds: string[] = [];
     let directSkus: string[] = [];
     if (inventoryItemIdsStr) {
@@ -3269,8 +3376,14 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true };
   }
 
-  if (actionType === "delete_product_group") {
+  if (actionTypeNorm === "delete_product_group") {
     const id = formData.get("id") as string;
+    if (id && id.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "id の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     productGroups = productGroups.filter((g) => g.id !== id);
 
     const saveResp = await admin.graphql(
@@ -3299,10 +3412,16 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // CSVプレビュー: パースのみ行い、行リストを返す（保存しない）。仕入同様アップロード後にリスト表示してからグループを追加する用
-  if (actionType === "preview_csv_inventory_count") {
+  if (actionTypeNorm === "preview_csv_inventory_count") {
     const csvRaw = formData.get("csv") as string;
     if (!csvRaw || typeof csvRaw !== "string") {
       return { ok: false, error: "CSVデータが送信されていません" as const };
+    }
+    if (csvRaw.length > MAX_CSV_BODY_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `CSVは${MAX_CSV_BODY_LENGTH / 1024 / 1024}MB以内でアップロードしてください` }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
     const parseCsvLine = (line: string): string[] => {
       const result: string[] = [];
@@ -3342,11 +3461,17 @@ export async function action({ request }: ActionFunctionArgs) {
 
   // CSVインポート: グループ名＋SKUの行で商品グループを一括登録（コレクションに依存しない）
   // 1ファイル: グループ数は無制限、SKU行数は最大10000行（バッチ＋並列でAPI呼び出しを削減）
-  if (actionType === "import_product_groups_csv") {
+  if (actionTypeNorm === "import_product_groups_csv") {
     const CSV_MAX_ROWS = 10000;
     const csvRaw = formData.get("csv") as string;
     if (!csvRaw || typeof csvRaw !== "string") {
       return { ok: false, error: "CSVデータが送信されていません" as const };
+    }
+    if (csvRaw.length > MAX_CSV_BODY_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `CSVは${MAX_CSV_BODY_LENGTH / 1024 / 1024}MB以内でアップロードしてください` }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
     const csvImportMode = (formData.get("csvImportMode") as string) || "append";
 
@@ -3476,7 +3601,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true, imported: importedCount };
   }
 
-  if (actionType === "create_inventory_count") {
+  if (actionTypeNorm === "create_inventory_count") {
     try {
       const locationId = formData.get("locationId") as string;
       const productGroupIdStr = formData.get("productGroupId") as string; // 後方互換性のため残す
@@ -3484,6 +3609,18 @@ export async function action({ request }: ActionFunctionArgs) {
 
       if (!locationId) {
         return { ok: false, error: "ロケーションは必須です" as const };
+      }
+      if (locationId.length > MAX_ID_FIELD_LENGTH) {
+        return new Response(
+          JSON.stringify({ ok: false, error: "locationId の長さが上限を超えています" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if ((productGroupIdsStr && productGroupIdsStr.length > MAX_JSON_PAYLOAD_LENGTH) || (productGroupIdStr && productGroupIdStr.length > MAX_ID_FIELD_LENGTH)) {
+        return new Response(
+          JSON.stringify({ ok: false, error: "商品グループ指定の長さが上限を超えています" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
       }
 
       // 複数選択対応：productGroupIdsがあればそれを使用、なければproductGroupIdを使用（後方互換性）
@@ -3592,10 +3729,16 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  if (actionType === "get_collection_products") {
+  if (actionTypeNorm === "get_collection_products") {
     const collectionId = formData.get("collectionId") as string;
     if (!collectionId) {
       return { ok: false, error: "コレクションIDは必須です" as const };
+    }
+    if (collectionId.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "collectionId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     try {
@@ -3671,13 +3814,19 @@ export async function action({ request }: ActionFunctionArgs) {
 
   // ✅ 未完了グループの商品リストと在庫数を取得（棚卸IDを開いたときの500防止：バッチ間待機・1グループあたり件数上限。offset で「さらに読み込む」対応）
   // ✅ countId をリクエスト・レスポンスに含め、モーダル閉じ後や別棚卸開き直し時の古いレスポンスを無視するため）
-  if (actionType === "get_incomplete_group_products") {
+  if (actionTypeNorm === "get_incomplete_group_products") {
     const countId = (formData.get("countId") as string)?.trim() ?? "";
     const groupId = formData.get("groupId") as string;
     let locationId = (formData.get("locationId") as string)?.trim() ?? "";
     const offset = Math.max(0, Number(formData.get("offset") || 0));
     if (!groupId || !locationId) {
       return { ok: false, error: "グループIDまたはロケーションIDが指定されていません" as const };
+    }
+    if (countId.length > MAX_ID_FIELD_LENGTH || groupId.length > MAX_ID_FIELD_LENGTH || locationId.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "countId / groupId / locationId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
     // ✅ 同一ショップ複数ブラウザ対策：キャッシュヒット時は Shopify API を叩かず即返す
     const shop = session?.shop ?? "";
@@ -4202,9 +4351,15 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // ✅ 履歴モーダル用：list 由来で groupItems がない棚卸のフルデータを1件取得（ステータス・完了/未完了表示の正確化）
-  if (actionType === "get_count_full") {
+  if (actionTypeNorm === "get_count_full") {
     const countId = (formData.get("countId") as string)?.trim();
     if (!countId) return { ok: false, error: "countId は必須です" as const };
+    if (countId.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "countId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
     if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
     const { inventoryItemIdsByGroup: _omit, ...rest } = count as InventoryCount & { inventoryItemIdsByGroup?: unknown };
@@ -4212,12 +4367,24 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   // ---------- 履歴モーダル：数量編集・確定・リセット・キャンセル ----------
-  if (actionType === "update_stocktake_quantity") {
+  if (actionTypeNorm === "update_stocktake_quantity") {
     const countId = formData.get("countId") as string;
     const groupId = formData.get("groupId") as string | null;
     const itemsJson = formData.get("items") as string | null;
     const groupsJson = formData.get("groups") as string | null; // optional: { [groupId]: items[] } で複数グループ一括
     if (!countId) return { ok: false, error: "countId は必須です" as const };
+    if (countId.length > MAX_ID_FIELD_LENGTH || (groupId && groupId.length > MAX_ID_FIELD_LENGTH)) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "countId または groupId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if ((itemsJson && itemsJson.length > MAX_JSON_PAYLOAD_LENGTH) || (groupsJson && groupsJson.length > MAX_JSON_PAYLOAD_LENGTH)) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "items または groups のデータ量が上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
     if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
     const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? { ...(count as any).groupItems } : {};
@@ -4275,12 +4442,18 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true };
   }
 
-  if (actionType === "confirm_stocktake_group") {
+  if (actionTypeNorm === "confirm_stocktake_group") {
     const countId = formData.get("countId") as string;
     const groupId = formData.get("groupId") as string;
     const itemsJson = formData.get("items") as string;
     if (!countId || !groupId || !itemsJson) {
       return { ok: false, error: "countId, groupId, items は必須です" as const };
+    }
+    if (countId.length > MAX_ID_FIELD_LENGTH || groupId.length > MAX_ID_FIELD_LENGTH || itemsJson.length > MAX_JSON_PAYLOAD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "パラメータの長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
     let items: Array<{ inventoryItemId: string; currentQuantity: number; actualQuantity: number; variantId?: string; sku?: string; title?: string }>;
     try {
@@ -4349,10 +4522,16 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true };
   }
 
-  if (actionType === "reset_stocktake_group") {
+  if (actionTypeNorm === "reset_stocktake_group") {
     const countId = formData.get("countId") as string;
     const groupId = formData.get("groupId") as string;
     if (!countId || !groupId) return { ok: false, error: "countId, groupId は必須です" as const };
+    if (countId.length > MAX_ID_FIELD_LENGTH || groupId.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "countId または groupId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
     if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
     const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? { ...(count as any).groupItems } : {};
@@ -4405,10 +4584,22 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true };
   }
 
-  if (actionType === "confirm_stocktake_all") {
+  if (actionTypeNorm === "confirm_stocktake_all") {
     const countId = formData.get("countId") as string;
     const incompleteGroupsJson = formData.get("incompleteGroupsItems") as string | null; // optional: { [groupId]: items[] }
     if (!countId) return { ok: false, error: "countId は必須です" as const };
+    if (countId.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "countId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (incompleteGroupsJson && incompleteGroupsJson.length > MAX_JSON_PAYLOAD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "incompleteGroupsItems のデータ量が上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
     if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
     const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? { ...(count as any).groupItems } : {};
@@ -4487,8 +4678,14 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true };
   }
 
-  if (actionType === "reset_stocktake_all") {
+  if (actionTypeNorm === "reset_stocktake_all") {
     const countId = formData.get("countId") as string;
+    if (countId && countId.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "countId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     if (!countId) return { ok: false, error: "countId は必須です" as const };
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
     if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
@@ -4534,10 +4731,16 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true };
   }
 
-  if (actionType === "cancel_stocktake_group") {
+  if (actionTypeNorm === "cancel_stocktake_group") {
     const countId = formData.get("countId") as string;
     const groupId = formData.get("groupId") as string;
     if (!countId || !groupId) return { ok: false, error: "countId, groupId は必須です" as const };
+    if (countId.length > MAX_ID_FIELD_LENGTH || groupId.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "countId または groupId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
     if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
     const cancelledGroupIds: string[] = Array.isArray((count as any).cancelledGroupIds) ? [...(count as any).cancelledGroupIds] : [];
@@ -4563,9 +4766,15 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: true };
   }
 
-  if (actionType === "cancel_stocktake") {
+  if (actionTypeNorm === "cancel_stocktake") {
     const countId = formData.get("countId") as string;
     if (!countId) return { ok: false, error: "countId は必須です" as const };
+    if (countId.length > MAX_ID_FIELD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "countId の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
     const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
     if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
     const groupItemsMap = (count as any).groupItems && typeof (count as any).groupItems === "object" ? (count as any).groupItems : {};

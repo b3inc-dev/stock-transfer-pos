@@ -541,4 +541,136 @@ API は **Admin GraphQL のみ**（REST 未使用）。エンドポイントは 
 
 ---
 
+## 7. Phase 4 — セキュリティ監査
+
+実施内容: 機密情報・インジェクション・フロントエンド・Remix 固有の観点でコードベースを検索・確認。
+
+---
+
+### 7.1 機密情報
+
+#### 7.1.1 API キー・シークレットのハードコード
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **✅ 問題なし** | `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` はすべて **環境変数**（`process.env.SHOPIFY_API_*`）から取得している。 |
+| 参照箇所 | `app/shopify.server.ts`（15–16, 35 行）、`app/routes/app.tsx`（245 行）、`app/routes/api.log-inventory-change.tsx`（37 行）、`api.pos-stocktake-complete.tsx`（35 行）、`api.inventory.apply-change.tsx`（55 行）、`app/utils/refresh-offline-session.ts`（24–25 行）、`scripts/call-inventory-snapshot-daily.js`（6 行）、`api.inventory-snapshot-daily.tsx`（116 行）、`api.reclassify-change-history.tsx`（24 行）。 |
+| 結論 | ソースコード内に API キー・シークレットの**リテラル文字列は存在しない**。 |
+
+#### 7.1.2 console.log による機密出力
+
+| ファイル | 行 | 内容 | リスク |
+|----------|-----|------|--------|
+| **app/shopify.server.ts** | 32 | `console.log("[shopify.server] shopify object keys:", Object.keys(shopify));` | 機密値は出していない。 |
+| **app/shopify.server.ts** | 36 | `console.log("[shopify.server] SHOPIFY_API_SECRET at startup:", secret ? \`set (length=${secret.length})\` : "NOT SET");` | **⚠️ 低リスク**：値は出さず「設定済み＋長さ」のみ。本番ではログ削減推奨。 |
+| その他 | 各所 | `console.log/warn` は idempotencyKey・orderId・shop 等の**業務ID**のみ。トークン・API キー・パスワードの出力はなし。 | 問題なし。 |
+
+**対応:** `shopify.server.ts` で上記 `console.log` を `NODE_ENV !== "production"` のときのみ実行するように変更済み。
+
+#### 7.1.3 .gitignore による .env の除外
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **✅ 問題なし** | `.gitignore` に **`.env`** および **`.env.*`** が含まれている（14–15 行）。 |
+| 結論 | 環境変数ファイルがリポジトリにコミットされるリスクは抑えられている。 |
+
+---
+
+### 7.2 インジェクション
+
+#### 7.2.1 GraphQL クエリへのユーザー入力
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **✅ 変数利用** | 検索・一覧系の GraphQL はすべて **変数**（`variables: { query: ... }`）で渡しており、クエリ文字列への**文字列連結**はしていない。 |
+| エスケープ | `app.inventory-count.tsx`・`app.inventory-info.tsx`・`app.purchase.tsx` 等で、検索語は `query.replace(/"/g, '\\"')` や `escapeSku(sku)`（`sku:${s.replace(/"/g, '\\"')}`）で **二重引用符のみ**エスケープしてから変数に渡している。 |
+| **⚠️ 注意** | Shopify の検索クエリ構文（`sku:xxx` 等）に他のメタ文字（`\`・改行・`*` の悪用等）がある場合、現状のエスケープでは不十分な可能性がある。必要に応じて Shopify ドキュメントの検索構文を確認し、エスケープを強化する。 |
+| 結論 | **GraphQL インジェクション**（クエリの書き換え）のリスクは低い。検索語の**検索構文インジェクション**は低〜中リスクとして記載。 |
+
+#### 7.2.2 SQL / DB クエリ
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **✅ 問題なし** | **Prisma のみ**使用。`$queryRaw` / `$executeRaw` / `whereRaw` / `Prisma.sql` の使用は**なし**。 |
+| 結論 | ユーザー入力をそのまま SQL に埋め込んでいる箇所はない。Prisma のパラメータ化されたクエリで安全。 |
+
+---
+
+### 7.3 フロントエンド（XSS 等）
+
+#### 7.3.1 dangerouslySetInnerHTML
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **✅ 使用なし** | プロジェクト全体で **`dangerouslySetInnerHTML` の使用は 0 件**。 |
+
+#### 7.3.2 innerHTML / document.write / eval
+
+| 確認結果 | 詳細 |
+|----------|------|
+| **✅ 使用なし** | `innerHTML`・`document.write`・`eval(` の使用は**なし**。 |
+| 結論 | ユーザー入力をそのまま DOM に流し込んでいる箇所はない。Polaris 等のコンポーネント経由の表示で問題なし。 |
+
+---
+
+### 7.4 Remix 固有
+
+#### 7.4.1 action の formData のバリデーション
+
+| ルート / 処理 | バリデーション | 備考 |
+|----------------|----------------|------|
+| **app.plan.tsx** | ✅ `plan === "lite" \|\| plan === "pro"` のみ許可。それ以外は `return null`。 | 問題なし。 |
+| **app.settings.tsx** | ✅ `JSON.parse(raw)` 後、`sanitizeSettings(incoming)` で型・許容値を正規化。`version === 1` チェックあり。 | 問題なし。 |
+| **app.export-change-history-csv** | ✅ `exportChangeHistoryCsv` 内で `authenticate.admin` 後に formData を取得。日付・ID は Prisma の `where` に渡すのみ（パラメータ化）。 | 問題なし。 |
+| **app.inventory-count.tsx** | ✅ 対応済み。 | `ALLOWED_ACTION_TYPES` ホワイトリストで未定義の action は 400 拒否。検索語・ids/skus 配列・CSV・countId/groupId・JSON payload に上限（MAX_SEARCH_QUERY_LENGTH, MAX_IDS_ARRAY_LENGTH, MAX_CSV_BODY_LENGTH, MAX_ID_FIELD_LENGTH, MAX_JSON_PAYLOAD_LENGTH）を設け、超過時は 400 で返す。 |
+| **app.inventory-info.tsx** | ✅ `intent` を String 化し、`query` は GraphQL 変数用に trim のみ。 | 許容範囲。 |
+| **app.purchase.tsx / app.order.tsx / app.history.tsx / app.adjustment.tsx / app.loss.tsx** | ✅ いずれも `authenticate.admin` 後に formData。日付・ID・JSON 等は String/Number 化や `sanitizeSettings` 等で正規化。 | 特段の問題なし。 |
+
+**推奨:** `app.inventory-count.tsx` の action で、`actionType` を固定リストと照合し、`ids`・`csv` 等の長さ・形式の上限を設けるとより安全。
+
+#### 7.4.2 認証チェックの有無（public ルート）
+
+| ルート | 認証 | 備考 |
+|--------|------|------|
+| **_index/route.tsx** | なし（ログインフォーム用） | 想定どおり。 |
+| **auth.login/route.tsx** | `login(request)` | 認証フロー用。 |
+| **auth.$.tsx** | `authenticate.admin(request)` | 保護されている。 |
+| **app.*（app.tsx, app.settings, app.plan, app.inventory-count 等）** | すべて **`authenticate.admin(request)`** | 保護されている。 |
+| **app.export-change-history-csv** | `exportChangeHistoryCsv` 内で **`authenticate.admin(request)`** | 保護されている。 |
+| **api.inventory-snapshot-daily** | **Bearer API キー**（`INVENTORY_SNAPSHOT_API_KEY`）のみ。Shopify セッションなし。 | Cron 用として設計どおり。 |
+| **api.reclassify-change-history** | **Bearer API キー**（`RECLASSIFY_CHANGE_HISTORY_API_KEY` 等）のみ。 | 運用・手動実行用として設計どおり。 |
+| **api.staff-members** | **`authenticate.public(request)`**。失敗時は 401。 | POS からスタッフ一覧取得用。意図した公開 API。 |
+| **api.log-inventory-change / api.pos-stocktake-complete / api.inventory.apply-change** | **`authenticate.pos(request)`** または session token（jose 検証） | 保護されている。 |
+| **webhooks.*** | **`authenticate.webhook(request)`**（HMAC 検証） | 保護されている。 |
+
+**結論:** public として想定されているのは `_index`・`auth.login`・`api.staff-members`（public 認証）・API キー認証の 2 本のみ。それ以外の app/api/webhook は認証済み。**認証漏れのルートはなし**。
+
+---
+
+### 7.5 その他（情報開示・エラーハンドリング）
+
+| ファイル | 内容 | リスク |
+|----------|------|--------|
+| **app/routes/api.staff-members.tsx** | catch 節で `stack: e?.stack` を JSON で返している（62–65 行）。 | **⚠️ 本番でスタックトレースがクライアントに返る**。情報開示・攻撃の手がかりになる可能性。 |
+
+**対応:** `api.staff-members.tsx` の catch で、`NODE_ENV === "production"` のときは `stack` をレスポンスに含めないように修正済み。
+
+---
+
+### 7.6 Phase 4 サマリー
+
+| 項目 | 結果 | 対応 |
+|------|------|------|
+| 機密情報のハードコード | ✅ なし。すべて環境変数。 | 特になし。 |
+| console での機密出力 | ✅ 対応済み。 | shopify.server.ts で NODE_ENV !== "production" のときのみログ出力。 |
+| .gitignore で .env 除外 | ✅ 除外済み。 | 特になし。 |
+| GraphQL インジェクション | ✅ 変数利用。検索語は一部エスケープのみ。 | 必要に応じて検索構文のエスケープを強化。 |
+| SQL/DB インジェクション | ✅ Prisma のみ。raw なし。 | 特になし。 |
+| dangerouslySetInnerHTML / innerHTML / eval | ✅ 使用なし。 | 特になし。 |
+| formData のバリデーション | ✅ 対応済み（inventory-count 含む）。 | app.inventory-count に actionType ホワイトリスト・検索語/ids/csv/JSON/countId/groupId の長さ上限を実装済み。 |
+| 認証漏れルート | ✅ なし。 | 特になし。 |
+| エラー時の stack 返却 | ✅ 対応済み。 | api.staff-members で本番時は stack を返さないよう修正済み。 |
+
+---
+
 以上が POS Stock（stock-transfer-pos）の全体監査レポートです。

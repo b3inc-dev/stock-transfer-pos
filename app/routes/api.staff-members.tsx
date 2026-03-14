@@ -62,12 +62,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
       }
     );
   } catch (e: any) {
-    return new Response(
-      JSON.stringify({ ok: false, error: e?.message || "Unknown error", stack: e?.stack }),
-      { 
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      }
-    );
+    const payload: { ok: false; error: string; stack?: string } = {
+      ok: false,
+      error: e?.message || "Unknown error",
+    };
+    if (process.env.NODE_ENV !== "production" && e?.stack) {
+      payload.stack = e.stack;
+    }
+    return new Response(JSON.stringify(payload), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 }
