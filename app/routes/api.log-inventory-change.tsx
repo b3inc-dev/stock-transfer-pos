@@ -4,6 +4,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
@@ -175,21 +176,24 @@ export async function action({ request }: ActionFunctionArgs) {
     if (session) {
       const shopDomain = session.shop;
       const accessToken = session.accessToken;
-      admin = {
-        request: async (options: { data: string; variables?: any }) => {
-          return fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Shopify-Access-Token": accessToken,
-            },
-            body: JSON.stringify({
-              query: options.data.replace(/^#graphql\s*/m, "").trim(),
-              variables: options.variables || {},
-            }),
-          });
-        },
+      const doRequest = async (query: string, variables?: Record<string, unknown>) => {
+        return fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": accessToken,
+          },
+          body: JSON.stringify({
+            query: query.replace(/^#graphql\s*/m, "").trim(),
+            variables: variables || {},
+          }),
+        });
       };
+      let adminObj = {
+        graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => doRequest(q, opts?.variables),
+        request: (options: { data: string; variables?: any }) => doRequest(options.data, options.variables),
+      };
+      admin = withGraphQLRetry(adminObj);
       const shopTimezoneResp = await admin.request({
         data: `#graphql
           query GetShopTimezone { shop { ianaTimezone } }

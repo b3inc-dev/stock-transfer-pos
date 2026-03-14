@@ -2,12 +2,14 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useNavigate, useRouteError } from "react-router";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import type { TransferLineItem } from "../types";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    let { admin } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
 
     const rawId = params?.id || params?.$id || "";
     const transferId = rawId ? decodeURIComponent(rawId) : "";
@@ -77,6 +79,13 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     );
 
     const data = await resp.json();
+    if (data?.errors?.length) {
+      const errMsg = data.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ");
+      throw new Response(JSON.stringify({ error: `GraphQL error: ${errMsg}` }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     const transfer = data?.data?.inventoryTransfer;
 
     if (!transfer) {

@@ -3,6 +3,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher, useSearchParams } from "react-router";
 import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone } from "../utils/timezone";
 import type { LocationNode, TransferLineItem, GroupedLineItemsEntry, TransferHistory } from "../types";
 
@@ -61,7 +62,8 @@ export type { LocationNode, TransferLineItem, GroupedLineItemsEntry, TransferHis
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    let { admin } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
     const url = new URL(request.url);
     const cursor = url.searchParams.get("cursor") || null;
     const direction = url.searchParams.get("direction") || "next"; // "next" or "prev"
@@ -298,8 +300,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
       },
     };
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
     console.error("History loader error:", error);
-    throw error;
+    throw new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 }
 
@@ -320,7 +326,8 @@ const LINE_ITEMS_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    let { admin } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
     const formData = await request.formData();
     const transferId = String(formData.get("transferId") || "").trim();
 

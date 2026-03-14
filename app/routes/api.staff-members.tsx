@@ -3,6 +3,7 @@
 
 import type { LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 
 const STAFF_MEMBERS_QUERY = `#graphql
   query StaffMembers($first: Int!) {
@@ -21,7 +22,14 @@ const STAFF_MEMBERS_QUERY = `#graphql
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
     const authResult = await authenticate.public(request);
-    const { admin } = authResult;
+    let { admin } = authResult;
+    if (!admin) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "Authentication failed" }),
+        { status: 401, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    admin = withGraphQLRetry(admin);
 
     const response = await admin.graphql(STAFF_MEMBERS_QUERY, {
       variables: { first: 250 },

@@ -486,7 +486,14 @@ export function InventoryCountConditions({
 
   // ロケーション一覧はマウント時に取得（モーダル表示時に使用）
   useEffect(() => {
-    fetchLocations().then((list) => setAllLocations(Array.isArray(list) ? list : []));
+    (async () => {
+      try {
+        const list = await fetchLocations();
+        setAllLocations(Array.isArray(list) ? list : []);
+      } catch (e) {
+        console.warn("[InventoryCountConditions] fetchLocations failed:", e);
+      }
+    })();
   }, []);
 
   // Footer（中央にロケーション変更ボタン、command でモーダルを開く）

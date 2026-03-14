@@ -2,6 +2,7 @@
 // 日次スナップショット自動保存API（Cronジョブから呼び出し用）
 import type { ActionFunctionArgs } from "react-router";
 import { sessionStorage } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import db from "../db.server";
 import { getDateInShopTimezone, getHourInShopTimezone } from "../utils/timezone";
 import {
@@ -41,7 +42,7 @@ async function processOneShop(sessionRecord: {
 
     const shopDomain = session.shop;
     const accessToken = session.accessToken || "";
-    const admin = {
+    let admin = {
       request: async (queryOrOpts: string | { data?: string; variables?: any }, maybeVars?: any) => {
         const queryStr = typeof queryOrOpts === "string" ? queryOrOpts : (queryOrOpts.data || "");
         const variables = typeof queryOrOpts === "string" ? (maybeVars?.variables ?? maybeVars ?? {}) : (queryOrOpts.variables || {});
@@ -59,10 +60,11 @@ async function processOneShop(sessionRecord: {
         return res;
       },
     };
+    admin = withGraphQLRetry(admin);
 
     const adminForSnapshot = {
       request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
-        admin.request(opts.data, opts.variables ?? {}),
+        admin.request!(opts),
     };
 
     const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);

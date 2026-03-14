@@ -2,6 +2,7 @@
 // 返品作成Webhookハンドラー（返品時の在庫変動検知）
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
 import { logInventoryChange } from "../utils/inventory-change-log";
@@ -48,6 +49,10 @@ async function getInventoryItemFromRefundGraphQL(
       variables: { id: `gid://shopify/Refund/${refundId}` },
     });
     const refundData = refundResp && typeof refundResp.json === "function" ? await refundResp.json() : refundResp;
+    if (refundData?.errors?.length) {
+      console.error("[refunds/create] GraphQL refund query errors:", refundData.errors);
+      return null;
+    }
     const refundNode = refundData?.data?.refund;
     const edges = refundNode?.refundLineItems?.edges || [];
     const items = edges.map((e: any) => e?.node).filter(Boolean);
@@ -163,6 +168,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       };
     }
+    admin = withGraphQLRetry(admin);
 
     // 返品作成日時を取得
     const refundCreatedAt = refund.created_at ? new Date(refund.created_at) : new Date();
@@ -172,7 +178,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     try {
       const tzResp = await admin.request({ data: `#graphql query GetShopTimezone { shop { ianaTimezone } }` });
       const tzData = tzResp && typeof tzResp.json === "function" ? await tzResp.json() : tzResp;
-      shopTimezone = tzData?.data?.shop?.ianaTimezone || "UTC";
+      if (!tzData?.errors?.length) {
+        shopTimezone = tzData?.data?.shop?.ianaTimezone || "UTC";
+      }
     } catch { /* UTC にフォールバック */ }
     const date = getDateInShopTimezone(refundCreatedAt, shopTimezone);
 
@@ -220,6 +228,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           variables: { id: `gid://shopify/Order/${refund.order_id}` },
         });
         const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
+        if (orderData?.errors?.length) {
+          console.warn("[refunds/create] GraphQL order query errors:", orderData.errors);
+          continue;
+        }
         const order = orderData?.data?.order;
 
         if (!order || !order.lineItems || !order.lineItems.edges) {
@@ -305,7 +317,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variables: { id: locationId },
           });
           const locData = locResp && typeof locResp.json === "function" ? await locResp.json() : locResp;
-          locationName = locData?.data?.location?.name || locationId;
+          if (!locData?.errors?.length) {
+            locationName = locData?.data?.location?.name || locationId;
+          }
         } catch { /* locationId をフォールバックとして使用 */ }
 
         // 変動後の数量を取得（InventoryLevelから）
@@ -335,6 +349,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variables: { itemId: inventoryItemId },
           });
           const levelData = levelResp && typeof levelResp.json === "function" ? await levelResp.json() : levelResp;
+          if (levelData?.errors?.length) {
+            console.warn("[refunds/create] GraphQL inventoryLevels errors:", levelData.errors);
+          }
           const levels = levelData?.data?.inventoryItem?.inventoryLevels?.edges || [];
           const locIdAlt = locationId.startsWith("gid://") ? locationId.replace(/^gid:\/\/shopify\/Location\//, "") : `gid://shopify/Location/${locationId}`;
           const matchingLevel = levels.find(

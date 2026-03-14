@@ -259,7 +259,14 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   useEffect(() => {
     if (locs.length > 0 || !setLocations) return;
     let mounted = true;
-    fetchLocations().then((list) => { if (mounted) setLocations(list); });
+    (async () => {
+      try {
+        const list = await fetchLocations();
+        if (mounted) setLocations(list);
+      } catch (e) {
+        console.warn("[LossHistoryList] fetchLocations failed:", e);
+      }
+    })();
     return () => { mounted = false; };
   }, [locs.length, setLocations]);
 

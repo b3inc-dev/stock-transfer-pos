@@ -46,7 +46,12 @@ export async function getVariantInfo(
       }`,
       { variables: { id: variantId } }
     );
-    const { data } = await resp.json() as { data?: { productVariant?: { id: string; sku: string; inventoryItem?: { id: string } } } };
+    const json = await resp.json() as { data?: { productVariant?: { id: string; sku: string; inventoryItem?: { id: string } } }; errors?: Array<{ message?: string }> };
+    if (json?.errors?.length) {
+      console.error("[getVariantInfo] GraphQL errors:", json.errors);
+      return { inventoryItemId: null, sku: "", variantId };
+    }
+    const data = json?.data;
     const variant = data?.productVariant;
     return {
       inventoryItemId: variant?.inventoryItem?.id ?? null,
@@ -128,7 +133,12 @@ export async function getInventoryItemInfo(
       }`,
       { variables: { id: inventoryItemId } }
     );
-    const { data } = await resp.json() as { data?: { inventoryItem?: { variant?: { id: string; sku: string } } } };
+    const json = await resp.json() as { data?: { inventoryItem?: { variant?: { id: string; sku: string } } }; errors?: Array<{ message?: string }> };
+    if (json?.errors?.length) {
+      console.error("[getInventoryItemInfo] GraphQL errors:", json.errors);
+      return { sku: "", variantId: null };
+    }
+    const data = json?.data;
     const variant = data?.inventoryItem?.variant;
     return {
       sku: variant?.sku ?? "",
@@ -155,8 +165,12 @@ export async function getLocationName(
       }`,
       { variables: { id: locationId } }
     );
-    const { data } = await resp.json() as { data?: { location?: { name: string } } };
-    return data?.location?.name ?? locationId;
+    const json = await resp.json() as { data?: { location?: { name: string } }; errors?: Array<{ message?: string }> };
+    if (json?.errors?.length) {
+      console.error("[getLocationName] GraphQL errors:", json.errors);
+      return locationId;
+    }
+    return json?.data?.location?.name ?? locationId;
   } catch (error) {
     console.error("[getLocationName] Failed:", error);
     return locationId;

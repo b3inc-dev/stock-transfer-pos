@@ -647,9 +647,15 @@ function Extension() {
 
   useEffect(() => {
     let alive = true;
-    fetchSettings()
-      .then((s) => { if (alive) setSettings(s); })
-      .catch(() => { if (alive) setSettings({ version: 1, inbound: { listInitialLimit: 100 }, productList: { initialLimit: 250 }, searchList: { initialLimit: 50 } }); });
+    (async () => {
+      try {
+        const s = await fetchSettings();
+        if (alive) setSettings(s);
+      } catch (e) {
+        console.warn("[Inbound Modal] fetchSettings failed:", e);
+        if (alive) setSettings({ version: 1, inbound: { listInitialLimit: 100 }, productList: { initialLimit: 250 }, searchList: { initialLimit: 50 } });
+      }
+    })();
     return () => { alive = false; };
   }, []);
 

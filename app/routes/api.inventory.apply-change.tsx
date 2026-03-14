@@ -4,6 +4,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import db from "../db.server";
 import { getDateInShopTimezone, getShopTimezone } from "../utils/timezone";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
@@ -187,7 +188,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const shopDomain = session.shop;
     const accessToken = session.accessToken;
 
-    const admin = {
+    let admin = {
       graphql: async (query: string, opts?: { variables?: Record<string, unknown> }) => {
         return fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
           method: "POST",
@@ -199,6 +200,7 @@ export async function action({ request }: ActionFunctionArgs) {
         });
       },
     };
+    admin = withGraphQLRetry(admin);
 
     // 冪等性チェック: 同一 appEventId が既に存在する場合は既存結果を返す（POS リトライ対策）
     // ★ delta→quantityAfter 正規化（Shopify API 呼び出しを伴う）より前に実行することで、

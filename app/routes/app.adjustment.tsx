@@ -4,6 +4,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher, useSearchParams } from "react-router";
 import { useState, useMemo, useEffect } from "react";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone, extractDateFromISO, getShopTimezone } from "../utils/timezone";
 import type { LocationNode, AdjustmentEntryItem, AdjustmentEntry } from "../types";
 
@@ -30,10 +31,12 @@ const DEFAULT_ADJUSTMENT_CSV_COLUMNS = [...ADJUSTMENT_CSV_COLUMN_IDS];
 export type { LocationNode, AdjustmentEntryItem, AdjustmentEntry } from "../types";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  try {
+    let { admin } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
 
-  // ショップのタイムゾーンを取得
-  const shopTimezone = await getShopTimezone(admin);
+    // ショップのタイムゾーンを取得
+    const shopTimezone = await getShopTimezone(admin);
 
   const [locResp, appResp, settingsResp] = await Promise.all([
     admin.graphql(
@@ -202,6 +205,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
       endCursor: null,
     },
   };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }
 
 export async function action({ request }: ActionFunctionArgs) {

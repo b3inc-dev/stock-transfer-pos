@@ -4,6 +4,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher, useSearchParams, useRevalidator, useLocation } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import type { PurchaseEntry, OrderRequestItem, LocationNode } from "../types";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
@@ -98,7 +99,7 @@ async function executePurchaseReceive(
       console.error(`[executePurchaseReceive] GraphQL errors:`, JSON.stringify(data.errors, null, 2));
     }
     if (data?.data?.inventoryAdjustQuantities?.userErrors?.length > 0) {
-      console.error(`[executePurchaseReceive] User errors:`, JSON.stringify(data.data.inventoryAdjustQuantities.userErrors, null, 2));
+      console.error(`[executePurchaseReceive] User errors:`, JSON.stringify(data?.data?.inventoryAdjustQuantities?.userErrors, null, 2));
     }
   } catch (error: any) {
     // エラーの詳細を確認
@@ -244,10 +245,12 @@ async function executePurchaseCancel(
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  try {
+    let { admin } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
 
-  // ショップのタイムゾーンを取得
-  const shopTimezone = await getShopTimezone(admin);
+    // ショップのタイムゾーンを取得
+    const shopTimezone = await getShopTimezone(admin);
 
   const [locResp, appResp, settingsResp] = await Promise.all([
     admin.graphql(
@@ -355,6 +358,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
       endCursor: null as string | null,
     },
   };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -738,9 +748,10 @@ export async function action({ request }: ActionFunctionArgs) {
             variables: { ids: variantGids },
           });
           const variantData = await variantResp.json();
-          if (variantData?.data?.nodes) {
+          const variantNodes = variantData?.data?.nodes ?? [];
+          if (variantNodes.length > 0) {
             const variantMap = new Map<string, { barcode?: string; option1?: string; option2?: string; option3?: string }>();
-            (variantData.data.nodes as any[]).forEach((node: any) => {
+            variantNodes.forEach((node: any) => {
               if (node?.id) {
                 const opts = node.selectedOptions as Array<{ value?: string }> | undefined;
                 variantMap.set(node.id, {

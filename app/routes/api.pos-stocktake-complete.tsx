@@ -4,6 +4,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { jwtVerify } from "jose";
 import { authenticate, sessionStorage } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import {
   readInventoryCountsChunked,
@@ -121,7 +122,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const shopDomain = session.shop;
   const accessToken = session.accessToken;
-  const admin = {
+  let admin = {
     graphql: async (query: string, opts?: { variables?: Record<string, unknown> }) => {
       return fetch(`https://${shopDomain}/admin/api/${API_VERSION}/graphql.json`, {
         method: "POST",
@@ -136,13 +137,18 @@ export async function action({ request }: ActionFunctionArgs) {
       });
     },
   };
+  admin = withGraphQLRetry(admin);
 
   let ownerId: string;
   try {
     const appInstResp = await admin.graphql(
       `#graphql query GetAppInstallation { currentAppInstallation { id } }`
     );
-    const appInstJson = (await appInstResp.json().catch(() => ({}))) as { data?: { currentAppInstallation?: { id?: string } } };
+    const appInstJson = (await appInstResp.json().catch(() => ({}))) as { data?: { currentAppInstallation?: { id?: string } }; errors?: Array<{ message?: string }> };
+    if (appInstJson?.errors?.length) {
+      console.warn("[api.pos-stocktake-complete] GraphQL errors:", appInstJson.errors);
+      return jsonResponse({ ok: false, error: "currentAppInstallation の取得に失敗しました" }, 500);
+    }
     ownerId = appInstJson?.data?.currentAppInstallation?.id ?? "";
   } catch (e) {
     console.warn("[api.pos-stocktake-complete] get ownerId failed:", e instanceof Error ? e.message : String(e));

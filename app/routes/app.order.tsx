@@ -4,6 +4,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import type { SettingsV1, OrderCsvColumn, OrderDestinationOption, LocationNode, OrderRequestItem, OrderRequestEntry, PurchaseEntry } from "../types";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 
@@ -338,10 +339,12 @@ async function createPurchaseFromOrder(
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  try {
+    let { admin } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
 
-  // ショップのタイムゾーンを取得
-  const shopTimezone = await getShopTimezone(admin);
+    // ショップのタイムゾーンを取得
+    const shopTimezone = await getShopTimezone(admin);
 
   const [locResp, appResp, settingsResp] = await Promise.all([
     admin.graphql(
@@ -535,6 +538,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
       endCursor: null as string | null,
     },
   };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -627,7 +637,8 @@ export async function action({ request }: ActionFunctionArgs) {
           });
           const variantData = await variantResp.json();
           
-          if (variantData?.data?.nodes) {
+          const variantNodes = variantData?.data?.nodes ?? [];
+          if (variantNodes.length > 0) {
             // variant情報をマップに変換（idをキーに）。原価・販売価格・barcode・option1/2/3 を取得
             const variantMap = new Map<string, {
               cost?: number;
@@ -638,7 +649,7 @@ export async function action({ request }: ActionFunctionArgs) {
               option3?: string;
             }>();
             
-            variantData.data.nodes.forEach((node: any) => {
+            variantNodes.forEach((node: { id?: string; inventoryItem?: { unitCost?: { amount?: string } }; price?: string; selectedOptions?: Array<{ name?: string; value?: string }>; barcode?: string }) => {
               if (node && node.id) {
                 const cost = node.inventoryItem?.unitCost?.amount
                   ? parseFloat(node.inventoryItem.unitCost.amount)

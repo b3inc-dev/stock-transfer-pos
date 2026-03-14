@@ -74,7 +74,7 @@ export async function ensureInventoryActivatedAtLocation(
   for (let i = 0; i < ids.length; i += 50) {
     const chunk = ids.slice(i, i + 50);
     try {
-      const { data } = await graphql(
+      const result = await graphql(
         admin,
         `#graphql
           query CheckInventoryItems($ids: [ID!]!, $locationId: ID!) {
@@ -88,6 +88,11 @@ export async function ensureInventoryActivatedAtLocation(
           }`,
         { ids: chunk, locationId: locationGid }
       );
+      if (result?.errors?.length) {
+        console.warn("[ensureInventoryActivatedAtLocation] CheckInventoryItems GraphQL errors:", result.errors);
+        throw new Error(result.errors.map((e) => e?.message ?? String(e)).join(", "));
+      }
+      const data = result?.data;
       const nodes = Array.isArray((data as any)?.nodes) ? (data as any).nodes : [];
       const processedIds = new Set<string>();
       for (const node of nodes) {
@@ -159,6 +164,16 @@ export async function ensureInventoryActivatedAtLocation(
               }`,
             { id: inventoryItemId, input: { tracked: true } }
           );
+          if (updateRes?.errors?.length) {
+            lastError = updateRes.errors.map((e) => e?.message ?? String(e)).join(", ");
+            if (attempt < maxAttempts) {
+              await delayMs(800 * attempt);
+              continue;
+            }
+            trackedUpdateFailed = true;
+            errors.push({ inventoryItemId, message: lastError });
+            break;
+          }
           const updateData = (updateRes.data as any)?.inventoryItemUpdate;
           const updateErrs = updateData?.userErrors ?? [];
           if (updateErrs.length > 0) {
@@ -216,6 +231,15 @@ export async function ensureInventoryActivatedAtLocation(
             }`,
           vars
         );
+        if (actRes?.errors?.length) {
+          lastError = actRes.errors.map((e) => e?.message ?? String(e)).join(", ");
+          if (attempt < maxAttempts) {
+            await delayMs(800 * attempt);
+            continue;
+          }
+          errors.push({ inventoryItemId, message: lastError ?? "在庫有効化に失敗しました" });
+          break;
+        }
         const payload = (actRes.data as any)?.inventoryActivate;
         const userErrs = payload?.userErrors ?? [];
         if (userErrs.length > 0) {
@@ -237,6 +261,9 @@ export async function ensureInventoryActivatedAtLocation(
                 }`,
               { ids: [inventoryItemId], locationId: locationGid }
             );
+            if (check?.errors?.length) {
+              // チェック失敗時はスキップ（既に有効化済みの可能性）
+            }
             const node = ((check.data as any)?.nodes ?? [])[0];
             if ((node as any)?.inventoryLevel?.id) {
               succeeded = true;

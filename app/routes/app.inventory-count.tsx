@@ -5,6 +5,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 import db from "../db.server";
 
@@ -1316,7 +1317,8 @@ function getMetafieldValueFromData(response: Record<string, unknown>): string | 
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-  const { admin, session } = await authenticate.admin(request);
+  let { admin, session } = await authenticate.admin(request);
+  admin = withGraphQLRetry(admin);
 
   let shopTimezone = "UTC";
   try {
@@ -2318,7 +2320,8 @@ async function getInventoryItemIdsForGroup(
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { admin, session } = await authenticate.admin(request);
+  let { admin, session } = await authenticate.admin(request);
+  admin = withGraphQLRetry(admin);
   const formData = await request.formData();
   const actionType = (formData.get("action") ?? formData.get("actionType")) as string;
   const expectedVersionRaw = formData.get("inventoryCountsVersion");

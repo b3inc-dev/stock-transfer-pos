@@ -3,6 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator, useSearchParams } from "react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { parseSettings } from "../utils/schemas";
 import type {
   LocationNode,
@@ -656,7 +657,8 @@ const COMPANY_PRESETS_JP_EXTRA = [
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    let { admin } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
 
     const resp = await admin.graphql(
       `#graphql
@@ -672,6 +674,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     );
 
     const data = await resp.json();
+    if (data?.errors?.length) {
+      const errMsg = data.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ");
+      throw new Error(`GraphQL error: ${errMsg}`);
+    }
     const locations: LocationNode[] = data?.data?.locations?.nodes ?? [];
     const raw = data?.data?.currentAppInstallation?.metafield?.value ?? null;
 
@@ -688,15 +694,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
     // ✅ React Router template: json() を使わず、そのまま返す
     return { locations, settings };
   } catch (error) {
-    // 認証エラーの場合は、authenticate.admin が自動的にリダイレクトする
-    // ここに到達することは通常ないが、念のためエラーハンドリング
+    const msg = error instanceof Error ? error.message : String(error);
     console.error("Settings loader error:", error);
-    throw error;
+    throw new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { admin } = await authenticate.admin(request);
+  let { admin } = await authenticate.admin(request);
+  admin = withGraphQLRetry(admin);
   const form = await request.formData();
 
   const raw = String(form.get("settings") ?? "");

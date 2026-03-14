@@ -7,6 +7,7 @@ import { AppProvider } from "@shopify/shopify-app-react-router/react";
 import "@shopify/polaris/build/esm/styles.css";
 
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { AppNavBar } from "../components/AppNavBar";
 import type { ActiveSubscription } from "../utils/billing";
 import {
@@ -156,7 +157,7 @@ export async function getShopPlan(
       if (amountUsd > 0) {
         const idempotencyKey = `usage-${sub.id}-${periodEnd}`;
         const description = `${extraLocations} extra location(s) (${locationsCount} total): $${amountUsd.toFixed(2)}`;
-        reportUsageRecord(admin, usageLineItemId, amountUsd, description, idempotencyKey).catch(() => {
+        reportUsageRecord(adminApi, usageLineItemId, amountUsd, description, idempotencyKey).catch(() => {
           // ローダーの応答をブロックしない。失敗時は次回アクセス時に再試行される
         });
       }
@@ -206,7 +207,8 @@ export async function getShopPlan(
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   try {
     const { admin, session } = await authenticate.admin(request);
-    const shopPlan = await getShopPlan(admin, session?.shop);
+    const adminApi = withGraphQLRetry(admin);
+    const shopPlan = await getShopPlan(adminApi, session?.shop);
     const storeHandle =
       session?.shop?.replace(/\.myshopify\.com$/i, "") ?? "";
 
@@ -247,7 +249,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (/syntax\s*error|unexpected\s*end\s*of\s*file/i.test(String(msg))) {
       console.error("SYNTAX_ERROR_ORIGIN [app layout loader] 親レイアウトで発生。上記 stack の先頭が発生箇所:", stack ?? "no stack");
     }
-    throw e;
+    // クラッシュを防ぎ、エラーレスポンスを返す（ErrorBoundary で捕捉可能に）
+    throw new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 };
 

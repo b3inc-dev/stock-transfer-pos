@@ -142,6 +142,10 @@ export async function reportUsageRecord(
     },
   });
   const data = await resp.json();
+  if (data?.errors?.length) {
+    console.error("[reportUsageRecord] GraphQL errors:", data.errors);
+    return { success: false, userErrors: data.errors.map((e: { message?: string }) => ({ message: e?.message ?? String(e) })) };
+  }
   const payload = data?.data?.appUsageRecordCreate;
   const userErrors = payload?.userErrors ?? [];
   if (userErrors.length > 0) {
@@ -213,6 +217,13 @@ export async function createAppSubscription(
     variables: { name, returnUrl, lineItems, trialDays },
   });
   const data = await resp.json();
+  if (data?.errors?.length) {
+    console.error("[createAppSubscription] GraphQL errors:", data.errors);
+    return {
+      confirmationUrl: null,
+      userErrors: data.errors.map((e: { message?: string }) => ({ message: e?.message ?? String(e) })),
+    };
+  }
   const payload = data?.data?.appSubscriptionCreate;
   const userErrors = payload?.userErrors ?? [];
   if (userErrors.length > 0) {

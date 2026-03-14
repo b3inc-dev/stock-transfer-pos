@@ -77,8 +77,12 @@ export async function getShopTimezone(
 ): Promise<string> {
   try {
     const resp = await admin.graphql(GET_SHOP_TIMEZONE_QUERY);
-    const { data } = await resp.json() as { data?: { shop?: { ianaTimezone?: string } } };
-    return data?.shop?.ianaTimezone ?? "UTC";
+    const json = await resp.json() as { data?: { shop?: { ianaTimezone?: string } }; errors?: Array<{ message?: string }> };
+    if (json?.errors?.length) {
+      console.error("[getShopTimezone] GraphQL errors:", json.errors);
+      return "UTC";
+    }
+    return json?.data?.shop?.ianaTimezone ?? "UTC";
   } catch (error) {
     console.error("[getShopTimezone] Failed:", error);
     return "UTC";

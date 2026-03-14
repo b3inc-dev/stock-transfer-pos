@@ -1,6 +1,7 @@
 // app/export-change-history-csv.server.ts
 // 在庫変動履歴CSVエクスポート（リソースルート用）。Remix が同一ページ POST で HTML を返す問題を避けるため専用ルートから呼ぶ。
 import { authenticate } from "./shopify.server";
+import { withGraphQLRetry } from "./utils/graphql-with-retry";
 import { formatDateTimeInShopTimezone } from "./utils/timezone";
 import db from "./db.server";
 
@@ -74,7 +75,8 @@ function csvExportErrorAsCsv(message: string): Response {
 }
 
 export async function exportChangeHistoryCsv(request: Request): Promise<Response> {
-  const { admin, session } = await authenticate.admin(request);
+  let { admin, session } = await authenticate.admin(request);
+  admin = withGraphQLRetry(admin);
   const formData = await request.formData();
 
   const startDate = String(formData.get("startDate") || "").trim();
@@ -202,9 +204,7 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
       const shopTzResp = await admin.graphql(shopTzQuery, {});
       if (shopTzResp && typeof (shopTzResp as { json?: () => Promise<unknown> }).json === "function") {
         const shopTzData = (await (shopTzResp as { json: () => Promise<{ data?: { shop?: { ianaTimezone?: string } }; errors?: unknown[] }> }).json()) as { data?: { shop?: { ianaTimezone?: string } }; errors?: unknown[] };
-        if (shopTzData?.data?.shop?.ianaTimezone) {
-          shopTimezone = shopTzData.data.shop.ianaTimezone;
-        }
+        shopTimezone = shopTzData?.data?.shop?.ianaTimezone ?? shopTimezone;
       }
     } catch (e) {
       console.warn("[export-change-history-csv] shop timezone failed (using UTC):", e instanceof Error ? e.message : String(e));

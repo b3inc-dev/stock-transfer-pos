@@ -384,4 +384,161 @@ API は **Admin GraphQL のみ**（REST 未使用）。エンドポイントは 
 
 ---
 
+## 6. バグ・実行時エラーになりうる箇所の監査
+
+実施内容: 非同期処理・型・データ安全性・Shopify 固有のバグパターンに絞ったコード検索。
+
+---
+
+### 6.1 非同期処理
+
+#### 6.1.1 await 忘れ・Promise 未処理（.then のみ / 戻り値無視）
+
+| ファイル | 行 | 内容 | リスク |
+|----------|-----|------|--------|
+| **app/routes/app.tsx** | 159 | `reportUsageRecord(admin, ...).catch(() => {})` | await なし。失敗が握りつぶされ、原因追跡が困難。 |
+| **app/routes/app.tsx** | 266 | `fetch("/app/keepalive", ...).catch(() => {});` | await なし（意図的でも、エラーが伝播しない）。 |
+| **extensions/stock-transfer-purchase/.../PurchaseHistoryList.jsx** | 585 | `fetchLocations().then((list) => { ... })` | fetchLocations の reject が未処理になりうる。 |
+| **extensions/stock-transfer-stocktake/.../InventoryCountConditions.jsx** | 489 | `fetchLocations().then((list) => setAllLocations(...))` | 同上。 |
+| **extensions/stock-transfer-loss/.../LossHistoryList.jsx** | 262 | `fetchLocations().then((list) => { if (mounted) ... })` | 同上。 |
+| **extensions/stock-transfer-order/.../OrderHistoryList.jsx** | 271 | 同上 | 同上。 |
+| **extensions/stock-transfer-adjustment/.../AdjustmentHistoryList.jsx** | 254 | 同上 | 同上。 |
+| **extensions/stock-transfer-inbound/src/Modal.jsx** | 651-652 | 設定取得を `.then(...).catch(...)` のみで処理 | await に統一した方が安全。 |
+
+その他、`refreshPending().catch()`、`ensureInventoryActivatedAtLocation(...).catch()`、`refreshOutboundHistory().catch()`、`processScanQueue().catch()`、`tick().catch()` など、**.catch() のみで await していない**箇所が extensions 内に多数あり（InboundListScreen, ModalOutbound, OrderProductList, PurchaseProductList, LossProductList, AdjustmentProductList 等）。エラーをログや UI に反映していないと原因追跡が難しくなる。
+
+**推奨:** 重要な処理は `await` し、catch 内でログ出力または UI 表示を行う。fire-and-forget にする場合はコメントで意図を明示する。
+
+---
+
+#### 6.1.2 Remix の loader/action でエラー時に json({ error }) を返さずクラッシュしうる箇所
+
+| ファイル | 行 | 内容 | リスク |
+|----------|-----|------|--------|
+| **app/routes/app.tsx** | 244-250 | `catch (e) { ... throw e; }` | エラーを再スローしており、`json({ error })` を返さず画面がクラッシュ。 |
+| **app/routes/app.loss.tsx** | 29-66 | loader 全体 | try/catch なし。`authenticate.admin` や `admin.graphql` / `.json()` の throw でそのままクラッシュ。 |
+| **app/routes/app.adjustment.tsx** | 32-66 | loader 全体 | 同上。 |
+| **app/routes/app.order.tsx** | 340-381 | loader 全体 | 同上。 |
+| **app/routes/app.purchase.tsx** | 246- | loader 全体 | 同上。 |
+| **app/routes/app.history.$id.tsx** | 8-79 | loader | try/catch はあるが、catch 内で `throw new Response(..., 500)` にしており、JSON ではなく HTML エラーになる。必要に応じて `json({ ok: false, error })` を返す選択肢あり。 |
+| **app/routes/app.history.tsx** | 62-159 | loader | try で開始しているが、loader 全体を囲む catch がなく、途中の throw でクラッシュしうる。 |
+| **app/routes/app.settings.tsx** | 657- | loader | try/catch なし。同上。 |
+| **app/routes/app.plan.tsx** | 11- | loader | 同上。 |
+| **app/routes/app.inventory-info.tsx** | 113- | loader | 同上。 |
+
+**推奨:** 各 loader/action の最上位で try/catch し、catch 時は `return json({ ok: false, error: "..." })` や適切な Response を返す。`app.tsx` の catch では `throw e` ではなく、ユーザー向けメッセージとともに `json({ error: msg })` を返すか、エラーページ用の Response を返す。
+
+---
+
+#### 6.1.3 try/catch のない API 呼び出し（関数単位）
+
+- **app:** `app.inventory-count.tsx` の `getMetafieldValueWithSession` 等、内部で try なしの fetch がある。呼び出し元の loader 側で catch されている箇所もあるが、関数単位では try/catch がない。
+- **extensions:** `stocktakeApi.js`, `inboundHelpers.js`, `orderApi.js`, `lossApi.js`, `purchaseApi.js`, `adjustmentApi.js`, `modalHelpers.js`, `OutboundReadyToShipEdit.jsx` の `fetch("shopify:admin/api/graphql.json", ...)` は、いずれも **async 関数の直下**で try ブロックなし。throw 時は呼び出し元に伝播するが、ローカルで catch していない。
+
+**推奨:** 呼び出し元で確実に catch している場合は優先度は低い。新規コードでは API 呼び出しを try/catch で囲み、エラーメッセージを返す形にするとよい。
+
+---
+
+### 6.2 型・データ安全性
+
+#### 6.2.1 TypeScript で `any` が使われている箇所（抜粋・優先度高）
+
+| ファイル | 行付近 | 内容 |
+|----------|--------|------|
+| **app/utils/ensure-inventory-activated-server.ts** | 91, 94, 97, 98, 162, 219, 240, 241 | `(data as any)?.nodes`, `(node as any)?.id` 等 |
+| **app/routes/webhooks.refunds.create.tsx** | 18, 53, 138, 150, 238, 273, 341, 358 等 | 引数・変数の `any`、`(db as any).refundPendingLocation` 等 |
+| **app/routes/webhooks.inventory_levels.update.tsx** | 89, 100, 204, 277, 303 等 | 同上。`(db as any).inventoryChangeLog` 等 |
+| **app/routes/webhooks.orders.updated.tsx** | 92, 104, 168, 208, 293, 299 等 | 同上。 |
+| **app/routes/api.inventory.apply-change.tsx** | 147, 151, 167, 168, 177, 178, 444 | `(sessionStorage as any)`, `(s: any)` 等 |
+| **app/utils/inventory-set-quantities-server.ts** | 104, 204, 207, 266, 268, 316, 369, 372 | `(json as any)?.data?...` 等 |
+| **app/routes/app.inventory-count.tsx** | 146, 150, 656, 2759, 2763, 2766 等 | `(c as any)?.groupItems`, `(it: any)` 等 |
+
+**リスク:** 型安全性を捨てており、リファクタ時や実行時の null/undefined アクセスで事故になりやすい。可能な範囲で型定義と optional chaining に置き換えるとよい。
+
+---
+
+#### 6.2.2 null/undefined 無チェックアクセス（optional chaining 推奨）
+
+| ファイル | 行 | 内容 | リスク |
+|----------|-----|------|--------|
+| **app/routes/app.order.tsx** | 641 | `variantData.data.nodes.forEach` | `variantData` または `variantData.data` が null/undefined のときランタイムエラー。`variantData?.data?.nodes?.forEach` 推奨。 |
+| **app/routes/app.purchase.tsx** | 743 | `(variantData.data.nodes as any[]).forEach` | 同上。`variantData?.data?.nodes` を事前にチェックするか optional chaining を使用。 |
+| **app/export-change-history-csv.server.ts** | 206 | `shopTimezone = shopTzData.data.shop.ianaTimezone` | if ブロック内で使用しているが、型上は `shopTzData?.data?.shop?.ianaTimezone` の方が安全。 |
+| **app/routes/app.purchase.tsx** | 101 | `data.data.inventoryAdjustQuantities.userErrors`（console.error 内） | 直前の if で `data?.data?.inventoryAdjustQuantities?.userErrors` を参照しているが、console では `.` のみ。統一推奨。 |
+
+**推奨:** GraphQL レスポンスや API 戻り値は `res?.data?.xxx` のように optional chaining でアクセスし、`nodes` 等の配列は `Array.isArray(x) ? x : []` でフォールバックする。
+
+---
+
+### 6.3 Shopify 固有のバグパターン
+
+#### 6.3.1 セッション取得できなかった場合の処理漏れ
+
+- **app/routes/api.staff-members.tsx**（23-26 行）: `const authResult = await authenticate.public(request); const { admin } = authResult;` の直後に **admin の null チェックなし**で `admin.graphql` を実行。型上 `admin` が optional になりうる場合はクラッシュの原因になりうる。
+- **その他ルート**（app.tsx, app.loss, app.order, app.purchase, app.adjustment, app.history, app.inventory-count 等）: `const { admin } = await authenticate.admin(request);` の直後に `admin` を利用。`authenticate.admin` が失敗時は throw するため、成功時は `admin` は存在する想定。ただし型定義で `admin` が optional になっていれば、null チェックを入れた方が安全。
+
+**推奨:** `authenticate.public` の戻り値型で `admin` が optional なら、`if (!admin) return new Response(..., { status: 401 });` などを入れる。
+
+---
+
+#### 6.3.2 GraphQL のエラーレスポンス（errors[]）を無視している箇所
+
+| ファイル | 行付近 | 内容 |
+|----------|--------|------|
+| **app/routes/app.history.$id.tsx** | 69-70 | `const data = await resp.json(); const transfer = data?.data?.inventoryTransfer`。`data.errors` 未チェック。 |
+| **app/utils/inventory-change-log.ts** | 49, 131, 158 | `await resp.json()` で `data` のみ使用。`errors` 未チェック。 |
+| **app/utils/timezone.ts** | 80 | `const { data } = await resp.json()`。`errors` 未チェック。 |
+| **app/utils/ensure-inventory-activated-server.ts** | 77, 151, 198, 227 | graphql の戻り値の `data` のみ使用。`errors` 未チェック。 |
+| **app/routes/api.pos-stocktake-complete.tsx** | 145-146 | `appInstJson` の `errors` 未チェック。 |
+| **app/routes/app.settings.tsx** | 674-676 | `const data = await resp.json();` のあと `data?.data?.locations` のみ使用。`data.errors` 未チェック。 |
+| **app/routes/app.purchase.tsx** | 411, 452, 487, 526, 600 | 複数箇所で `await resp.json()` / `data` 使用。一部で `data?.errors` は見ているが、すべての graphql 呼び出しで `errors` をチェックしているわけではない。 |
+| **app/routes/webhooks.refunds.create.tsx** | 49-50 | `refundData` の `errors` 未チェック。 |
+| **app/routes/webhooks.inventory_levels.update.tsx** | 128, 148, 157 | タイムゾーン・ロケーション・SKU 取得の各 `response.json()` で `errors` 未チェック。 |
+| **app/routes/webhooks.orders.updated.tsx** | 各 request の .json() | 同様に `errors` 未チェックの箇所あり。 |
+| **app/utils/billing.ts** | 144, 215 | `data?.data?.appUsageRecordCreate` 等は userErrors をチェックしているが、トップレベルの `data.errors`（GraphQL errors）は未チェック。 |
+
+**注:** `api.staff-members.tsx` は `result.errors && result.errors.length > 0` をチェックして 500 を返しており、この点は問題なし。
+
+**推奨:** GraphQL レスポンス取得後に `if (data?.errors?.length) { ... }` で分岐し、ログ出力または適切なエラー応答を返す。
+
+---
+
+#### 6.3.3 Storefront API と Admin API の混同
+
+- 検索範囲では **Storefront API の利用は見当たりませんでした**。Admin API（`/admin/api/.../graphql.json` または `admin.graphql`）のみで、混同はなさそうです。
+
+---
+
+#### 6.3.4 Rate limit（429 エラー）のリトライ処理がない API 呼び出し
+
+以下のファイルでは、Admin GraphQL 呼び出しに **429/Throttle 時のリトライ処理がない**。
+
+| 種別 | ファイル |
+|------|----------|
+| **app/utils** | `ensure-inventory-activated-server.ts`, `inventory-change-log.ts`, `timezone.ts` |
+| **app/routes** | `api.staff-members.tsx`, `app.settings.tsx`, `app.loss.tsx`, `app.order.tsx`, `app.purchase.tsx`, `app.adjustment.tsx`, `app.history.tsx`, `app.history.$id.tsx`、各 **webhooks.***.tsx**（自前 fetch で Admin GraphQL） |
+| **extensions** | `inboundHelpers.js`, `orderApi.js`, `lossApi.js`, `purchaseApi.js`, `modalHelpers.js`, `ModalOutbound.jsx`（直接 fetch、リトライなし） |
+
+**参考（リトライを入れている箇所）:**  
+`api.inventory.apply-change.tsx`, `inventory-set-quantities-server.ts`, `app.inventory-count.tsx`, `extensions/.../stocktakeApi.js`, `extensions/.../adjustmentApi.js`, `extensions/common/applyInventoryChange.js`。
+
+**推奨:** Webhook や loader で多用されている Admin API 呼び出しに、429 受信時にリトライ（指数バックオフなど）を入れると、負荷時や API 制限に強い挙動になる。
+
+---
+
+### 6.4 優先度まとめ
+
+| 優先度 | 項目 | 主な対応 | 対応状況 |
+|--------|------|----------|----------|
+| **最優先** | Remix loader の try/catch 不足と app.tsx の `throw e` | loader/action 最上位で try/catch し、catch 時は `json({ error })` または適切な Response を返す。app.tsx では再スローせずエラー応答を返す。 | ✅ 対応済み（app.tsx, app.order, app.purchase, app.loss, app.adjustment, app.history, app.settings, app.plan の各 loader で try/catch と throw new Response(JSON.stringify({ error })) を追加） |
+| **最優先** | null でクラッシュしうるプロパティアクセス | `app.order.tsx` 641 行の `variantData.data.nodes` を `variantData?.data?.nodes` に変更し、配列でない場合は `[]` でフォールバック。同様の箇所を optional chaining で統一。 | ✅ 対応済み（app.order.tsx, app.purchase.tsx で variantNodes = variantData?.data?.nodes ?? [] に変更） |
+| **高** | GraphQL の `errors` 未チェック | app.history.$id, inventory-change-log, timezone, api.pos-stocktake-complete, app.settings, webhooks 等で `data.errors` をチェックし、エラー時はログまたはエラー応答を返す。 | ✅ 対応済み（上記ファイルおよび ensure-inventory-activated-server, billing, webhooks.refunds, webhooks.inventory_levels, webhooks.orders に errors チェック追加） |
+| **高** | await なしの Promise 利用（fetchLocations().then 等） | extensions の HistoryList 系で `await fetchLocations()` に変更するか、.then 内で .catch し、reject をログまたは UI に反映。 | ✅ 対応済み（PurchaseHistoryList, InventoryCountConditions, LossHistoryList, AdjustmentHistoryList, OrderHistoryList, Inbound Modal で async IIFE + await + try/catch に変更） |
+| **高** | `any` の多用 | 型定義を追加し、`as any` を減らす。特に webhooks と apply-change 周り。 | 未対応（リファクタ時に段階的に対応推奨） |
+| **中** | authenticate 後の `admin` の null チェック | 型が optional なら `if (!admin) return ...` を入れる（api.staff-members 等）。 | ✅ 対応済み（api.staff-members.tsx に admin の null チェック追加） |
+| **中** | 429/rate limit リトライのない API 呼び出し | Webhook・loader で使う GraphQL 呼び出しにリトライ処理を検討。 | ✅ 対応済み（`app/utils/graphql-with-retry.ts` を追加し、各 loader/action/API/Webhook で `withGraphQLRetry(admin)` を適用。429/503 時に最大3回リトライ・指数バックオフ） |
+| **低** | optional chaining に統一すべき `.` のみのアクセス | 上記の null クラッシュ修正とあわせて、レスポンスアクセスを `?.` に統一。 | ✅ 一部対応済み（export-change-history-csv.server.ts, app.purchase.tsx の console.error 内を optional chaining に変更） |
+
+---
+
 以上が POS Stock（stock-transfer-pos）の全体監査レポートです。

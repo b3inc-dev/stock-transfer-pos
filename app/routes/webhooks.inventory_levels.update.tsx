@@ -2,6 +2,7 @@
 // 在庫レベル更新Webhookハンドラー（管理画面での在庫変動検知）
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
@@ -113,6 +114,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           },
         };
       }
+      if (admin) admin = withGraphQLRetry(admin);
 
       // タイムゾーン取得（失敗時は UTC にフォールバック）
       try {
@@ -127,7 +129,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           `,
         });
         const shopTimezoneData = await shopTimezoneResp.json();
-        shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
+        if (shopTimezoneData?.errors?.length) {
+          console.warn("[inventory_levels/update] GetShopTimezone GraphQL errors:", shopTimezoneData.errors);
+        } else {
+          shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
+        }
       } catch (tzErr) {
         console.warn(`[inventory_levels/update] タイムゾーン取得失敗、UTC にフォールバック:`, tzErr);
       }
@@ -147,7 +153,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           variables: { id: locationId },
         });
         const locationData = await locationResp.json();
-        locationName = locationData?.data?.location?.name || locationIdRaw;
+        if (locationData?.errors?.length) {
+          console.warn("[inventory_levels/update] GetLocation GraphQL errors:", locationData.errors);
+        } else {
+          locationName = locationData?.data?.location?.name || locationIdRaw;
+        }
       } catch (locErr) {
         console.warn(`[inventory_levels/update] ロケーション名取得失敗、ID をフォールバックとして使用:`, locErr);
       }
@@ -170,8 +180,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           variables: { id: inventoryItemId },
         });
         const itemData = await itemResp.json();
-        sku = itemData?.data?.inventoryItem?.variant?.sku || "";
-        variantId = itemData?.data?.inventoryItem?.variant?.id || null;
+        if (itemData?.errors?.length) {
+          console.warn("[inventory_levels/update] GetInventoryItem GraphQL errors:", itemData.errors);
+        } else {
+          sku = itemData?.data?.inventoryItem?.variant?.sku || "";
+          variantId = itemData?.data?.inventoryItem?.variant?.id || null;
+        }
       } catch (itemErr) {
         console.warn(`[inventory_levels/update] SKU・variantId 取得失敗、空値を使用:`, itemErr);
       }

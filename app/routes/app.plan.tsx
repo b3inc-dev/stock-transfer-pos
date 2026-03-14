@@ -3,19 +3,29 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 import { redirect } from "react-router";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getShopPlan } from "./app";
 import { createAppSubscription } from "../utils/billing";
 
 const APP_HANDLE = process.env.SHOPIFY_APP_HANDLE || "app";
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { admin, session } = await authenticate.admin(request);
-  const shopPlan = await getShopPlan(admin, session?.shop);
+  try {
+    let { admin, session } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
+    const shopPlan = await getShopPlan(admin, session?.shop);
 
-  const storeHandle = session.shop.replace(".myshopify.com", "");
-  const pricingPlansUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${APP_HANDLE}/pricing_plans`;
+    const storeHandle = session?.shop?.replace(".myshopify.com", "") ?? "";
+    const pricingPlansUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${APP_HANDLE}/pricing_plans`;
 
-  return { shopPlan, pricingPlansUrl };
+    return { shopPlan, pricingPlansUrl };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Response(JSON.stringify({ error: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }
 
 /** プラン選択ボタン押下: サブスク作成 → Shopify の承認 URL へリダイレクト */
@@ -25,7 +35,8 @@ export async function action({ request }: ActionFunctionArgs) {
   const plan = formData.get("plan");
   if (plan !== "lite" && plan !== "pro") return null;
 
-  const { admin, session } = await authenticate.admin(request);
+  let { admin, session } = await authenticate.admin(request);
+  admin = withGraphQLRetry(admin);
   const shopPlan = await getShopPlan(admin, session?.shop);
   if (shopPlan.distribution === "inhouse") return null;
 

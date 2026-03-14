@@ -2,6 +2,7 @@
 // 注文更新Webhookハンドラー（売上時の在庫変動検知）
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
 import { logInventoryChange } from "../utils/inventory-change-log";
@@ -117,6 +118,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       };
     }
+    admin = withGraphQLRetry(admin);
 
     // 注文がキャンセルされている場合: 在庫戻りを「キャンセル戻り」として確実に記録する
     if (order.cancelled_at) {
@@ -156,9 +158,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variables: { id: `gid://shopify/Order/${order.id}` },
           });
           const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
-          const fo = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
-          if (fo?.assignedLocation?.location?.id) {
-            orderLocationId = fo.assignedLocation.location.id;
+          if (orderData?.errors?.length) {
+            console.warn("[orders/updated] GraphQL order query errors (cancel flow):", orderData.errors);
+          } else {
+            const fo = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
+            if (fo?.assignedLocation?.location?.id) {
+              orderLocationId = fo.assignedLocation.location.id;
+            }
           }
         } catch (e) {
           console.error(`[orders/updated] Failed to get location for cancelled order ${order.id}:`, e);
@@ -171,7 +177,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         try {
           const tzResp = await admin.request({ data: `#graphql query GetShopTimezone { shop { ianaTimezone } }` });
           const tzData = tzResp && typeof tzResp.json === "function" ? await tzResp.json() : tzResp;
-          shopTimezoneForCancel = tzData?.data?.shop?.ianaTimezone || "UTC";
+          if (!tzData?.errors?.length) {
+            shopTimezoneForCancel = tzData?.data?.shop?.ianaTimezone || "UTC";
+          }
         } catch { /* UTC にフォールバック */ }
         const cancelDate = getDateInShopTimezone(cancelledAt, shopTimezoneForCancel);
         // ロケーション名取得
@@ -182,7 +190,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variables: { id: orderLocationId },
           });
           const locData = locResp && typeof locResp.json === "function" ? await locResp.json() : locResp;
-          locationName = locData?.data?.location?.name || orderLocationId;
+          if (!locData?.errors?.length) {
+            locationName = locData?.data?.location?.name || orderLocationId;
+          }
         } catch { /* orderLocationId をフォールバックとして使用 */ }
         for (const lineItem of order.line_items) {
           const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
@@ -199,6 +209,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               variables: { id: variantId },
             });
             const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+            if (variantData?.errors?.length) {
+              console.warn("[orders/updated] GraphQL variant query errors (cancel):", variantData.errors);
+              continue;
+            }
             const variant = variantData?.data?.productVariant;
             const inventoryItemId = variant?.inventoryItem?.id;
             const sku = variant?.sku ?? "";
@@ -342,10 +356,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 variables: { id: variantIdGid },
               });
               const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
-              const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
-              if (inventoryItemId) {
-                const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
-                variantToInventoryItem.set(vid, { inventoryItemId, rawItemId });
+              if (variantData?.errors?.length) {
+                console.warn("[orders/updated] GraphQL variant query errors (remediation):", variantData.errors);
+              } else {
+                const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
+                if (inventoryItemId) {
+                  const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+                  variantToInventoryItem.set(vid, { inventoryItemId, rawItemId });
+                }
               }
             } catch (e) {
               console.warn(`[orders/updated] Failed to get inventoryItem for variant ${vid}:`, e);
@@ -424,6 +442,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                     variables: { itemId: g.inventoryItemId },
                   });
                   const levelData = levelResp && typeof levelResp.json === "function" ? await levelResp.json() : levelResp;
+                  if (levelData?.errors?.length) {
+                    console.warn("[orders/updated] GraphQL inventoryLevels errors:", levelData.errors);
+                  }
                   const levels = levelData?.data?.inventoryItem?.inventoryLevels?.edges || [];
                   const locIdForMatch = g.locationIdGid ?? (g.locationIdRaw?.startsWith("gid://") ? g.locationIdRaw : `gid://shopify/Location/${g.locationIdRaw}`);
                   const match = levels.find((e: any) => e?.node?.location?.id === locIdForMatch || e?.node?.location?.id === g.locationIdRaw);
@@ -513,9 +534,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variables: { id: `gid://shopify/Order/${order.id}` },
           });
           const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
-          const fulfillmentOrder = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
-          if (fulfillmentOrder?.assignedLocation?.location?.id) {
-            orderLocationId = fulfillmentOrder.assignedLocation.location.id;
+          if (!orderData?.errors?.length) {
+            const fulfillmentOrder = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
+            if (fulfillmentOrder?.assignedLocation?.location?.id) {
+              orderLocationId = fulfillmentOrder.assignedLocation.location.id;
+            }
+          } else {
+            console.warn("[orders/updated] GraphQL order query errors:", orderData.errors);
           }
         } catch (error) {
           console.error(`[orders/updated] Failed to get order location for order ${order.id}:`, error);
@@ -539,6 +564,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 variables: { id: variantId },
               });
               const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+              if (variantData?.errors?.length) {
+                console.warn("[orders/updated] GraphQL variant query errors (OrderPendingLocation):", variantData.errors);
+                continue;
+              }
               const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
               if (!inventoryItemId) continue;
               const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
@@ -593,6 +622,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 variables: { id: variantId },
               });
               const variantData = variantResp && typeof variantResp.json === "function" ? await variantResp.json() : variantResp;
+              if (variantData?.errors?.length) {
+                console.warn("[orders/updated] GraphQL variant query errors (line_item):", variantData.errors);
+                continue;
+              }
               const variant = variantData?.data?.productVariant;
               const inventoryItemId = variant?.inventoryItem?.id;
               

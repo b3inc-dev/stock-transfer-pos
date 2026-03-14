@@ -4,6 +4,7 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams, useFetcher, useLocation } from "react-router";
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { authenticate } from "../shopify.server";
+import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone, formatDateTimeInShopTimezone } from "../utils/timezone";
 import db from "../db.server";
 import {
@@ -112,7 +113,8 @@ function normalizeLocationIdsForQuery(ids: string[]): string[] {
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-    const { admin, session } = await authenticate.admin(request);
+    let { admin, session } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
 
     // 日次スナップショット用トークンの有効期限（ストア別・画面表示用）
     const offlineSession = await db.session.findFirst({
@@ -561,7 +563,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 // 商品検索用のaction関数
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const { admin, session } = await authenticate.admin(request);
+    let { admin, session } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();
 
