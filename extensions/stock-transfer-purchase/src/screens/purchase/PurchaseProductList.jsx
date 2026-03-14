@@ -7,6 +7,7 @@ import {
   fetchVariantAvailable,
   resolveVariantByCode,
   fetchSettings,
+  refetchVariantsByIds,
 } from "./purchaseApi.js";
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
@@ -442,6 +443,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
 
   const [lines, setLines] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [draftRefetching, setDraftRefetching] = useState(false);
   const linesRef = useRef(lines);
   useEffect(() => {
     linesRef.current = lines;
@@ -508,6 +510,43 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         if (normalized.length > 0) {
           setLines(normalized);
           toast("下書きを復元しました");
+
+          // productTitle または inventoryItemId が欠落しているラインを
+          // バックグラウンドで Shopify API から補完する
+          const needsRefetch = normalized.filter(
+            (l) => l.variantId && (!l.productTitle || !l.inventoryItemId)
+          );
+          if (needsRefetch.length > 0) {
+            setDraftRefetching(true);
+            (async () => {
+              try {
+                const variantIds = needsRefetch.map((l) => l.variantId);
+                const nodeMap = await refetchVariantsByIds(variantIds);
+                if (nodeMap.size > 0) {
+                  setLines((prev) =>
+                    prev.map((l) => {
+                      if (!l.variantId) return l;
+                      const node = nodeMap.get(l.variantId);
+                      if (!node) return l;
+                      return {
+                        ...l,
+                        productTitle: l.productTitle || node.product?.title || "",
+                        variantTitle: l.variantTitle || node.title || "",
+                        inventoryItemId: l.inventoryItemId || node.inventoryItem?.id || null,
+                        sku: l.sku || node.sku || "",
+                        barcode: l.barcode || node.barcode || "",
+                        imageUrl: l.imageUrl || node.image?.url || node.product?.featuredImage?.url || "",
+                      };
+                    })
+                  );
+                }
+              } catch (e) {
+                console.error("[PurchaseProductList] draft refetch failed:", e);
+              } finally {
+                setDraftRefetching(false);
+              }
+            })();
+          }
         }
       } catch (e) {
         console.error("Failed to load purchase draft:", e);
@@ -854,11 +893,22 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
 
   const totalQty = useMemo(() => lines.reduce((s, l) => s + (Number(l.qty) || 0), 0), [lines]);
   const totalLines = lines.length;
-  const canSubmit = totalLines > 0 && totalQty > 0 && !submitting;
+  // qty > 0 かつ inventoryItemId あり → 確定できるライン
+  const validLines = useMemo(
+    () => lines.filter((l) => Number(l.qty || 0) > 0 && l.inventoryItemId),
+    [lines]
+  );
+  // qty > 0 なのに inventoryItemId が null → スキップされるライン（SKU変更・削除済み等）
+  const invalidLines = useMemo(
+    () => lines.filter((l) => Number(l.qty || 0) > 0 && !l.inventoryItemId),
+    [lines]
+  );
+  const canSubmit = validLines.length > 0 && !submitting && !draftRefetching;
 
   const handleConfirm = useCallback(async () => {
     if (!canSubmit || !conds?.locationId) {
-      if (totalLines === 0 || totalQty <= 0) toast("商品を追加して数量を入力してください");
+      if (draftRefetching) toast("商品情報を読み込み中です。しばらくお待ちください");
+      else if (validLines.length === 0) toast("確定できる商品がありません。商品を追加して数量を入力してください");
       else if (!conds?.locationId) toast("ロケーションが指定されていません");
       return;
     }
@@ -866,8 +916,9 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     try {
       const purchaseEntryId = generatePurchaseId();
       const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      // inventoryItemId のない明細は自動スキップ（SKU変更・削除済み商品など）
       const entriesForApply = lines
-        .filter((l) => Math.abs(Number(l.qty) || 0) > 0)
+        .filter((l) => Math.abs(Number(l.qty) || 0) > 0 && l.inventoryItemId)
         .map((l) => ({
           inventoryItemId: l.inventoryItemId,
           variantId: l.variantId ?? undefined,
@@ -937,7 +988,11 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
         await SHOPIFY.storage.delete(PURCHASE_CONDITIONS_DRAFT_KEY);
       }
-      toast("仕入を登録しました");
+      if (invalidLines.length > 0) {
+        toast(`仕入を登録しました（${invalidLines.length} 件は商品情報不備のためスキップされました）`);
+      } else {
+        toast("仕入を登録しました");
+      }
       confirmPurchaseModalRef?.current?.hideOverlay?.();
       confirmPurchaseModalRef?.current?.hide?.();
       onAfterConfirm?.();
@@ -946,7 +1001,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     } finally {
       setSubmitting(false);
     }
-  }, [lines, conds, canSubmit, onAfterConfirm]);
+  }, [lines, conds, canSubmit, validLines, invalidLines, draftRefetching, onAfterConfirm]);
 
   const closeSearchHard = () => {
     setQuery("");
@@ -1054,7 +1109,13 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     setFooter(
       <FixedFooterNavBar
         summaryLeft=""
-        summaryCenter={`明細 ${totalLines} / 合計 ${totalQty}`}
+        summaryCenter={
+          draftRefetching
+            ? "商品情報を読み込み中..."
+            : invalidLines.length > 0
+            ? `明細 ${totalLines} / 合計 ${totalQty} / スキップ ${invalidLines.length}`
+            : `明細 ${totalLines} / 合計 ${totalQty}`
+        }
         summaryRight=""
         leftLabel="戻る"
         onLeft={onBack}
@@ -1071,7 +1132,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       />
     );
     return () => setFooter?.(null);
-  }, [setFooter, totalLines, totalQty, submitting, canSubmit, onBack]);
+  }, [setFooter, totalLines, totalQty, submitting, canSubmit, invalidLines, draftRefetching, onBack]);
 
   // =========================
   // ✅ 表示する候補（表示件数制限適用）
@@ -1376,6 +1437,11 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
             <s-text size="small" tone="subdued">
               仕入先: {conds?.supplierName || "未選択"}
             </s-text>
+            {invalidLines.length > 0 ? (
+              <s-text size="small" tone="critical">
+                ⚠ {invalidLines.length} 件は商品情報不備のためスキップされます（SKU変更・削除済み商品など）
+              </s-text>
+            ) : null}
           </s-stack>
           <s-box paddingBlockStart="small" paddingBlockEnd="small">
             <s-divider />

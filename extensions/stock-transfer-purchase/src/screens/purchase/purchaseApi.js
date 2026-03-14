@@ -415,7 +415,7 @@ export async function searchVariants(q, opts = {}) {
   const conn = d?.productVariants ?? {};
   const nodes = (conn.nodes ?? []).map((n) => ({
     variantId: n.id,
-    inventoryItemId: n.inventoryItem?.id,
+    inventoryItemId: n.inventoryItem?.id ?? null,
     productTitle: n.product?.title ?? "",
     variantTitle: n.title ?? "",
     sku: n.sku ?? "",
@@ -467,6 +467,38 @@ export async function fetchVariantImage(variantId) {
     return data?.productVariant?.image?.url || data?.productVariant?.product?.featuredImage?.url || "";
   } catch {
     return "";
+  }
+}
+
+// ---------- ドラフト復元時の商品情報補完用バッチフェッチ ----------
+// productTitle / inventoryItemId が欠落しているラインを variantId で一括再取得する
+export async function refetchVariantsByIds(variantIds) {
+  const ids = [...new Set((variantIds ?? []).filter(Boolean))].slice(0, 50);
+  if (ids.length === 0) return new Map();
+  const gql = `#graphql
+    query RefetchVariantsForDraft($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on ProductVariant {
+          id
+          title
+          sku
+          barcode
+          image { url }
+          inventoryItem { id }
+          product { title featuredImage { url } }
+        }
+      }
+    }`;
+  try {
+    const data = await graphql(gql, { ids });
+    const result = new Map();
+    for (const node of data?.nodes ?? []) {
+      if (node?.id) result.set(node.id, node);
+    }
+    return result;
+  } catch (e) {
+    console.error("[purchaseApi.refetchVariantsByIds] error:", e);
+    return new Map();
   }
 }
 
