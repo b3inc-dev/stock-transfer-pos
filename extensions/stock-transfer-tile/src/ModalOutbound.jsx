@@ -4776,13 +4776,13 @@ function OutboundHistoryDetail({
             locationName: originLocationNameForLog,
             deltas,
             sourceId: transferIdForUri,
-            lineItems: lineItems || detail?.lineItems,
+            lineItems: detail?.lineItems,
           });
           console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (receive)`);
           // 在庫調整履歴をメモに反映
-          const originLocationName = detail?.originName || 
-            detail?.origin?.name || 
-            outbound.historySelectedOriginName || 
+          const originLocationName = detail?.originName ||
+            detail?.origin?.name ||
+            outbound.historySelectedOriginName ||
             "出庫元";
           const adjustments = deltas.map((d) => {
             const li = shipment.lineItems.find((l) => l.inventoryItemId === d.inventoryItemId);
@@ -4877,13 +4877,13 @@ function OutboundHistoryDetail({
             locationName: originLocationNameForLog,
             deltas,
             sourceId: transferIdForUri,
-            lineItems: lineItems || detail?.lineItems,
+            lineItems: detail?.lineItems,
           });
           console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (receive)`);
           // 在庫調整履歴をメモに反映
-          const originLocationName = detail?.originName || 
-            detail?.origin?.name || 
-            outbound.historySelectedOriginName || 
+          const originLocationName = detail?.originName ||
+            detail?.origin?.name ||
+            outbound.historySelectedOriginName ||
             "出庫元";
           const adjustments = deltas.map((d) => {
             const it = items.find((i) => i.inventoryItemId === d.inventoryItemId);
