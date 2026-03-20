@@ -141,6 +141,15 @@ export function formatOptionsLine_(options) {
   return ops.join(" / ");
 }
 
+export function toUserMessage(e) {
+  const msg = e?.message ?? String(e);
+  try {
+    const parsed = JSON.parse(msg);
+    if (Array.isArray(parsed)) return parsed.map((x) => x?.message ?? JSON.stringify(x)).join(" / ");
+  } catch {}
+  return msg;
+}
+
 /**
  * ステータスバッジ用の色（未登録のようなピル型バッジ）
  * 戻り値: { backgroundColor, color }
