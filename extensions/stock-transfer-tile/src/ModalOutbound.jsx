@@ -6428,26 +6428,18 @@ function OutboundList({
       return null;
     }
 
-    // lineItems を作る（InventoryTransferLineItemInput の形）
-    const lineItems = lines
+    let workingLines = lines.map((l) => ({ ...l }));
+    const lineItemsPrecheck = workingLines
       .map((l) => ({
         inventoryItemId: String(l?.inventoryItemId || "").trim(),
         quantity: Math.max(0, Number(l?.qty || 0)),
       }))
       .filter((x) => x.inventoryItemId && Number.isFinite(x.quantity) && x.quantity > 0);
 
-    if (lineItems.length === 0) {
+    if (lineItemsPrecheck.length === 0) {
       toast("明細の inventoryItemId / qty が不正です");
       return null;
     }
-
-    // userErrors の field を分かりやすくするためのメタ
-    const lineItemsMeta = lines.map((l) => ({
-      inventoryItemId: String(l?.inventoryItemId || "").trim(),
-      sku: String(l?.sku || "").trim(),
-      barcode: String(l?.barcode || "").trim(),
-      label: String(l?.label || "").trim(),
-    }));
 
     closeSearchHard();
 
@@ -6455,94 +6447,62 @@ function OutboundList({
     setSubmitting(true);
 
     try {
+      const rebuildLinePayloadFromWorkingLines = () => {
+        const li = workingLines
+          .map((l) => ({
+            inventoryItemId: String(l?.inventoryItemId || "").trim(),
+            quantity: Math.max(0, Number(l?.qty || 0)),
+          }))
+          .filter((x) => x.inventoryItemId && Number.isFinite(x.quantity) && x.quantity > 0);
+        const meta = workingLines.map((l) => ({
+          inventoryItemId: String(l?.inventoryItemId || "").trim(),
+          sku: String(l?.sku || "").trim(),
+          barcode: String(l?.barcode || "").trim(),
+          label: String(l?.label || "").trim(),
+        }));
+        return { lineItems: li, lineItemsMeta: meta };
+      };
+
+      let { lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLines();
+
       // stocked化（ゲート側でやった場合はスキップ）
       if (!skipActivate) {
-        const inventoryItemIds = lineItems.map((x) => x.inventoryItemId).filter(Boolean);
-        
-        // 出庫元（origin）の在庫追跡を有効化（必須）
-        // 公式推奨：エラーがある場合は例外を投げて処理を中断
-        if (originLocationGid && inventoryItemIds.length > 0) {
-          // ensureInventoryActivatedAtLocation が利用可能か確認
-          if (typeof ensureInventoryActivatedAtLocation !== "function") {
-            const msg = `ensureInventoryActivatedAtLocation が利用できません（typeof=${typeof ensureInventoryActivatedAtLocation}）`;
-            toast(msg);
-            throw new Error(msg);
-          }
-          
-          toast(`出庫元の在庫追跡有効化中... (${inventoryItemIds.length}件)`);
-          
-          const activateResult = await ensureInventoryActivatedAtLocation({
-            locationId: originLocationGid,
-            inventoryItemIds,
-            debug,
-          });
-          
-          // エラーがある場合は例外を投げる（公式推奨）
-          if (!activateResult?.ok) {
-            const errorDetails = (activateResult?.errors || [])
-              .map((e) => {
-                const meta = lines.find((l) => String(l?.inventoryItemId || "").trim() === String(e?.inventoryItemId || "").trim());
-                const itemName = meta?.productTitle || meta?.title || meta?.label || e?.inventoryItemId || "不明";
-                return `${itemName}: ${e?.message || ""}`;
-              })
-              .filter(Boolean);
-            const msg = `出庫元の在庫追跡有効化に失敗しました:\n${errorDetails.join("\n")}`;
-            toast(msg);
-            throw new Error(msg);
-          }
-          
-          // 有効化されたアイテム数を確認
-          const activatedCount = Array.isArray(activateResult?.activated) ? activateResult.activated.length : 0;
-          if (activatedCount < inventoryItemIds.length) {
-            const failedCount = inventoryItemIds.length - activatedCount;
-            toast(`警告: 出庫元の在庫追跡有効化が不完全です（${activatedCount}/${inventoryItemIds.length}件、失敗: ${failedCount}件）`);
-            throw new Error(`出庫元の在庫追跡有効化が不完全です（${activatedCount}/${inventoryItemIds.length}件）`);
-          }
-          
-          toast(`出庫元の在庫追跡有効化完了 (${activatedCount}件)`);
+        if (typeof ensureInventoryActivatedAtLocation !== "function") {
+          const msg = `ensureInventoryActivatedAtLocation が利用できません（typeof=${typeof ensureInventoryActivatedAtLocation}）`;
+          toast(msg);
+          throw new Error(msg);
         }
-        
-        // 宛先（destination）の在庫追跡を有効化
-        // 公式推奨：エラーがある場合は例外を投げて処理を中断
-        if (destinationLocationId && inventoryItemIds.length > 0) {
-          // ensureInventoryActivatedAtLocation が利用可能か確認
-          if (typeof ensureInventoryActivatedAtLocation !== "function") {
-            const msg = `ensureInventoryActivatedAtLocation が利用できません（typeof=${typeof ensureInventoryActivatedAtLocation}）`;
-            toast(msg);
-            throw new Error(msg);
+
+        if (originLocationGid) {
+          const originR = await ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
+            locationId: originLocationGid,
+            lines: workingLines,
+            setLines,
+            debug,
+            toastFn: toast,
+            phaseLabel: "出庫元の在庫追跡有効化",
+          });
+          if (!originR?.ok) {
+            throw new Error(originR?.message || "出庫元の在庫追跡有効化に失敗しました");
           }
-          
-          toast(`宛先の在庫追跡有効化中... (${inventoryItemIds.length}件)`);
-          
-          const activateResult = await ensureInventoryActivatedAtLocation({
-              locationId: destinationLocationId,
-            inventoryItemIds,
-              debug,
-            });
-          
-          // エラーがある場合は例外を投げる（公式推奨）
-          if (!activateResult?.ok) {
-            const errorDetails = (activateResult?.errors || [])
-              .map((e) => {
-                const meta = lines.find((l) => String(l?.inventoryItemId || "").trim() === String(e?.inventoryItemId || "").trim());
-                const itemName = meta?.productTitle || meta?.title || meta?.label || e?.inventoryItemId || "不明";
-                return `${itemName}: ${e?.message || ""}`;
-              })
-              .filter(Boolean);
-            const msg = `宛先の在庫追跡有効化に失敗しました:\n${errorDetails.join("\n")}`;
-            toast(msg);
-            throw new Error(msg);
+          workingLines = originR.lines;
+          ({ lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLines());
+        }
+
+        if (destinationLocationId) {
+          const destR = await ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
+            locationId: destinationLocationId,
+            lines: workingLines,
+            setLines,
+            debug,
+            toastFn: toast,
+            phaseLabel: "宛先の在庫追跡有効化",
+          });
+          if (!destR?.ok) {
+            throw new Error(destR?.message || "宛先の在庫追跡有効化に失敗しました");
           }
-          
-          // 有効化されたアイテム数を確認
-          const activatedCount = Array.isArray(activateResult?.activated) ? activateResult.activated.length : 0;
-          if (activatedCount < inventoryItemIds.length) {
-            const failedCount = inventoryItemIds.length - activatedCount;
-            toast(`警告: 宛先の在庫追跡有効化が不完全です（${activatedCount}/${inventoryItemIds.length}件、失敗: ${failedCount}件）`);
-            throw new Error(`宛先の在庫追跡有効化が不完全です（${activatedCount}/${inventoryItemIds.length}件）`);
-          }
-          
-          toast(`宛先の在庫追跡有効化完了 (${activatedCount}件)`);
+          workingLines = destR.lines;
+          ({ lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLines());
         }
       }
 
@@ -6629,7 +6589,7 @@ function OutboundList({
         const inventoryItemIdsForCheck = lineItems.map((x) => x.inventoryItemId).filter(Boolean);
         // metaById を構築（buildMetaByInventoryItemId は lines を参照するため、lineItems から構築）
         const metaById = {};
-        for (const l of Array.isArray(lines) ? lines : []) {
+        for (const l of Array.isArray(workingLines) ? workingLines : []) {
           const inventoryItemId = String(l?.inventoryItemId || "").trim();
           if (!inventoryItemId) continue;
 
@@ -6862,7 +6822,7 @@ function OutboundList({
       const transferIdMatch = transferIdStr.match(/(\d+)$/);
       const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
       const outboundDeltas = lineItems.map((l) => {
-        const line = (Array.isArray(lines) ? lines : []).find((x) => String(x?.inventoryItemId) === String(l.inventoryItemId));
+        const line = (Array.isArray(workingLines) ? workingLines : []).find((x) => String(x?.inventoryItemId) === String(l.inventoryItemId));
         const available = typeof line?.available === "number" ? line.available : null;
         const qty = Math.max(0, Number(l.quantity || 0));
         return {
@@ -6881,7 +6841,7 @@ function OutboundList({
           locationName: originLocationName,
           deltas: outboundDeltas,
           sourceId: transferIdForUri,
-          lineItems: lines,
+          lineItems: workingLines,
         });
       }
       Promise.all([
@@ -6933,26 +6893,18 @@ function OutboundList({
       return null;
     }
 
-    // lineItems を作る（InventoryTransferLineItemInput の形）
-    const lineItems = lines
+    let workingLinesRts = lines.map((l) => ({ ...l }));
+    const lineItemsPrecheckRts = workingLinesRts
       .map((l) => ({
         inventoryItemId: String(l?.inventoryItemId || "").trim(),
         quantity: Math.max(0, Number(l?.qty || 0)),
       }))
       .filter((x) => x.inventoryItemId && Number.isFinite(x.quantity) && x.quantity > 0);
 
-    if (lineItems.length === 0) {
+    if (lineItemsPrecheckRts.length === 0) {
       toast("明細の inventoryItemId / qty が不正です");
       return null;
     }
-
-    // userErrors の field を分かりやすくするためのメタ
-    const lineItemsMeta = lines.map((l) => ({
-      inventoryItemId: String(l?.inventoryItemId || "").trim(),
-      sku: String(l?.sku || "").trim(),
-      barcode: String(l?.barcode || "").trim(),
-      label: String(l?.label || "").trim(),
-    }));
 
     closeSearchHard();
 
@@ -6960,92 +6912,68 @@ function OutboundList({
     setSubmitting(true);
 
     try {
+      const rebuildLinePayloadFromWorkingLinesRts = () => {
+        const li = workingLinesRts
+          .map((l) => ({
+            inventoryItemId: String(l?.inventoryItemId || "").trim(),
+            quantity: Math.max(0, Number(l?.qty || 0)),
+          }))
+          .filter((x) => x.inventoryItemId && Number.isFinite(x.quantity) && x.quantity > 0);
+        const meta = workingLinesRts.map((l) => ({
+          inventoryItemId: String(l?.inventoryItemId || "").trim(),
+          sku: String(l?.sku || "").trim(),
+          barcode: String(l?.barcode || "").trim(),
+          label: String(l?.label || "").trim(),
+        }));
+        return { lineItems: li, lineItemsMeta: meta };
+      };
+
+      let { lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLinesRts();
+
       // 在庫追跡有効化（submitTransferCoreと同じ処理）
       if (!skipActivate) {
-        const inventoryItemIds = lineItems.map((x) => x.inventoryItemId).filter(Boolean);
-        
-        // 出庫元の在庫追跡を有効化
-        if (originLocationGid && inventoryItemIds.length > 0) {
-          if (typeof ensureInventoryActivatedAtLocation !== "function") {
-            const msg = `ensureInventoryActivatedAtLocation が利用できません（typeof=${typeof ensureInventoryActivatedAtLocation}）`;
-            toast(msg);
-            throw new Error(msg);
-          }
-          
-          toast(`出庫元の在庫追跡有効化中... (${inventoryItemIds.length}件)`);
-          
-          const activateResult = await ensureInventoryActivatedAtLocation({
-            locationId: originLocationGid,
-            inventoryItemIds,
-            debug,
-          });
-          
-          if (!activateResult?.ok) {
-            const errorDetails = (activateResult?.errors || [])
-              .map((e) => {
-                const meta = lines.find((l) => String(l?.inventoryItemId || "").trim() === String(e?.inventoryItemId || "").trim());
-                const itemName = meta?.productTitle || meta?.title || meta?.label || e?.inventoryItemId || "不明";
-                return `${itemName}: ${e?.message || ""}`;
-              })
-              .filter(Boolean);
-            const msg = `出庫元の在庫追跡有効化に失敗しました:\n${errorDetails.join("\n")}`;
-            toast(msg);
-            throw new Error(msg);
-          }
-          
-          const activatedCount = Array.isArray(activateResult?.activated) ? activateResult.activated.length : 0;
-          if (activatedCount < inventoryItemIds.length) {
-            const failedCount = inventoryItemIds.length - activatedCount;
-            toast(`警告: 出庫元の在庫追跡有効化が不完全です（${activatedCount}/${inventoryItemIds.length}件、失敗: ${failedCount}件）`);
-            throw new Error(`出庫元の在庫追跡有効化が不完全です（${activatedCount}/${inventoryItemIds.length}件）`);
-          }
-          
-          toast(`出庫元の在庫追跡有効化完了 (${activatedCount}件)`);
+        if (typeof ensureInventoryActivatedAtLocation !== "function") {
+          const msg = `ensureInventoryActivatedAtLocation が利用できません（typeof=${typeof ensureInventoryActivatedAtLocation}）`;
+          toast(msg);
+          throw new Error(msg);
         }
-        
-        // 宛先の在庫追跡を有効化
-        if (destinationLocationId && inventoryItemIds.length > 0) {
-          if (typeof ensureInventoryActivatedAtLocation !== "function") {
-            const msg = `ensureInventoryActivatedAtLocation が利用できません（typeof=${typeof ensureInventoryActivatedAtLocation}）`;
-            toast(msg);
-            throw new Error(msg);
-          }
-          
-          toast(`宛先の在庫追跡有効化中... (${inventoryItemIds.length}件)`);
-          
-          const activateResult = await ensureInventoryActivatedAtLocation({
-            locationId: destinationLocationId,
-            inventoryItemIds,
+
+        if (originLocationGid) {
+          const originR = await ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
+            locationId: originLocationGid,
+            lines: workingLinesRts,
+            setLines,
             debug,
+            toastFn: toast,
+            phaseLabel: "出庫元の在庫追跡有効化",
           });
-          
-          if (!activateResult?.ok) {
-            const errorDetails = (activateResult?.errors || [])
-              .map((e) => {
-                const meta = lines.find((l) => String(l?.inventoryItemId || "").trim() === String(e?.inventoryItemId || "").trim());
-                const itemName = meta?.productTitle || meta?.title || meta?.label || e?.inventoryItemId || "不明";
-                return `${itemName}: ${e?.message || ""}`;
-              })
-              .filter(Boolean);
-            const msg = `宛先の在庫追跡有効化に失敗しました:\n${errorDetails.join("\n")}`;
-            toast(msg);
-            throw new Error(msg);
+          if (!originR?.ok) {
+            throw new Error(originR?.message || "出庫元の在庫追跡有効化に失敗しました");
           }
-          
-          const activatedCount = Array.isArray(activateResult?.activated) ? activateResult.activated.length : 0;
-          if (activatedCount < inventoryItemIds.length) {
-            const failedCount = inventoryItemIds.length - activatedCount;
-            toast(`警告: 宛先の在庫追跡有効化が不完全です（${activatedCount}/${inventoryItemIds.length}件、失敗: ${failedCount}件）`);
-            throw new Error(`宛先の在庫追跡有効化が不完全です（${activatedCount}/${inventoryItemIds.length}件）`);
+          workingLinesRts = originR.lines;
+          ({ lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLinesRts());
+        }
+
+        if (destinationLocationId) {
+          const destR = await ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
+            locationId: destinationLocationId,
+            lines: workingLinesRts,
+            setLines,
+            debug,
+            toastFn: toast,
+            phaseLabel: "宛先の在庫追跡有効化",
+          });
+          if (!destR?.ok) {
+            throw new Error(destR?.message || "宛先の在庫追跡有効化に失敗しました");
           }
-          
-          toast(`宛先の在庫追跡有効化完了 (${activatedCount}件)`);
+          workingLinesRts = destR.lines;
+          ({ lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLinesRts());
         }
 
         // 在庫レベル反映待ち（submitTransferCoreと同じ処理）
         const inventoryItemIdsForCheck = lineItems.map((x) => x.inventoryItemId).filter(Boolean);
         const metaById = {};
-        for (const l of Array.isArray(lines) ? lines : []) {
+        for (const l of Array.isArray(workingLinesRts) ? workingLinesRts : []) {
           const inventoryItemId = String(l?.inventoryItemId || "").trim();
           if (!inventoryItemId) continue;
 
@@ -8772,6 +8700,224 @@ async function fetchInventoryItemAvailable({ inventoryItemId, locationGid }) {
 /* =========================
    Ensure destination has inventory levels (Outbound/Inbound extras)
 */
+
+/** 出庫行に Admin 検索結果をマージ（ラベル・画像など） */
+function mergeOutboundLineWithResolvedVariant(line, v) {
+  if (!v?.variantId || !v?.inventoryItemId) return null;
+  const productTitle = String(v.productTitle || "").trim();
+  const variantTitle = String(v.variantTitle || "").trim();
+  const sku = String(v.sku || "").trim();
+  const label =
+    productTitle || variantTitle || sku
+      ? `${productTitle} / ${variantTitle}${sku ? `（${sku}）` : ""}`.trim()
+      : String(line?.label || "").trim();
+
+  return {
+    ...line,
+    variantId: v.variantId,
+    inventoryItemId: v.inventoryItemId,
+    sku: sku || line.sku,
+    barcode: String(v.barcode || "").trim() || line.barcode,
+    productTitle: productTitle || line.productTitle,
+    variantTitle: variantTitle || line.variantTitle,
+    imageUrl: v.imageUrl || line.imageUrl,
+    label: label || line.label,
+  };
+}
+
+/**
+ * バーコード → 失敗時 SKU の順でキャッシュを無視して検索し、在庫アイテムIDが変われば行を更新する。
+ */
+async function tryRefreshOutboundLineFromShopify(line, { includeImages = false } = {}) {
+  const oldInv = String(line?.inventoryItemId || "").trim();
+  const barcodeRaw = String(line?.barcode || "").trim();
+  const skuRaw = String(line?.sku || "").trim();
+
+  async function fetchFresh(rawQuery, pickNormSource) {
+    const norm = normalizeScanCode_(pickNormSource || rawQuery);
+    if (!norm) return null;
+    try {
+      await VariantCache.delete(norm);
+    } catch (_) {}
+    const { nodes } = await searchVariants(rawQuery, { includeImages });
+    const v = pickBestVariant_(norm, nodes);
+    if (!v?.variantId || !v?.inventoryItemId) return null;
+    if (String(v.inventoryItemId).trim() === oldInv) return null;
+    return v;
+  }
+
+  let v = await fetchFresh(barcodeRaw, barcodeRaw);
+  if (!v) v = await fetchFresh(skuRaw, skuRaw);
+  if (!v) return null;
+
+  const merged = mergeOutboundLineWithResolvedVariant(line, v);
+  if (!merged) return null;
+
+  const cacheObj = {
+    variantId: merged.variantId,
+    inventoryItemId: merged.inventoryItemId,
+    sku: merged.sku || "",
+    barcode: merged.barcode || "",
+    productTitle: merged.productTitle || "",
+    variantTitle: merged.variantTitle || "",
+    imageUrl: merged.imageUrl || "",
+  };
+  const keys = new Set(
+    [
+      normalizeScanCode_(merged.barcode),
+      normalizeScanCode_(merged.sku),
+      normalizeScanCode_(barcodeRaw),
+      normalizeScanCode_(skuRaw),
+    ].filter(Boolean)
+  );
+  for (const k of keys) {
+    try {
+      await VariantCache.put(k, cacheObj);
+    } catch (_) {}
+  }
+  return merged;
+}
+
+async function refreshOutboundLinesForInventoryItemIds(lines, problematicIds, opts = {}) {
+  const idSet =
+    problematicIds instanceof Set
+      ? problematicIds
+      : new Set(
+          Array.isArray(problematicIds)
+            ? problematicIds.map((x) => String(x || "").trim()).filter(Boolean)
+            : []
+        );
+
+  let changed = 0;
+  const next = [];
+
+  for (const line of lines) {
+    const inv = String(line?.inventoryItemId || "").trim();
+    if (!idSet.has(inv)) {
+      next.push(line);
+      continue;
+    }
+    const refreshed = await tryRefreshOutboundLineFromShopify(line, opts);
+    if (refreshed) {
+      next.push(refreshed);
+      changed++;
+    } else {
+      next.push(line);
+    }
+  }
+
+  return { lines: next, changed };
+}
+
+/**
+ * 在庫有効化が失敗したとき、SKU/バーコードで再検索して行のIDを更新し、自動で数回まで再試行する。
+ */
+async function ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
+  locationId,
+  lines: initialLines,
+  setLines,
+  debug,
+  toastFn,
+  phaseLabel,
+}) {
+  const MAX_ATTEMPTS = 3;
+  let working = initialLines.map((l) => ({ ...l }));
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const inventoryItemIds = working
+      .map((l) => String(l?.inventoryItemId || "").trim())
+      .filter(Boolean);
+    if (inventoryItemIds.length === 0) {
+      return { ok: true, lines: working };
+    }
+
+    const requestedUnique = [...new Set(inventoryItemIds)];
+
+    if (typeof toastFn === "function") {
+      toastFn(
+        attempt === 0
+          ? `${phaseLabel}中... (${inventoryItemIds.length}件)`
+          : `${phaseLabel}中... 再試行 (${attempt + 1}/${MAX_ATTEMPTS})`
+      );
+    }
+
+    const activateResult = await ensureInventoryActivatedAtLocation({
+      locationId,
+      inventoryItemIds: requestedUnique,
+      debug,
+    });
+
+    const activatedSet = new Set(
+      (activateResult?.activated || [])
+        .map((a) => String(a?.inventoryItemId || "").trim())
+        .filter(Boolean)
+    );
+    const errorIds = new Set(
+      (activateResult?.errors || [])
+        .map((e) => String(e?.inventoryItemId || "").trim())
+        .filter(Boolean)
+    );
+    const missingFromActivated = requestedUnique.filter((id) => !activatedSet.has(id));
+    const problematicIds = new Set([...errorIds, ...missingFromActivated]);
+
+    const fullyCovered = activateResult?.ok === true && missingFromActivated.length === 0;
+
+    if (fullyCovered) {
+      if (typeof toastFn === "function") {
+        toastFn(`${phaseLabel}完了 (${requestedUnique.length}件)`);
+      }
+      if (typeof setLines === "function") setLines(working);
+      return { ok: true, lines: working };
+    }
+
+    if (attempt >= MAX_ATTEMPTS - 1) {
+      const errorDetails = (activateResult?.errors || [])
+        .map((e) => {
+          const meta = working.find(
+            (l) => String(l?.inventoryItemId || "").trim() === String(e?.inventoryItemId || "").trim()
+          );
+          const itemName = meta?.productTitle || meta?.title || meta?.label || e?.inventoryItemId || "不明";
+          return `${itemName}: ${e?.message || ""}`;
+        })
+        .filter(Boolean);
+      let msg = `${phaseLabel}に失敗しました`;
+      if (errorDetails.length) msg += `:\n${errorDetails.join("\n")}`;
+      else if (missingFromActivated.length) {
+        msg += `（無効な在庫アイテムIDの可能性: ${missingFromActivated.length}件）`;
+      }
+      if (typeof toastFn === "function") toastFn(msg);
+      return { ok: false, lines: working, message: msg };
+    }
+
+    if (problematicIds.size === 0) {
+      const msg = `${phaseLabel}に失敗しました（想定外の応答です）`;
+      if (typeof toastFn === "function") toastFn(msg);
+      return { ok: false, lines: working, message: msg };
+    }
+
+    if (typeof toastFn === "function") {
+      toastFn("有効化エラーのため、SKU/バーコードで再検索してIDを更新します…");
+    }
+
+    const refreshResult = await refreshOutboundLinesForInventoryItemIds(working, problematicIds, {
+      includeImages: false,
+    });
+
+    if (refreshResult.changed === 0) {
+      const msg = `${phaseLabel}に失敗しました（SKU/バーコードでの再検索でもIDを更新できませんでした）`;
+      if (typeof toastFn === "function") toastFn(msg);
+      return { ok: false, lines: working, message: msg };
+    }
+
+    working = refreshResult.lines;
+    if (typeof setLines === "function") setLines(working);
+    if (typeof toastFn === "function") {
+      toastFn(`商品IDを ${refreshResult.changed} 件更新しました。もう一度有効化します…`);
+    }
+  }
+
+  return { ok: false, lines: working, message: `${phaseLabel}に失敗しました（再試行上限）` };
+}
 
 // inventoryActivate を “必要なときだけ available 付き” で呼べるようにする
 async function ensureInventoryActivatedAtLocation({
@@ -10854,10 +11000,25 @@ const VariantCache = (() => {
     }
   }
 
+  async function delete_(codeRaw) {
+    const code = normalizeScanCode_(codeRaw);
+    if (!code) return;
+    await init_();
+    const idx = chunkIndexForCode_(code);
+    const map = await loadChunk_(idx);
+    if (map && Object.prototype.hasOwnProperty.call(map, code)) {
+      delete map[code];
+      chunks.set(idx, map);
+      dirtyChunks.add(idx);
+      scheduleFlush_();
+    }
+  }
+
   return {
     init: init_,
     get,
     put,
+    delete: delete_,
     flush: flush_,
     clearAll,
   };
