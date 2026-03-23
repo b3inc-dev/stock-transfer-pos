@@ -24,7 +24,7 @@ import {
   buildInboundNoteLine_,
   appendInboundAuditLog,
   adjustInventoryAtLocationWithFallback,
-  ensureInventoryActivatedAtLocation,
+  ensureInventoryActivatedWithSkuBarcodeRetryRows,
   searchVariants,
   resolveVariantByCode,
   VariantCache,
@@ -46,6 +46,37 @@ import { logInventoryChangeToApi } from "../../../common/logInventoryChange.js";
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
 const SCAN_QUEUE_KEY = "stock_transfer_pos_scan_queue_v1";
+
+function mergeInboundRowsAfterSkuRefresh(prev, refreshedSubset) {
+  return (prev || []).map((line) => {
+    const hit = refreshedSubset.find((r) => {
+      const sid = String(r.shipmentLineItemId || "").trim();
+      const lid = String(line.shipmentLineItemId || "").trim();
+      if (sid && lid && sid === lid) return true;
+      return String(r.inventoryItemId || "").trim() === String(line.inventoryItemId || "").trim();
+    });
+    return hit ? { ...line, ...hit } : line;
+  });
+}
+
+function buildInboundActivationRowsFromShipmentLineItems(lineItems, idFilterSet) {
+  const wanted = idFilterSet instanceof Set ? idFilterSet : new Set(idFilterSet || []);
+  const seen = new Set();
+  const out = [];
+  for (const li of lineItems || []) {
+    const inv = String(li?.inventoryItemId || "").trim();
+    if (!inv || !wanted.has(inv) || seen.has(inv)) continue;
+    seen.add(inv);
+    out.push({
+      shipmentLineItemId: li.id,
+      inventoryItemId: inv,
+      sku: String(li.sku || "").trim(),
+      barcode: String(li.barcode || "").trim(),
+      title: li.title || li.sku || inv,
+    });
+  }
+  return out;
+}
 
 // TDZ 対策: コンポーネント内で定義すると minify で jt 等になり参照順でエラーになるためモジュールレベルに配置
 function denyEdit_(toastReadOnlyOnceRef, toastFn) {
@@ -515,7 +546,14 @@ export function InboundListScreen({
       // 確定ボタン押下時には既に有効化が完了している状態を狙う（fire-and-forget）
       const preActivateIds = [...new Set((s.lineItems ?? []).map((li) => String(li.inventoryItemId || "").trim()).filter(Boolean))];
       if (preActivateIds.length > 0 && locationGid && !signal?.aborted) {
-        ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: preActivateIds }).catch(() => {});
+        const preRows = buildInboundActivationRowsFromShipmentLineItems(s.lineItems ?? [], new Set(preActivateIds));
+        ensureInventoryActivatedWithSkuBarcodeRetryRows({
+          locationId: locationGid,
+          rows: preRows,
+          setRows: null,
+          toastFn: null,
+          phaseLabel: "入庫先の在庫追跡有効化",
+        }).catch(() => {});
       }
     } catch (e) {
       if (signal?.aborted) return;
@@ -643,7 +681,23 @@ export function InboundListScreen({
       // バックグラウンドで入庫先ロケーションへの在庫有効化を先行実行（fire-and-forget）
       const preActivateIdsMulti = [...new Set(results.flatMap((s) => (s?.lineItems ?? []).map((li) => String(li.inventoryItemId || "").trim())).filter(Boolean))];
       if (preActivateIdsMulti.length > 0 && locationGid && !signal?.aborted) {
-        ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: preActivateIdsMulti }).catch(() => {});
+        const idSetMulti = new Set(preActivateIdsMulti);
+        const preRowsMulti = results.flatMap((sh) =>
+          buildInboundActivationRowsFromShipmentLineItems(sh?.lineItems ?? [], idSetMulti)
+        );
+        const seenM = new Set();
+        const uniqueMulti = preRowsMulti.filter((r) => {
+          if (seenM.has(r.inventoryItemId)) return false;
+          seenM.add(r.inventoryItemId);
+          return true;
+        });
+        ensureInventoryActivatedWithSkuBarcodeRetryRows({
+          locationId: locationGid,
+          rows: uniqueMulti,
+          setRows: null,
+          toastFn: null,
+          phaseLabel: "入庫先の在庫追跡有効化",
+        }).catch(() => {});
       }
 
       // 二相ロード: 非同期で監査ログ over を反映
@@ -1161,9 +1215,29 @@ export function InboundListScreen({
             const msg = String(e?.message || e || "");
             const isNotStockedAtDest = /配送先|not stocked|inventory.*location|アイテムの在庫がありません|no inventory at/i.test(msg);
             if (isNotStockedAtDest && allInventoryItemIds.length > 0) {
-              const actResult = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIds });
+              const idWanted = new Set(allInventoryItemIds);
+              const seenInv = new Set();
+              const activationRowsDest = [];
+              for (const r of rows || []) {
+                const inv = String(r.inventoryItemId || "").trim();
+                if (!idWanted.has(inv) || seenInv.has(inv)) continue;
+                seenInv.add(inv);
+                activationRowsDest.push({
+                  ...r,
+                  inventoryItemId: inv,
+                  sku: String(r.sku || "").trim(),
+                  barcode: String(r.barcode || "").trim(),
+                });
+              }
+              const actResult = await ensureInventoryActivatedWithSkuBarcodeRetryRows({
+                locationId: locationGid,
+                rows: activationRowsDest,
+                setRows: (next) => setRows((p) => mergeInboundRowsAfterSkuRefresh(p, next)),
+                toastFn: toast,
+                phaseLabel: "入庫先の在庫追跡有効化",
+              });
               if (!actResult?.ok) {
-                const errMsg = (actResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
+                const errMsg = actResult?.message || "在庫の有効化に失敗しました";
                 throw new Error(`入庫先で在庫を有効化できませんでした。${errMsg} しばらくしてから再度「確定」を押してください。`);
               }
               await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: plannedItems });
@@ -1240,10 +1314,22 @@ export function InboundListScreen({
               };
             }).filter((d) => d && d.inventoryItemId && d.delta > 0);
             if (rejectedDeltas.length > 0) {
-              const activateOriginResult = await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds: rejectedDeltas.map((d) => d.inventoryItemId) });
+              const actRowsRejected = rejectedDeltas.map((d) => ({ ...d }));
+              const activateOriginResult = await ensureInventoryActivatedWithSkuBarcodeRetryRows({
+                locationId: originLocationId,
+                rows: actRowsRejected,
+                setRows: (next) => setRows((p) => mergeInboundRowsAfterSkuRefresh(p, next)),
+                toastFn: null,
+                phaseLabel: "出庫元の在庫追跡有効化",
+              });
               if (!activateOriginResult?.ok) {
-                const msg = (activateOriginResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "出庫元在庫の有効化に失敗しました";
+                const msg = activateOriginResult?.message || "出庫元在庫の有効化に失敗しました";
                 toast(`警告: 出庫元への在庫有効化に失敗しました（入庫は完了）: ${msg}`);
+              } else {
+                rejectedDeltas = rejectedDeltas.map((d, i) => ({
+                  ...d,
+                  inventoryItemId: String(activateOriginResult.rows[i]?.inventoryItemId || d.inventoryItemId),
+                }));
               }
               // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
               const transferIdStr = String(transferId || "").trim();
@@ -1332,9 +1418,29 @@ export function InboundListScreen({
             const msg = String(e?.message || e || "");
             const isNotStockedAtDest = /配送先|not stocked|inventory.*location|アイテムの在庫がありません|no inventory at/i.test(msg);
             if (isNotStockedAtDest && allInventoryItemIdsMulti.length > 0) {
-              const actResultMulti = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds: allInventoryItemIdsMulti });
+              const idWantedM = new Set(allInventoryItemIdsMulti);
+              const seenInvM = new Set();
+              const activationRowsDestM = [];
+              for (const r of rows || []) {
+                const inv = String(r.inventoryItemId || "").trim();
+                if (!idWantedM.has(inv) || seenInvM.has(inv)) continue;
+                seenInvM.add(inv);
+                activationRowsDestM.push({
+                  ...r,
+                  inventoryItemId: inv,
+                  sku: String(r.sku || "").trim(),
+                  barcode: String(r.barcode || "").trim(),
+                });
+              }
+              const actResultMulti = await ensureInventoryActivatedWithSkuBarcodeRetryRows({
+                locationId: locationGid,
+                rows: activationRowsDestM,
+                setRows: (next) => setRows((p) => mergeInboundRowsAfterSkuRefresh(p, next)),
+                toastFn: toast,
+                phaseLabel: "入庫先の在庫追跡有効化",
+              });
               if (!actResultMulti?.ok) {
-                const errMsg = (actResultMulti?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました";
+                const errMsg = actResultMulti?.message || "在庫の有効化に失敗しました";
                 throw new Error(`入庫先で在庫を有効化できませんでした。${errMsg} しばらくしてから再度「確定」を押してください。`);
               }
               await receiveShipmentWithFallbackV2({ shipmentId: sid, items: plannedItems });
@@ -1415,10 +1521,22 @@ export function InboundListScreen({
           });
           rejectedDeltas = Array.from(merged.values());
           if (rejectedDeltas.length > 0) {
-            const activateOriginResultMulti = await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds: rejectedDeltas.map((d) => d.inventoryItemId) });
+            const actRowsRejectedM = rejectedDeltas.map((d) => ({ ...d }));
+            const activateOriginResultMulti = await ensureInventoryActivatedWithSkuBarcodeRetryRows({
+              locationId: originLocationId,
+              rows: actRowsRejectedM,
+              setRows: (next) => setRows((p) => mergeInboundRowsAfterSkuRefresh(p, next)),
+              toastFn: null,
+              phaseLabel: "出庫元の在庫追跡有効化",
+            });
             if (!activateOriginResultMulti?.ok) {
-              const msg = (activateOriginResultMulti?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "出庫元在庫の有効化に失敗しました";
+              const msg = activateOriginResultMulti?.message || "出庫元在庫の有効化に失敗しました";
               toast(`警告: 出庫元への在庫有効化に失敗しました（入庫は完了）: ${msg}`);
+            } else {
+              rejectedDeltas = rejectedDeltas.map((d, i) => ({
+                ...d,
+                inventoryItemId: String(activateOriginResultMulti.rows[i]?.inventoryItemId || d.inventoryItemId),
+              }));
             }
             // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
             const transferIdStr = String(transferId || "").trim();
@@ -1464,17 +1582,40 @@ export function InboundListScreen({
       }
 
       if (extraDeltasMerged.length > 0) {
-        const inventoryItemIds = extraDeltasMerged.map((d) => d.inventoryItemId);
-        // 予定外入荷は伝票に含まれないため、入庫先で在庫有効化が必須。確実に有効化してから在庫調整する（1回リトライ）。
-        let act = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds });
+        const extrasActivationRows = extraDeltasMerged.map((d) => {
+          const meta = extrasMap.get(d.inventoryItemId) || {};
+          return {
+            inventoryItemId: d.inventoryItemId,
+            sku: String(meta.sku || "").trim(),
+            barcode: String(meta.barcode || "").trim(),
+            title: meta.title || "",
+            receiveQty: d.delta,
+          };
+        });
+        const act = await ensureInventoryActivatedWithSkuBarcodeRetryRows({
+          locationId: locationGid,
+          rows: extrasActivationRows,
+          setRows: (next) =>
+            setExtras((prev) =>
+              (prev || []).map((ex) => {
+                const hit = next.find(
+                  (r) => String(r.inventoryItemId || "").trim() === String(ex.inventoryItemId || "").trim()
+                );
+                return hit ? { ...ex, ...hit } : ex;
+              })
+            ),
+          toastFn: toast,
+          phaseLabel: "予定外入荷・入庫先の在庫追跡有効化",
+        });
         if (!act?.ok) {
-          await new Promise((r) => setTimeout(r, 800));
-          act = await ensureInventoryActivatedAtLocation({ locationId: locationGid, inventoryItemIds });
-        }
-        if (!act?.ok) {
-          const msg = (act?.errors || []).map((e) => `${e.inventoryItemId}: ${e.message}`).filter(Boolean).join("\n") || "在庫の有効化に失敗しました";
+          const msg = act?.message || "在庫の有効化に失敗しました";
           throw new Error(`予定外入荷の在庫を有効化できませんでした。${msg} しばらくしてから再度「確定」を押してください。`);
         }
+        extraDeltasMerged = extraDeltasMerged.map((d, i) => ({
+          ...d,
+          inventoryItemId: String(act.rows[i]?.inventoryItemId || d.inventoryItemId),
+        }));
+        const inventoryItemIds = extraDeltasMerged.map((d) => d.inventoryItemId);
         // transferIdからID部分を抽出（GID形式の場合は末尾の数字部分を取得）
         const transferIdStr = String(transferId || "").trim();
         const transferIdMatch = transferIdStr.match(/(\d+)$/);
@@ -1503,9 +1644,29 @@ export function InboundListScreen({
         if (!originLocationId) {
           toast("警告: 出庫元のlocationIdが取得できませんでした（出庫元の在庫調整をスキップします）");
         } else {
-          const activateExtrasOriginResult = await ensureInventoryActivatedAtLocation({ locationId: originLocationId, inventoryItemIds });
+          const extrasOriginRows = act.rows.map((r) => ({
+            inventoryItemId: r.inventoryItemId,
+            sku: String(r.sku || "").trim(),
+            barcode: String(r.barcode || "").trim(),
+            title: String(r.title || r.productTitle || "").trim(),
+          }));
+          const activateExtrasOriginResult = await ensureInventoryActivatedWithSkuBarcodeRetryRows({
+            locationId: originLocationId,
+            rows: extrasOriginRows,
+            setRows: (next) =>
+              setExtras((prev) =>
+                (prev || []).map((ex) => {
+                  const hit = next.find(
+                    (r) => String(r.inventoryItemId || "").trim() === String(ex.inventoryItemId || "").trim()
+                  );
+                  return hit ? { ...ex, ...hit } : ex;
+                })
+              ),
+            toastFn: null,
+            phaseLabel: "予定外入荷・出庫元の在庫追跡有効化",
+          });
           if (!activateExtrasOriginResult?.ok) {
-            const msg = (activateExtrasOriginResult?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "出庫元在庫の有効化に失敗しました";
+            const msg = activateExtrasOriginResult?.message || "出庫元在庫の有効化に失敗しました";
             toast(`警告: 出庫元への在庫有効化に失敗しました（予定外入庫は完了）: ${msg}`);
           }
           const originDeltas = extraDeltasMerged.map((d) => ({

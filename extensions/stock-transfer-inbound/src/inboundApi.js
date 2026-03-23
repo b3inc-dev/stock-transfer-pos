@@ -1,4 +1,5 @@
 import { adminGraphql, assertNoUserErrors } from "./inboundHelpers.js";
+import { ensureInventoryActivatedWithSkuBarcodeRetry as runInventoryActivateSkuRetry } from "../../common/inventoryActivateRetry.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 
@@ -1137,6 +1138,19 @@ const VariantCache = (() => {
       dirtyChunks.add(idx);
       scheduleFlush_();
     },
+    async delete(codeRaw) {
+      const code = normalizeScanCode_(codeRaw);
+      if (!code) return;
+      await init_();
+      const idx = chunkIndexForCode_(code);
+      const map = await loadChunk_(idx);
+      if (map && Object.prototype.hasOwnProperty.call(map, code)) {
+        delete map[code];
+        chunks.set(idx, map);
+        dirtyChunks.add(idx);
+        scheduleFlush_();
+      }
+    },
     init: init_,
   };
 })();
@@ -1178,3 +1192,28 @@ export async function resolveVariantByCode(codeRaw, { includeImages = false } = 
 }
 
 export { VariantCache };
+
+/**
+ * 有効化失敗時に SKU/バーコードで再検索して inventoryItemId を更新し、自動再試行する（入庫画面用）。
+ * @param {{ locationId: string, rows: unknown[], setRows?: (r: unknown[]) => void, toastFn?: (m: string) => void, phaseLabel?: string }} opts
+ */
+export async function ensureInventoryActivatedWithSkuBarcodeRetryRows({
+  locationId,
+  rows,
+  setRows,
+  toastFn,
+  phaseLabel = "在庫追跡有効化",
+}) {
+  return runInventoryActivateSkuRetry({
+    initialRows: rows,
+    runActivate: (uniqueIds) => ensureInventoryActivatedAtLocation({ locationId, inventoryItemIds: uniqueIds }),
+    searchVariants: async (q, opts) => {
+      const r = await searchVariants(q, opts);
+      return { nodes: r?.nodes ?? [] };
+    },
+    variantCache: VariantCache,
+    setRows,
+    toastFn,
+    phaseLabel,
+  });
+}

@@ -42,6 +42,7 @@ import {
   useDebounce,
 } from "./modalUiParts.jsx";
 import { logInventoryChangeToApi } from "../../common/logInventoryChange.js";
+import { ensureInventoryActivatedWithSkuBarcodeRetry } from "../../common/inventoryActivateRetry.js";
 
 const SHOPIFY = globalThis?.shopify;
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -6333,6 +6334,73 @@ function OutboundList({
     return metaById;
   }, [lines]);
 
+  /** ゲート用: missing 行のサブセットで SKU/バーコード再試行し、待機用の inventoryItemId 一覧を返す */
+  const activateOutboundGateLocationWithSkuRetry = useCallback(
+    async (locationId, ids, phaseLabel) => {
+      const idSet = new Set(ids.map((x) => String(x || "").trim()).filter(Boolean));
+      const subset = (lines || []).filter((l) => idSet.has(String(l?.inventoryItemId || "").trim()));
+      if (!locationId || idSet.size === 0) {
+        return { ok: true, inventoryItemIdsForWait: [...idSet] };
+      }
+
+      if (subset.length === 0) {
+        const uniqueIds = [...idSet];
+        const r = await ensureInventoryActivatedAtLocation({
+          locationId,
+          inventoryItemIds: uniqueIds,
+          debug,
+        });
+        if (!r?.ok) {
+          return {
+            ok: false,
+            message:
+              (r?.errors || []).map((e) => e.message).filter(Boolean).join(" / ") || "在庫の有効化に失敗しました",
+            inventoryItemIdsForWait: uniqueIds,
+          };
+        }
+        return { ok: true, inventoryItemIdsForWait: uniqueIds };
+      }
+
+      const retryRes = await ensureInventoryActivatedWithSkuBarcodeRetry({
+        initialRows: subset.map((l) => ({ ...l })),
+        runActivate: (uniqueIds) =>
+          ensureInventoryActivatedAtLocation({
+            locationId,
+            inventoryItemIds: uniqueIds,
+            debug,
+          }),
+        searchVariants: async (q, opts) => {
+          const res = await searchVariants(q, opts);
+          return { nodes: res?.nodes ?? [] };
+        },
+        variantCache: VariantCache,
+        setRows: (nextSubset) => {
+          setLines((prev) =>
+            prev.map((line) => {
+              const hit = nextSubset.find((x) => x.id === line.id);
+              return hit ? { ...line, ...hit } : line;
+            })
+          );
+        },
+        toastFn: toast,
+        phaseLabel,
+      });
+
+      if (!retryRes.ok) {
+        return {
+          ok: false,
+          message: retryRes.message,
+          inventoryItemIdsForWait: [...idSet],
+        };
+      }
+      const newIds = [
+        ...new Set(retryRes.rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean)),
+      ];
+      return { ok: true, inventoryItemIdsForWait: newIds };
+    },
+    [lines, setLines, debug, toast]
+  );
+
   const refreshOutboundGate = useCallback(async () => {
     if (!destinationLocationId || !Array.isArray(lines) || lines.length === 0) {
       setGateDestMissing([]);
@@ -6474,34 +6542,52 @@ function OutboundList({
         }
 
         if (originLocationGid) {
-          const originR = await ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
-            locationId: originLocationGid,
-            lines: workingLines,
-            setLines,
-            debug,
+          const originR = await ensureInventoryActivatedWithSkuBarcodeRetry({
+            initialRows: workingLines,
+            runActivate: (uniqueIds) =>
+              ensureInventoryActivatedAtLocation({
+                locationId: originLocationGid,
+                inventoryItemIds: uniqueIds,
+                debug,
+              }),
+            searchVariants: async (q, opts) => {
+              const res = await searchVariants(q, opts);
+              return { nodes: res?.nodes ?? [] };
+            },
+            variantCache: VariantCache,
+            setRows: setLines,
             toastFn: toast,
             phaseLabel: "出庫元の在庫追跡有効化",
           });
           if (!originR?.ok) {
             throw new Error(originR?.message || "出庫元の在庫追跡有効化に失敗しました");
           }
-          workingLines = originR.lines;
+          workingLines = originR.rows;
           ({ lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLines());
         }
 
         if (destinationLocationId) {
-          const destR = await ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
-            locationId: destinationLocationId,
-            lines: workingLines,
-            setLines,
-            debug,
+          const destR = await ensureInventoryActivatedWithSkuBarcodeRetry({
+            initialRows: workingLines,
+            runActivate: (uniqueIds) =>
+              ensureInventoryActivatedAtLocation({
+                locationId: destinationLocationId,
+                inventoryItemIds: uniqueIds,
+                debug,
+              }),
+            searchVariants: async (q, opts) => {
+              const res = await searchVariants(q, opts);
+              return { nodes: res?.nodes ?? [] };
+            },
+            variantCache: VariantCache,
+            setRows: setLines,
             toastFn: toast,
             phaseLabel: "宛先の在庫追跡有効化",
           });
           if (!destR?.ok) {
             throw new Error(destR?.message || "宛先の在庫追跡有効化に失敗しました");
           }
-          workingLines = destR.lines;
+          workingLines = destR.rows;
           ({ lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLines());
         }
       }
@@ -6939,34 +7025,52 @@ function OutboundList({
         }
 
         if (originLocationGid) {
-          const originR = await ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
-            locationId: originLocationGid,
-            lines: workingLinesRts,
-            setLines,
-            debug,
+          const originR = await ensureInventoryActivatedWithSkuBarcodeRetry({
+            initialRows: workingLinesRts,
+            runActivate: (uniqueIds) =>
+              ensureInventoryActivatedAtLocation({
+                locationId: originLocationGid,
+                inventoryItemIds: uniqueIds,
+                debug,
+              }),
+            searchVariants: async (q, opts) => {
+              const res = await searchVariants(q, opts);
+              return { nodes: res?.nodes ?? [] };
+            },
+            variantCache: VariantCache,
+            setRows: setLines,
             toastFn: toast,
             phaseLabel: "出庫元の在庫追跡有効化",
           });
           if (!originR?.ok) {
             throw new Error(originR?.message || "出庫元の在庫追跡有効化に失敗しました");
           }
-          workingLinesRts = originR.lines;
+          workingLinesRts = originR.rows;
           ({ lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLinesRts());
         }
 
         if (destinationLocationId) {
-          const destR = await ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
-            locationId: destinationLocationId,
-            lines: workingLinesRts,
-            setLines,
-            debug,
+          const destR = await ensureInventoryActivatedWithSkuBarcodeRetry({
+            initialRows: workingLinesRts,
+            runActivate: (uniqueIds) =>
+              ensureInventoryActivatedAtLocation({
+                locationId: destinationLocationId,
+                inventoryItemIds: uniqueIds,
+                debug,
+              }),
+            searchVariants: async (q, opts) => {
+              const res = await searchVariants(q, opts);
+              return { nodes: res?.nodes ?? [] };
+            },
+            variantCache: VariantCache,
+            setRows: setLines,
             toastFn: toast,
             phaseLabel: "宛先の在庫追跡有効化",
           });
           if (!destR?.ok) {
             throw new Error(destR?.message || "宛先の在庫追跡有効化に失敗しました");
           }
-          workingLinesRts = destR.lines;
+          workingLinesRts = destR.rows;
           ({ lineItems, lineItemsMeta } = rebuildLinePayloadFromWorkingLinesRts());
         }
 
@@ -7787,17 +7891,33 @@ function OutboundList({
               // 3) 出庫元 missing → activate → 反映待ち（失敗時は止める）
               if (gateOriginMissing.length > 0 && originLocationGid) {
                 const ids = gateOriginMissing.map((m) => String(m.inventoryItemId)).filter(Boolean);
-
-                await ensureInventoryActivatedAtLocation({
-                  locationId: originLocationGid,
-                  inventoryItemIds: ids,
-                  debug,
-                });
-
+                const gateOriginAct = await activateOutboundGateLocationWithSkuRetry(
+                  originLocationGid,
+                  ids,
+                  "出庫元の在庫追跡有効化"
+                );
+                if (!gateOriginAct.ok) {
+                  toast(gateOriginAct.message || "出庫元の在庫有効化に失敗しました");
+                  return;
+                }
+                const idsOriginWait = gateOriginAct.inventoryItemIdsForWait || ids;
+                const metaOriginWait = { ...metaById };
+                for (const id of idsOriginWait) {
+                  if (!metaOriginWait[id]) {
+                    metaOriginWait[id] = {
+                      inventoryItemId: id,
+                      title: id,
+                      variantTitle: "",
+                      sku: "",
+                      qty: 1,
+                      available: null,
+                    };
+                  }
+                }
                 const waited = await waitForMissingInventoryLevelsToClear({
                   locationId: originLocationGid,
-                  inventoryItemIds: ids,
-                  metaById,
+                  inventoryItemIds: idsOriginWait,
+                  metaById: metaOriginWait,
                   timeoutMs: 20000,
                   intervalMs: 900,
                   debug,
@@ -7812,17 +7932,33 @@ function OutboundList({
               // 4) 宛先 missing → activate → 反映待ち（失敗時は止める）
               if (gateDestMissing.length > 0 && destinationLocationId) {
                 const ids = gateDestMissing.map((m) => String(m.inventoryItemId)).filter(Boolean);
-
-                await ensureInventoryActivatedAtLocation({
-                  locationId: destinationLocationId,
-                  inventoryItemIds: ids,
-                  debug,
-                });
-
+                const gateDestAct = await activateOutboundGateLocationWithSkuRetry(
+                  destinationLocationId,
+                  ids,
+                  "宛先の在庫追跡有効化"
+                );
+                if (!gateDestAct.ok) {
+                  toast(gateDestAct.message || "宛先の在庫有効化に失敗しました");
+                  return;
+                }
+                const idsDestWait = gateDestAct.inventoryItemIdsForWait || ids;
+                const metaDestWait = { ...metaById };
+                for (const id of idsDestWait) {
+                  if (!metaDestWait[id]) {
+                    metaDestWait[id] = {
+                      inventoryItemId: id,
+                      title: id,
+                      variantTitle: "",
+                      sku: "",
+                      qty: 1,
+                      available: null,
+                    };
+                  }
+                }
                 const waited = await waitForMissingInventoryLevelsToClear({
                   locationId: destinationLocationId,
-                  inventoryItemIds: ids,
-                  metaById,
+                  inventoryItemIds: idsDestWait,
+                  metaById: metaDestWait,
                   timeoutMs: 20000,
                   intervalMs: 900,
                   debug,
@@ -7867,17 +8003,33 @@ function OutboundList({
               // 3) 出庫元 missing → activate → 反映待ち（失敗時は止める）
               if (gateOriginMissing.length > 0 && originLocationGid) {
                 const ids = gateOriginMissing.map((m) => String(m.inventoryItemId)).filter(Boolean);
-
-                await ensureInventoryActivatedAtLocation({
-                  locationId: originLocationGid,
-                  inventoryItemIds: ids,
-                  debug,
-                });
-
+                const gateOriginAct = await activateOutboundGateLocationWithSkuRetry(
+                  originLocationGid,
+                  ids,
+                  "出庫元の在庫追跡有効化"
+                );
+                if (!gateOriginAct.ok) {
+                  toast(gateOriginAct.message || "出庫元の在庫有効化に失敗しました");
+                  return;
+                }
+                const idsOriginWait = gateOriginAct.inventoryItemIdsForWait || ids;
+                const metaOriginWait = { ...metaById };
+                for (const id of idsOriginWait) {
+                  if (!metaOriginWait[id]) {
+                    metaOriginWait[id] = {
+                      inventoryItemId: id,
+                      title: id,
+                      variantTitle: "",
+                      sku: "",
+                      qty: 1,
+                      available: null,
+                    };
+                  }
+                }
                 const waited = await waitForMissingInventoryLevelsToClear({
                   locationId: originLocationGid,
-                  inventoryItemIds: ids,
-                  metaById,
+                  inventoryItemIds: idsOriginWait,
+                  metaById: metaOriginWait,
                   timeoutMs: 20000,
                   intervalMs: 900,
                   debug,
@@ -7892,17 +8044,33 @@ function OutboundList({
               // 4) 宛先 missing → activate → 反映待ち（失敗時は止める）
               if (gateDestMissing.length > 0 && destinationLocationId) {
                 const ids = gateDestMissing.map((m) => String(m.inventoryItemId)).filter(Boolean);
-
-                await ensureInventoryActivatedAtLocation({
-                  locationId: destinationLocationId,
-                  inventoryItemIds: ids,
-                  debug,
-                });
-
+                const gateDestAct = await activateOutboundGateLocationWithSkuRetry(
+                  destinationLocationId,
+                  ids,
+                  "宛先の在庫追跡有効化"
+                );
+                if (!gateDestAct.ok) {
+                  toast(gateDestAct.message || "宛先の在庫有効化に失敗しました");
+                  return;
+                }
+                const idsDestWait = gateDestAct.inventoryItemIdsForWait || ids;
+                const metaDestWait = { ...metaById };
+                for (const id of idsDestWait) {
+                  if (!metaDestWait[id]) {
+                    metaDestWait[id] = {
+                      inventoryItemId: id,
+                      title: id,
+                      variantTitle: "",
+                      sku: "",
+                      qty: 1,
+                      available: null,
+                    };
+                  }
+                }
                 const waited = await waitForMissingInventoryLevelsToClear({
                   locationId: destinationLocationId,
-                  inventoryItemIds: ids,
-                  metaById,
+                  inventoryItemIds: idsDestWait,
+                  metaById: metaDestWait,
                   timeoutMs: 20000,
                   intervalMs: 900,
                   debug,
@@ -8050,17 +8218,33 @@ function OutboundList({
               // 3) 出庫元 missing → activate → 反映待ち（失敗時は止める）
               if (gateOriginMissing.length > 0 && originLocationGid) {
                 const ids = gateOriginMissing.map((m) => String(m.inventoryItemId)).filter(Boolean);
-
-                await ensureInventoryActivatedAtLocation({
-                  locationId: originLocationGid,
-                  inventoryItemIds: ids,
-                  debug,
-                });
-
+                const gateOriginAct = await activateOutboundGateLocationWithSkuRetry(
+                  originLocationGid,
+                  ids,
+                  "出庫元の在庫追跡有効化"
+                );
+                if (!gateOriginAct.ok) {
+                  toast(gateOriginAct.message || "出庫元の在庫有効化に失敗しました");
+                  return;
+                }
+                const idsOriginWait = gateOriginAct.inventoryItemIdsForWait || ids;
+                const metaOriginWait = { ...metaById };
+                for (const id of idsOriginWait) {
+                  if (!metaOriginWait[id]) {
+                    metaOriginWait[id] = {
+                      inventoryItemId: id,
+                      title: id,
+                      variantTitle: "",
+                      sku: "",
+                      qty: 1,
+                      available: null,
+                    };
+                  }
+                }
                 const waited = await waitForMissingInventoryLevelsToClear({
                   locationId: originLocationGid,
-                  inventoryItemIds: ids,
-                  metaById,
+                  inventoryItemIds: idsOriginWait,
+                  metaById: metaOriginWait,
                   timeoutMs: 20000,
                   intervalMs: 900,
                   debug,
@@ -8075,17 +8259,33 @@ function OutboundList({
               // 4) 宛先 missing → activate → 反映待ち（失敗時は止める）
               if (gateDestMissing.length > 0 && destinationLocationId) {
                 const ids = gateDestMissing.map((m) => String(m.inventoryItemId)).filter(Boolean);
-
-                await ensureInventoryActivatedAtLocation({
-                  locationId: destinationLocationId,
-                  inventoryItemIds: ids,
-                  debug,
-                });
-
+                const gateDestAct = await activateOutboundGateLocationWithSkuRetry(
+                  destinationLocationId,
+                  ids,
+                  "宛先の在庫追跡有効化"
+                );
+                if (!gateDestAct.ok) {
+                  toast(gateDestAct.message || "宛先の在庫有効化に失敗しました");
+                  return;
+                }
+                const idsDestWait = gateDestAct.inventoryItemIdsForWait || ids;
+                const metaDestWait = { ...metaById };
+                for (const id of idsDestWait) {
+                  if (!metaDestWait[id]) {
+                    metaDestWait[id] = {
+                      inventoryItemId: id,
+                      title: id,
+                      variantTitle: "",
+                      sku: "",
+                      qty: 1,
+                      available: null,
+                    };
+                  }
+                }
                 const waited = await waitForMissingInventoryLevelsToClear({
                   locationId: destinationLocationId,
-                  inventoryItemIds: ids,
-                  metaById,
+                  inventoryItemIds: idsDestWait,
+                  metaById: metaDestWait,
                   timeoutMs: 20000,
                   intervalMs: 900,
                   debug,
@@ -8133,17 +8333,33 @@ function OutboundList({
               // 3) 出庫元 missing → activate → 反映待ち（失敗時は止める）
               if (gateOriginMissing.length > 0 && originLocationGid) {
                 const ids = gateOriginMissing.map((m) => String(m.inventoryItemId)).filter(Boolean);
-
-                await ensureInventoryActivatedAtLocation({
-                  locationId: originLocationGid,
-                  inventoryItemIds: ids,
-                  debug,
-                });
-
+                const gateOriginAct = await activateOutboundGateLocationWithSkuRetry(
+                  originLocationGid,
+                  ids,
+                  "出庫元の在庫追跡有効化"
+                );
+                if (!gateOriginAct.ok) {
+                  toast(gateOriginAct.message || "出庫元の在庫有効化に失敗しました");
+                  return;
+                }
+                const idsOriginWait = gateOriginAct.inventoryItemIdsForWait || ids;
+                const metaOriginWait = { ...metaById };
+                for (const id of idsOriginWait) {
+                  if (!metaOriginWait[id]) {
+                    metaOriginWait[id] = {
+                      inventoryItemId: id,
+                      title: id,
+                      variantTitle: "",
+                      sku: "",
+                      qty: 1,
+                      available: null,
+                    };
+                  }
+                }
                 const waited = await waitForMissingInventoryLevelsToClear({
                   locationId: originLocationGid,
-                  inventoryItemIds: ids,
-                  metaById,
+                  inventoryItemIds: idsOriginWait,
+                  metaById: metaOriginWait,
                   timeoutMs: 20000,
                   intervalMs: 900,
                   debug,
@@ -8158,17 +8374,33 @@ function OutboundList({
               // 4) 宛先 missing → activate → 反映待ち（失敗時は止める）
               if (gateDestMissing.length > 0 && destinationLocationId) {
                 const ids = gateDestMissing.map((m) => String(m.inventoryItemId)).filter(Boolean);
-
-                await ensureInventoryActivatedAtLocation({
-                  locationId: destinationLocationId,
-                  inventoryItemIds: ids,
-                  debug,
-                });
-
+                const gateDestAct = await activateOutboundGateLocationWithSkuRetry(
+                  destinationLocationId,
+                  ids,
+                  "宛先の在庫追跡有効化"
+                );
+                if (!gateDestAct.ok) {
+                  toast(gateDestAct.message || "宛先の在庫有効化に失敗しました");
+                  return;
+                }
+                const idsDestWait = gateDestAct.inventoryItemIdsForWait || ids;
+                const metaDestWait = { ...metaById };
+                for (const id of idsDestWait) {
+                  if (!metaDestWait[id]) {
+                    metaDestWait[id] = {
+                      inventoryItemId: id,
+                      title: id,
+                      variantTitle: "",
+                      sku: "",
+                      qty: 1,
+                      available: null,
+                    };
+                  }
+                }
                 const waited = await waitForMissingInventoryLevelsToClear({
                   locationId: destinationLocationId,
-                  inventoryItemIds: ids,
-                  metaById,
+                  inventoryItemIds: idsDestWait,
+                  metaById: metaDestWait,
                   timeoutMs: 20000,
                   intervalMs: 900,
                   debug,
@@ -8699,225 +8931,8 @@ async function fetchInventoryItemAvailable({ inventoryItemId, locationGid }) {
 
 /* =========================
    Ensure destination has inventory levels (Outbound/Inbound extras)
+   ※ SKU/バーコード再試行ロジックは ../../common/inventoryActivateRetry.js に集約
 */
-
-/** 出庫行に Admin 検索結果をマージ（ラベル・画像など） */
-function mergeOutboundLineWithResolvedVariant(line, v) {
-  if (!v?.variantId || !v?.inventoryItemId) return null;
-  const productTitle = String(v.productTitle || "").trim();
-  const variantTitle = String(v.variantTitle || "").trim();
-  const sku = String(v.sku || "").trim();
-  const label =
-    productTitle || variantTitle || sku
-      ? `${productTitle} / ${variantTitle}${sku ? `（${sku}）` : ""}`.trim()
-      : String(line?.label || "").trim();
-
-  return {
-    ...line,
-    variantId: v.variantId,
-    inventoryItemId: v.inventoryItemId,
-    sku: sku || line.sku,
-    barcode: String(v.barcode || "").trim() || line.barcode,
-    productTitle: productTitle || line.productTitle,
-    variantTitle: variantTitle || line.variantTitle,
-    imageUrl: v.imageUrl || line.imageUrl,
-    label: label || line.label,
-  };
-}
-
-/**
- * バーコード → 失敗時 SKU の順でキャッシュを無視して検索し、在庫アイテムIDが変われば行を更新する。
- */
-async function tryRefreshOutboundLineFromShopify(line, { includeImages = false } = {}) {
-  const oldInv = String(line?.inventoryItemId || "").trim();
-  const barcodeRaw = String(line?.barcode || "").trim();
-  const skuRaw = String(line?.sku || "").trim();
-
-  async function fetchFresh(rawQuery, pickNormSource) {
-    const norm = normalizeScanCode_(pickNormSource || rawQuery);
-    if (!norm) return null;
-    try {
-      await VariantCache.delete(norm);
-    } catch (_) {}
-    const { nodes } = await searchVariants(rawQuery, { includeImages });
-    const v = pickBestVariant_(norm, nodes);
-    if (!v?.variantId || !v?.inventoryItemId) return null;
-    if (String(v.inventoryItemId).trim() === oldInv) return null;
-    return v;
-  }
-
-  let v = await fetchFresh(barcodeRaw, barcodeRaw);
-  if (!v) v = await fetchFresh(skuRaw, skuRaw);
-  if (!v) return null;
-
-  const merged = mergeOutboundLineWithResolvedVariant(line, v);
-  if (!merged) return null;
-
-  const cacheObj = {
-    variantId: merged.variantId,
-    inventoryItemId: merged.inventoryItemId,
-    sku: merged.sku || "",
-    barcode: merged.barcode || "",
-    productTitle: merged.productTitle || "",
-    variantTitle: merged.variantTitle || "",
-    imageUrl: merged.imageUrl || "",
-  };
-  const keys = new Set(
-    [
-      normalizeScanCode_(merged.barcode),
-      normalizeScanCode_(merged.sku),
-      normalizeScanCode_(barcodeRaw),
-      normalizeScanCode_(skuRaw),
-    ].filter(Boolean)
-  );
-  for (const k of keys) {
-    try {
-      await VariantCache.put(k, cacheObj);
-    } catch (_) {}
-  }
-  return merged;
-}
-
-async function refreshOutboundLinesForInventoryItemIds(lines, problematicIds, opts = {}) {
-  const idSet =
-    problematicIds instanceof Set
-      ? problematicIds
-      : new Set(
-          Array.isArray(problematicIds)
-            ? problematicIds.map((x) => String(x || "").trim()).filter(Boolean)
-            : []
-        );
-
-  let changed = 0;
-  const next = [];
-
-  for (const line of lines) {
-    const inv = String(line?.inventoryItemId || "").trim();
-    if (!idSet.has(inv)) {
-      next.push(line);
-      continue;
-    }
-    const refreshed = await tryRefreshOutboundLineFromShopify(line, opts);
-    if (refreshed) {
-      next.push(refreshed);
-      changed++;
-    } else {
-      next.push(line);
-    }
-  }
-
-  return { lines: next, changed };
-}
-
-/**
- * 在庫有効化が失敗したとき、SKU/バーコードで再検索して行のIDを更新し、自動で数回まで再試行する。
- */
-async function ensureInventoryActivatedAtLocationWithSkuBarcodeRetry({
-  locationId,
-  lines: initialLines,
-  setLines,
-  debug,
-  toastFn,
-  phaseLabel,
-}) {
-  const MAX_ATTEMPTS = 3;
-  let working = initialLines.map((l) => ({ ...l }));
-
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const inventoryItemIds = working
-      .map((l) => String(l?.inventoryItemId || "").trim())
-      .filter(Boolean);
-    if (inventoryItemIds.length === 0) {
-      return { ok: true, lines: working };
-    }
-
-    const requestedUnique = [...new Set(inventoryItemIds)];
-
-    if (typeof toastFn === "function") {
-      toastFn(
-        attempt === 0
-          ? `${phaseLabel}中... (${inventoryItemIds.length}件)`
-          : `${phaseLabel}中... 再試行 (${attempt + 1}/${MAX_ATTEMPTS})`
-      );
-    }
-
-    const activateResult = await ensureInventoryActivatedAtLocation({
-      locationId,
-      inventoryItemIds: requestedUnique,
-      debug,
-    });
-
-    const activatedSet = new Set(
-      (activateResult?.activated || [])
-        .map((a) => String(a?.inventoryItemId || "").trim())
-        .filter(Boolean)
-    );
-    const errorIds = new Set(
-      (activateResult?.errors || [])
-        .map((e) => String(e?.inventoryItemId || "").trim())
-        .filter(Boolean)
-    );
-    const missingFromActivated = requestedUnique.filter((id) => !activatedSet.has(id));
-    const problematicIds = new Set([...errorIds, ...missingFromActivated]);
-
-    const fullyCovered = activateResult?.ok === true && missingFromActivated.length === 0;
-
-    if (fullyCovered) {
-      if (typeof toastFn === "function") {
-        toastFn(`${phaseLabel}完了 (${requestedUnique.length}件)`);
-      }
-      if (typeof setLines === "function") setLines(working);
-      return { ok: true, lines: working };
-    }
-
-    if (attempt >= MAX_ATTEMPTS - 1) {
-      const errorDetails = (activateResult?.errors || [])
-        .map((e) => {
-          const meta = working.find(
-            (l) => String(l?.inventoryItemId || "").trim() === String(e?.inventoryItemId || "").trim()
-          );
-          const itemName = meta?.productTitle || meta?.title || meta?.label || e?.inventoryItemId || "不明";
-          return `${itemName}: ${e?.message || ""}`;
-        })
-        .filter(Boolean);
-      let msg = `${phaseLabel}に失敗しました`;
-      if (errorDetails.length) msg += `:\n${errorDetails.join("\n")}`;
-      else if (missingFromActivated.length) {
-        msg += `（無効な在庫アイテムIDの可能性: ${missingFromActivated.length}件）`;
-      }
-      if (typeof toastFn === "function") toastFn(msg);
-      return { ok: false, lines: working, message: msg };
-    }
-
-    if (problematicIds.size === 0) {
-      const msg = `${phaseLabel}に失敗しました（想定外の応答です）`;
-      if (typeof toastFn === "function") toastFn(msg);
-      return { ok: false, lines: working, message: msg };
-    }
-
-    if (typeof toastFn === "function") {
-      toastFn("有効化エラーのため、SKU/バーコードで再検索してIDを更新します…");
-    }
-
-    const refreshResult = await refreshOutboundLinesForInventoryItemIds(working, problematicIds, {
-      includeImages: false,
-    });
-
-    if (refreshResult.changed === 0) {
-      const msg = `${phaseLabel}に失敗しました（SKU/バーコードでの再検索でもIDを更新できませんでした）`;
-      if (typeof toastFn === "function") toastFn(msg);
-      return { ok: false, lines: working, message: msg };
-    }
-
-    working = refreshResult.lines;
-    if (typeof setLines === "function") setLines(working);
-    if (typeof toastFn === "function") {
-      toastFn(`商品IDを ${refreshResult.changed} 件更新しました。もう一度有効化します…`);
-    }
-  }
-
-  return { ok: false, lines: working, message: `${phaseLabel}に失敗しました（再試行上限）` };
-}
 
 // inventoryActivate を “必要なときだけ available 付き” で呼べるようにする
 async function ensureInventoryActivatedAtLocation({

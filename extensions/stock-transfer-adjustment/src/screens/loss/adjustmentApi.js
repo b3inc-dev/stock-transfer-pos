@@ -1,3 +1,5 @@
+import { ensureInventoryActivatedWithSkuBarcodeRetry } from "../../../../common/inventoryActivateRetry.js";
+
 const ADJUSTMENT_NS = "stock_transfer_pos";
 const ADJUSTMENT_KEY = "adjustment_entries_v1";
 const SHOPIFY = globalThis?.shopify ?? {};
@@ -340,10 +342,25 @@ const VariantCache = (() => {
     }
   }
 
+  async function delete_(codeRaw) {
+    const code = normalizeScanCode_(codeRaw);
+    if (!code) return;
+    await init_();
+    const idx = chunkIndexForCode_(code);
+    const map = await loadChunk_(idx);
+    if (map && Object.prototype.hasOwnProperty.call(map, code)) {
+      delete map[code];
+      chunks.set(idx, map);
+      dirtyChunks.add(idx);
+      scheduleFlush_();
+    }
+  }
+
   return {
     init: init_,
     get,
     put,
+    delete: delete_,
     flush: flush_,
     clearAll,
   };
@@ -861,15 +878,28 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     return { valid: true, inventoryItemId: inventoryItemGid, quantity, compareQuantity: 0 };
   });
 
-  const quantities = quantitiesWithStatus.filter((x) => x.valid);
   const invalidCount = quantitiesWithStatus.filter((x) => !x.valid).length;
 
   if (invalidCount > 0) {
     console.warn(`[adjustInventoryToActual] ${invalidCount}件の不正なinventoryItemIdを除外しました`);
   }
 
-  if (!locationId || quantities.length === 0) {
-    if (quantities.length === 0 && (items ?? []).length > 0) {
+  const activationRows = validItems
+    .map((x) => {
+      const inventoryItemGid = toInventoryItemGid(x.inventoryItemId);
+      if (!inventoryItemGid) return null;
+      return {
+        ...x,
+        inventoryItemId: inventoryItemGid,
+        quantity: Math.floor(Number(x.actualQuantity) || 0),
+        sku: String(x.sku ?? "").trim(),
+        barcode: String(x.barcode ?? "").trim(),
+      };
+    })
+    .filter(Boolean);
+
+  if (!locationId || activationRows.length === 0) {
+    if (activationRows.length === 0 && (items ?? []).length > 0) {
       const errMsg = invalidCount > 0
         ? `有効な在庫アイテムIDがありません（${invalidCount}件が不正なIDのため除外されました）`
         : "有効な在庫アイテムIDがありません";
@@ -878,25 +908,37 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     return { adjustmentGroup: null, invalidCount, processedCount: 0 };
   }
 
-  // ロケーションに在庫レベルがないアイテムがあると inventorySetQuantities が失敗するため、先に在庫有効化（棚卸と同様）
-  let activateResult = await ensureInventoryActivatedAtLocation({
-    locationGid,
-    items: quantities.map((q) => ({ inventoryItemId: q.inventoryItemId, quantity: q.quantity })),
+  const activateRes = await ensureInventoryActivatedWithSkuBarcodeRetry({
+    initialRows: activationRows,
+    runActivate: (uniqueIds, working) => {
+      const idSet = new Set(uniqueIds);
+      const actItems = working
+        .filter((r) => idSet.has(String(r.inventoryItemId || "").trim()))
+        .map((r) => ({
+          inventoryItemId: r.inventoryItemId,
+          quantity: Number.isFinite(Number(r.quantity)) ? Math.floor(Number(r.quantity)) : 0,
+        }));
+      return ensureInventoryActivatedAtLocation({ locationGid, items: actItems });
+    },
+    searchVariants: async (q, opts) => {
+      const r = await searchVariants(q, opts);
+      return { nodes: r?.nodes ?? [] };
+    },
+    variantCache: VariantCache,
+    setRows: null,
+    toastFn: null,
+    phaseLabel: "在庫調整・在庫追跡有効化",
   });
-  const maxActivateRetries = 2;
-  for (let r = 0; r < maxActivateRetries && (activateResult.errors ?? []).length > 0; r++) {
-    const failedIds = new Set((activateResult.errors ?? []).map((e) => e.inventoryItemId));
-    const failedItems = quantities.filter((q) => failedIds.has(q.inventoryItemId));
-    if (failedItems.length === 0) break;
-    await new Promise((resolve) => setTimeout(resolve, 1000 * (r + 1)));
-    activateResult = await ensureInventoryActivatedAtLocation({
-      locationGid,
-      items: failedItems.map((q) => ({ inventoryItemId: q.inventoryItemId, quantity: q.quantity })),
-    });
+
+  if (!activateRes.ok) {
+    throw new Error(activateRes.message || "在庫有効化に失敗しました");
   }
-  if ((activateResult.errors ?? []).length > 0) {
-    throw new Error("在庫有効化に失敗しました");
-  }
+
+  let quantities = activateRes.rows.map((r) => ({
+    inventoryItemId: r.inventoryItemId,
+    quantity: Math.floor(Number(r.quantity) || 0),
+    compareQuantity: 0,
+  }));
 
   const uri = referenceDocumentUri ? `gid://stock-transfer-pos/AdjustmentEntry/${referenceDocumentUri}` : null;
   const maxRetries = 3;
