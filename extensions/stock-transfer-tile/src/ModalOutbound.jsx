@@ -6636,7 +6636,7 @@ function OutboundList({
         return { transfer: null, shipment };
       }
 
-      // ②編集モード（同ID）：lineItems を差し替えるだけ（下書き蓄積させない）
+      // ②編集モード（同ID）：明細更新後、必ず Shipment を IN_TRANSIT にする
       const editingTransferId = String(outbound?.editingTransferId || "").trim();
       if (editingTransferId) {
         const transfer = await inventoryTransferSetItemsSafe({
@@ -6644,7 +6644,30 @@ function OutboundList({
           lineItems,
         });
 
-        toast("明細を更新しました（同ID）");
+        const trackingInput = hasShipmentMeta
+          ? {
+              company: resolvedCompany || null,
+              trackingNumber: trackingNumberTrim || null,
+              trackingUrl: trackingUrlTrim || null,
+              arrivesAt: String(outbound.arrivesAtIso || "").trim() || null,
+            }
+          : null;
+        const selectedShipmentIdForConfirm = String(outbound?.historySelectedShipmentId || "").trim();
+        const isVirtualShipment = selectedShipmentIdForConfirm.startsWith("__transfer__");
+        let shipment = null;
+
+        if (selectedShipmentIdForConfirm && !isVirtualShipment) {
+          shipment = await inventoryShipmentMarkInTransit(selectedShipmentIdForConfirm);
+        } else {
+          shipment = await createInventoryShipmentInTransit({
+            movementId: editingTransferId,
+            lineItems,
+            trackingInput,
+            lineItemsMeta,
+          });
+        }
+
+        toast("明細更新と出庫確定を完了しました（IN_TRANSIT）");
 
         // 後処理（新規作成と同等にリセット、商品リストとコンディションの両方の下書きをクリア）
         try { await clearOutboundDraft?.(); } catch (_) {}
@@ -6665,7 +6688,7 @@ function OutboundList({
         }));
 
         (onConfirmSuccess ?? onBack)?.();
-        return { transfer, shipment: null };
+        return { transfer, shipment };
       }
 
       // 1) 在庫追跡有効化処理が完了したことを最終確認（公式推奨：ポーリングで確認）
@@ -9407,6 +9430,19 @@ async function createInventoryShipmentInTransit({ movementId, lineItems, trackin
 
   assertNoUserErrors(data?.inventoryShipmentCreateInTransit, "inventoryShipmentCreateInTransit", lineItemsMeta);
   return data.inventoryShipmentCreateInTransit.inventoryShipment;
+}
+
+async function inventoryShipmentMarkInTransit(shipmentId) {
+  const mutation = `#graphql
+    mutation MarkShipmentInTransit($id: ID!) {
+      inventoryShipmentMarkInTransit(id: $id) {
+        inventoryShipment { id status }
+        userErrors { field message }
+      }
+    }`;
+  const data = await adminGraphql(mutation, { id: shipmentId });
+  assertNoUserErrors(data?.inventoryShipmentMarkInTransit, "inventoryShipmentMarkInTransit");
+  return data?.inventoryShipmentMarkInTransit?.inventoryShipment ?? null;
 }
 
 /** 既存 Transfer に DRAFT シップメントを追加（movementId = Transfer ID） */
