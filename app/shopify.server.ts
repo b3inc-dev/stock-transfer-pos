@@ -7,9 +7,9 @@ import {
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
 
-/** shopify.app.toml の access_scopes と一致させる（SCOPES 未設定時のフォールバック） */
+/** shopify.app.toml の access_scopes と一致させる（SCOPES 未設定時のフォールバック）。read_users は制限付きのため含めない。 */
 const DEFAULT_SCOPES =
-  "read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers,read_orders,read_users";
+  "read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers,read_orders";
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,

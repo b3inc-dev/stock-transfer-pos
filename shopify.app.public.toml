@@ -49,8 +49,8 @@ direct_api_mode = "offline"
 embedded_app_direct_api_access = true
 
 [access_scopes]
-# read_users: api.staff-members（スタッフ一覧）で staffMembers クエリに必要。
-scopes = "read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers,read_orders,read_users"
+# read_users は制限付きスコープのため必須から除外。詳細: docs/ERROR_DEPLOY_READ_USERS_SCOPE.md
+scopes = "read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers,read_orders"
 
 [auth]
 redirect_urls = [ "https://pos-stock.onrender.com" ]

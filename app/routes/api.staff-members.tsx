@@ -38,6 +38,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const result = await response.json();
 
     if (result.errors && result.errors.length > 0) {
+      // read_users スコープがない場合など、権限不足のエラー時は空リストを返す（POS が落ちないようにする）
+      const isAccessError = result.errors.some(
+        (e: { message?: string }) =>
+          /access|permission|scope|read_users|denied/i.test(String(e.message ?? ""))
+      );
+      if (isAccessError) {
+        return new Response(
+          JSON.stringify({ ok: true, staffMembers: [] }),
+          {
+            headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store" },
+          }
+        );
+      }
       return new Response(
         JSON.stringify({ ok: false, error: "Failed to fetch staff members", details: result.errors }),
         { 
