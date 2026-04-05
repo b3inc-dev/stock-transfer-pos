@@ -694,13 +694,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
       { variables: { first: 250 } }
     );
 
-    const data = await resp.json();
-    if (data?.errors?.length) {
-      const errMsg = data.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ");
+    // 変数名を data にしない（react-router の data() と衝突し「is not a function」になる）
+    const gqlJson = await resp.json();
+    if (gqlJson?.errors?.length) {
+      const errMsg = gqlJson.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ");
       throw new Error(`GraphQL error: ${errMsg}`);
     }
-    const locations: LocationNode[] = data?.data?.locations?.nodes ?? [];
-    const raw = data?.data?.currentAppInstallation?.metafield?.value ?? null;
+    const locations: LocationNode[] = gqlJson?.data?.locations?.nodes ?? [];
+    const raw = gqlJson?.data?.currentAppInstallation?.metafield?.value ?? null;
 
     let settings = safeParseSettings(raw);
 
