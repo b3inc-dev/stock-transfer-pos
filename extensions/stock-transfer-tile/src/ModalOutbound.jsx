@@ -6676,7 +6676,7 @@ function OutboundList({
 
         if (lineItems.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
           await assertDraftOrThrowForLineItemResplit(editingTransferId, "出庫確定・明細更新");
-          toast(`明細${lineItems.length}件を同一在庫移動で確定します（Shipment を分割）…`);
+          toast(`明細${lineItems.length}件のため、在庫移動を複数件に分割して確定します…`);
           const split = await outboundOneTransferWithChunkedShipments({
             originLocationId: String(originLocationGid || "").trim(),
             destinationLocationId: String(destinationLocationId || "").trim(),
@@ -6689,10 +6689,13 @@ function OutboundList({
           transfer = split.transfer ?? null;
           const shipList = split.shipments || [];
           shipment = shipList[shipList.length - 1] ?? null;
+          const multiEd = split.transfersMulti;
           toast(
-            shipList.length > 1
-              ? `明細更新と出庫確定を完了しました（同一Transfer・Shipment${shipList.length}件・IN_TRANSIT）`
-              : "明細更新と出庫確定を完了しました（IN_TRANSIT）"
+            multiEd?.length > 1
+              ? `明細更新と出庫確定を完了しました（在庫移動${multiEd.length}件に分割・IN_TRANSIT）`
+              : shipList.length > 1
+                ? `明細更新と出庫確定を完了しました（同一Transfer・Shipment${shipList.length}件・IN_TRANSIT）`
+                : "明細更新と出庫確定を完了しました（IN_TRANSIT）"
           );
         } else {
           transfer = await inventoryTransferSetItemsSafe({
@@ -6934,7 +6937,7 @@ function OutboundList({
       // 2) Transfer 1 件（先頭最大250明細）＋ 同一 movement で Shipment をチャンク分割（IN_TRANSIT）
       const splitCount = chunkLineItemsWithMeta(lineItems, lineItemsMeta).length;
       if (splitCount > 1) {
-        toast(`明細${lineItems.length}件を同一在庫移動に載せ、配送（Shipment）を${splitCount}件に分割します`);
+        toast(`明細${lineItems.length}件のため、在庫移動を${splitCount}件に分割して確定します（1件あたり最大${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}明細）`);
       } else {
         toast("Transfer作成中...");
       }
@@ -6965,11 +6968,14 @@ function OutboundList({
 
       const shipListNew = splitNew.shipments || [];
       const shipment = shipListNew[shipListNew.length - 1] ?? null;
+      const multiTr = splitNew.transfersMulti;
 
       toast(
-        shipListNew.length > 1
-          ? `出庫を作成しました（同一Transfer・Shipment${shipListNew.length}件・進行中）`
-          : "出庫を作成しました（進行中）"
+        multiTr?.length > 1
+          ? `出庫を作成しました（在庫移動${multiTr.length}件に分割・各Shipment進行中）`
+          : shipListNew.length > 1
+            ? `出庫を作成しました（同一Transfer・Shipment${shipListNew.length}件・進行中）`
+            : "出庫を作成しました（進行中）"
       );
 
       // UIを先に更新してから、残りはバックグラウンドで実行
@@ -7284,11 +7290,14 @@ function OutboundList({
             mode: "ready_with_draft_overflow",
           });
           transfer = splitRts.transfer ?? null;
+          const multiRts = splitRts.transfersMulti;
           const extraShip = splitRts.shipments?.length || 0;
           toast(
-            extraShip > 0
-              ? `配送準備完了で作成しました（同一Transfer・続きはDRAFT Shipment ${extraShip}件。元の下書きはキャンセル済み）`
-              : "配送準備完了で作成しました（元の下書きはキャンセル済み）"
+            multiRts?.length > 1
+              ? `配送準備完了で作成しました（在庫移動${multiRts.length}件に分割。元の下書きはキャンセル済み）`
+              : extraShip > 0
+                ? `配送準備完了で作成しました（同一Transfer・続きはDRAFT Shipment ${extraShip}件。元の下書きはキャンセル済み）`
+                : "配送準備完了で作成しました（元の下書きはキャンセル済み）"
           );
         } else {
           transfer = await inventoryTransferSetItemsSafe({
@@ -7348,11 +7357,14 @@ function OutboundList({
             mode: "ready_with_draft_overflow",
           });
           transfer = splitDraft.transfer ?? null;
+          const multiDf = splitDraft.transfersMulti;
           const extraD = splitDraft.shipments?.length || 0;
           toast(
-            extraD > 0
-              ? `配送準備完了にしました（同一Transfer・続きはDRAFT Shipment ${extraD}件）`
-              : "配送準備完了にしました"
+            multiDf?.length > 1
+              ? `配送準備完了にしました（在庫移動${multiDf.length}件に分割）`
+              : extraD > 0
+                ? `配送準備完了にしました（同一Transfer・続きはDRAFT Shipment ${extraD}件）`
+                : "配送準備完了にしました"
           );
         } else {
           transfer = await inventoryTransferSetItemsSafe({
@@ -7390,10 +7402,10 @@ function OutboundList({
         return { transfer, shipment: null };
       }
 
-      // 新規作成：READY_TO_SHIP（先頭チャンク）＋ 250超は同一Transferに DRAFT Shipment で分割
+      // 新規作成：READY_TO_SHIP。250超は在庫移動（Transfer）を複数作成（各最大250明細）
       const splitCountRts = chunkLineItemsWithMeta(lineItems, lineItemsMeta).length;
       if (splitCountRts > 1) {
-        toast(`明細${lineItems.length}件を同一在庫移動で配送準備完了にします（続きは DRAFT Shipment に分割）`);
+        toast(`明細${lineItems.length}件のため、在庫移動を${splitCountRts}件に分割して配送準備完了にします`);
       } else {
         toast("Transfer作成中...");
       }
@@ -7407,14 +7419,15 @@ function OutboundList({
         mode: "ready_with_draft_overflow",
       });
       const transfer = splitRtsNew.transfer ?? null;
+      const multiNew = splitRtsNew.transfersMulti;
       const extraN = splitRtsNew.shipments?.length || 0;
       toast(
-        extraN > 0
-          ? `配送準備完了で作成しました（同一Transfer・追加DRAFT Shipment ${extraN}件）`
-          : "配送準備完了で作成しました"
+        multiNew?.length > 1
+          ? `配送準備完了で作成しました（在庫移動${multiNew.length}件に分割）`
+          : extraN > 0
+            ? `配送準備完了で作成しました（同一Transfer・追加DRAFT Shipment ${extraN}件）`
+            : "配送準備完了で作成しました"
       );
-
-      // 追加分は DRAFT Shipment（tracking なし）。確定時に IN_TRANSIT の Shipment を別途作成する流れ
 
       // 後処理
       try { await clearOutboundDraft?.(); } catch (_) {}
@@ -8395,11 +8408,14 @@ function OutboundList({
                   draftTransferId: String(splitNewDraft.transfer?.id || ""),
                 }));
 
+                const draftsM = splitNewDraft.draftTransfersMulti;
                 const exNd = splitNewDraft.shipments?.length || 0;
                 toast(
-                  exNd > 0
-                    ? `下書きを作成しました（同一Transfer・続きはDRAFT Shipment ${exNd}件）`
-                    : "下書きを作成しました（履歴に表示されます）"
+                  draftsM?.length > 1
+                    ? `下書きを作成しました（在庫移動${draftsM.length}件に分割・画面は1件目を表示）`
+                    : exNd > 0
+                      ? `下書きを作成しました（同一Transfer・続きはDRAFT Shipment ${exNd}件）`
+                      : "下書きを作成しました（履歴に表示されます）"
                 );
               } catch (e) {
                 toast(toUserMessage(e));
@@ -9601,10 +9617,80 @@ async function createTransferReadyToShipWithFallback({ originLocationId, destina
 }
 
 /**
- * 1 件の Transfer に先頭チャンク（最大250明細）だけを載せ、同一 movementId で Shipment をチャンク分割する。
- * - in_transit: 各チャンク DRAFT Shipment → 追跡 → inventoryShipmentMarkInTransit（すべて IN_TRANSIT に揃える）
- * - ready_with_draft_overflow: 250超は Transfer を一度 DRAFT で作り全チャンクを DRAFT Shipment で載せた後、Transfer だけ READY（Shipment は未発送で揃う）
- * - draft_transfer: Transfer は下書き、2件目以降は DRAFT Shipment
+ * 250超の確定（IN_TRANSIT）: 1 Transfer に載せられる明細は最大250のため Transfer を複数作成し、各 Transfer に 1 Shipment。
+ * （同一 movement に 2 本目の Shipment で Transfer に無い SKU を載せると数量エラーになる）
+ */
+async function outboundMultipleTransfersWithInTransitShipments({
+  originLocationId,
+  destinationLocationId,
+  chunks,
+  splitLabel,
+  trackingInput,
+}) {
+  const n = chunks.length;
+  const label = String(splitLabel || "POS出庫").trim() || "POS出庫";
+  const transfers = [];
+  const shipments = [];
+  for (let i = 0; i < n; i++) {
+    const note =
+      n > 1
+        ? `${label} 分割 ${i + 1}/${n}（API上限${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}明細/Transfer）`
+        : undefined;
+    const t = await createTransferReadyToShipWithFallback({
+      originLocationId,
+      destinationLocationId,
+      lineItems: chunks[i].lineItems,
+      lineItemsMeta: chunks[i].lineItemsMeta,
+      note,
+    });
+    transfers.push(t);
+    const sh = await createInventoryShipmentInTransit({
+      movementId: t.id,
+      lineItems: chunks[i].lineItems,
+      trackingInput,
+      lineItemsMeta: chunks[i].lineItemsMeta,
+    });
+    shipments.push(sh);
+  }
+  return { transfers, shipments };
+}
+
+/**
+ * 250超の配送準備完了（READY_TO_SHIP）: Transfer 明細は最大250のため Transfer を複数作成する。
+ * （2チャンク目を同一 Transfer に DRAFT Shipment だけ載せると、Transfer に無い SKU で数量エラーになる）
+ */
+async function outboundMultipleTransfersReadyToShip({
+  originLocationId,
+  destinationLocationId,
+  chunks,
+  splitLabel,
+}) {
+  const n = chunks.length;
+  const label = String(splitLabel || "POS出庫").trim() || "POS出庫";
+  const transfers = [];
+  for (let i = 0; i < n; i++) {
+    const note =
+      n > 1
+        ? `${label} 分割 ${i + 1}/${n}（API上限${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}明細/Transfer）`
+        : undefined;
+    transfers.push(
+      await createTransferReadyToShipWithFallback({
+        originLocationId,
+        destinationLocationId,
+        lineItems: chunks[i].lineItems,
+        lineItemsMeta: chunks[i].lineItemsMeta,
+        note,
+      })
+    );
+  }
+  return { transfers };
+}
+
+/**
+ * 1 件の Transfer に先頭チャンク（最大250明細）を載せ、同一 movementId で追加 Shipment を分ける。
+ * - in_transit: チャンク1件は同一 Transfer＋Shipment。チャンク複数は Transfer 複数（Shopifyは Transfer 明細250超を別 Shipment に載せられない）
+ * - ready_with_draft_overflow: チャンク複数は Transfer 複数（各 READY）。チャンク1件のみ従来どおり 1 Transfer
+ * - draft_transfer: 下書き Transfer では Shipment 追加不可のため 250超は下書き Transfer を複数作成
  */
 async function outboundOneTransferWithChunkedShipments({
   originLocationId,
@@ -9620,28 +9706,58 @@ async function outboundOneTransferWithChunkedShipments({
   const label = String(splitLabel || "POS出庫").trim() || "POS出庫";
   const noteMulti =
     n > 1
-      ? `${label} 全${lineItems.length}明細 / 同一Transfer＋Shipment${n}分割（各最大${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}明細）`
+      ? `${label} 全${lineItems.length}明細 / ${n}分割（各最大${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}明細）`
       : undefined;
+
+  if (mode === "draft_transfer" && n > 1) {
+    const ts = new Date().toISOString();
+    const drafts = [];
+    for (let i = 0; i < n; i++) {
+      const noteDraft = `POS draft saved 分割${i + 1}/${n} ${ts}`;
+      drafts.push(
+        await inventoryTransferCreateDraftSafe({
+          originLocationId,
+          destinationLocationId,
+          lineItems: chunks[i].lineItems,
+          note: noteDraft,
+        })
+      );
+    }
+    return {
+      transfer: drafts[0],
+      chunks,
+      shipments: [],
+      draftTransfersMulti: drafts,
+    };
+  }
+
+  if (mode === "ready_with_draft_overflow" && n > 1) {
+    const r = await outboundMultipleTransfersReadyToShip({
+      originLocationId,
+      destinationLocationId,
+      chunks,
+      splitLabel: label,
+    });
+    return {
+      transfer: r.transfers[0],
+      chunks,
+      shipments: [],
+      transfersMulti: r.transfers,
+    };
+  }
 
   let transfer;
   if (mode === "draft_transfer") {
     const ts = new Date().toISOString();
-    const draftNote = n > 1 ? `POS draft saved 全${lineItems.length}明細・Shipment分割 ${ts}` : `POS draft saved ${ts}`;
+    const draftNote = `POS draft saved ${ts}`;
     transfer = await inventoryTransferCreateDraftSafe({
       originLocationId,
       destinationLocationId,
       lineItems: chunks[0].lineItems,
       note: draftNote,
     });
-  } else if (mode === "ready_with_draft_overflow" && n > 1) {
-    transfer = await inventoryTransferCreateDraftSafe({
-      originLocationId,
-      destinationLocationId,
-      lineItems: chunks[0].lineItems,
-      note:
-        noteMulti ||
-        `POS 配送準備（全${lineItems.length}明細・Shipment分割） ${new Date().toISOString()}`,
-    });
+  } else if (mode === "in_transit" && n > 1) {
+    transfer = null;
   } else {
     transfer = await createTransferReadyToShipWithFallback({
       originLocationId,
@@ -9652,10 +9768,25 @@ async function outboundOneTransferWithChunkedShipments({
     });
   }
 
-  const movementId = transfer.id;
+  const movementId = transfer?.id;
   const shipments = [];
 
   if (mode === "in_transit") {
+    if (n > 1) {
+      const r = await outboundMultipleTransfersWithInTransitShipments({
+        originLocationId,
+        destinationLocationId,
+        chunks,
+        splitLabel: label,
+        trackingInput,
+      });
+      return {
+        transfer: r.transfers[0],
+        chunks,
+        shipments: r.shipments,
+        transfersMulti: r.transfers,
+      };
+    }
     for (let i = 0; i < n; i++) {
       const sh = await createInventoryShipmentInTransit({
         movementId,
@@ -9669,38 +9800,9 @@ async function outboundOneTransferWithChunkedShipments({
   }
 
   if (mode === "ready_with_draft_overflow") {
-    if (n === 1) {
-      return { transfer, chunks, shipments: [] };
-    }
-    for (let i = 0; i < n; i++) {
-      try {
-        shipments.push(
-          await createInventoryShipmentDraft({
-            movementId,
-            lineItems: chunks[i].lineItems,
-            lineItemsMeta: chunks[i].lineItemsMeta,
-          })
-        );
-      } catch (e) {
-        if (i === 0) {
-          continue;
-        }
-        throw e;
-      }
-    }
-    transfer = await inventoryTransferMarkAsReadyToShip(movementId);
-    return { transfer, chunks, shipments };
+    return { transfer, chunks, shipments: [] };
   }
 
-  // draft_transfer
-  for (let i = 1; i < n; i++) {
-    const sh = await createInventoryShipmentDraft({
-      movementId,
-      lineItems: chunks[i].lineItems,
-      lineItemsMeta: chunks[i].lineItemsMeta,
-    });
-    shipments.push(sh);
-  }
   return { transfer, chunks, shipments };
 }
 
