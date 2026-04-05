@@ -224,6 +224,23 @@ async function inventoryTransferSetItemsSafe({ id, lineItems }) {
   return payload?.inventoryTransfer;
 }
 
+/** Shopify Admin: 配列入力は最大250（公式の入力配列上限） */
+const SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX = 250;
+
+function chunkLineItemsWithMeta(lineItems, lineItemsMeta) {
+  const li = Array.isArray(lineItems) ? lineItems : [];
+  const meta = Array.isArray(lineItemsMeta) ? lineItemsMeta : [];
+  const max = SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX;
+  const out = [];
+  for (let i = 0; i < li.length; i += max) {
+    out.push({
+      lineItems: li.slice(i, i + max),
+      lineItemsMeta: meta.slice(i, i + max),
+    });
+  }
+  return out;
+}
+
 function Extension() {
   const [prefs, setPrefs] = useUiPrefs();
   const [appState, setAppState] = usePersistentAppState();
@@ -6603,13 +6620,18 @@ function OutboundList({
               arrivesAt: String(outbound.arrivesAtIso || "").trim() || null,
             }
           : null;
-        const shipment = await createInventoryShipmentInTransit({
+        const shipments = await createInventoryShipmentInTransitChunked({
           movementId: addingIdForConfirm,
           lineItems,
           trackingInput,
           lineItemsMeta,
         });
-        toast(shipment ? "配送を追加しました（出庫確定）" : "配送を追加しました");
+        const shipment = shipments[shipments.length - 1] ?? null;
+        if (shipments.length > 1) {
+          toast(`配送を${shipments.length}件のシップメントに分割して追加しました（出庫確定）`);
+        } else {
+          toast(shipment ? "配送を追加しました（出庫確定）" : "配送を追加しました");
+        }
         try { await clearOutboundDraft?.(); } catch (_) {}
         try {
           if (SHOPIFY?.storage?.delete) {
@@ -6639,11 +6661,6 @@ function OutboundList({
       // ②編集モード（同ID）：明細更新後、必ず Shipment を IN_TRANSIT にする
       const editingTransferId = String(outbound?.editingTransferId || "").trim();
       if (editingTransferId) {
-        const transfer = await inventoryTransferSetItemsSafe({
-          id: editingTransferId,
-          lineItems,
-        });
-
         const trackingInput = hasShipmentMeta
           ? {
               company: resolvedCompany || null,
@@ -6655,19 +6672,47 @@ function OutboundList({
         const selectedShipmentIdForConfirm = String(outbound?.historySelectedShipmentId || "").trim();
         const isVirtualShipment = selectedShipmentIdForConfirm.startsWith("__transfer__");
         let shipment = null;
+        let transfer = null;
 
-        if (selectedShipmentIdForConfirm && !isVirtualShipment) {
-          shipment = await inventoryShipmentMarkInTransit(selectedShipmentIdForConfirm);
-        } else {
-          shipment = await createInventoryShipmentInTransit({
-            movementId: editingTransferId,
+        if (lineItems.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+          await assertDraftOrThrowForLineItemResplit(editingTransferId, "出庫確定・明細更新");
+          toast(`明細${lineItems.length}件を同一在庫移動で確定します（Shipment を分割）…`);
+          const split = await outboundOneTransferWithChunkedShipments({
+            originLocationId: String(originLocationGid || "").trim(),
+            destinationLocationId: String(destinationLocationId || "").trim(),
             lineItems,
-            trackingInput,
             lineItemsMeta,
+            splitLabel: "POS出庫",
+            trackingInput,
+            mode: "in_transit",
           });
-        }
+          transfer = split.transfer ?? null;
+          const shipList = split.shipments || [];
+          shipment = shipList[shipList.length - 1] ?? null;
+          toast(
+            shipList.length > 1
+              ? `明細更新と出庫確定を完了しました（同一Transfer・Shipment${shipList.length}件・IN_TRANSIT）`
+              : "明細更新と出庫確定を完了しました（IN_TRANSIT）"
+          );
+        } else {
+          transfer = await inventoryTransferSetItemsSafe({
+            id: editingTransferId,
+            lineItems,
+          });
 
-        toast("明細更新と出庫確定を完了しました（IN_TRANSIT）");
+          if (selectedShipmentIdForConfirm && !isVirtualShipment) {
+            shipment = await inventoryShipmentMarkInTransit(selectedShipmentIdForConfirm);
+          } else {
+            shipment = await createInventoryShipmentInTransit({
+              movementId: editingTransferId,
+              lineItems,
+              trackingInput,
+              lineItemsMeta,
+            });
+          }
+
+          toast("明細更新と出庫確定を完了しました（IN_TRANSIT）");
+        }
 
         // 後処理（新規作成と同等にリセット、商品リストとコンディションの両方の下書きをクリア）
         try { await clearOutboundDraft?.(); } catch (_) {}
@@ -6886,23 +6931,13 @@ function OutboundList({
         }
       }
 
-      // 2) Transfer 作成（Ready to ship）
-      // 有効化処理が確実に完了しているため、ここではエラー時の再試行は行わない
-      toast("Transfer作成中...");
-      const transfer = await createTransferReadyToShipWithFallback({
-        originLocationId: String(originLocationGid || "").trim(),
-        destinationLocationId: String(destinationLocationId || "").trim(),
-        lineItems,
-        lineItemsMeta,
-      });
-      toast("Transfer作成完了");
-
-      const movementId = transfer?.id;
-      if (!movementId) {
-        throw new Error("transfer.id が取得できません");
+      // 2) Transfer 1 件（先頭最大250明細）＋ 同一 movement で Shipment をチャンク分割（IN_TRANSIT）
+      const splitCount = chunkLineItemsWithMeta(lineItems, lineItemsMeta).length;
+      if (splitCount > 1) {
+        toast(`明細${lineItems.length}件を同一在庫移動に載せ、配送（Shipment）を${splitCount}件に分割します`);
+      } else {
+        toast("Transfer作成中...");
       }
-
-      // 2) Shipment 作成（「確定する」は常に処理中にする。配送情報はあれば付与、なければ null）
       const trackingInput = (company || trackingNumber || trackingUrl || eta)
         ? {
             company: company || null,
@@ -6911,13 +6946,31 @@ function OutboundList({
             arrivesAt: eta || null,
           }
         : null;
-      const shipment = await createInventoryShipmentInTransit({
-        movementId,
+      const splitNew = await outboundOneTransferWithChunkedShipments({
+        originLocationId: String(originLocationGid || "").trim(),
+        destinationLocationId: String(destinationLocationId || "").trim(),
         lineItems,
+        lineItemsMeta,
+        splitLabel: "POS出庫",
         trackingInput,
+        mode: "in_transit",
       });
+      toast("Transfer作成完了");
 
-      toast("出庫を作成しました（進行中）");
+      const transfer = splitNew.transfer ?? null;
+      const movementId = transfer?.id;
+      if (!movementId) {
+        throw new Error("transfer.id が取得できません");
+      }
+
+      const shipListNew = splitNew.shipments || [];
+      const shipment = shipListNew[shipListNew.length - 1] ?? null;
+
+      toast(
+        shipListNew.length > 1
+          ? `出庫を作成しました（同一Transfer・Shipment${shipListNew.length}件・進行中）`
+          : "出庫を作成しました（進行中）"
+      );
 
       // UIを先に更新してから、残りはバックグラウンドで実行
       try { setLines([]); } catch (_) {}
@@ -7177,12 +7230,17 @@ function OutboundList({
       // ③配送追加モード：「配送準備完了にする」＝既存 Transfer に DRAFT シップメントを追加（新規 Transfer は作らない）
       const addingId = String(outbound?.addingShipmentToTransferId || "").trim();
       if (addingId) {
-        const shipment = await createInventoryShipmentDraft({
+        const shipmentsRts = await createInventoryShipmentDraftChunked({
           movementId: addingId,
           lineItems,
           lineItemsMeta,
         });
-        toast(shipment ? "配送を追加しました（DRAFT）" : "配送を追加しました");
+        const shipment = shipmentsRts[shipmentsRts.length - 1] ?? null;
+        if (shipmentsRts.length > 1) {
+          toast(`配送を${shipmentsRts.length}件のシップメント（下書き）に分割して追加しました`);
+        } else {
+          toast(shipment ? "配送を追加しました（DRAFT）" : "配送を追加しました");
+        }
         try { await clearOutboundDraft?.(); } catch (_) {}
         try {
           if (SHOPIFY?.storage?.delete) {
@@ -7212,24 +7270,43 @@ function OutboundList({
       // 編集モード（同ID）：明細更新 + ステータス変更（DRAFT → READY_TO_SHIP）
       const editingTransferId = String(outbound?.editingTransferId || "").trim();
       if (editingTransferId) {
-        // 明細を更新
-        const transfer = await inventoryTransferSetItemsSafe({
-          id: editingTransferId,
-          lineItems,
-        });
+        let transfer = null;
 
-        // 現在のステータスを取得
-        const currentTransfer = await fetchTransfer(editingTransferId);
-        const currentStatus = String(currentTransfer?.status || "").toUpperCase();
-        
-        // DRAFT → READY_TO_SHIP に変更
-        if (currentStatus === "DRAFT") {
-          await inventoryTransferMarkAsReadyToShip(editingTransferId);
-          toast("配送準備完了にしました（DRAFT → READY_TO_SHIP）");
-        } else if (currentStatus === "READY_TO_SHIP") {
-          toast("明細を更新しました（既にREADY_TO_SHIP）");
+        if (lineItems.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+          await assertDraftOrThrowForLineItemResplit(editingTransferId, "配送準備完了");
+          const splitRts = await outboundOneTransferWithChunkedShipments({
+            originLocationId: String(originLocationGid || "").trim(),
+            destinationLocationId: String(destinationLocationId || "").trim(),
+            lineItems,
+            lineItemsMeta,
+            splitLabel: "POS出庫",
+            trackingInput: null,
+            mode: "ready_with_draft_overflow",
+          });
+          transfer = splitRts.transfer ?? null;
+          const extraShip = splitRts.shipments?.length || 0;
+          toast(
+            extraShip > 0
+              ? `配送準備完了で作成しました（同一Transfer・続きはDRAFT Shipment ${extraShip}件。元の下書きはキャンセル済み）`
+              : "配送準備完了で作成しました（元の下書きはキャンセル済み）"
+          );
         } else {
-          toast("明細を更新しました（ステータス: " + currentStatus + "）");
+          transfer = await inventoryTransferSetItemsSafe({
+            id: editingTransferId,
+            lineItems,
+          });
+
+          const currentTransfer = await fetchTransfer(editingTransferId);
+          const currentStatus = String(currentTransfer?.status || "").toUpperCase();
+
+          if (currentStatus === "DRAFT") {
+            await inventoryTransferMarkAsReadyToShip(editingTransferId);
+            toast("配送準備完了にしました（DRAFT → READY_TO_SHIP）");
+          } else if (currentStatus === "READY_TO_SHIP") {
+            toast("明細を更新しました（既にREADY_TO_SHIP）");
+          } else {
+            toast("明細を更新しました（ステータス: " + currentStatus + "）");
+          }
         }
 
         // 後処理
@@ -7250,24 +7327,50 @@ function OutboundList({
       // 注意: outboundはOutboundListコンポーネントのスコープ内にある
       const currentDraftTransferId = String(outbound?.draftTransferId || "").trim();
       if (currentDraftTransferId) {
-        // 明細を更新
-        const transfer = await inventoryTransferSetItemsSafe({
-          id: currentDraftTransferId,
-          lineItems,
-        });
+        let transfer = null;
 
-        // 現在のステータスを取得
-        const currentTransfer = await fetchTransfer(currentDraftTransferId);
-        const currentStatus = String(currentTransfer?.status || "").toUpperCase();
-        
-        // DRAFT → READY_TO_SHIP に変更
-        if (currentStatus === "DRAFT") {
-          await inventoryTransferMarkAsReadyToShip(currentDraftTransferId);
-          toast("配送準備完了にしました（DRAFT → READY_TO_SHIP）");
-        } else if (currentStatus === "READY_TO_SHIP") {
-          toast("明細を更新しました（既にREADY_TO_SHIP）");
+        if (lineItems.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+          const tDf = await fetchTransfer(currentDraftTransferId);
+          const stDf = String(tDf?.status || "").toUpperCase();
+          if (stDf !== "DRAFT") {
+            throw new Error(
+              `明細が${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}件を超えています。自動分割は下書きの在庫移動のみ対応です（現在: ${stDf || "不明"}）。`
+            );
+          }
+          await inventoryTransferCancelSafe({ id: currentDraftTransferId });
+          const splitDraft = await outboundOneTransferWithChunkedShipments({
+            originLocationId: String(originLocationGid || "").trim(),
+            destinationLocationId: String(destinationLocationId || "").trim(),
+            lineItems,
+            lineItemsMeta,
+            splitLabel: "POS出庫",
+            trackingInput: null,
+            mode: "ready_with_draft_overflow",
+          });
+          transfer = splitDraft.transfer ?? null;
+          const extraD = splitDraft.shipments?.length || 0;
+          toast(
+            extraD > 0
+              ? `配送準備完了にしました（同一Transfer・続きはDRAFT Shipment ${extraD}件）`
+              : "配送準備完了にしました"
+          );
         } else {
-          toast("明細を更新しました（ステータス: " + currentStatus + "）");
+          transfer = await inventoryTransferSetItemsSafe({
+            id: currentDraftTransferId,
+            lineItems,
+          });
+
+          const currentTransfer = await fetchTransfer(currentDraftTransferId);
+          const currentStatus = String(currentTransfer?.status || "").toUpperCase();
+
+          if (currentStatus === "DRAFT") {
+            await inventoryTransferMarkAsReadyToShip(currentDraftTransferId);
+            toast("配送準備完了にしました（DRAFT → READY_TO_SHIP）");
+          } else if (currentStatus === "READY_TO_SHIP") {
+            toast("明細を更新しました（既にREADY_TO_SHIP）");
+          } else {
+            toast("明細を更新しました（ステータス: " + currentStatus + "）");
+          }
         }
 
         // 後処理
@@ -7287,17 +7390,31 @@ function OutboundList({
         return { transfer, shipment: null };
       }
 
-      // 新規作成：READY_TO_SHIPステータスで作成
-      toast("Transfer作成中...");
-      const transfer = await createTransferReadyToShipWithFallback({
+      // 新規作成：READY_TO_SHIP（先頭チャンク）＋ 250超は同一Transferに DRAFT Shipment で分割
+      const splitCountRts = chunkLineItemsWithMeta(lineItems, lineItemsMeta).length;
+      if (splitCountRts > 1) {
+        toast(`明細${lineItems.length}件を同一在庫移動で配送準備完了にします（続きは DRAFT Shipment に分割）`);
+      } else {
+        toast("Transfer作成中...");
+      }
+      const splitRtsNew = await outboundOneTransferWithChunkedShipments({
         originLocationId: String(originLocationGid || "").trim(),
         destinationLocationId: String(destinationLocationId || "").trim(),
         lineItems,
         lineItemsMeta,
+        splitLabel: "POS出庫",
+        trackingInput: null,
+        mode: "ready_with_draft_overflow",
       });
-      toast("配送準備完了で作成しました");
+      const transfer = splitRtsNew.transfer ?? null;
+      const extraN = splitRtsNew.shipments?.length || 0;
+      toast(
+        extraN > 0
+          ? `配送準備完了で作成しました（同一Transfer・追加DRAFT Shipment ${extraN}件）`
+          : "配送準備完了で作成しました"
+      );
 
-      // Shipmentは作成しない（tracking情報なし）
+      // 追加分は DRAFT Shipment（tracking なし）。確定時に IN_TRANSIT の Shipment を別途作成する流れ
 
       // 後処理
       try { await clearOutboundDraft?.(); } catch (_) {}
@@ -8146,6 +8263,13 @@ function OutboundList({
 
                 if (lineItems.length === 0) return toast("数量が0のため下書き保存できません");
 
+                const lineItemsMetaSave = lines.map((l) => ({
+                  inventoryItemId: String(l?.inventoryItemId || "").trim(),
+                  sku: String(l?.sku || "").trim(),
+                  barcode: String(l?.barcode || "").trim(),
+                  label: String(l?.label || "").trim(),
+                }));
+
                 // ③配送追加：既存 Transfer に DRAFT シップメントを追加
                 if (addingShipmentToTransferId) {
                   const lineItemsMeta = lines.map((l) => ({
@@ -8154,12 +8278,16 @@ function OutboundList({
                     barcode: String(l?.barcode || "").trim(),
                     label: String(l?.label || "").trim(),
                   }));
-                  await createInventoryShipmentDraft({
+                  const draftsAdded = await createInventoryShipmentDraftChunked({
                     movementId: addingShipmentToTransferId,
                     lineItems,
                     lineItemsMeta,
                   });
-                  toast("配送を追加しました（下書き）");
+                  if (draftsAdded.length > 1) {
+                    toast(`配送を${draftsAdded.length}件のシップメント（下書き）に分割して追加しました`);
+                  } else {
+                    toast("配送を追加しました（下書き）");
+                  }
                   try { await clearOutboundDraft?.(); } catch (_) {}
                   try { setLines([]); } catch (_) {}
                   try { setCandidateQtyMap?.({}); } catch (_) {}
@@ -8179,6 +8307,32 @@ function OutboundList({
 
                 // ②④編集（仮想行またはTransferのlineItems）：inventoryTransferSetItems で更新
                 if (editingTransferId && isMultiShipmentAddOrEdit) {
+                  if (lineItems.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+                    await assertDraftOrThrowForLineItemResplit(editingTransferId, "下書きの明細更新");
+                    const splitSave = await outboundOneTransferWithChunkedShipments({
+                      originLocationId: originLocationGid,
+                      destinationLocationId,
+                      lineItems,
+                      lineItemsMeta: lineItemsMetaSave,
+                      splitLabel: "POS出庫",
+                      trackingInput: null,
+                      mode: "draft_transfer",
+                    });
+                    const exS = splitSave.shipments?.length || 0;
+                    toast(
+                      exS > 0
+                        ? `同一Transferに下書き保存しました（続きはDRAFT Shipment ${exS}件）`
+                        : "明細を更新しました"
+                    );
+                    try { await clearOutboundDraft?.(); } catch (_) {}
+                    setStateSlice(setAppState, "outbound", (prev) => ({
+                      ...(prev || {}),
+                      draftTransferId: String(splitSave.transfer?.id || ""),
+                      editingTransferId: "",
+                    }));
+                    onBack?.();
+                    return;
+                  }
                   await inventoryTransferSetItemsSafe({ id: editingTransferId, lineItems });
                   toast("明細を更新しました");
                   try { await clearOutboundDraft?.(); } catch (_) {}
@@ -8191,24 +8345,62 @@ function OutboundList({
                 }
 
                 if (draftTransferId) {
+                  if (lineItems.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+                    const tDs = await fetchTransfer(draftTransferId);
+                    const stDs = String(tDs?.status || "").toUpperCase();
+                    if (stDs !== "DRAFT") {
+                      throw new Error(
+                        `明細が${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}件を超えています。下書きの分割保存は下書き状態のみ可能です（現在: ${stDs || "不明"}）。`
+                      );
+                    }
+                    await inventoryTransferCancelSafe({ id: draftTransferId });
+                    const splitDs = await outboundOneTransferWithChunkedShipments({
+                      originLocationId: originLocationGid,
+                      destinationLocationId,
+                      lineItems,
+                      lineItemsMeta: lineItemsMetaSave,
+                      splitLabel: "POS出庫",
+                      trackingInput: null,
+                      mode: "draft_transfer",
+                    });
+                    const exDs = splitDs.shipments?.length || 0;
+                    setStateSlice(setAppState, "outbound", (prev) => ({
+                      ...(prev || {}),
+                      draftTransferId: String(splitDs.transfer?.id || ""),
+                    }));
+                    toast(
+                      exDs > 0
+                        ? `同一Transferに再保存しました（続きはDRAFT Shipment ${exDs}件）`
+                        : "下書きを更新しました"
+                    );
+                    return;
+                  }
                   await inventoryTransferSetItemsSafe({ id: draftTransferId, lineItems });
                   toast("下書きを更新しました（同ID）");
                   return;
                 }
 
-                const created = await inventoryTransferCreateDraftSafe({
+                const splitNewDraft = await outboundOneTransferWithChunkedShipments({
                   originLocationId: originLocationGid,
                   destinationLocationId,
                   lineItems,
-                  note: `POS draft saved ${new Date().toISOString()}`,
+                  lineItemsMeta: lineItemsMetaSave,
+                  splitLabel: "POS出庫",
+                  trackingInput: null,
+                  mode: "draft_transfer",
                 });
 
                 setStateSlice(setAppState, "outbound", (prev) => ({
                   ...(prev || {}),
-                  draftTransferId: String(created?.id || ""),
+                  draftTransferId: String(splitNewDraft.transfer?.id || ""),
                 }));
 
-                toast("下書きを作成しました（履歴に表示されます）");
+                const exNd = splitNewDraft.shipments?.length || 0;
+                toast(
+                  exNd > 0
+                    ? `下書きを作成しました（同一Transfer・続きはDRAFT Shipment ${exNd}件）`
+                    : "下書きを作成しました（履歴に表示されます）"
+                );
               } catch (e) {
                 toast(toUserMessage(e));
               }
@@ -9347,7 +9539,7 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
 /* =========================
 /* Transfer/Shipment */
 
-async function inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta }) {
+async function inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note }) {
   const mutation = `#graphql
     mutation CreateTransferReady($input: InventoryTransferCreateAsReadyToShipInput!) {
       inventoryTransferCreateAsReadyToShip(input: $input) {
@@ -9356,13 +9548,17 @@ async function inventoryTransferCreateAsReadyToShip({ originLocationId, destinat
       }
     }`;
 
-  const data = await adminGraphql(mutation, { input: { originLocationId, destinationLocationId, lineItems } });
+  const input = { originLocationId, destinationLocationId, lineItems };
+  const noteTrim = note != null && String(note).trim();
+  if (noteTrim) input.note = noteTrim;
+
+  const data = await adminGraphql(mutation, { input });
 
   assertNoUserErrors(data?.inventoryTransferCreateAsReadyToShip, "inventoryTransferCreateAsReadyToShip", lineItemsMeta);
   return data.inventoryTransferCreateAsReadyToShip.inventoryTransfer;
 }
 
-async function inventoryTransferCreateDraft({ originLocationId, destinationLocationId, lineItems, lineItemsMeta }) {
+async function inventoryTransferCreateDraft({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note }) {
   const mutation = `#graphql
     mutation CreateTransfer($input: InventoryTransferCreateInput!) {
       inventoryTransferCreate(input: $input) {
@@ -9370,7 +9566,10 @@ async function inventoryTransferCreateDraft({ originLocationId, destinationLocat
         userErrors { field message }
       }
     }`;
-  const data = await adminGraphql(mutation, { input: { originLocationId, destinationLocationId, lineItems } });
+  const input = { originLocationId, destinationLocationId, lineItems };
+  const noteTrim = note != null && String(note).trim();
+  if (noteTrim) input.note = noteTrim;
+  const data = await adminGraphql(mutation, { input });
   assertNoUserErrors(data?.inventoryTransferCreate, "inventoryTransferCreate", lineItemsMeta);
   return data.inventoryTransferCreate.inventoryTransfer;
 }
@@ -9388,48 +9587,149 @@ async function inventoryTransferMarkAsReadyToShip(transferId) {
   return data.inventoryTransferMarkAsReadyToShip.inventoryTransfer;
 }
 
-async function createTransferReadyToShipWithFallback({ originLocationId, destinationLocationId, lineItems, lineItemsMeta }) {
+async function createTransferReadyToShipWithFallback({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note }) {
   try {
-    return await inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta });
+    return await inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note });
   } catch (e) {
     const msg = String(e?.message ?? e);
     if (msg.includes("inventoryTransferCreateAsReadyToShip") || msg.includes("Field") || msg.includes("undefined")) {
-      const draft = await inventoryTransferCreateDraft({ originLocationId, destinationLocationId, lineItems, lineItemsMeta });
+      const draft = await inventoryTransferCreateDraft({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note });
       return await inventoryTransferMarkAsReadyToShip(draft.id);
     }
     throw e;
   }
 }
 
-async function createInventoryShipmentInTransit({ movementId, lineItems, trackingInput, lineItemsMeta }) {
-  const mutation = `#graphql
-    mutation CreateInTransit($input: InventoryShipmentCreateInput!) {
-      inventoryShipmentCreateInTransit(input: $input) {
-        inventoryShipment {
-          id
-          status
-          tracking { trackingNumber company trackingUrl arrivesAt }
+/**
+ * 1 件の Transfer に先頭チャンク（最大250明細）だけを載せ、同一 movementId で Shipment をチャンク分割する。
+ * - in_transit: 各チャンク DRAFT Shipment → 追跡 → inventoryShipmentMarkInTransit（すべて IN_TRANSIT に揃える）
+ * - ready_with_draft_overflow: 250超は Transfer を一度 DRAFT で作り全チャンクを DRAFT Shipment で載せた後、Transfer だけ READY（Shipment は未発送で揃う）
+ * - draft_transfer: Transfer は下書き、2件目以降は DRAFT Shipment
+ */
+async function outboundOneTransferWithChunkedShipments({
+  originLocationId,
+  destinationLocationId,
+  lineItems,
+  lineItemsMeta,
+  splitLabel,
+  trackingInput,
+  mode,
+}) {
+  const chunks = chunkLineItemsWithMeta(lineItems, lineItemsMeta);
+  const n = chunks.length;
+  const label = String(splitLabel || "POS出庫").trim() || "POS出庫";
+  const noteMulti =
+    n > 1
+      ? `${label} 全${lineItems.length}明細 / 同一Transfer＋Shipment${n}分割（各最大${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}明細）`
+      : undefined;
+
+  let transfer;
+  if (mode === "draft_transfer") {
+    const ts = new Date().toISOString();
+    const draftNote = n > 1 ? `POS draft saved 全${lineItems.length}明細・Shipment分割 ${ts}` : `POS draft saved ${ts}`;
+    transfer = await inventoryTransferCreateDraftSafe({
+      originLocationId,
+      destinationLocationId,
+      lineItems: chunks[0].lineItems,
+      note: draftNote,
+    });
+  } else if (mode === "ready_with_draft_overflow" && n > 1) {
+    transfer = await inventoryTransferCreateDraftSafe({
+      originLocationId,
+      destinationLocationId,
+      lineItems: chunks[0].lineItems,
+      note:
+        noteMulti ||
+        `POS 配送準備（全${lineItems.length}明細・Shipment分割） ${new Date().toISOString()}`,
+    });
+  } else {
+    transfer = await createTransferReadyToShipWithFallback({
+      originLocationId,
+      destinationLocationId,
+      lineItems: chunks[0].lineItems,
+      lineItemsMeta: chunks[0].lineItemsMeta,
+      note: noteMulti,
+    });
+  }
+
+  const movementId = transfer.id;
+  const shipments = [];
+
+  if (mode === "in_transit") {
+    for (let i = 0; i < n; i++) {
+      const sh = await createInventoryShipmentInTransit({
+        movementId,
+        lineItems: chunks[i].lineItems,
+        trackingInput,
+        lineItemsMeta: chunks[i].lineItemsMeta,
+      });
+      shipments.push(sh);
+    }
+    return { transfer, chunks, shipments };
+  }
+
+  if (mode === "ready_with_draft_overflow") {
+    if (n === 1) {
+      return { transfer, chunks, shipments: [] };
+    }
+    for (let i = 0; i < n; i++) {
+      try {
+        shipments.push(
+          await createInventoryShipmentDraft({
+            movementId,
+            lineItems: chunks[i].lineItems,
+            lineItemsMeta: chunks[i].lineItemsMeta,
+          })
+        );
+      } catch (e) {
+        if (i === 0) {
+          continue;
         }
-        userErrors { field message }
+        throw e;
       }
-    }`;
+    }
+    transfer = await inventoryTransferMarkAsReadyToShip(movementId);
+    return { transfer, chunks, shipments };
+  }
 
-  const cleanTracking = {};
-  if (trackingInput?.trackingNumber) cleanTracking.trackingNumber = trackingInput.trackingNumber;
-  if (trackingInput?.company) cleanTracking.company = trackingInput.company;
-  if (trackingInput?.trackingUrl) cleanTracking.trackingUrl = trackingInput.trackingUrl;
-  if (trackingInput?.arrivesAt) cleanTracking.arrivesAt = trackingInput.arrivesAt;
-
-  const data = await adminGraphql(mutation, {
-    input: {
+  // draft_transfer
+  for (let i = 1; i < n; i++) {
+    const sh = await createInventoryShipmentDraft({
       movementId,
-      lineItems,
-      trackingInput: Object.keys(cleanTracking).length ? cleanTracking : null,
-    },
-  });
+      lineItems: chunks[i].lineItems,
+      lineItemsMeta: chunks[i].lineItemsMeta,
+    });
+    shipments.push(sh);
+  }
+  return { transfer, chunks, shipments };
+}
 
-  assertNoUserErrors(data?.inventoryShipmentCreateInTransit, "inventoryShipmentCreateInTransit", lineItemsMeta);
-  return data.inventoryShipmentCreateInTransit.inventoryShipment;
+/**
+ * 進行中（IN_TRANSIT）: 下書きShipment作成 → 追跡情報 → MarkInTransit。
+ * createInTransit 一発より複数Shipment時に状態が揃いやすい。
+ */
+async function createInventoryShipmentInTransit({ movementId, lineItems, trackingInput, lineItemsMeta }) {
+  return createInventoryShipmentDraftThenMarkInTransit({
+    movementId,
+    lineItems,
+    trackingInput,
+    lineItemsMeta,
+  });
+}
+
+async function createInventoryShipmentInTransitChunked({ movementId, lineItems, trackingInput, lineItemsMeta }) {
+  const chunks = chunkLineItemsWithMeta(lineItems, lineItemsMeta);
+  const shipments = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const sh = await createInventoryShipmentInTransit({
+      movementId,
+      lineItems: chunks[i].lineItems,
+      trackingInput,
+      lineItemsMeta: chunks[i].lineItemsMeta,
+    });
+    shipments.push(sh);
+  }
+  return shipments;
 }
 
 async function inventoryShipmentMarkInTransit(shipmentId) {
@@ -9461,6 +9761,58 @@ async function createInventoryShipmentDraft({ movementId, lineItems, lineItemsMe
   return data.inventoryShipmentCreate.inventoryShipment;
 }
 
+function normalizeInventoryShipmentTrackingClean(trackingInput) {
+  const clean = {};
+  if (!trackingInput || typeof trackingInput !== "object") return clean;
+  if (trackingInput.trackingNumber) clean.trackingNumber = trackingInput.trackingNumber;
+  if (trackingInput.company) clean.company = trackingInput.company;
+  if (trackingInput.trackingUrl) clean.trackingUrl = trackingInput.trackingUrl;
+  if (trackingInput.arrivesAt) clean.arrivesAt = trackingInput.arrivesAt;
+  return clean;
+}
+
+async function inventoryShipmentSetTrackingSafe(shipmentId, trackingInput) {
+  const clean = normalizeInventoryShipmentTrackingClean(trackingInput);
+  const sid = String(shipmentId || "").trim();
+  if (!sid || Object.keys(clean).length === 0) return null;
+  const data = await adminGraphql(
+    `#graphql
+      mutation InvShpSetTrk($id: ID!, $tracking: InventoryShipmentTrackingInput!) {
+        inventoryShipmentSetTracking(id: $id, tracking: $tracking) {
+          inventoryShipment { id status }
+          userErrors { field message }
+        }
+      }`,
+    { id: sid, tracking: clean }
+  );
+  assertNoUserErrors(data?.inventoryShipmentSetTracking, "inventoryShipmentSetTracking");
+  return data?.inventoryShipmentSetTracking?.inventoryShipment ?? null;
+}
+
+async function createInventoryShipmentDraftThenMarkInTransit({ movementId, lineItems, trackingInput, lineItemsMeta }) {
+  const draft = await createInventoryShipmentDraft({ movementId, lineItems, lineItemsMeta });
+  const sid = String(draft?.id || "").trim();
+  if (!sid) throw new Error("Shipment（下書き）のIDが取得できません");
+  if (Object.keys(normalizeInventoryShipmentTrackingClean(trackingInput)).length > 0) {
+    await inventoryShipmentSetTrackingSafe(sid, trackingInput);
+  }
+  return await inventoryShipmentMarkInTransit(sid);
+}
+
+async function createInventoryShipmentDraftChunked({ movementId, lineItems, lineItemsMeta }) {
+  const chunks = chunkLineItemsWithMeta(lineItems, lineItemsMeta);
+  const shipments = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const sh = await createInventoryShipmentDraft({
+      movementId,
+      lineItems: chunks[i].lineItems,
+      lineItemsMeta: chunks[i].lineItemsMeta,
+    });
+    shipments.push(sh);
+  }
+  return shipments;
+}
+
 async function fetchTransfer(id) {
   const query = `#graphql
     query GetTransfer($id: ID!) {
@@ -9468,6 +9820,19 @@ async function fetchTransfer(id) {
     }`;
   const data = await adminGraphql(query, { id });
   return data?.inventoryTransfer ?? null;
+}
+
+async function assertDraftOrThrowForLineItemResplit(transferId, opLabel) {
+  const id = String(transferId || "").trim();
+  if (!id) throw new Error(`${opLabel}: Transfer ID が空です`);
+  const t = await fetchTransfer(id);
+  const st = String(t?.status || "").toUpperCase();
+  if (st !== "DRAFT") {
+    throw new Error(
+      `${opLabel}: 明細が${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}件を超えています。ShopifyのAPIは1回あたり${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}明細までです。自動で分けるには在庫移動が「下書き」である必要があります（現在: ${st || "不明"}）。明細を${SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX}件以下にするか、下書きに戻してからやり直してください。`
+    );
+  }
+  await inventoryTransferCancelSafe({ id });
 }
 
 /* =========================
@@ -10226,6 +10591,15 @@ async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
 
   if (clean.length === 0) return null;
 
+  if (clean.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+    let last = null;
+    for (let i = 0; i < clean.length; i += SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+      const slice = clean.slice(i, i + SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX);
+      last = await receiveShipmentWithFallbackV2({ shipmentId, items: slice });
+    }
+    return last;
+  }
+
   // 1) try: inventoryShipmentReceiveItems（古い環境向け）
   try {
     const m1 = `#graphql
@@ -10286,6 +10660,19 @@ async function adjustInventoryAtLocationWithFallback({ locationId, deltas, refer
     .map((x) => ({ inventoryItemId: x.inventoryItemId, delta: Number(x.delta) }));
 
   if (!locationId || changes.length === 0) return null;
+
+  if (changes.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+    let last = null;
+    for (let i = 0; i < changes.length; i += SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
+      const sub = changes.slice(i, i + SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX);
+      last = await adjustInventoryAtLocationWithFallback({
+        locationId,
+        deltas: sub.map((c) => ({ inventoryItemId: c.inventoryItemId, delta: c.delta })),
+        referenceDocumentUri: i === 0 ? referenceDocumentUri : undefined,
+      });
+    }
+    return last;
+  }
 
   // referenceDocumentUriを生成（転送IDが指定されている場合）
   const uri = referenceDocumentUri ? `gid://stock-transfer-pos/OutboundTransfer/${referenceDocumentUri}` : null;
