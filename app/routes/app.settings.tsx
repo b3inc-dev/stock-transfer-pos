@@ -714,6 +714,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     return data({ locations, settings }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
+    // authenticate.admin などが投げる Response（OAuth 再開・App Bridge 用）はそのまま伝播させる
+    if (error instanceof Response) {
+      throw error;
+    }
     const msg = error instanceof Error ? error.message : String(error);
     console.error("Settings loader error:", error);
     throw new Response(JSON.stringify({ error: msg }), {
