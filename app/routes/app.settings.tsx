@@ -713,7 +713,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       };
     }
 
-    return data({ locations, settings }, { headers: { "Cache-Control": "private, no-store" } });
+    return data({ locations, settings, loadError: null as string | null }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     // authenticate.admin などが投げる Response（OAuth 再開・App Bridge 用）はそのまま伝播させる
     if (error instanceof Response) {
@@ -721,78 +721,86 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
     const msg = error instanceof Error ? error.message : String(error);
     console.error("Settings loader error:", error);
-    throw new Response(JSON.stringify({ error: msg }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    // 設定取得に失敗しても画面自体は開けるようにし、審査時の致命的な500を回避する
+    return data(
+      { locations: [] as LocationNode[], settings: defaultSettings(), loadError: msg },
+      { headers: { "Cache-Control": "private, no-store" } }
+    );
   }
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  let { admin } = await authenticate.admin(request);
-  admin = withGraphQLRetry(admin);
-  const form = await request.formData();
-
-  const raw = String(form.get("settings") ?? "");
-  let incoming: unknown;
   try {
-    incoming = JSON.parse(raw);
-  } catch {
-    return { ok: false, error: "settings JSON が不正です" as const };
-  }
+    let { admin } = await authenticate.admin(request);
+    admin = withGraphQLRetry(admin);
+    const form = await request.formData();
 
-  if (incoming == null || typeof incoming !== "object" || (incoming as { version?: number }).version !== 1) {
-    return { ok: false, error: "settings version が不正です" as const };
-  }
-
-  const settings = sanitizeSettings(incoming as Record<string, unknown>);
-
-  const appInstResp = await admin.graphql(
-    `#graphql
-      query AppInst {
-        currentAppInstallation { id }
-      }
-    `
-  );
-
-  const appInstJson = await appInstResp.json();
-  const ownerId = appInstJson?.data?.currentAppInstallation?.id as string;
-
-  if (!ownerId) {
-    return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
-  }
-
-  const saveResp = await admin.graphql(
-    `#graphql
-      mutation SaveSettings($metafields: [MetafieldsSetInput!]!) {
-        metafieldsSet(metafields: $metafields) {
-          metafields { id namespace key type }
-          userErrors { field message }
-        }
-      }
-    `,
-    {
-      variables: {
-        metafields: [
-          {
-            ownerId,
-            namespace: NS,
-            key: KEY,
-            type: "json",
-            value: JSON.stringify(settings),
-          },
-        ],
-      },
+    const raw = String(form.get("settings") ?? "");
+    let incoming: unknown;
+    try {
+      incoming = JSON.parse(raw);
+    } catch {
+      return { ok: false, error: "settings JSON が不正です" as const };
     }
-  );
 
-  const saveJson = await saveResp.json();
-  const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
-  if (errs.length) {
-    return { ok: false, error: errs.map((e: { message?: string }) => e.message ?? "").join(" / ") as const };
+    if (incoming == null || typeof incoming !== "object" || (incoming as { version?: number }).version !== 1) {
+      return { ok: false, error: "settings version が不正です" as const };
+    }
+
+    const settings = sanitizeSettings(incoming as Record<string, unknown>);
+
+    const appInstResp = await admin.graphql(
+      `#graphql
+        query AppInst {
+          currentAppInstallation { id }
+        }
+      `
+    );
+
+    const appInstJson = await appInstResp.json();
+    const ownerId = appInstJson?.data?.currentAppInstallation?.id as string;
+
+    if (!ownerId) {
+      return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
+    }
+
+    const saveResp = await admin.graphql(
+      `#graphql
+        mutation SaveSettings($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key type }
+            userErrors { field message }
+          }
+        }
+      `,
+      {
+        variables: {
+          metafields: [
+            {
+              ownerId,
+              namespace: NS,
+              key: KEY,
+              type: "json",
+              value: JSON.stringify(settings),
+            },
+          ],
+        },
+      }
+    );
+
+    const saveJson = await saveResp.json();
+    const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) {
+      return { ok: false, error: errs.map((e: { message?: string }) => e.message ?? "").join(" / ") as const };
+    }
+
+    return { ok: true, settings };
+  } catch (error) {
+    if (error instanceof Response) throw error;
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error("Settings action error:", error);
+    return { ok: false, error: `保存に失敗しました: ${msg}` as const };
   }
-
-  return { ok: true, settings };
 }
 
 export default function SettingsPage() {
@@ -813,7 +821,7 @@ export default function SettingsPage() {
     );
   }
 
-  const { locations, settings: initial } = loaderData;
+  const { locations, settings: initial, loadError } = loaderData;
   const [settings, setSettings] = useState<SettingsV1>(initial);
 
   // carrier presets UI
@@ -1849,6 +1857,15 @@ export default function SettingsPage() {
     <s-page heading="設定">
       <s-scroll-box padding="base">
         <s-stack gap="base">
+          {loadError && (
+            <s-box padding="base">
+              <div style={{ padding: "10px 12px", background: "#fff4e5", border: "1px solid #e0b252", borderRadius: 6 }}>
+                <s-text tone="caution">
+                  一部の設定読み込みに失敗しました。ページを再読み込みしても続く場合はサポートに連絡してください。
+                </s-text>
+              </div>
+            </s-box>
+          )}
           {/* 上部タブナビゲーション（アプリ設定 / 出庫設定 / 入庫設定 / 仕入設定 / ロス設定） */}
           <s-box padding="none">
             <div

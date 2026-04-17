@@ -6,18 +6,12 @@ import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getShopPlan } from "./app";
 import { createAppSubscription } from "../utils/billing";
 
-const APP_HANDLE = process.env.SHOPIFY_APP_HANDLE || "app";
-
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
     let { admin, session } = await authenticate.admin(request);
     admin = withGraphQLRetry(admin);
     const shopPlan = await getShopPlan(admin, session?.shop);
-
-    const storeHandle = session?.shop?.replace(".myshopify.com", "") ?? "";
-    const pricingPlansUrl = `https://admin.shopify.com/store/${storeHandle}/charges/${APP_HANDLE}/pricing_plans`;
-
-    return data({ shopPlan, pricingPlansUrl }, { headers: { "Cache-Control": "private, no-store" } });
+    return data({ shopPlan }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     throw new Response(JSON.stringify({ error: msg }), {
@@ -49,7 +43,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function PlanPage() {
-  const { shopPlan, pricingPlansUrl } = useLoaderData<typeof loader>();
+  const { shopPlan } = useLoaderData<typeof loader>();
   const { plan, locationsCount, distribution, isDevelopmentStore, locationPlanMismatch, maxLocationsForPlan } = shopPlan;
   const isInhouse = distribution === "inhouse";
 
@@ -100,23 +94,46 @@ export default function PlanPage() {
             <div style={{ fontSize: "14px", color: "#202223", marginBottom: "12px", lineHeight: 1.5 }}>
               現在のプランは<strong>{maxLocationsForPlan}ロケーション</strong>までです。ストアのロケーション数は<strong>{locationsCount}</strong>のため、プラン変更が必要です。変更が反映されるまで設定・在庫・入出庫などの機能はご利用いただけません。
             </div>
-            <a
-              href={pricingPlansUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                display: "inline-block",
-                padding: "10px 20px",
-                background: "#2c6ecb",
-                color: "#fff",
-                borderRadius: "6px",
-                fontSize: "14px",
-                fontWeight: 600,
-                textDecoration: "none",
-              }}
-            >
-              Shopify でプランを変更する
-            </a>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <form method="post" style={{ display: "inline-block" }}>
+                <input type="hidden" name="plan" value="lite" />
+                <button
+                  type="submit"
+                  style={{
+                    display: "inline-block",
+                    padding: "10px 20px",
+                    background: "#2c6ecb",
+                    color: "#fff",
+                    borderRadius: "6px",
+                    fontSize: "14px",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                  }}
+                >
+                  Liteに変更する
+                </button>
+              </form>
+              <form method="post" style={{ display: "inline-block" }}>
+                <input type="hidden" name="plan" value="pro" />
+                <button
+                  type="submit"
+                  style={{
+                    display: "inline-block",
+                    padding: "10px 20px",
+                    background: "#2c6ecb",
+                    color: "#fff",
+                    borderRadius: "6px",
+                    fontSize: "14px",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                  }}
+                >
+                  Proに変更する
+                </button>
+              </form>
+            </div>
             <div style={{ marginTop: "8px", fontSize: "13px", color: "#6d7175" }}>
               プラン変更後、このページを再読み込みしてください。
             </div>
@@ -160,7 +177,6 @@ export default function PlanPage() {
               trial="7日間無料"
               summary="入出庫（POS・管理画面）、入出庫履歴・CSV"
               isCurrent={plan === "lite"}
-              pricingPlansUrl={pricingPlansUrl}
             />
             <PlanCard
               planKey="pro"
@@ -170,7 +186,6 @@ export default function PlanPage() {
               trial="14日間無料"
               summary="在庫情報・入出庫・仕入・ロス・発注・棚卸・調整（全機能）"
               isCurrent={plan === "pro"}
-              pricingPlansUrl={pricingPlansUrl}
             />
           </div>
         </div>
@@ -212,14 +227,22 @@ export default function PlanPage() {
           </div>
           {plan !== "pro" && (
             <div style={{ marginTop: "16px" }}>
-              <a
-                href={pricingPlansUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ fontSize: "14px", color: "#2c6ecb" }}
-              >
-                アップグレードして全機能を使う →
-              </a>
+              <form method="post" style={{ display: "inline-block" }}>
+                <input type="hidden" name="plan" value="pro" />
+                <button
+                  type="submit"
+                  style={{
+                    fontSize: "14px",
+                    color: "#2c6ecb",
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                  }}
+                >
+                  アップグレードして全機能を使う →
+                </button>
+              </form>
             </div>
           )}
         </div>
@@ -236,7 +259,6 @@ function PlanCard({
   trial,
   summary,
   isCurrent,
-  pricingPlansUrl,
 }: {
   planKey: "lite" | "pro";
   name: string;
@@ -245,7 +267,6 @@ function PlanCard({
   trial: string;
   summary: string;
   isCurrent: boolean;
-  pricingPlansUrl: string;
 }) {
   return (
     <div
