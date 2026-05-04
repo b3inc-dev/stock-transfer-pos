@@ -875,7 +875,7 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     const inventoryItemGid = toInventoryItemGid(x.inventoryItemId);
     if (!inventoryItemGid) return { valid: false, item: x };
     const quantity = Math.floor(Number(x.actualQuantity) || 0);
-    return { valid: true, inventoryItemId: inventoryItemGid, quantity, compareQuantity: 0 };
+    return { valid: true, inventoryItemId: inventoryItemGid, quantity };
   });
 
   const invalidCount = quantitiesWithStatus.filter((x) => !x.valid).length;
@@ -937,7 +937,6 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
   let quantities = activateRes.rows.map((r) => ({
     inventoryItemId: r.inventoryItemId,
     quantity: Math.floor(Number(r.quantity) || 0),
-    compareQuantity: 0,
   }));
 
   const uri = referenceDocumentUri ? `gid://stock-transfer-pos/AdjustmentEntry/${referenceDocumentUri}` : null;
@@ -959,12 +958,11 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     const input = {
       name: "available",
       reason: "correction",
-      ignoreCompareQuantity: true,
       quantities: chunk.map((q) => ({
         inventoryItemId: q.inventoryItemId,
         locationId: locationGid,
         quantity: q.quantity,
-        compareQuantity: q.compareQuantity,
+        changeFromQuantity: null,
       })),
     };
     if (uri) input.referenceDocumentUri = uri;

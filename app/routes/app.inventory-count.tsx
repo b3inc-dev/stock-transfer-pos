@@ -1109,7 +1109,7 @@ async function adjustInventoryQuantitiesServer(
     .map((x) => {
       const gid = toInventoryItemGidForCount(x.inventoryItemId);
       const quantity = Math.floor(Number(x.quantity) ?? 0);
-      return gid ? { valid: true as const, inventoryItemId: gid, quantity, compareQuantity: 0 } : { valid: false as const };
+      return gid ? { valid: true as const, inventoryItemId: gid, quantity } : { valid: false as const };
     });
   const validQuantities = quantities.filter((q) => q.valid);
   const invalidCount = quantities.filter((q) => !q.valid).length;
@@ -1124,12 +1124,11 @@ async function adjustInventoryQuantitiesServer(
     const input: Record<string, unknown> = {
       name: "available",
       reason: "correction",
-      ignoreCompareQuantity: true,
       quantities: chunk.map((q) => ({
         inventoryItemId: q.inventoryItemId,
         locationId: locationGid,
         quantity: q.quantity,
-        compareQuantity: q.compareQuantity,
+        changeFromQuantity: null,
       })),
     };
     if (refUri) input.referenceDocumentUri = refUri;

@@ -641,7 +641,7 @@ export async function adjustInventoryAtLocation({ locationId, deltas }) {
   }
   const quantities = changes.map((c) => {
     const cur = currentMap.get(c.inventoryItemId) ?? 0;
-    return { inventoryItemId: c.inventoryItemId, locationId: locationGid, quantity: cur + c.delta, compareQuantity: cur };
+    return { inventoryItemId: c.inventoryItemId, locationId: locationGid, quantity: cur + c.delta, changeFromQuantity: cur };
   });
   
   const m2 = `#graphql

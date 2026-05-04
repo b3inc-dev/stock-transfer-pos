@@ -10840,7 +10840,7 @@ async function adjustInventoryAtLocationWithFallback({ locationId, deltas, refer
       inventoryItemId: c.inventoryItemId,
       locationId,
       quantity: next,
-      compareQuantity: cur,
+      changeFromQuantity: cur,
     };
   });
 

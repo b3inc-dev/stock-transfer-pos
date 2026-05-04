@@ -392,7 +392,7 @@ export async function adjustInventoryAtLocationWithFallback({ locationId, deltas
   }
   const quantities = changes.map((c) => {
     const cur = currentMap.get(c.inventoryItemId) ?? 0;
-    return { inventoryItemId: c.inventoryItemId, locationId, quantity: cur + c.delta, compareQuantity: cur };
+    return { inventoryItemId: c.inventoryItemId, locationId, quantity: cur + c.delta, changeFromQuantity: cur };
   });
   const input2 = { name: "available", reason: "correction", quantities };
   // referenceDocumentUriが指定されている場合は追加（fallbackでも設定）

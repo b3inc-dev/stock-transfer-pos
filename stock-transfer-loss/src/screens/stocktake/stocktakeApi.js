@@ -545,7 +545,7 @@ export async function adjustInventoryToActual({ locationId, items }) {
       if (!inventoryItemGid) return null;
       const actual = Math.max(0, Math.floor(Number(x.actualQuantity) || 0));
       const current = Number.isFinite(Number(x.currentQuantity)) ? Math.max(0, Math.floor(Number(x.currentQuantity) || 0)) : 0;
-      return { inventoryItemId: inventoryItemGid, quantity: actual, compareQuantity: current };
+      return { inventoryItemId: inventoryItemGid, quantity: actual, changeFromQuantity: current };
     })
     .filter((x) => x !== null);
 
@@ -580,7 +580,7 @@ export async function adjustInventoryToActual({ locationId, items }) {
           inventoryItemId: q.inventoryItemId,
           locationId: locationGid,
           quantity: q.quantity,
-          compareQuantity: q.compareQuantity,
+          changeFromQuantity: q.changeFromQuantity,
         })),
       },
     });
@@ -602,7 +602,7 @@ export async function adjustInventoryToActual({ locationId, items }) {
       quantitiesSample: quantities.slice(0, 2).map((q) => ({
         inventoryItemId: q.inventoryItemId?.substring(0, 30),
         quantity: q.quantity,
-        compareQuantity: q.compareQuantity,
+        changeFromQuantity: q.changeFromQuantity,
       })),
     });
     // HTTP 400エラーなどの場合は、より詳細なエラーメッセージを投げる
@@ -610,7 +610,7 @@ export async function adjustInventoryToActual({ locationId, items }) {
       const quantitiesSummary = quantities.slice(0, 3).map((q) => ({
         id: q.inventoryItemId?.substring(0, 30) + "...",
         quantity: q.quantity,
-        compareQuantity: q.compareQuantity,
+        changeFromQuantity: q.changeFromQuantity,
       }));
       throw new Error(`在庫調整エラー: ${msg}\nロケーション: ${locationGid?.substring(0, 30)}...\n変更数: ${quantities.length}件`);
     }

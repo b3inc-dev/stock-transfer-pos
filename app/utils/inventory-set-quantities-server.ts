@@ -140,7 +140,7 @@ export async function setInventoryQuantitiesServer(
     .map((x) => {
       const gid = toInventoryItemGid(x.inventoryItemId);
       const quantity = Math.floor(Number(x.quantity) ?? 0);
-      return gid ? { valid: true as const, inventoryItemId: gid, quantity, compareQuantity: 0 } : { valid: false as const };
+      return gid ? { valid: true as const, inventoryItemId: gid, quantity } : { valid: false as const };
     });
   const validQuantities = quantities.filter((q) => q.valid);
   const invalidCount = quantities.filter((q) => !q.valid).length;
@@ -186,12 +186,11 @@ export async function setInventoryQuantitiesServer(
     const input: Record<string, unknown> = {
       name: "available",
       reason: "correction",
-      ignoreCompareQuantity: true,
       quantities: chunk.map((q) => ({
         inventoryItemId: q.inventoryItemId,
         locationId: locationGid,
         quantity: q.quantity,
-        compareQuantity: q.compareQuantity,
+        changeFromQuantity: null,
       })),
     };
     if (refUri) input.referenceDocumentUri = refUri;
@@ -252,12 +251,11 @@ export async function setInventoryQuantitiesServer(
         const rollbackInput: Record<string, unknown> = {
           name: "available",
           reason: "correction",
-          ignoreCompareQuantity: true,
           quantities: snapshot.quantities.map((q) => ({
             inventoryItemId: q.inventoryItemId,
             locationId: locationGid,
             quantity: q.quantity,
-            compareQuantity: 0,
+            changeFromQuantity: null,
           })),
         };
         try {
