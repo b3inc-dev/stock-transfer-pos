@@ -169,6 +169,7 @@ export type TransferHistory = {
   name: string;
   status: string;
   note?: string;
+  extrasCount?: number;
   dateCreated: string;
   totalQuantity: number;
   receivedQuantity: number;

@@ -57,6 +57,77 @@ function extractExtrasCountFromNote(note: string): number {
   return parseInt(extrasSectionMatch[1] || "0", 10);
 }
 
+type InboundAuditExtraItem = {
+  inventoryItemId?: string;
+  qty?: number;
+  title?: string;
+  sku?: string;
+  barcode?: string;
+};
+
+type InboundAuditEntry = {
+  locationId?: string;
+  shipmentId?: string;
+  extras?: InboundAuditExtraItem[];
+};
+
+type AuditExtrasAggregate = {
+  count: number;
+  quantity: number;
+  items: Array<{ title: string; sku: string; barcode: string; qty: number }>;
+};
+
+function parseInboundAuditEntries(raw: unknown): InboundAuditEntry[] {
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function splitTitleAndOptions(titleRaw: string): { title: string; option1: string; option2: string; option3: string } {
+  const t = String(titleRaw || "").trim();
+  if (!t || !t.includes(" / ")) return { title: t, option1: "", option2: "", option3: "" };
+  const parts = t.split(" / ").map((s) => s.trim()).filter(Boolean);
+  return {
+    title: parts[0] || t,
+    option1: parts[1] || "",
+    option2: parts[2] || "",
+    option3: parts[3] || "",
+  };
+}
+
+function buildInboundAuditExtrasIndex(entries: InboundAuditEntry[], locationId?: string): Map<string, AuditExtrasAggregate> {
+  const index = new Map<string, AuditExtrasAggregate>();
+  const locationNeedle = String(locationId || "").trim();
+  for (const e of entries) {
+    const shipmentId = String(e?.shipmentId || "").trim();
+    if (!shipmentId) continue;
+    const loc = String(e?.locationId || "").trim();
+    if (locationNeedle && loc && loc !== locationNeedle) continue;
+    const extras = Array.isArray(e?.extras) ? e.extras : [];
+    if (extras.length === 0) continue;
+
+    const agg = index.get(shipmentId) || { count: 0, quantity: 0, items: [] };
+    for (const x of extras) {
+      const qty = Math.max(0, Math.floor(Number(x?.qty ?? 0)));
+      if (qty <= 0) continue;
+      agg.count += 1;
+      agg.quantity += qty;
+      agg.items.push({
+        title: String(x?.title || x?.inventoryItemId || "予定外入庫").trim(),
+        sku: String(x?.sku || "").trim(),
+        barcode: String(x?.barcode || "").trim(),
+        qty,
+      });
+    }
+    if (agg.count > 0) index.set(shipmentId, agg);
+  }
+  return index;
+}
+
 // 型定義は app/types.ts に集約。後方互換のため re-export する
 export type { LocationNode, TransferLineItem, GroupedLineItemsEntry, TransferHistory } from "../types";
 
@@ -160,11 +231,41 @@ export async function loader({ request }: LoaderFunctionArgs) {
       endCursor: null,
     };
 
+    // inbound_audit_v1（予定外入庫監査ログ）を取得。
+    // note 追記が失敗しても、監査ログから予定外入庫件数/数量を補完して表示漏れを防ぐ。
+    let inboundAuditEntries: InboundAuditEntry[] = [];
+    try {
+      const auditResp = await admin.graphql(
+        `#graphql
+          query InboundAuditForHistory {
+            currentAppInstallation {
+              metafield(namespace: "stock_transfer_pos", key: "inbound_audit_v1") { value }
+            }
+          }
+        `
+      );
+      const auditData = await auditResp.json();
+      inboundAuditEntries = parseInboundAuditEntries(auditData?.data?.currentAppInstallation?.metafield?.value ?? "");
+    } catch {
+      inboundAuditEntries = [];
+    }
+
     // 全履歴を整形（出庫・入庫を分類）
     const allHistories: TransferHistory[] = allNodes
       .map((t: { id?: string; name?: string; status?: string; [key: string]: unknown }) => {
         const originId = t?.origin?.location?.id;
         const destinationId = t?.destination?.location?.id;
+        const shipmentNodes = Array.isArray(t?.shipments?.nodes) ? t.shipments.nodes : [];
+        const shipmentIds = shipmentNodes.map((s: { id?: string }) => String(s?.id || "").trim()).filter(Boolean);
+        const auditExtrasIndex = buildInboundAuditExtrasIndex(inboundAuditEntries, String(destinationId || "").trim());
+        const auditAgg = shipmentIds.reduce(
+          (acc, sid) => {
+            const v = auditExtrasIndex.get(sid);
+            if (!v) return acc;
+            return { count: acc.count + v.count, quantity: acc.quantity + v.quantity };
+          },
+          { count: 0, quantity: 0 }
+        );
 
         // lineItemsは詳細表示時に取得するため、ここでは空配列
         const lineItems: TransferLineItem[] = [];
@@ -173,8 +274,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
         // 拒否分: マイナス（GraphQL receivedQuantity に含まれているため引く）
         // 予定外: プラス（メモ/監査ログから取得して加算）
         // 過剰分: 加算しない（GraphQL receivedQuantity に既に含まれている）
-        const extrasQuantity = extractExtrasQuantityFromNote(t.note || "");
-        const rejectedQuantity = (Array.isArray(t?.shipments?.nodes) ? t.shipments.nodes : [])
+        const extrasQuantityFromNote = extractExtrasQuantityFromNote(t.note || "");
+        const extrasCountFromNote = extractExtrasCountFromNote(t.note || "");
+        const extrasQuantity = extrasQuantityFromNote > 0 ? extrasQuantityFromNote : auditAgg.quantity;
+        const extrasCount = extrasCountFromNote > 0 ? extrasCountFromNote : auditAgg.count;
+        const rejectedQuantity = shipmentNodes
           .reduce((sum: number, s: { totalRejectedQuantity?: unknown }) => sum + Math.max(0, Number(s?.totalRejectedQuantity ?? 0)), 0);
         const receivedQuantityDisplay =
           Number(t.receivedQuantity ?? 0) - Number(rejectedQuantity) + Number(extrasQuantity);
@@ -186,6 +290,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
             name: t.name || "",
             status: t.status || "",
             note: t.note || "",
+            extrasCount,
             dateCreated: t.dateCreated || "",
             totalQuantity: t.totalQuantity ?? 0,
             receivedQuantity: receivedQuantityDisplay,
@@ -193,7 +298,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
             originLocationName: t.origin?.location?.name || t.origin?.name || "",
             destinationLocationId: destinationId || "",
             destinationLocationName: t?.destination?.location?.name || t?.destination?.name || "",
-            shipmentCount: Array.isArray(t?.shipments?.nodes) ? t.shipments.nodes.length : 0,
+            shipmentCount: shipmentNodes.length,
             lineItems,
             type: "outbound" as const,
           };
@@ -206,6 +311,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
             name: t.name || "",
             status: t.status || "",
             note: t.note || "",
+            extrasCount,
             dateCreated: t.dateCreated || "",
             totalQuantity: t.totalQuantity ?? 0,
             receivedQuantity: receivedQuantityDisplay,
@@ -213,7 +319,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
             originLocationName: t?.origin?.location?.name || t?.origin?.name || "",
             destinationLocationId: destinationId,
             destinationLocationName: t?.destination?.location?.name || t?.destination?.name || "",
-            shipmentCount: Array.isArray(t?.shipments?.nodes) ? t.shipments.nodes.length : 0,
+            shipmentCount: shipmentNodes.length,
             lineItems,
             type: "inbound" as const,
           };
@@ -353,6 +459,11 @@ export async function action({ request }: ActionFunctionArgs) {
             id
             name
             note
+            destination {
+              location {
+                id
+              }
+            }
             lineItems(first: 250) {
               nodes {
                 id
@@ -572,6 +683,47 @@ export async function action({ request }: ActionFunctionArgs) {
             }
           }
         });
+      }
+    }
+
+    // note から予定外入庫を復元できない場合は、inbound_audit_v1 から補完する。
+    // これで note 追記失敗時でも管理画面の商品リストに表示できる。
+    if (extrasItems.length === 0) {
+      try {
+        const auditResp = await admin.graphql(
+          `#graphql
+            query InboundAuditForLineItems {
+              currentAppInstallation {
+                metafield(namespace: "stock_transfer_pos", key: "inbound_audit_v1") { value }
+              }
+            }
+          `
+        );
+        const auditData = await auditResp.json();
+        const auditEntries = parseInboundAuditEntries(auditData?.data?.currentAppInstallation?.metafield?.value ?? "");
+        const destinationLocationId = String(transfer?.destination?.location?.id || "").trim();
+        const auditIndex = buildInboundAuditExtrasIndex(auditEntries, destinationLocationId);
+        const shipmentIds = shipmentNodes.map((s: { id?: string }) => String(s?.id || "").trim()).filter(Boolean);
+        const fallbackAuditItems = shipmentIds.flatMap((sid) => auditIndex.get(sid)?.items || []);
+        fallbackAuditItems.forEach((x, idx) => {
+          const split = splitTitleAndOptions(x.title);
+          extrasItems.push({
+            id: `extra-audit-${transferId}-${idx}`,
+            inventoryItemId: "",
+            variantId: "",
+            sku: x.sku || "",
+            barcode: x.barcode || "",
+            title: split.title || `予定外入庫: ${x.sku || `item-${idx}`}`,
+            option1: split.option1,
+            option2: split.option2,
+            option3: split.option3,
+            quantity: 0,
+            receivedQuantity: x.qty,
+            isExtra: true,
+          });
+        });
+      } catch {
+        // 監査ログの取得失敗時は無視（通常明細は表示できるため）
       }
     }
     
@@ -1392,7 +1544,7 @@ export default function HistoryPage() {
                           <s-text color="subdued" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
                             <span style={getStatusBadgeStyle(history.status)}>{STATUS_LABEL[history.status] || history.status}</span>
                             {(() => {
-                              const extrasCount = extractExtrasCountFromNote(history.note || "");
+                              const extrasCount = Number(history.extrasCount || 0);
                               if (extrasCount > 0) {
                                 return (
                                   <span style={{ color: "#d32f2f", fontSize: "12px" }}>
