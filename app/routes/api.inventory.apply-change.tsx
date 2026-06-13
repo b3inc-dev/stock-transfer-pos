@@ -77,6 +77,8 @@ function referenceDocumentUriForActivity(activity: string, refId: string | null)
   if (activity === "loss_entry") return `gid://stock-transfer-pos/LossEntry/${id}`;
   if (activity === "purchase_entry" || activity === "purchase_cancel") return `gid://stock-transfer-pos/PurchaseEntry/${id}`;
   if (activity === "adjustment") return `gid://stock-transfer-pos/AdjustmentEntry/${id}`;
+  if (activity === "inbound_transfer") return `gid://stock-transfer-pos/InboundTransfer/${id}`;
+  if (activity === "outbound_transfer") return `gid://stock-transfer-pos/OutboundTransfer/${id}`;
   return `gid://stock-transfer-pos/InventoryCount/${id}`;
 }
 

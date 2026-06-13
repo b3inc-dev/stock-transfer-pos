@@ -5,11 +5,12 @@ import {
   readAdjustmentEntriesFull,
   readAdjustmentEntryById,
   writeAdjustmentEntries,
-  adjustInventoryToActual,
   fetchLocations,
   fetchVariantImage,
   fetchSettings,
 } from "./adjustmentApi.js";
+import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
+import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 import { getStatusBadgeTone } from "../../adjustmentHelpers.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
@@ -326,28 +327,44 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   );
 
   const cancelConfirmEntryRef = useRef(null);
+  const cancelLockRef = useRef(false);
 
   const handleCancel = useCallback(
     async (entry) => {
-      if (entry?.status !== "active" || !entry?.items?.length) return;
+      if (!entry?.id || entry?.status !== "active" || !entry?.items?.length) return;
+      if (cancelLockRef.current) return;
+      cancelLockRef.current = true;
       setCancelling(entry.id);
       try {
-        const restoreItems = (entry.items || []).map((it) => ({
+        const latest = await readAdjustmentEntryById(entry.id);
+        if (!latest || latest.status !== "active") {
+          toast("既にキャンセル済みです");
+          return;
+        }
+        const restoreItems = (latest.items || []).map((it) => ({
           inventoryItemId: it.inventoryItemId,
           currentQuantity: Number(it.quantity ?? 0),
           actualQuantity: Number(it.currentQuantity ?? 0),
         })).filter((x) => x.inventoryItemId);
         if (restoreItems.length > 0) {
-          await adjustInventoryToActual({
-            locationId: entry.locationId,
-            items: restoreItems,
-            referenceDocumentUri: entry.id,
+          await applyInventoryChangeToApi({
+            appEventId: buildStableAppEventId("adjustment_cancel", latest.id),
+            activity: "adjustment",
+            locationId: latest.locationId,
+            locationName: latest.locationName || "",
+            sourceId: latest.id,
+            referenceDocumentUri: latest.id,
+            entries: restoreItems.map((it) => ({
+              inventoryItemId: it.inventoryItemId,
+              quantityAfter: it.actualQuantity,
+              quantityBefore: it.currentQuantity,
+            })),
           });
         }
         const full = await readAdjustmentEntriesFull();
         const cancelledAt = new Date().toISOString();
         const updated = full.map((e) =>
-          e.id === entry.id ? { ...e, status: "cancelled", cancelledAt } : e
+          e.id === latest.id ? { ...e, status: "cancelled", cancelledAt } : e
         );
         await writeAdjustmentEntries(updated);
         const result = await readAdjustmentEntriesFirstPage();
@@ -362,6 +379,7 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
       } catch (e) {
         toast(`キャンセルエラー: ${e?.message ?? e}`);
       } finally {
+        cancelLockRef.current = false;
         setCancelling("");
         cancelConfirmEntryRef.current = null;
       }

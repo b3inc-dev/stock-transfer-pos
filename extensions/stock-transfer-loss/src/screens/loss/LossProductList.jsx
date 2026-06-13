@@ -10,6 +10,7 @@ import {
 } from "./lossApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
+import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -376,6 +377,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
   const [searchPageInfo, setSearchPageInfo] = useState({ hasNextPage: false, endCursor: null }); // ✅ 検索のサーバー側「さらに読み込む」用
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const submitLockRef = useRef(false);
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -828,15 +830,17 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
   const canSubmit = totalLines > 0 && totalQty > 0 && !submitting;
 
   const handleConfirm = useCallback(async () => {
+    if (submitLockRef.current) return;
     if (!canSubmit || !conds?.locationId) {
       if (totalLines === 0 || totalQty <= 0) toast("商品を追加して数量を入力してください");
       else if (!conds?.locationId) toast("ロケーションが指定されていません");
       return;
     }
+    submitLockRef.current = true;
     setSubmitting(true);
     try {
       const lossEntryId = generateLossId();
-      const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const appEventId = buildStableAppEventId("loss_entry", lossEntryId);
       const entriesForApply = lines
         .filter((l) => Math.abs(Number(l.qty) || 0) > 0)
         .map((l) => ({
@@ -848,7 +852,6 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
 
       if (entriesForApply.length === 0) {
         toast("ロスする数量がありません");
-        setSubmitting(false);
         return;
       }
 
@@ -917,6 +920,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   }, [lines, conds, canSubmit, onAfterConfirm]);

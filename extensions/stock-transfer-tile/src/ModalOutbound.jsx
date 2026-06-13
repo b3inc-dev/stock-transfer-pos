@@ -42,6 +42,10 @@ import {
   useDebounce,
 } from "./modalUiParts.jsx";
 import { logInventoryChangeToApi } from "../../common/logInventoryChange.js";
+import { buildStableAppEventId } from "../../common/buildStableAppEventId.js";
+import {
+  adjustInventoryAtLocationWithFallback,
+} from "../../common/adjustInventoryViaApplyChange.js";
 import { ensureInventoryActivatedWithSkuBarcodeRetry } from "../../common/inventoryActivateRetry.js";
 
 const SHOPIFY = globalThis?.shopify;
@@ -913,6 +917,11 @@ const INVENTORY_TRANSFER_EDIT_NOTE_MUTATION = `
     }
   }
 `;
+
+/** Transfer note に出庫元への在庫戻しが記録済みか（二重在庫調整防止） */
+function transferNoteAlreadyRestoredOrigin_(note) {
+  return /\[キャンセル\]|\[強制キャンセル\]/i.test(String(note || ""));
+}
 
 function buildInboundNoteLine_({ shipmentId, locationId, finalize, note, over, extras, inventoryAdjustments }) {
   const at = new Date();
@@ -3279,6 +3288,7 @@ function OutboundShipmentSelection({
   const [error, setError] = useState("");
   const [detail, setDetail] = useState(null);
   const [selectingShipmentId, setSelectingShipmentId] = useState(null);
+  const cancelLockRef = useRef(false);
 
   // 仮想行（発送準備完了）は #T0127-L、実Shipmentは #T0127-1, #T0127-2... で管理画面と重複しない
   const formatShipmentLabel = useCallback((name, index, isVirtual) => {
@@ -3352,10 +3362,14 @@ function OutboundShipmentSelection({
     return [{ id: `${VIRTUAL_PREFIX}${detail.id}`, status: String(detail?.status || ""), isVirtual: true }];
   }, [detail, shipments, virtualRowFromTransfer]);
 
-  // 配送一覧フッター用：トランスファーがキャンセル可能か（TRANSFERRED/CANCELEDは不可）
+  // 配送一覧フッター用：トランスファーがキャンセル可能か（TRANSFERRED/CANCELED・輸送中は不可）
   const statusRawShipmentList = String(detail?.status || "").toUpperCase();
   const canCancelFromShipmentList = useMemo(() => {
-    return !!detail?.id && statusRawShipmentList !== "TRANSFERRED" && statusRawShipmentList !== "CANCELED";
+    if (!detail?.id) return false;
+    if (statusRawShipmentList === "TRANSFERRED" || statusRawShipmentList === "CANCELED") return false;
+    // 輸送中・入庫処理中は通常キャンセル不可（履歴詳細の「強制キャンセル＝全拒否入庫」を使う）
+    if (statusRawShipmentList === "IN_TRANSIT" || statusRawShipmentList === "IN_PROGRESS") return false;
+    return true;
   }, [detail?.id, statusRawShipmentList]);
 
   const CONFIRM_CANCEL_SHIPMENT_LIST_MODAL_ID = "confirm-cancel-shipment-list-modal";
@@ -3366,7 +3380,13 @@ function OutboundShipmentSelection({
       toast("キャンセルできません（transferId 未取得）");
       return;
     }
+    if (cancelLockRef.current) return;
+    cancelLockRef.current = true;
     try {
+      if (transferNoteAlreadyRestoredOrigin_(detail?.note)) {
+        toast("既に出庫元への在庫戻しが記録されています");
+        return;
+      }
       await inventoryTransferCancelSafe({ id: transferId });
       const originLocationId = String(detail?.originLocationId || "").trim();
       const lineItems = Array.isArray(detail?.lineItems) ? detail.lineItems : [];
@@ -3391,23 +3411,16 @@ function OutboundShipmentSelection({
         const transferIdStr = String(transferId || "").trim();
         const transferIdMatch = transferIdStr.match(/(\d+)$/);
         const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+        const originLocationNameForLog = String(detail?.originName || outbound.historySelectedOriginName || "").trim();
 
         await adjustInventoryAtLocationWithFallback({
           locationId: originLocationId,
           deltas,
           referenceDocumentUri: transferIdForUri,
-        });
-        const originLocationNameForLog = String(detail?.originName || outbound.historySelectedOriginName || "").trim();
-        console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer (history): locationId=${originLocationId}, deltas.length=${deltas?.length || 0}, sourceId=${transferIdForUri}`);
-        await logInventoryChangeToApi({
-          activity: "outbound_transfer",
-          locationId: originLocationId,
-          locationName: originLocationNameForLog,
-          deltas,
           sourceId: transferIdForUri,
-          lineItems,
+          locationName: originLocationNameForLog,
+          operation: "outbound_cancel_restore",
         });
-        console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (history)`);
         const originLocationName = String(detail?.originName || outbound.historySelectedOriginName || "").trim() || "出庫元";
         const adjustments = deltas.map((d) => {
           const li = lineItems.find((l) => String(l?.inventoryItemId || "").trim() === d.inventoryItemId);
@@ -3439,6 +3452,8 @@ function OutboundShipmentSelection({
       loadTransfer();
     } catch (e) {
       toast(String(e?.message || e || "キャンセルに失敗しました"));
+    } finally {
+      cancelLockRef.current = false;
     }
   }, [transferId, detail]);
 
@@ -3661,6 +3676,7 @@ function OutboundHistoryDetail({
   const [lineItemsPageInfo, setLineItemsPageInfo] = useState({ hasNextPage: false, endCursor: null });
   const [loadingMore, setLoadingMore] = useState(false);
   const [cancelArmedAt, setCancelArmedAt] = useState(0);
+  const cancelLockRef = useRef(false);
   const [editOrDuplicateMode, setEditOrDuplicateMode] = useState(null);
   const [historyShipmentTracking, setHistoryShipmentTracking] = useState(null);
   const [stockRefreshing, setStockRefreshing] = useState(false);
@@ -4714,8 +4730,14 @@ function OutboundHistoryDetail({
       toast("強制キャンセルできません（transferId/shipmentId 未取得）");
       return;
     }
+    if (cancelLockRef.current) return;
+    cancelLockRef.current = true;
 
     try {
+      if (transferNoteAlreadyRestoredOrigin_(detail?.note)) {
+        toast("既に出庫元への在庫戻しが記録されています");
+        return;
+      }
       // shipmentのlineItemsを取得して、unreceivedQuantityを全てREJECTEDとして受領
       const shipment = await fetchInventoryShipmentEnriched(selectedShipmentId, {
         includeImages: false,
@@ -4780,23 +4802,17 @@ function OutboundHistoryDetail({
           const transferIdStr = String(transferId || "").trim();
           const transferIdMatch = transferIdStr.match(/(\d+)$/);
           const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
 
           await adjustInventoryAtLocationWithFallback({
             locationId: originLocationId,
             deltas,
             referenceDocumentUri: transferIdForUri,
-          });
-          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
-          console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer (receive): locationId=${originLocationId}, deltas.length=${deltas?.length || 0}, sourceId=${transferIdForUri}`);
-          await logInventoryChangeToApi({
-            activity: "outbound_transfer",
-            locationId: originLocationId,
-            locationName: originLocationNameForLog,
-            deltas,
             sourceId: transferIdForUri,
-            lineItems: detail?.lineItems,
+            locationName: originLocationNameForLog,
+            operation: "outbound_pseudo_cancel_restore",
+            shipmentId: selectedShipmentId,
           });
-          console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (receive)`);
           // 在庫調整履歴をメモに反映
           const originLocationName = detail?.originName ||
             detail?.origin?.name ||
@@ -4840,6 +4856,8 @@ function OutboundHistoryDetail({
       }, 500);
     } catch (e) {
       toast(String(e?.message || e || "強制キャンセルに失敗しました"));
+    } finally {
+      cancelLockRef.current = false;
     }
   }, [transferId, selectedShipmentId, detail, outbound.historySelectedOriginLocationId, loadDetail_]);
 
@@ -4849,8 +4867,14 @@ function OutboundHistoryDetail({
       toast("キャンセルできません（transferId 未取得）");
       return;
     }
+    if (cancelLockRef.current) return;
+    cancelLockRef.current = true;
 
     try {
+      if (transferNoteAlreadyRestoredOrigin_(detail?.note)) {
+        toast("既に出庫元への在庫戻しが記録されています");
+        return;
+      }
       await inventoryTransferCancelSafe({ id: transferId });
 
       // 在庫を出庫元ロケーションに戻す
@@ -4881,23 +4905,16 @@ function OutboundHistoryDetail({
           const transferIdStr = String(transferId || "").trim();
           const transferIdMatch = transferIdStr.match(/(\d+)$/);
           const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
 
           await adjustInventoryAtLocationWithFallback({
             locationId: originLocationId,
             deltas,
             referenceDocumentUri: transferIdForUri,
-          });
-          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
-          console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer (receive): locationId=${originLocationId}, deltas.length=${deltas?.length || 0}, sourceId=${transferIdForUri}`);
-          await logInventoryChangeToApi({
-            activity: "outbound_transfer",
-            locationId: originLocationId,
-            locationName: originLocationNameForLog,
-            deltas,
             sourceId: transferIdForUri,
-            lineItems: detail?.lineItems,
+            locationName: originLocationNameForLog,
+            operation: "outbound_cancel_restore",
           });
-          console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (receive)`);
           // 在庫調整履歴をメモに反映
           const originLocationName = detail?.originName ||
             detail?.origin?.name ||
@@ -4938,6 +4955,8 @@ function OutboundHistoryDetail({
       onBack?.();
     } catch (e) {
       toast(String(e?.message || e || "キャンセルに失敗しました"));
+    } finally {
+      cancelLockRef.current = false;
     }
   }, [transferId, detail, outbound.historySelectedOriginLocationId, items, onBack]);
 
@@ -4947,11 +4966,14 @@ function OutboundHistoryDetail({
       toast("削除できません（transferId 未取得）");
       return;
     }
+    if (cancelLockRef.current) return;
+    cancelLockRef.current = true;
 
     try {
       // 在庫を出庫元ロケーションに戻す（削除前に実行）
       const originLocationId = detail?.originLocationId || outbound.historySelectedOriginLocationId;
-      if (originLocationId && Array.isArray(items) && items.length > 0) {
+      const noteAlreadyRestored = transferNoteAlreadyRestoredOrigin_(detail?.note);
+      if (originLocationId && Array.isArray(items) && items.length > 0 && !noteAlreadyRestored) {
         const deltas = items.map((it) => ({
           inventoryItemId: it.inventoryItemId,
           delta: Number(it.quantity ?? 0),
@@ -4962,24 +4984,19 @@ function OutboundHistoryDetail({
           const transferIdStr = String(transferId || "").trim();
           const transferIdMatch = transferIdStr.match(/(\d+)$/);
           const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
-          
+          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
+
           await adjustInventoryAtLocationWithFallback({
             locationId: originLocationId,
             deltas,
             referenceDocumentUri: transferIdForUri,
-          });
-          const originLocationNameForLog = String(detail?.originName || detail?.origin?.name || outbound.historySelectedOriginName || "").trim();
-          console.log(`[ModalOutbound] Calling logInventoryChangeToApi for outbound_transfer (delete): locationId=${originLocationId}, deltas.length=${deltas?.length || 0}, sourceId=${transferIdForUri}`);
-          await logInventoryChangeToApi({
-            activity: "outbound_transfer",
-            locationId: originLocationId,
-            locationName: originLocationNameForLog,
-            deltas,
             sourceId: transferIdForUri,
-            lineItems: items || detail?.lineItems,
+            locationName: originLocationNameForLog,
+            operation: "outbound_delete_restore",
           });
-          console.log(`[ModalOutbound] logInventoryChangeToApi call completed for outbound_transfer (delete)`);
         }
+      } else if (noteAlreadyRestored && originLocationId) {
+        toast("出庫元への在庫戻しは記録済みのため、在庫調整をスキップして削除します");
       }
 
       // Shopify公式APIで削除
@@ -4989,6 +5006,8 @@ function OutboundHistoryDetail({
       onBack?.();
     } catch (e) {
       toast(String(e?.message || e || "削除に失敗しました"));
+    } finally {
+      cancelLockRef.current = false;
     }
   }, [transferId, detail, outbound.historySelectedOriginLocationId, items, onBack]);
 
@@ -7010,6 +7029,7 @@ function OutboundList({
           deltas: outboundDeltas,
           sourceId: transferIdForUri,
           lineItems: workingLines,
+          appEventId: buildStableAppEventId("outbound_create", transferIdForUri, originLocationGid),
         });
       }
       Promise.all([
@@ -10750,125 +10770,6 @@ async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
     }
     throw e;
   }
-}
-
-/* =========================
-/* Adjust inventory */
-
-async function adjustInventoryAtLocationWithFallback({ locationId, deltas, referenceDocumentUri }) {
-  // プラス値もマイナス値も処理できるように、delta !== 0 でフィルター
-  const changes = (deltas ?? [])
-    .filter((x) => x?.inventoryItemId && Number(x?.delta || 0) !== 0)
-    .map((x) => ({ inventoryItemId: x.inventoryItemId, delta: Number(x.delta) }));
-
-  if (!locationId || changes.length === 0) return null;
-
-  if (changes.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
-    let last = null;
-    for (let i = 0; i < changes.length; i += SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
-      const sub = changes.slice(i, i + SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX);
-      last = await adjustInventoryAtLocationWithFallback({
-        locationId,
-        deltas: sub.map((c) => ({ inventoryItemId: c.inventoryItemId, delta: c.delta })),
-        referenceDocumentUri: i === 0 ? referenceDocumentUri : undefined,
-      });
-    }
-    return last;
-  }
-
-  // referenceDocumentUriを生成（転送IDが指定されている場合）
-  const uri = referenceDocumentUri ? `gid://stock-transfer-pos/OutboundTransfer/${referenceDocumentUri}` : null;
-
-  // 1) try: inventoryAdjustQuantities（差分加算）
-  try {
-    const input = {
-      reason: "correction",
-      name: "available",
-      changes: changes.map((c) => ({
-        inventoryItemId: c.inventoryItemId,
-        locationId,
-        delta: c.delta,
-      })),
-    };
-    
-    // referenceDocumentUriが指定されている場合は追加
-    if (uri) {
-      input.referenceDocumentUri = uri;
-    }
-
-    const m1 = `#graphql
-      mutation Adjust($input: InventoryAdjustQuantitiesInput!) {
-        inventoryAdjustQuantities(input: $input) {
-          inventoryAdjustmentGroup { id }
-          userErrors { field message }
-        }
-      }`;
-
-    const d1 = await adminGraphql(m1, {
-      input,
-    });
-
-    assertNoUserErrors(d1?.inventoryAdjustQuantities, "inventoryAdjustQuantities");
-    return d1?.inventoryAdjustQuantities?.inventoryAdjustmentGroup ?? null;
-  } catch (e) {
-    const msg = String(e?.message ?? e);
-    if (!/doesn\\'t exist|Field .* doesn't exist|undefined/i.test(msg)) throw e;
-  }
-
-  // 2) fallback: inventorySetQuantities（現在値を読んでから new=cur+delta でセット）
-  const currentMap = new Map();
-
-  for (const c of changes) {
-    const q = `#graphql
-      query Cur($id: ID!, $loc: ID!) {
-        inventoryItem(id: $id) {
-          id
-          inventoryLevel(locationId: $loc) {
-            quantities(names: ["available"]) { name quantity }
-          }
-        }
-      }`;
-    const d = await adminGraphql(q, { id: c.inventoryItemId, loc: locationId });
-    const cur = d?.inventoryItem?.inventoryLevel?.quantities?.find((x) => x.name === "available")?.quantity ?? 0;
-    currentMap.set(c.inventoryItemId, Number(cur || 0));
-  }
-
-  const quantities = changes.map((c) => {
-    const cur = currentMap.get(c.inventoryItemId) ?? 0;
-    const next = cur + c.delta;
-    return {
-      inventoryItemId: c.inventoryItemId,
-      locationId,
-      quantity: next,
-      changeFromQuantity: cur,
-    };
-  });
-
-  const m2 = `#graphql
-    mutation Set($input: InventorySetQuantitiesInput!) {
-      inventorySetQuantities(input: $input) {
-        inventoryAdjustmentGroup { id }
-        userErrors { field message }
-      }
-    }`;
-
-  const input2 = {
-    name: "available",
-    reason: "correction",
-    quantities,
-  };
-  
-  // referenceDocumentUriが指定されている場合は追加（fallbackでも設定）
-  if (uri) {
-    input2.referenceDocumentUri = uri;
-  }
-
-  const d2 = await adminGraphql(m2, {
-    input: input2,
-  });
-
-  assertNoUserErrors(d2?.inventorySetQuantities, "inventorySetQuantities");
-  return d2?.inventorySetQuantities?.inventoryAdjustmentGroup ?? null;
 }
 
 // =========================================================

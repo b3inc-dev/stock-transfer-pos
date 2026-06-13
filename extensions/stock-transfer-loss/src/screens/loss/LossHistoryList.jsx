@@ -5,11 +5,12 @@ import {
   readLossEntriesFull,
   readLossEntryById,
   writeLossEntries,
-  adjustInventoryAtLocation,
   fetchLocations,
   fetchVariantImage,
   fetchSettings,
 } from "./lossApi.js";
+import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
+import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 import { getStatusBadgeTone } from "../../lossHelpers.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
@@ -334,24 +335,43 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   );
 
   const cancelConfirmEntryRef = useRef(null);
+  const cancelLockRef = useRef(false);
 
   const handleCancel = useCallback(
     async (entry) => {
-      if (entry?.status !== "active" || !entry?.items?.length) return;
+      if (!entry?.id || entry?.status !== "active" || !entry?.items?.length) return;
+      if (cancelLockRef.current) return;
+      cancelLockRef.current = true;
       setCancelling(entry.id);
       try {
-        const deltas = entry.items.map((it) => ({
+        const latest = await readLossEntryById(entry.id);
+        if (!latest || latest.status !== "active") {
+          toast("既にキャンセル済みです");
+          return;
+        }
+        const deltas = (latest.items || []).map((it) => ({
           inventoryItemId: it.inventoryItemId,
           delta: +(it.quantity || 0),
-        }));
-        await adjustInventoryAtLocation({
-          locationId: entry.locationId,
-          deltas,
-          referenceDocumentUri: entry.id
+        })).filter((d) => d.inventoryItemId && d.delta > 0);
+        if (deltas.length === 0) {
+          toast("キャンセル対象の商品がありません");
+          return;
+        }
+        await applyInventoryChangeToApi({
+          appEventId: buildStableAppEventId("loss_cancel", latest.id),
+          activity: "loss_entry",
+          locationId: latest.locationId,
+          locationName: latest.locationName || "",
+          sourceId: latest.id,
+          referenceDocumentUri: latest.id,
+          entries: deltas.map((d) => ({
+            inventoryItemId: d.inventoryItemId,
+            delta: d.delta,
+          })),
         });
         const full = await readLossEntriesFull();
         const updated = full.map((e) =>
-          e.id === entry.id
+          e.id === latest.id
             ? { ...e, status: "cancelled", cancelledAt: new Date().toISOString() }
             : e
         );
@@ -368,6 +388,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
       } catch (e) {
         toast(`キャンセルエラー: ${e?.message ?? e}`);
       } finally {
+        cancelLockRef.current = false;
         setCancelling("");
         cancelConfirmEntryRef.current = null;
       }

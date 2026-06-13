@@ -11,6 +11,7 @@ import {
 } from "./purchaseApi.js";
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
+import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -377,6 +378,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
   const [searchPageInfo, setSearchPageInfo] = useState({ hasNextPage: false, endCursor: null });
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const submitLockRef = useRef(false);
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -906,16 +908,18 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
   const canSubmit = validLines.length > 0 && !submitting && !draftRefetching;
 
   const handleConfirm = useCallback(async () => {
+    if (submitLockRef.current) return;
     if (!canSubmit || !conds?.locationId) {
       if (draftRefetching) toast("商品情報を読み込み中です。しばらくお待ちください");
       else if (validLines.length === 0) toast("確定できる商品がありません。商品を追加して数量を入力してください");
       else if (!conds?.locationId) toast("ロケーションが指定されていません");
       return;
     }
+    submitLockRef.current = true;
     setSubmitting(true);
     try {
       const purchaseEntryId = generatePurchaseId();
-      const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const appEventId = buildStableAppEventId("purchase_entry", purchaseEntryId);
       // inventoryItemId のない明細は自動スキップ（SKU変更・削除済み商品など）
       const entriesForApply = lines
         .filter((l) => Math.abs(Number(l.qty) || 0) > 0 && l.inventoryItemId)
@@ -999,6 +1003,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   }, [lines, conds, canSubmit, validLines, invalidLines, draftRefetching, onAfterConfirm]);

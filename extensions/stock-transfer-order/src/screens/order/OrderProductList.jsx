@@ -346,6 +346,7 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
   const CONFIRM_ORDER_MODAL_ID = "confirm-order-modal";
   const CONFIRM_RESET_MODAL_ID = "confirm-reset-modal";
   const confirmLossModalRef = useRef(null);
+  const submitLockRef = useRef(false);
   const confirmResetModalRef = useRef(null);
   const lossDraftLoadedRef = useRef(false);
   
@@ -825,11 +826,13 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
   const canSubmit = totalLines > 0 && totalQty > 0 && !submitting;
 
   const handleConfirm = useCallback(async () => {
+    if (submitLockRef.current) return;
     if (!canSubmit || !conds?.locationId) {
       if (totalLines === 0 || totalQty <= 0) toast("商品を追加して数量を入力してください");
       else if (!conds?.locationId) toast("ロケーションが指定されていません");
       return;
     }
+    submitLockRef.current = true;
     setSubmitting(true);
     try {
       // 在庫は動かさず、発注リストとして Metafield に保存する
@@ -887,6 +890,7 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   }, [lines, conds, canSubmit, totalLines, totalQty, onAfterConfirm]);

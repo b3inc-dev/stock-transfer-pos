@@ -19,6 +19,7 @@ import {
 import { getStatusBadgeTone } from "../../lossHelpers.js";
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
+import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 
 function stripEntryForList(entry) {
   if (!entry) return entry;
@@ -455,6 +456,7 @@ export function PurchaseHistoryList({
   const [query, setQuery] = useState("");
   const [candidates, setCandidates] = useState([]);
   const [submitting, setSubmitting] = useState(false);
+  const submitLockRef = useRef(false);
   const [lines, setLines] = useState([]);
   const [extras, setExtras] = useState([]); // 予定外仕入（検索で追加したもの）
   const [addQtyById, setAddQtyById] = useState({}); // 検索リストでの「追加済み」表示（variantId -> qty）
@@ -963,16 +965,22 @@ export function PurchaseHistoryList({
     if (entry.status !== "pending") return;
     if (!entry.locationId) return toast("入庫先ロケーションが指定されていません");
     if (receiveTotal <= 0) return toast("数量を入力してください");
-    if (submitting) return;
+    if (submitLockRef.current || submitting) return;
 
+    submitLockRef.current = true;
     setSubmitting(true);
     try {
+      const latest = (Array.isArray(entries) ? entries : []).find((e) => String(e.id) === String(entry.id));
+      if (!latest || latest.status !== "pending") {
+        toast("既に確定済みです");
+        return;
+      }
       const entriesForApply = [
         ...(Array.isArray(lines) ? lines : []).map((l) => ({ inventoryItemId: l.inventoryItemId, delta: Math.abs(Number(l.receiveQty) || 0), variantId: l.variantId ?? undefined, sku: l.sku ?? undefined })),
         ...(Array.isArray(extras) ? extras : []).map((l) => ({ inventoryItemId: l.inventoryItemId, delta: Math.abs(Number(l.receiveQty) || 0), variantId: l.variantId ?? undefined, sku: l.sku ?? undefined })),
       ].filter((d) => d.inventoryItemId && d.delta > 0);
       if (entriesForApply.length > 0) {
-        const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        const appEventId = buildStableAppEventId("purchase_entry", entry.id);
         await applyInventoryChangeToApi({
           appEventId,
           activity: "purchase_entry",
@@ -1054,6 +1062,7 @@ export function PurchaseHistoryList({
     } catch (e) {
       toast(`確定エラー: ${String(e?.message ?? e)}`);
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   }, [entries, selectedEntryId, lines, extras, receiveTotal, submitting]);

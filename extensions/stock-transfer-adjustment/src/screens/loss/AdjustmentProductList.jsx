@@ -10,6 +10,7 @@ import {
 } from "./adjustmentApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
+import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -376,6 +377,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
   const [searchPageInfo, setSearchPageInfo] = useState({ hasNextPage: false, endCursor: null });
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const submitLockRef = useRef(false);
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -841,11 +843,13 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
 
   // 確定処理：棚卸と同順（在庫調整 → 変動ログ → 履歴保存 → UI完了 → 下書き削除）
   const handleConfirm = useCallback(async () => {
+    if (submitLockRef.current) return;
     if (!canSubmit || !conds?.locationId) {
       if (totalLines === 0) toast("商品を追加してください");
       else if (!conds?.locationId) toast("ロケーションが指定されていません");
       return;
     }
+    submitLockRef.current = true;
     setSubmitting(true);
     const cur = (l) => Number(l.currentQuantity ?? l.available ?? 0);
     const act = (l) => Number(l.qty ?? 0);
@@ -860,7 +864,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       }));
 
       // 1) Phase1: 在庫変更＋履歴を1本化（apply-change API）
-      const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const appEventId = buildStableAppEventId("adjustment", adjustmentEntryId);
       let adjustmentGroupId = null;
       try {
         const applyResult = await applyInventoryChangeToApi({
@@ -878,7 +882,6 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       } catch (applyErr) {
         const msg = String(applyErr?.message ?? applyErr);
         toast(`在庫調整エラー: ${msg}`);
-        setSubmitting(false);
         return;
       }
 
@@ -928,7 +931,6 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
-      setSubmitting(false);
 
       // 4) 下書き削除（確定成功時のみ）
       if (SHOPIFY?.storage?.delete) {
@@ -939,6 +941,8 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       }
     } catch (e) {
       toast(`エラー: ${e?.message ?? e}`);
+    } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   }, [lines, conds, canSubmit, onAfterConfirm]);

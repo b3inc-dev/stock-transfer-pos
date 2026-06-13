@@ -22,6 +22,7 @@ import {
   receiveShipmentWithFallbackV2,
   appendInventoryTransferNote_,
   buildInboundNoteLine_,
+  transferNoteAlreadyRestoredOrigin,
   appendInboundAuditLog,
   adjustInventoryAtLocationWithFallback,
   ensureInventoryActivatedWithSkuBarcodeRetryRows,
@@ -42,6 +43,7 @@ import {
   renderConfirmMemo_,
 } from "../InboundUiParts.jsx";
 import { logInventoryChangeToApi } from "../../../common/logInventoryChange.js";
+import { buildInboundReceiveLogAppEventId } from "../../../common/buildStableAppEventId.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -1295,7 +1297,19 @@ export function InboundListScreen({
           }).filter((d) => d && d.inventoryItemId && d.delta > 0);
           if (inboundDeltas.length > 0) {
             const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
-            await logInventoryChangeToApi({ activity: "inbound_transfer", locationId: locationGid, locationName: destinationLocationNameForLog, deltas: inboundDeltas, sourceId: transferIdForUri });
+            await logInventoryChangeToApi({
+              activity: "inbound_transfer",
+              locationId: locationGid,
+              locationName: destinationLocationNameForLog,
+              deltas: inboundDeltas,
+              sourceId: transferIdForUri,
+              appEventId: buildInboundReceiveLogAppEventId({
+                transferId: transferIdForUri,
+                locationId: locationGid,
+                deltas: inboundDeltas,
+                finalize,
+              }),
+            });
           }
         }
 
@@ -1335,23 +1349,25 @@ export function InboundListScreen({
               const transferIdStr = String(transferId || "").trim();
               const transferIdMatch = transferIdStr.match(/(\d+)$/);
               const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+              const noteAlreadyRestored = transferNoteAlreadyRestoredOrigin(transferForShipment?.note);
+              if (noteAlreadyRestored) {
+                toast("警告: 出庫元への在庫戻しは既に記録済みのため、在庫調整をスキップしました");
+              } else {
+              const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
               try {
                 await adjustInventoryAtLocationWithFallback({
                   locationId: originLocationId,
                   deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
-                  referenceDocumentUri: transferIdForUri || null
+                  referenceDocumentUri: transferIdForUri || null,
+                  sourceId: transferIdForUri,
+                  locationName: originLocationNameForLog,
+                  operation: "inbound_reject_restore",
+                  shipmentId: shipment?.id,
                 });
               } catch (adjustErr) {
                 toast(`警告: 出庫元の在庫調整に失敗しました（入庫は完了）: ${adjustErr?.message || adjustErr}`);
               }
-              const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
-              await logInventoryChangeToApi({
-                activity: "inbound_transfer",
-                locationId: originLocationId,
-                locationName: originLocationNameForLog,
-                deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta, sku: d.sku })),
-                sourceId: transferIdForUri,
-              });
+              }
             }
           }
         }
@@ -1490,7 +1506,19 @@ export function InboundListScreen({
             const transferIdMatch = transferIdStr.match(/(\d+)$/);
             const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
             const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
-            await logInventoryChangeToApi({ activity: "inbound_transfer", locationId: locationGid, locationName: destinationLocationNameForLog, deltas: inboundDeltas, sourceId: transferIdForUri });
+            await logInventoryChangeToApi({
+              activity: "inbound_transfer",
+              locationId: locationGid,
+              locationName: destinationLocationNameForLog,
+              deltas: inboundDeltas,
+              sourceId: transferIdForUri,
+              appEventId: buildInboundReceiveLogAppEventId({
+                transferId: transferIdForUri,
+                locationId: locationGid,
+                deltas: inboundDeltas,
+                finalize,
+              }),
+            });
           }
         }
         for (const [sid, rejItems] of rejectedByShip) {
@@ -1542,23 +1570,24 @@ export function InboundListScreen({
             const transferIdStr = String(transferId || "").trim();
             const transferIdMatch = transferIdStr.match(/(\d+)$/);
             const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
+            const noteAlreadyRestoredM = transferNoteAlreadyRestoredOrigin(transferForShipment?.note);
+            if (noteAlreadyRestoredM) {
+              toast("警告: 出庫元への在庫戻しは既に記録済みのため、在庫調整をスキップしました");
+            } else {
+            const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
             try {
               await adjustInventoryAtLocationWithFallback({
                 locationId: originLocationId,
                 deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
-                referenceDocumentUri: transferIdForUri || null
+                referenceDocumentUri: transferIdForUri || null,
+                sourceId: transferIdForUri,
+                locationName: originLocationNameForLog,
+                operation: "inbound_reject_restore",
               });
             } catch (adjustErr) {
               toast(`警告: 出庫元の在庫調整に失敗しました（入庫は完了）: ${adjustErr?.message || adjustErr}`);
             }
-            const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
-            await logInventoryChangeToApi({
-              activity: "inbound_transfer",
-              locationId: originLocationId,
-              locationName: originLocationNameForLog,
-              deltas: rejectedDeltas.map((d) => ({ inventoryItemId: d.inventoryItemId, delta: d.delta })),
-              sourceId: transferIdForUri,
-            });
+            }
           }
         }
         if (overflowMap.size > 0) {
@@ -1621,25 +1650,20 @@ export function InboundListScreen({
         const transferIdMatch = transferIdStr.match(/(\d+)$/);
         const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
         
+        const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
+
         try {
           await adjustInventoryAtLocationWithFallback({
             locationId: locationGid,
             deltas: extraDeltasMerged,
-            referenceDocumentUri: transferIdForUri || null
+            referenceDocumentUri: transferIdForUri || null,
+            sourceId: transferIdForUri,
+            locationName: destinationLocationNameForLog,
+            operation: "inbound_extras_dest",
           });
         } catch (adjustErr) {
           toast(`警告: 入庫先の在庫調整に失敗しました（入庫は完了）: ${adjustErr?.message || adjustErr}`);
         }
-        const destinationLocationNameForLog = String(transferForShipment?.destinationName || transferForShipment?.destination?.name || inbound?.selectedDestinationName || "").trim();
-        console.log(`[InboundListScreen] Calling logInventoryChangeToApi for inbound_transfer: locationId=${locationGid}, deltas.length=${extraDeltasMerged?.length || 0}, sourceId=${transferIdForUri}`);
-        await logInventoryChangeToApi({
-          activity: "inbound_transfer",
-          locationId: locationGid,
-          locationName: destinationLocationNameForLog,
-          deltas: extraDeltasMerged,
-          sourceId: transferIdForUri,
-        });
-        console.log(`[InboundListScreen] logInventoryChangeToApi call completed for inbound_transfer`);
         const originLocationId = String(transferForShipment?.originLocationId || transferForShipment?.origin?.location?.id || inbound?.selectedOriginLocationId || "").trim() || null;
         if (!originLocationId) {
           toast("警告: 出庫元のlocationIdが取得できませんでした（出庫元の在庫調整をスキップします）");
@@ -1673,25 +1697,25 @@ export function InboundListScreen({
             inventoryItemId: d.inventoryItemId,
             delta: -Math.max(0, Math.floor(Number(d.delta || 0))),
           }));
+          const noteAlreadyRestoredExtras = transferNoteAlreadyRestoredOrigin(transferForShipment?.note);
+          if (noteAlreadyRestoredExtras) {
+            toast("警告: 出庫元への在庫戻しは既に記録済みのため、予定外の出庫元調整をスキップしました");
+          } else {
+          const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
           try {
             await adjustInventoryAtLocationWithFallback({
               locationId: originLocationId,
               deltas: originDeltas,
-              referenceDocumentUri: transferIdForUri || null
+              referenceDocumentUri: transferIdForUri || null,
+              sourceId: transferIdForUri,
+              locationName: originLocationNameForLog,
+              operation: "inbound_extras_origin",
+              activity: "outbound_transfer",
             });
           } catch (adjustErr) {
             toast(`警告: 出庫元の在庫調整に失敗しました（入庫は完了）: ${adjustErr?.message || adjustErr}`);
           }
-          const originLocationNameForLog = String(transferForShipment?.originName || transferForShipment?.origin?.name || inbound?.selectedOriginName || "").trim();
-          console.log(`[InboundListScreen] Calling logInventoryChangeToApi for outbound_transfer: locationId=${originLocationId}, deltas.length=${originDeltas?.length || 0}, sourceId=${transferIdForUri}`);
-          await logInventoryChangeToApi({
-            activity: "outbound_transfer",
-            locationId: originLocationId,
-            locationName: originLocationNameForLog,
-            deltas: originDeltas,
-            sourceId: transferIdForUri,
-          });
-          console.log(`[InboundListScreen] logInventoryChangeToApi call completed for outbound_transfer`);
+          }
         }
       }
 

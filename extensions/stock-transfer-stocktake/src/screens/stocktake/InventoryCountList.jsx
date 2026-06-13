@@ -20,6 +20,7 @@ import { fetchSettings } from "./stocktakeApi.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
+import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 import { reportStocktakeCompleteToApi } from "../../../../common/reportStocktakeComplete.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
@@ -2095,7 +2096,7 @@ export function InventoryCountList({
           return false;
         }
         // ✅ Phase1: 在庫変更＋履歴を1本化（apply-change API）
-        const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        const appEventId = buildStableAppEventId("inventory_count", count.id, "multi");
         const entriesAdjust = allItemsToAdjust.map((l) => ({
           inventoryItemId: l.inventoryItemId,
           variantId: l.variantId ?? undefined,
@@ -2191,7 +2192,7 @@ export function InventoryCountList({
         return false;
       }
       // ✅ Phase1: 在庫変更＋履歴を1本化（apply-change API）
-      const appEventId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const appEventId = buildStableAppEventId("inventory_count", count.id, currentGroupId);
       const entriesSingle = itemsToAdjust.map((l) => ({
         inventoryItemId: l.inventoryItemId,
         variantId: l.variantId ?? undefined,

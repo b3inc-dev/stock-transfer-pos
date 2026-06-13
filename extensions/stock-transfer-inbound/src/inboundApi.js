@@ -362,47 +362,18 @@ export async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
   }
 }
 
-export async function adjustInventoryAtLocationWithFallback({ locationId, deltas, referenceDocumentUri }) {
-  const changes = (deltas ?? []).filter((x) => x?.inventoryItemId && Number(x?.delta || 0) !== 0).map((x) => ({ inventoryItemId: x.inventoryItemId, delta: Number(x.delta) }));
-  if (!locationId || changes.length === 0) return null;
-  
-  // referenceDocumentUriを生成（転送IDが指定されている場合）
-  const uri = referenceDocumentUri ? `gid://stock-transfer-pos/InboundTransfer/${referenceDocumentUri}` : null;
-  
-  try {
-    const input = { reason: "correction", name: "available", changes: changes.map((c) => ({ inventoryItemId: c.inventoryItemId, locationId, delta: c.delta })) };
-    // referenceDocumentUriが指定されている場合は追加
-    if (uri) {
-      input.referenceDocumentUri = uri;
-    }
-    const m1 = `#graphql mutation Adjust($input: InventoryAdjustQuantitiesInput!) { inventoryAdjustQuantities(input: $input) { inventoryAdjustmentGroup { id } userErrors { field message } } }`;
-    const d1 = await adminGraphql(m1, { input });
-    assertNoUserErrors(d1?.inventoryAdjustQuantities, "inventoryAdjustQuantities");
-    return d1?.inventoryAdjustQuantities?.inventoryAdjustmentGroup ?? null;
-  } catch (e) {
-    const msg = String(e?.message ?? e);
-    if (!/doesn't exist|Field .* doesn't exist|undefined/i.test(msg)) throw e;
-  }
-  const currentMap = new Map();
-  for (const c of changes) {
-    const q = `#graphql query Cur($id: ID!, $loc: ID!) { inventoryItem(id: $id) { id inventoryLevel(locationId: $loc) { quantities(names: ["available"]) { name quantity } } } }`;
-    const d = await adminGraphql(q, { id: c.inventoryItemId, loc: locationId });
-    const cur = d?.inventoryItem?.inventoryLevel?.quantities?.find((x) => x.name === "available")?.quantity ?? 0;
-    currentMap.set(c.inventoryItemId, Number(cur || 0));
-  }
-  const quantities = changes.map((c) => {
-    const cur = currentMap.get(c.inventoryItemId) ?? 0;
-    return { inventoryItemId: c.inventoryItemId, locationId, quantity: cur + c.delta, changeFromQuantity: cur };
+export {
+  buildTransferAdjustAppEventId,
+} from "../../common/adjustInventoryViaApplyChange.js";
+
+import { adjustInventoryAtLocationWithFallback as adjustViaApplyChange } from "../../common/adjustInventoryViaApplyChange.js";
+
+/** 入庫拡張：在庫調整は apply-change API 経由（デフォルト activity=inbound_transfer） */
+export async function adjustInventoryAtLocationWithFallback(opts) {
+  return adjustViaApplyChange({
+    activity: "inbound_transfer",
+    ...opts,
   });
-  const input2 = { name: "available", reason: "correction", quantities };
-  // referenceDocumentUriが指定されている場合は追加（fallbackでも設定）
-  if (uri) {
-    input2.referenceDocumentUri = uri;
-  }
-  const m2 = `#graphql mutation Set($input: InventorySetQuantitiesInput!) { inventorySetQuantities(input: $input) { inventoryAdjustmentGroup { id } userErrors { field message } } }`;
-  const d2 = await adminGraphql(m2, { input: input2 });
-  assertNoUserErrors(d2?.inventorySetQuantities, "inventorySetQuantities");
-  return d2?.inventorySetQuantities?.inventoryAdjustmentGroup ?? null;
 }
 
 export async function ensureInventoryActivatedAtLocation({ locationId, inventoryItemIds }) {
@@ -799,6 +770,11 @@ export async function appendInboundAuditLog({ locationId, shipmentId, reason, no
   const m = `#graphql mutation AuditSet($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { id } userErrors { field message } } }`;
   const r = await adminGraphql(m, { metafields: [{ ownerId: app.id, namespace: INBOUND_AUDIT_NS, key: INBOUND_AUDIT_KEY, type: "json", value: JSON.stringify(next) }] });
   assertNoUserErrors(r?.metafieldsSet, "metafieldsSet");
+}
+
+/** Transfer note に出庫元への在庫戻しが記録済みか（二重在庫調整防止） */
+export function transferNoteAlreadyRestoredOrigin(note) {
+  return /\[キャンセル\]|\[強制キャンセル\]/i.test(String(note || ""));
 }
 
 export function buildInboundNoteLine_({ shipmentId, locationId, finalize, note, over, extras, inventoryAdjustments }) {
