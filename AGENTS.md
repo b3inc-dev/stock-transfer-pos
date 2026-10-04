@@ -55,6 +55,8 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 | [`docs/STATE_MACHINE.md`](docs/STATE_MACHINE.md) | 状態遷移・retry/timeout・冪等 |
 | [`docs/SHOPIFY.md`](docs/SHOPIFY.md) | Location/Inventory/Transfer API |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | 設計判断・負債・優先度 |
+| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 安全な開発・mock検証・障害調査・PR手順 |
+| [`docs/BACKLOG.md`](docs/BACKLOG.md) | 未実装候補・課題ID・完了条件（着手許可ではない） |
 
 既存の詳細調査（差分・原因分析）は `docs/` 配下に多数ある。**正本の状態遷移は本セットを優先**し、古いギャップ文書（例: add-shipment 未実装と書かれたもの）は `ModalOutbound.jsx` の現行実装で再確認すること。
 
@@ -101,3 +103,7 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 - [ ] 二重発行・部分成功・timeout 直後の再実行を説明できるか
 - [ ] Transfer 作成と apply-change / 履歴ログを混同していないか
 - [ ] 既存の「条件継ぎ足し」負債を増やしていないか（`DECISIONS.md`）
+
+## 継続開発の手順と課題管理
+
+[開発・mock検証・障害調査手順](docs/DEVELOPMENT.md) と [BACKLOG](docs/BACKLOG.md) を参照する。通常ownerはCodex、GitHubが唯一の正本。Backlogは未実装候補で、依頼範囲外には着手しない。本番反映の承認条件は [DEPLOY.md](docs/DEPLOY.md) に従う。

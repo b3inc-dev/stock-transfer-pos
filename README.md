@@ -253,3 +253,7 @@ Internationalization:
 ## Codexでの継続開発
 
 通常ownerはCodex、GitHubが唯一の正本です。[AGENTS.md](AGENTS.md) と [開発運用](docs/DEPLOY.md) に従い、専用branch/worktreeで調査・実装・mock検証・レビュー・PR作成まで進めます。本番在庫変更、main merge、production deploy、Shopify本番設定、secret変更、不可逆操作は明示承認まで停止します。現状の安全性と未解決点は [在庫処理監査](docs/CODEX_INVENTORY_AUDIT.md) を参照してください。`npm test` は通信mockのみの検証です。
+
+## 継続開発の手順と課題管理
+
+[開発・mock検証・障害調査手順](docs/DEVELOPMENT.md) と [BACKLOG](docs/BACKLOG.md) を参照する。通常ownerはCodex、GitHubが唯一の正本。Backlogは未実装候補で、依頼範囲外には着手しない。本番反映の承認条件は [DEPLOY.md](docs/DEPLOY.md) に従う。

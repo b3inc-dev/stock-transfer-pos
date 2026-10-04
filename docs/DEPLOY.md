@@ -169,3 +169,7 @@ GitHub main `c3cfefff` とPRを同じNode24/依存/envで比較し、lint 3,093 
 4. owner tool/agent・branch/worktree・base/HEAD・scope・quality・未完了・次actionをIssue/PRへ記録し、関連品質確認と必要な独立reviewまで進める。依頼外Backlogへ着手しない。merge/releaseは既存の分類・DoD・承認条件に従う。本依頼のproduction merge停止は継続する。
 
 実行環境がworktree作成を許可しない場合は共有mainへ編集せず、具体的な制約と最小限の対応を報告する。これは各toolの読込後の行動規則であり、GUIでworktree作成を強制する仕組みや権限の全面省略ではない。PR未mergeの間はこのbranchの規則を読めるセッションで利用し、共有baseへの反映後は新規セッションで読込を確認する。
+
+## 継続開発の手順と課題管理
+
+[開発・mock検証・障害調査手順](DEVELOPMENT.md) と [BACKLOG](BACKLOG.md) を参照する。通常ownerはCodex、GitHubが唯一の正本。Backlogは未実装候補で、依頼範囲外には着手しない。本番反映の承認条件は [DEPLOY.md](DEPLOY.md) に従う。
