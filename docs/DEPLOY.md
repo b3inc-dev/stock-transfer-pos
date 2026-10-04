@@ -71,6 +71,8 @@ POS が使うアプリと Render で動かしているアプリが同じにな�
 
 GitHub のコード・Issue・PR を正本とし、共通指示は `AGENTS.md` と本書に保存する。ツールの個人メモだけで仕様を確定しない。
 
+業務・状態遷移の正本は [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md)、[ARCHITECTURE.md](ARCHITECTURE.md)、[BUSINESS_RULES.md](BUSINESS_RULES.md)、[STATE_MACHINE.md](STATE_MACHINE.md)、[SHOPIFY.md](SHOPIFY.md)、[DECISIONS.md](DECISIONS.md)。開発運用・owner・引き継ぎ・リリース承認の正本は本書。古い個別手順のmain直pushや無承認deployは実行せず、本書の停止条件に従う。DECISIONSの推奨優先順位はBacklogとして扱い、依頼なしに実装へ着手しない。
+
 - 1 logical workstream = 1 owner agent/tool = 1 branch/worktree/PR。同じworkstreamを3ツールが同時編集しない。
 - 開始前にGitHub Issue/PRでownerを確認し、担当未確定なら確定してから編集する。別workstreamも変更範囲の重複を確認する。
 - mainへのdirect commit/push・force pushは禁止。GitHub正本から専用branch/worktreeを作り、変更ファイルだけをstageする。他者の未コミット変更・Theme Editor由来commitを保持する。
