@@ -144,3 +144,14 @@ main protectionなし（API404 Branch not protected）、rulesetなし。GitHub 
 Render `pos-stock`（srv-d5vcsr7pm1nc73cfph90）は `b3inc-dev/stock-transfer-pos` / main / On Commit、Docker service、context `.`、Dockerfile path `./Dockerfile`、Root Directory/Build Filters未指定、Docker Command overrideとpreDeploy空。DockerfileはNode20、CMD `npm run docker-start`。Ciara用 `pos-stock-ciara`（srv-d5d4n2be5dus7394um90）の実Source/Branch/Auto-Deployは未確認。Dashboard→サービス→Settingsで確認する。`shopify.app.toml`はstock-transfer-pos.onrender.com、公開用tomlはpos-stock.onrender.comを指定しており、稼働Ciaraアプリの実URL/redirectとサービスURLの対応はShopify Dev Dashboardのアプリ設定で照合が必要。設定を書き換えず未確認として残す。
 
 GitHub main `c3cfefff` とPRを同じNode24/依存/envで比較し、lint 3,093 errors/157 warnings、typecheck 452 error行が同一（lintの絶対path・列幅を正規化）。今回差分による新規失敗なし。正式Green baselineは未成立。
+
+### 依頼ごとに自動で行う作業分離
+
+ユーザーは変更内容を通常の言葉で依頼するだけでよい。Cursor・Codex・Claude Codeの担当toolは、編集前に次を自律実行し、branch/worktreeの作成・再利用について毎回の確認を求めない。
+
+1. 実作業path・GitHub remote・branch・dirty状態・既存worktreeを確認し、GitHub Issue/PRの進行中workstream/owner/範囲/依存と照合する。依頼が読み取りだけならworktree作成は不要。
+2. 同じworkstreamを自分が継続中なら専用branch/worktree/PRを再利用する。他toolがownerなら編集せず、停止とhandoffを確認する。新しい独立workstreamならGitHubの最新base（Themeはstaging、他repoはmain）から専用branch＋isolated worktreeを作る。Codex新規branchはcodex/を既定とし、各toolの既存命名規約を保持する。
+3. 原checkoutの未commit変更を勝手に移動・stash・破棄しない。作業pathが専用worktree、branchが保護base以外、ownerが自分であることを確かめてから編集する。base追従は現在のworkstreamと競合を確認し、他者の履歴を書き換えない。
+4. owner tool/agent・branch/worktree・base/HEAD・scope・quality・未完了・次actionをIssue/PRへ記録し、関連品質確認と必要な独立reviewまで進める。依頼外Backlogへ着手しない。merge/releaseは既存の分類・DoD・承認条件に従う。本依頼のproduction merge停止は継続する。
+
+実行環境がworktree作成を許可しない場合は共有mainへ編集せず、具体的な制約と最小限の対応を報告する。これは各toolの読込後の行動規則であり、GUIでworktree作成を強制する仕組みや権限の全面省略ではない。PR未mergeの間はこのbranchの規則を読めるセッションで利用し、共有baseへの反映後は新規セッションで読込を確認する。
