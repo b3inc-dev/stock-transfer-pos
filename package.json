@@ -19,7 +19,11 @@
     "prisma": "prisma",
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
-    "typecheck": "react-router typegen && tsc --noEmit"
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "preview:setup": "node scripts/preview/setup.mjs",
+    "preview:pr": "node scripts/preview/pr.mjs",
+    "preview:dev": "node scripts/preview/dev.mjs",
+    "preview:self-test": "node scripts/preview/self-test.mjs"
   },
   "type": "module",
   "engines": {
