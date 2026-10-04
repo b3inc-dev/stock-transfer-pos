@@ -38,7 +38,7 @@ git push origin <feature-branch>
 
 ## 2. Render のデプロイ
 
-- **main監視かつauto-deploy有効**なら、承認済みPRのmain mergeでbackend deployが始まります（外部実設定は未確認）。
+- 公開用 `pos-stock` はGitHub main監視・On Commit auto-deployを2026-10-04に確認済み。承認済みmain mergeでbackend production deployが始まります。Ciara用 `pos-stock-ciara` の実設定は未確認（末尾の再監査参照）。
 - 明示承認後に手動deployする場合のみ、[Render ダッシュボード](https://dashboard.render.com) → 該当サービス（pos-stock）→ **「Manual Deploy」→「Deploy latest commit」** で手動デプロイ。
 
 **確認:** Render の **Logs** で `==> Your service is live` などが出れば完了。
@@ -115,7 +115,7 @@ Handoff: 前owner停止確認・次owner受領
 
 OAuth・scopes・webhooks・App Proxy・billing・inventory/order mutation・本番env変更はHIGH RISK。手動production deployは明示承認時のみ。旧手順のmain直pushは使わず、PR経由に読み替える。`shopify app deploy`によるShopify設定/拡張のreleaseと、hosted backendのdeployは別経路。開発時も本番アプリのURLを更新しないようapp/config/storeの接続先を確認する。
 
-Renderの監視branch・auto-deploy・build filter・実際のbuild/predeploy/start・public/inhouseの対象は外部設定で未確認。main mergeが本番deployを起こす場合はproduction releaseとして扱う。今回は確認・人間承認までmergeしない。
+Renderの下記確認済みサービスはmainを監視しOn Commit auto-deploy。main merge = backend production releaseとして扱い、今回は人間承認までmergeしない。Shopify app config/extension releaseは別経路で、Render deployだけではShopify版のreleaseを意味しない。
 
 品質ゲートはpackage.jsonに存在するlint/typecheck/buildを実行し、存在しないtestコマンドを捏造しない。開発用credentialsが必要な検証は未実行理由をPRに残す。本番DBへのmigrationや接続を品質確認に使わない。
 
@@ -123,7 +123,7 @@ Renderの監視branch・auto-deploy・build filter・実際のbuild/predeploy/st
 
 ### repoから確認した運用証拠（2026-10-04）
 
-`shopify.app.toml`/`shopify.app.public.toml`と既存deploy docsは自社用/公開用を分離する。`package.json`のdeployはShopify releaseであり、Render backend deployを直接実行する証拠ではない。Render auto-deploy設定は未確認。`app/utils/graphql-with-retry.ts`はHTTP429/503に最大3retry（1/2/4秒）を実装するが、このhelperのGraphQL throttle/network例外/Retry-After対応は未整備。`app/utils/admin-webhook-retry.ts`は2.5秒×12回の再検索。`app/routes/api.log-inventory-change.tsx`等のappEventIdとDB unique/upsertで重複防止する。全mutationの網羅性は未確認。
+`shopify.app.toml`/`shopify.app.public.toml`と既存deploy docsは自社用/公開用を分離する。`package.json`のdeployはShopify releaseであり、Render backend deployを直接実行する証拠ではない。公開用Renderサービスのmain/On Commitを実確認。Ciara用の設定は下記未確認。`app/utils/graphql-with-retry.ts`はHTTP429/503に最大3retry（1/2/4秒）を実装するが、このhelperのGraphQL throttle/network例外/Retry-After対応は未整備。`app/utils/admin-webhook-retry.ts`は2.5秒×12回の再検索。`app/routes/api.log-inventory-change.tsx`等のappEventIdとDB unique/upsertで重複防止する。全mutationの網羅性は未確認。
 
 ### 初期設定監査（2026-10-04、本番コード/deploy設定変更なし）
 
@@ -133,8 +133,14 @@ main protectionなし（API404 Branch not protected）、rulesetなし。GitHub 
 
 ツール: Cursor desktop CLI 3.23.12、Codex CLI 0.160.0、Claude Code 2.1.246、Shopify CLI 3.88.1。Codexはread-only実セッションで共通指示と参照docsを読み、owner/PR/停止条件/引き継ぎを確認。Cursorの実Agent読込は未確認（cursor-agentは未検出）、Claude Codeは未ログインで実セッション未確認。rootから起動して上記の無編集確認promptを実行し、Claudeは/contextのMemory files、Cursorは適用ルールを照合する。
 
-既存権限/接続: Codexユーザー設定にapproval/sandboxの明示キーはなく、このPRはrepo側だけsafe defaultを追加。現在のdesktop sessionはworkspace-write相当。Cursor CLIはapprovalMode=allowlistだがsandbox.mode=disabled（既存ユーザー設定を保持、要確認）。Claudeユーザー設定にはallow rule 28件がありdefaultModeは明示なし（実効権限は未確認）。Codex/ Cursorの既存MCP、App repoのShopify MCPは保持し、新規MCP・credentialsを追加しない。個人認証/接続情報はコピーしていない。
+既存権限/接続: Codexユーザー設定にapproval/sandboxの明示キーはなく、このPRはrepo側だけsafe defaultを追加。repo設定はon-request/workspace-writeを維持するが、再監査時のこのCodex desktop sessionは起動側のdanger-full-access/approval neverで上書きされている。repo設定だけでは実効権限を保証できないため、通常開発ではdesktopの承認・sandbox表示を確認して開始する。今回こちらからFull Accessへ変更した事実はない。Cursor CLIはapprovalMode=allowlistだがsandbox.mode=disabled（既存ユーザー設定を保持、要確認）。Claudeユーザー設定はallow 28件・defaultMode明示なし。Edit(**)、git push、npx prisma、gcloud buildsの広いallowがある。production禁止はdocs上の指示でありpermission denyではない。未ログインのため実効モードとimportは未確認。個人権限は変更していない。Codex/ Cursorの既存MCP、App repoのShopify MCPは保持し、新規MCP・credentialsを追加しない。個人認証/接続情報はコピーしていない。
 
 承認後の更新: 2026-10-04にユーザー承認を受けmain ruleset `main-pr-required-no-force-push` をactiveで適用し、有効ルールをGETで再確認済み。PR必須、force push/削除禁止、required approvals=0、追加承認/Code Owner/last push approvalは無効、bypassなし。required checksは追加せず、既存auto-merge設定は変更していない。
 
 独立レビュー: 別Agentによる読み取りレビューで旧deploy手順の矛盾を修正し、重大な追加指摘なし。実行できないツール/外部設定と既存品質エラーは上記・PRで未確認/未完了として残す。
+
+### 外部設定・品質再監査（2026-10-04）
+
+Render `pos-stock`（srv-d5vcsr7pm1nc73cfph90）は `b3inc-dev/stock-transfer-pos` / main / On Commit、Docker service、context `.`、Dockerfile path `./Dockerfile`、Root Directory/Build Filters未指定、Docker Command overrideとpreDeploy空。DockerfileはNode20、CMD `npm run docker-start`。Ciara用 `pos-stock-ciara`（srv-d5d4n2be5dus7394um90）の実Source/Branch/Auto-Deployは未確認。Dashboard→サービス→Settingsで確認する。`shopify.app.toml`はstock-transfer-pos.onrender.com、公開用tomlはpos-stock.onrender.comを指定しており、稼働Ciaraアプリの実URL/redirectとサービスURLの対応はShopify Dev Dashboardのアプリ設定で照合が必要。設定を書き換えず未確認として残す。
+
+GitHub main `c3cfefff` とPRを同じNode24/依存/envで比較し、lint 3,093 errors/157 warnings、typecheck 452 error行が同一（lintの絶対path・列幅を正規化）。今回差分による新規失敗なし。正式Green baselineは未成立。
