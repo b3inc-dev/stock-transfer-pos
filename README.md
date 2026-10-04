@@ -249,3 +249,7 @@ Shopify:
 Internationalization:
 
 - [Internationalizing your app](https://shopify.dev/docs/apps/best-practices/internationalization/getting-started)
+
+## Codexでの継続開発
+
+通常ownerはCodex、GitHubが唯一の正本です。[AGENTS.md](AGENTS.md) と [開発運用](docs/DEPLOY.md) に従い、専用branch/worktreeで調査・実装・mock検証・レビュー・PR作成まで進めます。本番在庫変更、main merge、production deploy、Shopify本番設定、secret変更、不可逆操作は明示承認まで停止します。現状の安全性と未解決点は [在庫処理監査](docs/CODEX_INVENTORY_AUDIT.md) を参照してください。`npm test` は通信mockのみの検証です。

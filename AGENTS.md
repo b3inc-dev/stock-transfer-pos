@@ -15,6 +15,18 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 
 作業分離は毎回の指示を待たず自動で行う。編集前にGitHubのowner・進行中PRとローカル変更を確認し、同じworkstreamの自分の専用branch/worktreeがあれば再利用、なければGitHubの適切なbaseから作成する。main/stagingの共有checkoutや他toolのworktreeへ直接編集しない。詳細手順は上記の共通運用docsを参照する。
 
+## Codex単独継続開発（2026-10-04以降）
+
+通常の開発ownerはCodex。GitHubを唯一の正本とし、確認先は依頼元のチャットとする。他チャット・他ツールへの確認を通常の開始条件にしない。既存の他tool所有PR/branchは、停止・明示handoffなしに編集しない。以下は既存の共通運用に追加する現行指示であり、過去の監査記録より優先する。
+
+- 依頼ごとにfetch/status/main/docs/進行中PR/履歴を調査し、専用feature branch/worktreeで進める。合理的に判断できる調査・実装・mockテスト・commit・push・PR作成は確認なしで進める。Backlogへの無断着手はしない。
+- inventory mutationを変更する前に入口からShopify mutation・履歴保存まで追跡し、location/SKU/variant/inventoryItem/quantityの対応、冪等キー、再開位置、成功不明状態、部分成功を説明する。
+- fixture/mock/test environmentを優先し、実在庫を書き換えない。lint/typecheck/test/build、retry/duplicate/partial failure/location別の検証、自己レビュー・独立レビューを行う。未検証の安全性をテスト済みと記載しない。
+- 本番在庫mutation、production app deploy、Shopify本番設定変更、main merge、secret変更、不可逆な本番操作は明示承認まで停止する。PR作成の許可はこれらの許可を含まない。
+- PR本文にowner/base/scopeと、在庫変更ロジックへの影響・二重実行防止・retry・timeout・partial failure・テスト結果・本番反映時の注意点を必ず記録する。
+
+調査結果と安全な検証の範囲は [docs/CODEX_INVENTORY_AUDIT.md](docs/CODEX_INVENTORY_AUDIT.md) を参照する。
+
 ## プロジェクト概要
 
 - **リポジトリ**: `b3inc-dev/stock-transfer-pos`

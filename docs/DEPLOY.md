@@ -81,6 +81,18 @@ GitHub のコード・Issue・PR を正本とし、共通指示は `AGENTS.md` �
 - HIGH RISKはReadyで停止し、人間の明示承認後のみmergeする。今回の初期設定ではproduction releaseを伴うmergeも承認待ち。本番手動deploy/publish/rollbackは行わない。
 - secrets/token/本番credentialsをrepo・Issue・PR・ログへ保存しない。.env.exampleは必要な変数名と非secretの例のみ。既存接続を置換せず、MCP追加は必要性・権限・credential保存先を先に確認する。
 
+### Codex単独開発の現行運用（2026-10-04）
+
+通常ownerはCodex、確認先は依頼元チャット。GitHubのコード・docs・Issue・PR・履歴を唯一の正本とする。別チャットへの確認なしに、read-only調査、専用branch/worktree作成、依頼範囲の実装、mockテスト、commit/push/PR作成まで進める。既存の他tool所有branchを引き継ぎなしに編集しない。以下の停止条件は全変更に適用する: 本番在庫mutation、production app deploy、Shopify本番設定変更、main merge、secret変更、不可逆な本番操作。依頼元での明示承認が必要。
+
+開始時は `git fetch origin` → status/worktree/remote → origin/main/PR/owner/履歴 → 必読docs → mutationの入口から出口までの追跡 → 冪等性/retry/timeout/partial success → deploy構成の順で確認する。fetchできない場合は最新base未確認と記録する。scopeが独立なら既存他tool PRは継続ownerのまま保持する。
+
+品質確認は `npm run lint`、`npm run typecheck`、`npm test`、`npm run build`。`npm test` はNode組み込みrunnerとmock通信のみで既存クライアントhelperを検証する。本番API/DB/在庫を利用しない。テストの範囲と限界は [CODEX_INVENTORY_AUDIT.md](CODEX_INVENTORY_AUDIT.md) に記録する。失敗はbaseと比較してPRへ残し、既存失敗を今回の成功として扱わない。自己レビュー後、別Codex agentによる独立レビューを行いPRを更新する。通常の他チャット確認は不要。
+
+`npm run dev` はShopify URL更新、web devはmigration、`npm run setup`/`docker-start` はmigrationを伴うため、安全なmock検証の代わりに起動しない。mock環境ではsecretをコピーしない。
+
+PR本文には在庫変更ロジックへの影響、二重実行防止、retry動作、timeout動作、partial failure動作、テスト結果、本番反映時の注意点を記載する。Readyでもmerge/releaseは停止する。以下の監査欄は過去時点の記録であり、実効権限・外部設定は開始時点で再確認する。repoのon-request/workspace-write設定だけで起動時の実効権限を保証しない。
+
 ### 3ツール間の引き継ぎ
 
 前ownerは編集・自動処理を止め、commitと作業状態をIssue/PRへ記録して所有権を解放する。次ownerは記録・HEAD・未コミット差分を確認して引き継ぎを明記してから編集する。ownerが不明なら同時着手しない。
@@ -119,7 +131,7 @@ OAuth・scopes・webhooks・App Proxy・billing・inventory/order mutation・本
 
 Renderの下記確認済みサービスはmainを監視しOn Commit auto-deploy。main merge = backend production releaseとして扱い、今回は人間承認までmergeしない。Shopify app config/extension releaseは別経路で、Render deployだけではShopify版のreleaseを意味しない。
 
-品質ゲートはpackage.jsonに存在するlint/typecheck/buildを実行し、存在しないtestコマンドを捏造しない。開発用credentialsが必要な検証は未実行理由をPRに残す。本番DBへのmigrationや接続を品質確認に使わない。
+品質ゲートはpackage.jsonに存在するlint/typecheck/test/buildを実行する。開発用credentialsが必要な検証は未実行理由をPRに残す。本番DBへのmigrationや接続を品質確認に使わない。
 
 外部API変更時は既存helperのretry上限/backoff・429/GraphQL throttle・error/userErrors処理を確認する。mutationはタイムアウト後の成功不明状態を含めidempotencyと再送を確認し、read用retryをそのまま適用しない。全経路の網羅性・rate limit・secret/log redactionが未確認なら注意点として残し、初期設定ではrefactorしない。
 
