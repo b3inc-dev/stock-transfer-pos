@@ -316,6 +316,8 @@ function InboundConditions({
       const readOnly = isCompleted(t);
       setStateSlice(setAppState, "inbound", {
         selectedShipmentId: shipmentId,
+        selectedShipmentIds: [],
+        shipmentMode: "single",
         selectedTransferId: String(t?.id || ""),
         selectedTransferName: String(t?.name || ""),
         selectedOriginName: String(t?.originName || ""),
@@ -338,6 +340,9 @@ function InboundConditions({
     const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
     if (shipments.length === 0) { toast("配送が見つかりません"); pendingTransferForModalRef.current = null; setPendingTransferForModal(null); return; }
     setStateSlice(setAppState, "inbound", {
+      selectedShipmentId: "",
+      selectedShipmentIds: [],
+      shipmentMode: "single",
       selectedTransferId: String(t?.id || ""),
       selectedTransferName: String(t?.name || ""),
       selectedOriginName: String(t?.originName || ""),
@@ -356,8 +361,10 @@ function InboundConditions({
   const handleShowAllShipments = useCallback(() => {
     const t = pendingTransferForModal || pendingTransferForModalRef.current;
     if (!t) { pendingTransferForModalRef.current = null; setPendingTransferForModal(null); return; }
+    const shipmentIds = (Array.isArray(t?.shipments) ? t.shipments : []).map((s) => String(s?.id || "").trim()).filter(Boolean);
     setStateSlice(setAppState, "inbound", {
-      selectedShipmentIds: (Array.isArray(t?.shipments) ? t.shipments : []).map((s) => String(s?.id || "").trim()).filter(Boolean),
+      selectedShipmentId: shipmentIds[0] || "",
+      selectedShipmentIds: shipmentIds,
       shipmentMode: "multiple",
       selectedTransferId: String(t?.id || ""),
       selectedTransferName: String(t?.name || ""),
@@ -367,6 +374,7 @@ function InboundConditions({
       selectedTransferStatus: String(t?.status || ""),
       selectedTransferTotalQuantity: Number(t?.totalQuantity ?? 0),
       selectedTransferReceivedQuantity: Number(t?.receivedQuantityDisplay ?? t?.receivedQuantity ?? 0),
+      selectedReadOnly: false,
     });
     pendingTransferForModalRef.current = null;
     setPendingTransferForModal(null);
@@ -653,7 +661,12 @@ function Extension() {
         if (alive) setSettings(s);
       } catch (e) {
         console.warn("[Inbound Modal] fetchSettings failed:", e);
-        if (alive) setSettings({ version: 1, inbound: { listInitialLimit: 100 }, productList: { initialLimit: 250 }, searchList: { initialLimit: 50 } });
+        if (alive) setSettings({
+          version: 1,
+          inbound: { listInitialLimit: 100, allowOverReceive: true, allowExtraReceive: true },
+          productList: { initialLimit: 250 },
+          searchList: { initialLimit: 50 },
+        });
       }
     })();
     return () => { alive = false; };

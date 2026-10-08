@@ -88,9 +88,14 @@ function denyEdit_(toastReadOnlyOnceRef, toastFn) {
 }
 
 // TDZ 対策: モジュールレベルに配置（loadShipment / setRowQty / setAllToPlanned 等で参照）
-function clampReceiveQty_(r, n) {
+function clampReceiveQty_(r, n, allowOverReceive = true) {
   const min = Math.max(0, Math.floor(Number(r?.alreadyAcceptedTotalQty ?? (Number(r?.alreadyAcceptedQty || 0) + Number(r?.overAcceptedQty || 0)))));
-  const v = Math.max(min, Math.floor(Number(n || 0)));
+  let v = Math.max(min, Math.floor(Number(n || 0)));
+  if (allowOverReceive === false) {
+    const planned = Math.max(0, Math.floor(Number(r?.plannedQty || 0)));
+    const max = Math.max(min, planned);
+    v = Math.min(v, max);
+  }
   return v;
 }
 
@@ -110,25 +115,24 @@ function formatShipmentLabelLocal(transferName, index) {
 }
 
 // TDZ 対策（Jt エラー）: コンポーネント内の incRow/setRowQty/setExtraQty/incExtra が minify で Jt 等になり参照順でエラーになるためモジュールレベルに配置
-function incRow_(readOnlyRef, toastReadOnlyOnceRef, toastFn, rowsRef, setRows, key, delta) {
+function incRow_(readOnlyRef, toastReadOnlyOnceRef, toastFn, rowsRef, setRows, key, delta, allowOverReceive = true) {
   if (readOnlyRef?.current) return denyEdit_(toastReadOnlyOnceRef, toastFn);
-  const min = (rowsRef?.current || []).find((r) => r.key === key)?.alreadyAcceptedTotalQty ?? 0;
   setRows((prev) =>
-    prev.map((r) =>
-      r.key === key
-        ? { ...r, receiveQty: Math.max(Number(min || 0), Math.floor(Number(r.receiveQty ?? 0)) + delta) }
-        : r
-    )
+    prev.map((r) => {
+      if (r.key !== key) return r;
+      const next = Math.floor(Number(r.receiveQty ?? 0)) + delta;
+      return { ...r, receiveQty: clampReceiveQty_(r, next, allowOverReceive) };
+    })
   );
 }
-function setRowQty_(readOnlyRef, toastReadOnlyOnceRef, toastFn, rowsRef, setRows, key, qty) {
+function setRowQty_(readOnlyRef, toastReadOnlyOnceRef, toastFn, rowsRef, setRows, key, qty, allowOverReceive = true) {
   if (readOnlyRef?.current) return denyEdit_(toastReadOnlyOnceRef, toastFn);
   const k = String(key || "").trim();
   const n = Math.max(0, Number(qty || 0));
   setRows((prev) =>
     prev.map((r) =>
       String(r.key) === k || String(r.shipmentLineItemId) === k
-        ? { ...r, receiveQty: clampReceiveQty_(r, n) }
+        ? { ...r, receiveQty: clampReceiveQty_(r, n, allowOverReceive) }
         : r
     )
   );
@@ -301,8 +305,17 @@ export function InboundListScreen({
 
   const debouncedAddQuery = useDebounce(addQuery.trim(), 200);
 
-  const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
-  const searchLimit = Math.max(10, Math.min(50, Number((appState?.outbound?.settings ?? settings)?.searchList?.initialLimit ?? 50)));
+  const productFirst = Math.max(1, Math.min(250, Number((appState?.outbound?.settings ?? settings)?.productList?.initialLimit ?? settings?.productList?.initialLimit ?? 250)));
+  const searchLimit = Math.max(10, Math.min(50, Number((appState?.outbound?.settings ?? settings)?.searchList?.initialLimit ?? settings?.searchList?.initialLimit ?? 50)));
+  // 管理画面設定（デフォルト許可=true。キー未設定の既存 metafield も許可扱い）
+  const allowOverReceive =
+    (appState?.outbound?.settings?.inbound?.allowOverReceive ?? settings?.inbound?.allowOverReceive ?? true) !== false;
+  const allowExtraReceive =
+    (appState?.outbound?.settings?.inbound?.allowExtraReceive ?? settings?.inbound?.allowExtraReceive ?? true) !== false;
+  const allowOverReceiveRef = useRef(allowOverReceive);
+  const allowExtraReceiveRef = useRef(allowExtraReceive);
+  useEffect(() => { allowOverReceiveRef.current = allowOverReceive; }, [allowOverReceive]);
+  useEffect(() => { allowExtraReceiveRef.current = allowExtraReceive; }, [allowExtraReceive]);
 
   // REFERENCE 5.2 #4: pendingTransfers から「現在の shipment を含む Transfer」を transferForShipment として算出（refresh 後に最新の total/received が反映される）
   const normalizeId_ = (v) => String(v || "").trim().split("/").pop();
@@ -462,6 +475,7 @@ export function InboundListScreen({
     try {
       const shipmentResult = await fetchInventoryShipmentEnriched(shipmentId, {
         includeImages: showImages && !liteMode,
+        first: productFirst,
         signal,
       });
       const s = shipmentResult || {};
@@ -520,7 +534,7 @@ export function InboundListScreen({
             const saved = draft.rows?.find((x) => x.shipmentLineItemId === r.shipmentLineItemId);
             if (!saved) return r;
             const savedQty = Math.max(0, Math.floor(Number(saved.receiveQty || 0)));
-            const nextQty = clampReceiveQty_(r, savedQty);
+            const nextQty = clampReceiveQty_(r, savedQty, allowOverReceiveRef.current);
             return { ...r, receiveQty: nextQty };
           })
         : baseRows;
@@ -534,7 +548,8 @@ export function InboundListScreen({
         setShipment(s);
         setRows(finalRows);
         if (hasDraft) {
-          setExtras(Array.isArray(draft.extras) ? draft.extras : []);
+          const restoredExtras = Array.isArray(draft.extras) ? draft.extras : [];
+          setExtras(allowExtraReceiveRef.current ? restoredExtras : []);
           setOnlyUnreceived(!!draft.onlyUnreceived);
           setReason(String(draft.reason || ""));
           setNote(String(draft.note || ""));
@@ -599,6 +614,7 @@ export function InboundListScreen({
         shipmentIds.map((id) =>
           fetchInventoryShipmentEnriched(id, {
             includeImages: showImages && !liteMode,
+            first: productFirst,
             signal,
           })
         )
@@ -653,22 +669,40 @@ export function InboundListScreen({
       let multiRowsToSet = await repairInboundRowTitles(allRows, { signal });
       if (signal?.aborted) return;
 
+      // まとめて表示でも productList.initialLimit を適用し、未読込があれば「読込」で追加取得
+      const multiPageInfos = results.map((s) => ({
+        shipmentId: String(s?.id || "").trim(),
+        hasNextPage: !!s?.pageInfo?.hasNextPage,
+        endCursor: s?.pageInfo?.endCursor || null,
+      })).filter((p) => p.shipmentId);
+      const anyHasNext = multiPageInfos.some((p) => p.hasNextPage && p.endCursor);
+      // endCursor に JSON で全シップメントの pageInfo を載せて loadMore で使う
+      const multiPageInfoPayload = {
+        hasNextPage: anyHasNext,
+        endCursor: anyHasNext ? JSON.stringify(multiPageInfos) : null,
+        _multi: true,
+      };
+
       const hasDraftMulti = !!draft;
       const draftForMulti = draft;
       safeSet(mountedRef, () => {
         setShipment(results[0] || null);
         setRows(multiRowsToSet);
+        setLineItemsPageInfo(multiPageInfoPayload);
         setShipmentError("");
         if (hasDraftMulti && draftForMulti) {
-          setExtras(Array.isArray(draftForMulti.extras) ? draftForMulti.extras.map((x, i) => ({
-            key: x.key || `extra-${i}-${x.inventoryItemId || ""}`,
-            inventoryItemId: String(x.inventoryItemId || "").trim(),
-            title: x.title || x.sku || "(unknown)",
-            sku: x.sku || "",
-            barcode: x.barcode || "",
-            imageUrl: x.imageUrl || "",
-            receiveQty: Math.max(0, Number(x.receiveQty || 0)),
-          })) : []);
+          const restoredExtras = allowExtraReceiveRef.current
+            ? (Array.isArray(draftForMulti.extras) ? draftForMulti.extras.map((x, i) => ({
+              key: x.key || `extra-${i}-${x.inventoryItemId || ""}`,
+              inventoryItemId: String(x.inventoryItemId || "").trim(),
+              title: x.title || x.sku || "(unknown)",
+              sku: x.sku || "",
+              barcode: x.barcode || "",
+              imageUrl: x.imageUrl || "",
+              receiveQty: Math.max(0, Number(x.receiveQty || 0)),
+            })) : [])
+            : [];
+          setExtras(restoredExtras);
           setOnlyUnreceived(!!draftForMulti.onlyUnreceived);
           setReason(String(draftForMulti.reason || ""));
           setNote(String(draftForMulti.note || ""));
@@ -730,16 +764,97 @@ export function InboundListScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   // formatShipmentLabelLocal はモジュールレベルで安定参照のため依存から除外
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showImages, liteMode, locationGid]);
+  }, [showImages, liteMode, locationGid, productFirst]);
 
   const loadMoreLineItems_ = useCallback(async () => {
-    if (loadingMore || !lineItemsPageInfo?.hasNextPage || !lineItemsPageInfo?.endCursor || !selectedShipmentId || !locationGid) return;
+    if (loadingMore || !lineItemsPageInfo?.hasNextPage || !lineItemsPageInfo?.endCursor || !locationGid) return;
+    if (!isMultipleMode && !selectedShipmentId) return;
     setLoadingMore(true);
     await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     const ac = new AbortController();
     try {
+      // まとめて表示: endCursor に各 shipment の pageInfo JSON を格納
+      if (isMultipleMode && lineItemsPageInfo?._multi) {
+        let multiInfos = [];
+        try {
+          multiInfos = JSON.parse(String(lineItemsPageInfo.endCursor || "[]"));
+        } catch (_) {
+          multiInfos = [];
+        }
+        if (!Array.isArray(multiInfos) || multiInfos.length === 0) return;
+        const transferName = String(inbound.selectedTransferName || "").trim();
+        const idToIndex = new Map((Array.isArray(inbound.selectedShipmentIds) ? inbound.selectedShipmentIds : []).map((id, i) => [String(id), i]));
+        const nextInfos = [];
+        const appended = [];
+        for (const info of multiInfos) {
+          const sid = String(info?.shipmentId || "").trim();
+          if (!sid || !info?.hasNextPage || !info?.endCursor) {
+            if (sid) nextInfos.push({ shipmentId: sid, hasNextPage: false, endCursor: null });
+            continue;
+          }
+          const result = await fetchInventoryShipmentEnriched(sid, {
+            includeImages: showImages && !liteMode,
+            first: productFirst,
+            after: info.endCursor,
+            signal: ac.signal,
+          });
+          const newShip = result || {};
+          const newLineItems = Array.isArray(newShip?.lineItems) ? newShip.lineItems : [];
+          const idx = idToIndex.has(sid) ? idToIndex.get(sid) : nextInfos.length;
+          const shipmentLabel = formatShipmentLabelLocal(transferName, idx);
+          for (const li of newLineItems) {
+            const plannedQty = Number(li.quantity ?? 0);
+            const alreadyAcceptedQty = Math.max(0, Number(li.acceptedQuantity ?? 0));
+            const alreadyRejectedQty = Math.max(0, Number(li.rejectedQuantity ?? 0));
+            appended.push({
+              key: `${sid}-${li.id}`,
+              shipmentLineItemId: li.id,
+              shipmentId: sid,
+              shipmentLabel,
+              inventoryItemId: li.inventoryItemId,
+              title: li.title || li.sku || li.inventoryItemId || li.id || "(unknown)",
+              sku: li.sku || "",
+              barcode: li.barcode || "",
+              imageUrl: li.imageUrl || "",
+              plannedQty,
+              alreadyAcceptedQty,
+              alreadyRejectedQty,
+              overAcceptedQty: 0,
+              alreadyAcceptedTotalQty: alreadyAcceptedQty,
+              receiveQty: alreadyAcceptedQty,
+            });
+          }
+          nextInfos.push({
+            shipmentId: sid,
+            hasNextPage: !!newShip?.pageInfo?.hasNextPage,
+            endCursor: newShip?.pageInfo?.endCursor || null,
+          });
+        }
+        if (appended.length > 0) {
+          const repaired = await repairInboundRowTitles(appended, { signal: ac.signal });
+          const existingMap = new Map();
+          (rowsRef.current || []).forEach((r) => {
+            const k = r.key || `${r.shipmentId || ""}-${r.shipmentLineItemId || ""}`;
+            existingMap.set(k, r);
+          });
+          repaired.forEach((r) => {
+            const k = r.key || `${r.shipmentId || ""}-${r.shipmentLineItemId || ""}`;
+            if (!existingMap.has(k)) existingMap.set(k, r);
+          });
+          setRows(Array.from(existingMap.values()));
+        }
+        const anyHasNext = nextInfos.some((p) => p.hasNextPage && p.endCursor);
+        setLineItemsPageInfo({
+          hasNextPage: anyHasNext,
+          endCursor: anyHasNext ? JSON.stringify(nextInfos) : null,
+          _multi: true,
+        });
+        return;
+      }
+
       const result = await fetchInventoryShipmentEnriched(selectedShipmentId, {
         includeImages: showImages && !liteMode,
+        first: productFirst,
         after: lineItemsPageInfo.endCursor,
         signal: ac.signal,
       });
@@ -792,7 +907,7 @@ export function InboundListScreen({
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, lineItemsPageInfo, selectedShipmentId, locationGid, showImages, liteMode]);
+  }, [loadingMore, lineItemsPageInfo, selectedShipmentId, locationGid, showImages, liteMode, productFirst, isMultipleMode, inbound.selectedTransferName, inbound.selectedShipmentIds]);
 
   // 依存を安定化: ids の参照ではなく内容で比較（毎レンダーで ids が新配列だと effect が連打され読み込みが完了しない）
   const idsKey = Array.isArray(inbound.selectedShipmentIds) && inbound.selectedShipmentIds.length
@@ -846,7 +961,11 @@ export function InboundListScreen({
             savedAt: new Date().toISOString(),
             transferId: tid || null,
             shipmentId: sid,
-            rows: (rowsRef.current || []).map((r) => ({ shipmentLineItemId: r.shipmentLineItemId, receiveQty: Number(r.receiveQty || 0) })),
+            rows: (rowsRef.current || []).map((r) => ({
+              shipmentLineItemId: r.shipmentLineItemId,
+              shipmentId: r.shipmentId || sid || "",
+              receiveQty: Number(r.receiveQty || 0),
+            })),
             extras: Array.isArray(extrasRef.current) ? extrasRef.current : [],
             onlyUnreceived: !!onlyUnreceived,
             reason: String(reason || ""),
@@ -905,7 +1024,7 @@ export function InboundListScreen({
   // TDZ 対策: incRow/setRowQty/setExtraQty/incExtra はモジュールレベル（incRow_/setRowQty_/setExtraQty_/incExtra_）に移し、呼び出し時は ref/setter を渡す
   // 行メモ化で数量操作を軽くするため、setRowQty を安定した参照にする
   const setRowQtyStable = useCallback(
-    (key, qty) => setRowQty_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, key, qty),
+    (key, qty) => setRowQty_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, key, qty, allowOverReceiveRef.current),
     []
   );
   const setRowQtyReadOnlyStable = useCallback(
@@ -948,10 +1067,24 @@ export function InboundListScreen({
     const inventoryItemId = resolved?.inventoryItemId;
     if (!inventoryItemId) { toast("inventoryItemId が取得できませんでした"); return; }
     const titleForToast = String(resolved.barcode || "").trim() || String(resolved.sku || "").trim() || String(resolved.productTitle || "").trim() || "(no title)";
-    const existing = (rowsRef.current || []).find((r) => String(r.inventoryItemId || "") === String(inventoryItemId));
+    // まとめて表示: 同一 SKU が複数配送にある場合は未充足行を優先（表示順フォールバック）
+    const matches = (rowsRef.current || []).filter((r) => String(r.inventoryItemId || "") === String(inventoryItemId));
+    let existing = null;
+    if (matches.length === 1) {
+      existing = matches[0];
+    } else if (matches.length > 1) {
+      existing =
+        matches.find((r) => Number(r.receiveQty || 0) < Number(r.plannedQty || 0)) ||
+        matches[0];
+    }
     if (existing) {
-      incRow_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, existing.key, delta);
-      toast(`${titleForToast} を追加しました（+${delta}）`);
+      incRow_(readOnlyRef, toastReadOnlyOnceRef, toast, rowsRef, setRows, existing.key, delta, allowOverReceiveRef.current);
+      const label = existing.shipmentLabel ? `（${existing.shipmentLabel}）` : "";
+      toast(`${titleForToast}${label} を追加しました（+${delta}）`);
+      return;
+    }
+    if (!allowExtraReceiveRef.current) {
+      toast("商品リストにない商品です。");
       return;
     }
     const key = `extra-${inventoryItemId}-${Date.now()}`;
@@ -1149,6 +1282,14 @@ export function InboundListScreen({
     }
     if (hasWarning && !ackWarning) {
       toast("差異があります。内容を確認してから確定してください。");
+      return false;
+    }
+    if (!allowOverReceive && overRows.length > 0) {
+      toast("過剰入庫は設定で許可されていません。予定数以内に調整してください。");
+      return false;
+    }
+    if (!allowExtraReceive && extras.length > 0) {
+      toast("予定外入庫は設定で許可されていません。予定外を削除してください。");
       return false;
     }
     if (receiveLockRef.current) return false;
@@ -1815,7 +1956,7 @@ export function InboundListScreen({
       receiveLockRef.current = false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [readOnly, shipment && shipment.id, locationGid, hasWarning, ackWarning, rows, extras, overRows, shortageRows, note, reason, transferId, transferForShipment, inbound, onAfterReceive, onBack, isMultipleMode]);
+  }, [readOnly, shipment && shipment.id, locationGid, hasWarning, ackWarning, allowOverReceive, allowExtraReceive, rows, extras, overRows, shortageRows, note, reason, transferId, transferForShipment, inbound, onAfterReceive, onBack, isMultipleMode]);
 
   const handleReceive = useCallback(async () => {
     if (hasWarning && !warningReady) return;
@@ -1942,34 +2083,36 @@ export function InboundListScreen({
               </s-button>
             </s-stack>
           </s-stack>
-          {/* リスト外追加（検索）※処理済み時はグレーアウト */}
-          <s-box inlineSize="100%" paddingBlockStart="small-200" style={readOnly ? { opacity: 0.6 } : undefined}>
-            <s-text-field
-              label="検索"
-              labelHidden
-              placeholder="商品名 / SKU / バーコード"
-              value={addQuery}
-              onInput={(e) => setAddQuery(readValue(e))}
-              onChange={(e) => setAddQuery(readValue(e))}
-              disabled={readOnly}
-            >
-              {addQuery ? (
-                <s-button slot="accessory" kind="secondary" tone="critical" onClick={() => clearAddSearch_(setAddQuery, setAddCandidates, setAddCandidatesDisplayLimit, setAddQtyById)}>
-                  ✕
-                </s-button>
-              ) : null}
-            </s-text-field>
-          </s-box>
-          {showResults ? (
+          {/* リスト外追加（検索）※予定外入庫不許可時は非表示・処理済み時はグレーアウト */}
+          {allowExtraReceive ? (
+            <s-box inlineSize="100%" paddingBlockStart="small-200" style={readOnly ? { opacity: 0.6 } : undefined}>
+              <s-text-field
+                label="検索"
+                labelHidden
+                placeholder="商品名 / SKU / バーコード"
+                value={addQuery}
+                onInput={(e) => setAddQuery(readValue(e))}
+                onChange={(e) => setAddQuery(readValue(e))}
+                disabled={readOnly}
+              >
+                {addQuery ? (
+                  <s-button slot="accessory" kind="secondary" tone="critical" onClick={() => clearAddSearch_(setAddQuery, setAddCandidates, setAddCandidatesDisplayLimit, setAddQtyById)}>
+                    ✕
+                  </s-button>
+                ) : null}
+              </s-text-field>
+            </s-box>
+          ) : null}
+          {allowExtraReceive && showResults ? (
             <s-text tone="subdued" size="small">
               検索結果：{addLoading ? "…" : addCandidates.length}件
             </s-text>
           ) : null}
-          {addLoading ? <s-text tone="subdued" size="small">読み込み中...</s-text> : null}
+          {allowExtraReceive && addLoading ? <s-text tone="subdued" size="small">読み込み中...</s-text> : null}
         </s-stack>
       </s-box>
     );
-  }, [setHeader, headNo, headerOriginName, headerInboundTo, addQuery, addLoading, addCandidates, inbound, liteMode, onToggleLiteMode, shipment && shipment.id, shipment && shipment.tracking, readOnly]);
+  }, [setHeader, headNo, headerOriginName, headerInboundTo, addQuery, addLoading, addCandidates, inbound, liteMode, onToggleLiteMode, shipment && shipment.id, shipment && shipment.tracking, readOnly, allowExtraReceive]);
 
   useEffect(() => {
     if (!setHeader) return;
@@ -2134,8 +2277,8 @@ export function InboundListScreen({
 
   return (
     <s-stack gap="base">
-      {/* 1. 検索結果ブロック（最上部・REFERENCE と同じ条件）※処理済み時はグレーアウト */}
-      {String(addQuery || "").trim().length >= 1 ? (
+      {/* 1. 検索結果ブロック（最上部・REFERENCE と同じ条件）※予定外不許可時は非表示・処理済み時はグレーアウト */}
+      {allowExtraReceive && String(addQuery || "").trim().length >= 1 ? (
         <s-box padding="base" style={readOnly ? { opacity: 0.6 } : undefined}>
           <s-stack gap="extra-tight">
             <s-text>検索リスト 候補： {addLoading ? "..." : addCandidates.length}件</s-text>
@@ -2305,7 +2448,11 @@ export function InboundListScreen({
         <s-box key="extras_area" padding="small">
           <s-stack gap="small">
             <s-text emphasis="bold">予定外入荷（リストにない商品）</s-text>
-            {renderExtras_({ extras, extrasHistory, showImages, dialog, setExtraQty: (key, value) => setExtraQty_(readOnlyRef, toastReadOnlyOnceRef, toast, extrasRef, setExtras, key, value) })}
+            {!allowExtraReceive ? (
+              <s-text tone="subdued" size="small">設定により予定外入庫は許可されていません。</s-text>
+            ) : (
+              renderExtras_({ extras, extrasHistory, showImages, dialog, setExtraQty: (key, value) => setExtraQty_(readOnlyRef, toastReadOnlyOnceRef, toast, extrasRef, setExtras, key, value) })
+            )}
             {renderExtrasHistory_({ extrasHistory, extrasHistoryLoading, showImages, dialog })}
             {renderConfirmMemo_({ extrasHistoryLoading, confirmMemo })}
           </s-stack>
