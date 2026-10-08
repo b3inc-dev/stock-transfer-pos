@@ -747,6 +747,16 @@ export async function readInventoryCountById(countId) {
 }
 
 export async function readInventoryCounts() {
+  try {
+    const { fetchInventoryCountsFromDb } = await import("../../../../common/appDocumentsApi.js");
+    const fromDb = await fetchInventoryCountsFromDb();
+    if (fromDb) {
+      const productGroups = await readProductGroups();
+      return fixCountsStatusOnly(fromDb, productGroups);
+    }
+  } catch (e) {
+    console.warn("[stocktakeApi] inventory_counts DB read fallback:", e?.message || e);
+  }
   const counts = await readInventoryCountsRaw();
   try {
     
@@ -1015,6 +1025,14 @@ export async function writeInventoryCounts(counts, expectedVersion) {
   if (WRITE_START_DELAY_MS > 0) {
     await new Promise((r) => setTimeout(r, WRITE_START_DELAY_MS));
   }
+  // DB SoT: 成功時は metafield 書き込みをスキップ（移行後）。失敗時のみ metafield フォールバック。
+  try {
+    const { saveInventoryCountsToDb } = await import("../../../../common/appDocumentsApi.js");
+    const ok = await saveInventoryCountsToDb(Array.isArray(counts) ? counts : []);
+    if (ok) return;
+  } catch (e) {
+    console.warn("[stocktakeApi] inventory_counts DB write fallback to metafield:", e?.message || e);
+  }
   const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
   const d = await runWithThrottleRetry(() => graphql(gqlApp));
   const ownerId = d?.currentAppInstallation?.id;
@@ -1266,6 +1284,13 @@ export async function writeInventoryCounts(counts, expectedVersion) {
 }
 
 export async function readProductGroups() {
+  try {
+    const { fetchProductGroupsFromDb } = await import("../../../../common/appDocumentsApi.js");
+    const fromDb = await fetchProductGroupsFromDb();
+    if (fromDb) return fromDb;
+  } catch (e) {
+    console.warn("[stocktakeApi] product_groups DB read fallback:", e?.message || e);
+  }
   const gql = `#graphql
     query ProductGroups {
       currentAppInstallation {

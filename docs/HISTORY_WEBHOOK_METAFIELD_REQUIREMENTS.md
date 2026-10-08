@@ -42,10 +42,11 @@
 - apply-change: setQuantities **前**に `InventoryChangeLog` を `quantityAfter=null` + `note: appEventId:…` で upsert
 - webhook: 業務行（非 admin_webhook）に加え、`note` が `appEventId:` で始まる先行履歴も合流して early-return。ただし `appEventId` 行は `quantityAfterExpected` と `available` が一致するときだけ null-latch（不一致は売上/返品マッチへ）
 - apply-change 成功後: 同一 item/location の直近 `admin_webhook`（`quantityAfter` null または一致・短い時間窓）を業務 activity に coalesce（売上/返品救済を奪わない）
-- Prisma: `InventoryCountDocument` / `InventoryCountDocumentChunk`
-- **dual-write**: metafield 成功後に best-effort upsert（失敗しても metafield 成功は維持）
-- **dual-read**: Admin loader は metafield を SoT のまま維持し、DB にだけある count を末尾追加（既存 count の DB overlay はしない。cancel/edit が metafield のみ更新する間の巻き戻し防止）。`readInventoryCountsChunked` 自体は metafield のみ（client bundle 制約）
+- Prisma: `InventoryCountDocument` / `InventoryCountDocumentChunk`、加えて `ProductGroupDocument` / `AppEntryDocument` / `InventoryDailySnapshotRow`
+- **DB SoT（段階カットオーバー）**: Admin+API+POS は DB 優先読取。metafield は空 DB 時のフォールバック。新規 metafield 書き込みは既定退職（`METAFIELD_MIRROR_*=1` で任意ミラー）
+- `settings_v1` は metafield のまま。Transfer / Shipment は Shopify 正本（アプリ DB 二重管理なし）
+- カットオーバー手順・タイプ別表: [`METAFIELD_DB_CUTOVER.md`](./METAFIELD_DB_CUTOVER.md)
+- 移行スクリプト: `scripts/migrate-metafield-to-db.mjs`
 - Admin 変更履歴 UI は引き続き `InventoryChangeLog` のみ
-- フル DB 正本切替・本番 migrate は本 PR 対象外
 
 詳細監査: Agent Store `internal/history-webhook-metafield-requirements.md`（参照用）。

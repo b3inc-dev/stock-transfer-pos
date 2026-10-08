@@ -179,3 +179,63 @@ model InventoryCountDocumentChunk {
   @@unique([documentId, chunkIndex])
   @@index([documentId])
 }
+
+// Metafield→DB 段階移行: 商品グループ（product_groups_v1）
+// settings_v1 / Transfer / Shipment は対象外。
+model ProductGroupDocument {
+  id          String   @id @default(cuid())
+  shop        String
+  groupId     String
+  name        String?
+  payloadJson String? // グループ全文 JSON
+  version     Int      @default(1)
+  source      String   @default("db") // db | metafield_mirror
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([shop, groupId])
+  @@index([shop, updatedAt])
+  @@index([shop, name])
+}
+
+// Metafield→DB 段階移行: loss / adjustment / purchase / order_request entries
+// POS v2 チャンク相当を 1 行 1 エントリで保持。
+model AppEntryDocument {
+  id          String   @id @default(cuid())
+  shop        String
+  entryType   String // loss | adjustment | purchase | order_request
+  entryId     String
+  status      String?
+  name        String? // lossName / adjustmentName / purchaseName / orderName
+  locationId  String?
+  payloadJson String?
+  version     Int      @default(1)
+  source      String   @default("db")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([shop, entryType, entryId])
+  @@index([shop, entryType, updatedAt])
+  @@index([shop, entryType, status])
+  @@index([shop, entryType, createdAt])
+}
+
+// Metafield→DB 段階移行: shop.inventory_info / daily_snapshots
+model InventoryDailySnapshotRow {
+  id                       String   @id @default(cuid())
+  shop                     String
+  date                     String // YYYY-MM-DD
+  locationId               String
+  locationName             String?
+  totalQuantity            Int      @default(0)
+  totalRetailValue         Float    @default(0)
+  totalCompareAtPriceValue Float    @default(0)
+  totalCostValue           Float    @default(0)
+  snapshotUpdatedAt        DateTime?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@unique([shop, date, locationId])
+  @@index([shop, date])
+  @@index([shop, updatedAt])
+}

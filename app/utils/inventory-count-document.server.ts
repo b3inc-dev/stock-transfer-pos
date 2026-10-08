@@ -1,10 +1,10 @@
 /**
- * Phase F / R-META: 棚卸ドキュメントの DB 書き込み基盤。
- * metafield（inventory_counts_*）は移行期間のフォールバック SoT。
- * 失敗しても呼び出し側の metafield 成功を壊さない（best-effort）。
+ * Phase F / R-META → staged cutover: 棚卸ドキュメントの DB SoT。
+ * Admin/API は DB 優先読取。metafield は空 DB 時のフォールバック／任意ミラー。
  * Admin「在庫変動履歴」は InventoryChangeLog のまま（本モジュール対象外）。
  */
 import db from "../db.server";
+import { preferDbSot } from "./metafield-db-sot";
 
 const PAYLOAD_INLINE_MAX_CHARS = 100_000;
 
@@ -198,45 +198,98 @@ function normalizeCountId(id: unknown): string {
   return s.split("/").pop() || s;
 }
 
+function overlayFromDbDoc<T extends { id?: string; status?: string }>(doc: DbCountOverlay): T {
+  if (doc.payload && typeof doc.payload === "object") {
+    return {
+      ...(doc.payload as object),
+      id: doc.countId,
+      status: doc.status,
+      _source: "db",
+    } as T;
+  }
+  return {
+    id: doc.countId,
+    status: doc.status,
+    countName: doc.countName,
+    locationId: doc.locationId,
+    locationName: doc.locationName,
+    _source: "db",
+  } as T;
+}
+
 /**
- * dual-read（移行期）: metafield を SoT とし、既存 count は上書きしない。
- * DB にだけある count（metafield 未反映の確定成功分）のみ末尾追加する。
- * cancel/edit が metafield のみ更新する間、古い DB payload で status を巻き戻さないため。
+ * DB SoT 読取（段階移行後）:
+ * - preferDbSot かつ DB に 1 件以上 → DB を正とし、metafield にだけある id を末尾フォールバック追加
+ * - DB 空 → metafield をそのまま（未 migrate ショップ）
+ * - preferDbSot=false → 旧 dual-read（metafield SoT + DB-only 末尾追加）
  */
 export async function mergeInventoryCountsWithDb<T extends { id?: string; status?: string }>(
   shop: string,
   metafieldCounts: T[]
 ): Promise<T[]> {
   const dbDocs = await listInventoryCountDocumentsForShop(shop);
-  if (dbDocs.length === 0) return metafieldCounts;
+  const mf = Array.isArray(metafieldCounts) ? metafieldCounts : [];
 
-  const seen = new Set(
-    metafieldCounts.map((c) => normalizeCountId(c.id)).filter(Boolean)
-  );
-  const merged: T[] = [...metafieldCounts];
+  if (preferDbSot("inventory_counts") && dbDocs.length > 0) {
+    const fromDb = dbDocs.map((d) => overlayFromDbDoc<T>(d));
+    const seen = new Set(fromDb.map((c) => normalizeCountId(c.id)).filter(Boolean));
+    const merged = [...fromDb];
+    for (const c of mf) {
+      const norm = normalizeCountId(c.id);
+      if (!norm || seen.has(norm)) continue;
+      seen.add(norm);
+      merged.push({ ...c, _source: "metafield_fallback" } as T);
+    }
+    return merged;
+  }
 
+  if (dbDocs.length === 0) return mf;
+
+  // legacy dual-read（緊急フォールバック METAFIELD_DB_SOT_INVENTORY_COUNTS=0）
+  const seen = new Set(mf.map((c) => normalizeCountId(c.id)).filter(Boolean));
+  const merged: T[] = [...mf];
   for (const leftover of dbDocs) {
     const norm = normalizeCountId(leftover.countId);
     if (!norm || seen.has(norm)) continue;
     seen.add(norm);
-    if (leftover.payload && typeof leftover.payload === "object") {
-      merged.push({
-        ...(leftover.payload as object),
-        id: leftover.countId,
-        status: leftover.status,
-        _source: "db_only",
-      } as T);
-    } else {
-      merged.push({
-        id: leftover.countId,
-        status: leftover.status,
-        countName: leftover.countName,
-        locationId: leftover.locationId,
-        locationName: leftover.locationName,
-        _source: "db_only",
-      } as T);
-    }
+    merged.push(overlayFromDbDoc<T>(leftover));
   }
-
   return merged;
+}
+
+/** 棚卸一覧を DB に全件 upsert（migrate / Admin persist）。削除はしない。 */
+export async function upsertInventoryCountsBulk(
+  shop: string,
+  counts: Array<{
+    id?: string;
+    countName?: string | null;
+    status?: string;
+    locationId?: string | null;
+    locationName?: string | null;
+    completedAt?: string | null;
+    [key: string]: unknown;
+  }>
+): Promise<{ ok: boolean; count: number; error?: string }> {
+  try {
+    let n = 0;
+    for (const c of counts) {
+      const countId = String(c?.id ?? "").trim();
+      if (!countId) continue;
+      const res = await upsertInventoryCountDocument({
+        shop,
+        countId,
+        countName: c.countName ?? null,
+        status: String(c.status || "draft"),
+        locationId: c.locationId ?? null,
+        locationName: c.locationName ?? null,
+        payload: c,
+        completedAt: c.completedAt ?? null,
+      });
+      if (res.ok) n += 1;
+    }
+    return { ok: true, count: n };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, count: 0, error: msg };
+  }
 }

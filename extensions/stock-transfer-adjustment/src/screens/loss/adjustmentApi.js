@@ -591,11 +591,25 @@ export async function readAdjustmentEntriesFull() {
 }
 
 export async function readAdjustmentEntries() {
+  try {
+    const { fetchEntriesFromDb } = await import("../../../../common/appDocumentsApi.js");
+    const fromDb = await fetchEntriesFromDb("adjustment");
+    if (fromDb) return fromDb;
+  } catch (e) {
+    console.warn("[adjustmentApi] DB read fallback:", e?.message || e);
+  }
   return readAdjustmentEntriesFull();
 }
 
 export async function writeAdjustmentEntries(entries) {
   const arr = Array.isArray(entries) ? entries : [];
+  try {
+    const { saveEntriesToDb } = await import("../../../../common/appDocumentsApi.js");
+    const ok = await saveEntriesToDb("adjustment", arr);
+    if (ok) return;
+  } catch (e) {
+    console.warn("[adjustmentApi] DB write fallback to metafield:", e?.message || e);
+  }
   const chunkSize = await getAdjustmentChunkSize();
   const chunks = [];
   for (let i = 0; i < arr.length; i += chunkSize) {

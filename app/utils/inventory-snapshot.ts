@@ -171,8 +171,11 @@ export function aggregateSnapshotsFromItems(
   return Array.from(locationMap.values());
 }
 
-/** Metafield から保存済みスナップショットとショップ情報を取得 */
-export async function getSavedSnapshots(admin: { request: AdminRequest }): Promise<{
+/** Metafield / DB から保存済みスナップショットとショップ情報を取得（DB 優先） */
+export async function getSavedSnapshots(
+  admin: { request: AdminRequest },
+  opts?: { shopDomain?: string | null }
+): Promise<{
   shopId: string;
   shopName: string;
   shopTimezone: string;
@@ -195,16 +198,29 @@ export async function getSavedSnapshots(admin: { request: AdminRequest }): Promi
       /* ignore */
     }
   }
+  const shopDomain = opts?.shopDomain?.trim() || "";
+  if (shopDomain) {
+    try {
+      const { preferDailySnapshotsFromDb } = await import("./inventory-daily-snapshot.server");
+      savedSnapshots = await preferDailySnapshotsFromDb(shopDomain, savedSnapshots);
+    } catch (e) {
+      console.warn(
+        "[inventory-snapshot] DB prefer skipped:",
+        e instanceof Error ? e.message : String(e)
+      );
+    }
+  }
   return { shopId, shopName, shopTimezone, savedSnapshots };
 }
 
-/** 指定日付のスナップショットをマージして Metafield に保存 */
+/** 指定日付のスナップショットをマージして DB（+任意 metafield ミラー）に保存 */
 export async function saveSnapshotsForDate(
   admin: { request: AdminRequest },
   shopId: string,
   savedSnapshots: InventorySnapshotsData,
   newSnapshots: DailyInventorySnapshot[],
-  dateToReplace: string
+  dateToReplace: string,
+  opts?: { shopDomain?: string | null }
 ): Promise<{ userErrors: Array<{ field?: string; message: string }> }> {
   const updated = savedSnapshots.snapshots.filter((s) => s.date !== dateToReplace);
   // スナップショットに更新時刻を設定
@@ -214,6 +230,30 @@ export async function saveSnapshotsForDate(
     updatedAt: now,
   }));
   updated.push(...snapshotsWithTimestamp);
+
+  const shopDomain = opts?.shopDomain?.trim() || "";
+  if (shopDomain) {
+    try {
+      const { replaceDailySnapshotsForDate } = await import("./inventory-daily-snapshot.server");
+      const dbRes = await replaceDailySnapshotsForDate(shopDomain, dateToReplace, snapshotsWithTimestamp);
+      if (!dbRes.ok) {
+        return { userErrors: [{ message: dbRes.error || "スナップショットの DB 保存に失敗しました" }] };
+      }
+    } catch (e) {
+      return {
+        userErrors: [{ message: e instanceof Error ? e.message : String(e) }],
+      };
+    }
+  }
+
+  const { shouldWriteMetafield } = await import("./metafield-db-sot");
+  if (!shouldWriteMetafield("daily_snapshots")) {
+    if (!shopDomain) {
+      return { userErrors: [{ message: "スナップショットの DB 保存には shopDomain が必要です" }] };
+    }
+    return { userErrors: [] };
+  }
+
   const data = await requestJson(admin, SAVE_SNAPSHOTS_MUTATION, {
     metafields: [
       {
@@ -232,12 +272,20 @@ export async function saveSnapshotsForDate(
 /** 指定日付の在庫スナップショットを取得して保存（前日フォールバックや Cron で使用） */
 export async function fetchAndSaveSnapshotsForDate(
   admin: { request: AdminRequest },
-  dateStr: string
+  dateStr: string,
+  opts?: { shopDomain?: string | null }
 ): Promise<{ ok: boolean; userErrors?: string[] }> {
-  const { shopId, savedSnapshots } = await getSavedSnapshots(admin);
+  const { shopId, savedSnapshots } = await getSavedSnapshots(admin, opts);
   const items = await fetchAllInventoryItems(admin);
   const newSnapshots = aggregateSnapshotsFromItems(items, dateStr);
-  const { userErrors } = await saveSnapshotsForDate(admin, shopId, savedSnapshots, newSnapshots, dateStr);
+  const { userErrors } = await saveSnapshotsForDate(
+    admin,
+    shopId,
+    savedSnapshots,
+    newSnapshots,
+    dateStr,
+    opts
+  );
   if (userErrors.length > 0) {
     return { ok: false, userErrors: userErrors.map((e: { message?: string }) => e.message ?? "") };
   }
@@ -533,6 +581,8 @@ async function waitForBulkOperationAndSave(
       // Bulk Operation の結果は inventoryItems の配列なので、そのまま集計に使える
       const newSnapshots = aggregateSnapshotsFromItems(items, dateStr);
 
+      // bulk 経路では shopDomain 未指定のため、METAFIELD_MIRROR_DAILY_SNAPSHOTS=1 時のみ metafield 保存可。
+      // Cron / Admin 本線は shopDomain 付き saveSnapshotsForDate を使う。
       const { shopId, savedSnapshots } = await getSavedSnapshots(admin);
       const { userErrors } = await saveSnapshotsForDate(admin, shopId, savedSnapshots, newSnapshots, dateStr);
 

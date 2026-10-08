@@ -941,11 +941,25 @@ export async function readOrderEntriesFull() {
 
 /** 全件取得（後方互換: OrderProductList 等で使用） */
 export async function readOrderEntries() {
+  try {
+    const { fetchEntriesFromDb } = await import("../../../../common/appDocumentsApi.js");
+    const fromDb = await fetchEntriesFromDb("order_request");
+    if (fromDb) return fromDb;
+  } catch (e) {
+    console.warn("[orderApi] DB read fallback:", e?.message || e);
+  }
   return readOrderEntriesFull();
 }
 
 export async function writeOrderEntries(entries) {
   const arr = Array.isArray(entries) ? entries : [];
+  try {
+    const { saveEntriesToDb } = await import("../../../../common/appDocumentsApi.js");
+    const ok = await saveEntriesToDb("order_request", arr);
+    if (ok) return;
+  } catch (e) {
+    console.warn("[orderApi] DB write fallback to metafield:", e?.message || e);
+  }
   const chunkSize = await getOrderChunkSize();
   const chunks = [];
   for (let i = 0; i < arr.length; i += chunkSize) {

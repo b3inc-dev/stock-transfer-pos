@@ -725,16 +725,24 @@ async function writeInventoryCountsVersion(
 /** 修復時などで direct fetch と既存データを渡すオプション（syntax error 回避・再読取スキップ） */
 export type WriteInventoryCountsChunkedOptions = {
   session?: { shop: string; accessToken: string } | null;
+  /** session が無いときでも DB SoT 用に shop を渡せる */
+  shop?: string | null;
   /** 渡すと初回の readInventoryCountsChunked をスキップしてこれを使う（修復時に必須） */
   existingCounts?: InventoryCount[] | null;
+  /**
+   * metafield 書き込みをスキップ（DB SoT カットオーバー後）。
+   * .server をこの export から直接 import しないため、呼び出し側（action）がフラグを渡す。
+   */
+  skipMetafieldWrite?: boolean;
+  /** metafield を読まず DB 等から existing を供給（skipMetafieldWrite 時） */
+  loadExisting?: () => Promise<InventoryCount[]>;
+  /** マージ・バリデーション後・metafield 書き込み前に呼ぶ（DB upsert 用。action から注入） */
+  persistPrepared?: (counts: InventoryCount[]) => Promise<{ ok: boolean; error?: string }>;
 };
 
 /**
- * 棚卸メタフィールドをチャンク対応で保存（単体が CHUNK_BYTES を超える場合は groupItems/items をパート分割）。
- * 一覧用軽量メタフィールド（list）と棚卸ID→チャンク番号インデックスも同時に保存。
- * 書き込み前に既存データから locationId / productGroupIds / groupItems 等を補完し、空白で上書きしない。
- * expectedVersion を渡した場合、現在のバージョンと一致しないと競合として保存しない（楽観ロック）。
- * options.session を渡すと GraphQL を direct fetch で実行し syntax error を避ける。options.existingCounts を渡すと初回読取をスキップ（修復用）。
+ * 棚卸保存。DB SoT 時は options.skipMetafieldWrite + persistPrepared を action から渡す。
+ * （.server モジュールは本 export から import しない — client bundle 制約）
  */
 export async function writeInventoryCountsChunked(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
@@ -744,15 +752,22 @@ export async function writeInventoryCountsChunked(
   options?: WriteInventoryCountsChunkedOptions | null
 ): Promise<{ userErrors: Array<{ message?: string }> }> {
   const useDirectFetch = Boolean(options?.session?.shop && options?.session?.accessToken);
-  const shop = options?.session?.shop ?? "";
+  const shop = options?.session?.shop ?? options?.shop ?? "";
   const accessToken = options?.session?.accessToken ?? "";
   const gql = useDirectFetch
     ? (query: string, variables?: Record<string, unknown>) => loaderGraphql(shop, accessToken, query, variables)
     : null;
+  const skipMetafieldWrite = Boolean(options?.skipMetafieldWrite);
 
   let existing: InventoryCount[] = [];
   if (options?.existingCounts != null && Array.isArray(options.existingCounts)) {
     existing = options.existingCounts;
+  } else if (skipMetafieldWrite && typeof options?.loadExisting === "function") {
+    try {
+      existing = await options.loadExisting();
+    } catch {
+      existing = [];
+    }
   } else {
     try {
       existing = await readInventoryCountsChunked(admin);
@@ -761,7 +776,7 @@ export async function writeInventoryCountsChunked(
     }
   }
   // ✅ 読取失敗で existing=[] のとき、実はストアにデータがあるなら上書きしない（チャンク欠落等で読めなかっただけの可能性）
-  if (existing.length === 0 && Array.isArray(counts) && counts.length > 0) {
+  if (!skipMetafieldWrite && existing.length === 0 && Array.isArray(counts) && counts.length > 0) {
     const main = await readMainKeyOnly(admin);
     if (main !== null) {
       return {
@@ -771,8 +786,10 @@ export async function writeInventoryCountsChunked(
       };
     }
   }
-  const currentVersion = await getInventoryCountsVersion(admin, options?.session ?? undefined);
-  if (expectedVersion != null && currentVersion !== expectedVersion) {
+  const currentVersion = skipMetafieldWrite
+    ? 0
+    : await getInventoryCountsVersion(admin, options?.session ?? undefined);
+  if (!skipMetafieldWrite && expectedVersion != null && currentVersion !== expectedVersion) {
     return {
       userErrors: [{ message: "他の操作でデータが更新されています。画面を再読み込みしてから再度お試しください。" }],
     };
@@ -780,6 +797,17 @@ export async function writeInventoryCountsChunked(
   const merged = mergeExistingNonBlank(Array.isArray(counts) ? counts : [], existing);
   const withNames = ensureCountNamesOnCounts(merged);
   const arr = filterInvalidCountsBeforeWrite(withNames);
+
+  if (typeof options?.persistPrepared === "function") {
+    const dbRes = await options.persistPrepared(arr);
+    if (!dbRes.ok) {
+      return { userErrors: [{ message: dbRes.error || "棚卸の DB 保存に失敗しました" }] };
+    }
+  }
+  if (skipMetafieldWrite) {
+    return { userErrors: [] };
+  }
+
   try {
     const toMinimal = (c: InventoryCount) =>
       c
@@ -1486,6 +1514,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
       productGroups = Array.isArray(parsed) ? parsed : [];
     } catch {
       productGroups = [];
+    }
+  }
+  if (shop) {
+    try {
+      const { preferProductGroupsFromDb } = await import("../utils/product-group-document.server");
+      productGroups = (await preferProductGroupsFromDb(shop, productGroups)) as ProductGroup[];
+    } catch (e) {
+      console.warn("[inventory-count] product_groups DB prefer skipped:", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -2765,6 +2801,42 @@ export async function action({ request }: ActionFunctionArgs) {
     return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
   }
 
+  const { shouldWriteMetafield } = await import("../utils/metafield-db-sot");
+  const { upsertInventoryCountsBulk, listInventoryCountDocumentsForShop } = await import(
+    "../utils/inventory-count-document.server"
+  );
+  const skipMetafieldWrite = !shouldWriteMetafield("inventory_counts");
+  const shopForCounts = session?.shop ?? "";
+  const inventoryCountWriteOptsBase: WriteInventoryCountsChunkedOptions = {
+    shop: shopForCounts || null,
+    session:
+      session?.shop && session?.accessToken
+        ? { shop: session.shop, accessToken: session.accessToken as string }
+        : null,
+    skipMetafieldWrite,
+    loadExisting: skipMetafieldWrite
+      ? async () => {
+          if (!shopForCounts) return [];
+          const docs = await listInventoryCountDocumentsForShop(shopForCounts);
+          return docs.map((d) =>
+            d.payload && typeof d.payload === "object"
+              ? ({ ...(d.payload as object), id: d.countId, status: d.status } as InventoryCount)
+              : ({
+                  id: d.countId,
+                  status: d.status as InventoryCount["status"],
+                  countName: d.countName ?? undefined,
+                  locationId: d.locationId ?? "",
+                  locationName: d.locationName ?? undefined,
+                } as InventoryCount)
+          );
+        }
+      : undefined,
+    persistPrepared: shopForCounts
+      ? async (prepared) =>
+          upsertInventoryCountsBulk(shopForCounts, prepared as Array<{ id?: string; status?: string }>)
+      : async () => ({ ok: false, error: "棚卸の DB 保存には shop セッションが必要です" }),
+  };
+
   // COMPLETE_RETRY: 管理画面からメタ更新のみ再試行（pending_complete_v1 バックアップ）
   if (actionTypeNorm === "pos_metafield_retry") {
     const countId = String(formData.get("countId") ?? "").trim();
@@ -2832,7 +2904,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const repairedCount = countsWithName.filter(
         (c, i) => !counts[i]?.countName || String(counts[i].countName).trim() === ""
       ).length;
-      const { userErrors } = await writeInventoryCountsChunked(admin, countsWithName, ownerId, expectedVersionNum);
+      const { userErrors } = await writeInventoryCountsChunked(admin, countsWithName, ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
       if (userErrors.length) {
         return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
       }
@@ -2865,7 +2937,8 @@ export async function action({ request }: ActionFunctionArgs) {
       const version = await getInventoryCountsVersion(admin, session);
       const repairSession = session?.shop && session?.accessToken ? { shop: session.shop, accessToken: session.accessToken } : undefined;
       const { userErrors } = await writeInventoryCountsChunked(admin, counts, ownerId, version, {
-        session: repairSession ?? undefined,
+        ...inventoryCountWriteOptsBase,
+        session: repairSession ?? inventoryCountWriteOptsBase.session,
         existingCounts: counts,
       });
       if (userErrors.length) {
@@ -2913,6 +2986,14 @@ export async function action({ request }: ActionFunctionArgs) {
     try {
       productGroups = JSON.parse(groupsRaw) || [];
     } catch {}
+  }
+  if (session?.shop) {
+    try {
+      const { preferProductGroupsFromDb } = await import("../utils/product-group-document.server");
+      productGroups = (await preferProductGroupsFromDb(session.shop, productGroups)) as ProductGroup[];
+    } catch (e) {
+      console.warn("[inventory-count] action product_groups DB prefer skipped:", e instanceof Error ? e.message : String(e));
+    }
   }
 
   // ✅ 欠損した棚卸を「指定の棚卸ID・ロケーション・商品グループ」で復元し、現在在庫で完了確定する（一時対応）
@@ -3063,7 +3144,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, restored: true } as const;
   }
@@ -3130,7 +3211,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, redistributed: true } as const;
   }
@@ -3246,7 +3327,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId) ? updatedCount : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, groupsCompleted: true } as const;
   }
@@ -3258,7 +3339,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const nb = parseCountNameNumber((b as { countName?: string }).countName);
       return na - nb;
     });
-    const { userErrors } = await writeInventoryCountsChunked(admin, sorted as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, sorted as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e?.message ?? "").join(" / ") as const };
     return { ok: true, sortedByCountName: true } as const;
   }
@@ -3340,25 +3421,12 @@ export async function action({ request }: ActionFunctionArgs) {
       } else {
         productGroups.push(newGroup);
       }
-      const saveResp = await admin.graphql(
-        `#graphql
-          mutation SaveProductGroups($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key type }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: productGroupsMetafields(ownerId, productGroups),
-          },
+      {
+        const { persistProductGroupsForShop } = await import("../utils/persist-product-groups.server");
+        const persistPg = await persistProductGroupsForShop(admin, ownerId, session?.shop ?? "", productGroups);
+        if (!persistPg.ok) {
+          return { ok: false, error: (persistPg.error || "商品グループの保存に失敗しました") as const };
         }
-      );
-      const saveJson = await saveResp.json();
-      const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
-      if (errs.length) {
-        return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") as const };
       }
       return { ok: true };
     }
@@ -3460,26 +3528,12 @@ export async function action({ request }: ActionFunctionArgs) {
       });
     }
 
-    const saveResp = await admin.graphql(
-      `#graphql
-        mutation SaveProductGroups($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key type }
-            userErrors { field message }
-          }
-        }
-      `,
-      {
-        variables: {
-          metafields: productGroupsMetafields(ownerId, productGroups),
-        },
+    {
+      const { persistProductGroupsForShop } = await import("../utils/persist-product-groups.server");
+      const persistPg = await persistProductGroupsForShop(admin, ownerId, session?.shop ?? "", productGroups);
+      if (!persistPg.ok) {
+        return { ok: false, error: (persistPg.error || "商品グループの保存に失敗しました") as const };
       }
-    );
-
-    const saveJson = await saveResp.json();
-    const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
-    if (errs.length) {
-      return { ok: false, error: errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ") as const };
     }
 
     return { ok: true };
@@ -3495,26 +3549,12 @@ export async function action({ request }: ActionFunctionArgs) {
     }
     productGroups = productGroups.filter((g) => g.id !== id);
 
-    const saveResp = await admin.graphql(
-      `#graphql
-        mutation SaveProductGroups($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key type }
-            userErrors { field message }
-          }
-        }
-      `,
-      {
-        variables: {
-          metafields: productGroupsMetafields(ownerId, productGroups),
-        },
+    {
+      const { persistProductGroupsForShop } = await import("../utils/persist-product-groups.server");
+      const persistPg = await persistProductGroupsForShop(admin, ownerId, session?.shop ?? "", productGroups);
+      if (!persistPg.ok) {
+        return { ok: false, error: (persistPg.error || "商品グループの保存に失敗しました") as const };
       }
-    );
-
-    const saveJson = await saveResp.json();
-    const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
-    if (errs.length) {
-      return { ok: false, error: errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ") as const };
     }
 
     return { ok: true };
@@ -3685,26 +3725,12 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
 
-    const saveResp = await admin.graphql(
-      `#graphql
-        mutation SaveProductGroups($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key type }
-            userErrors { field message }
-          }
-        }
-      `,
-      {
-        variables: {
-          metafields: productGroupsMetafields(ownerId, productGroups),
-        },
+    {
+      const { persistProductGroupsForShop } = await import("../utils/persist-product-groups.server");
+      const persistPg = await persistProductGroupsForShop(admin, ownerId, session?.shop ?? "", productGroups);
+      if (!persistPg.ok) {
+        return { ok: false, error: (persistPg.error || "商品グループの保存に失敗しました") as const };
       }
-    );
-
-    const saveJson = await saveResp.json();
-    const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
-    if (errs.length) {
-      return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") as const };
     }
 
     return { ok: true, imported: importedCount };
@@ -4545,7 +4571,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: groupItemsMap }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -4626,7 +4652,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     return { ok: true };
   }
@@ -4687,7 +4713,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -4781,7 +4807,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -4834,7 +4860,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, groupItems: {}, status: "in_progress" as const, completedAt: undefined }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -4869,7 +4895,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, cancelledGroupIds, status: nextStatus, completedAt: nextCompletedAt }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };
@@ -4896,7 +4922,7 @@ export async function action({ request }: ActionFunctionArgs) {
           ? { ...c, status: "cancelled" as const, completedAt: undefined }
           : c
       );
-      const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+      const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
       if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
       invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
       return { ok: true };
@@ -4916,7 +4942,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? { ...c, cancelledGroupIds, status: nextStatus, completedAt: nextCompletedAt }
         : c
     );
-    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
+    const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum, inventoryCountWriteOptsBase);
     if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
     return { ok: true };

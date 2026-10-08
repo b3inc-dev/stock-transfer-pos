@@ -198,6 +198,10 @@
    - **ロス履歴** → **棚卸（商品グループ・棚卸ID）** → **仕入履歴** → **発注履歴** の順で、Metafield から DB へ移行。  
    - 各機能ごとに「Metafield 読み込み」と「DB 読み込み」の切り替え（または DB 優先で Metafield はフォールバック）を実装し、データ移行スクリプトで既存 Metafield を DB に投入。
 
+4. **実装状況（2026-10 / Workstream F）**  
+   - 承認済み段階移行順: **inventory_counts → product_groups → entries → daily_snapshots**（`settings_v1` は metafield 残置）。  
+   - 実装・運用の正本: [`METAFIELD_DB_CUTOVER.md`](./METAFIELD_DB_CUTOVER.md)。
+
 4. **店舗設定**  
    - DB に移すかは任意。移す場合は `AppSettings` テーブルを追加し、設定画面の読み書きを Prisma に切り替える。
 
