@@ -11,6 +11,8 @@ import {
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
+import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -443,6 +445,11 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
   }, []);
 
   const [lines, setLines] = useState([]);
+  const [listPage, setListPage] = useState(1);
+  const listPageInfo = useMemo(() => getListPageSlice(lines, listPage), [lines, listPage]);
+  useEffect(() => {
+    if (listPage !== listPageInfo.currentPage) setListPage(listPageInfo.currentPage);
+  }, [listPageInfo.currentPage, listPage]);
   const [refreshing, setRefreshing] = useState(false);
   const linesRef = useRef(lines);
   useEffect(() => {
@@ -1446,7 +1453,9 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
           <s-stack gap="none">
             <s-text emphasis="bold">ロスリスト</s-text>
             <s-box style={{ blockSize: "8px" }} />
-            {lines.map((l) => (
+            <ListPageControls pageInfo={listPageInfo} onPageChange={setListPage} />
+            {listPageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
+            {listPageInfo.displayed.map((l) => (
               <LossAddedLineRowMemo
                 key={l.id}
                 line={l}

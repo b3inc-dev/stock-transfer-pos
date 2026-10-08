@@ -11,6 +11,8 @@ import {
 } from "./adjustmentApi.js";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
+import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 import { getStatusBadgeTone } from "../../adjustmentHelpers.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
@@ -183,8 +185,7 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
   const [detailEntry, setDetailEntry] = useState(null);
   const fullEntriesByIdRef = useRef(new Map());
   const [settings, setSettings] = useState(null);
-  const [detailDisplayLimit, setDetailDisplayLimit] = useState(250);
-  const DETAIL_LOAD_PAGE_SIZE = 600;
+  const [detailListPage, setDetailListPage] = useState(1);
 
   useEffect(() => {
     let mounted = true;
@@ -199,19 +200,16 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
     return () => { mounted = false; };
   }, []);
 
-  const detailInitialLimit = useMemo(
-    () => Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250))),
-    [settings?.productList?.initialLimit]
-  );
+  useEffect(() => {
+    setDetailListPage(1);
+  }, [detailId]);
 
   useEffect(() => {
     if (!detailId) return;
-    setDetailDisplayLimit(detailInitialLimit);
-  }, [detailId, detailInitialLimit]);
-
-  const loadMoreDetailItems = useCallback(() => {
-    setDetailDisplayLimit((prev) => prev + DETAIL_LOAD_PAGE_SIZE);
-  }, []);
+    const items = detailEntry?.items ?? fullEntriesByIdRef.current.get(detailId)?.items ?? [];
+    const info = getListPageSlice(items, detailListPage);
+    if (info.currentPage !== detailListPage) setDetailListPage(info.currentPage);
+  }, [detailId, detailEntry, detailListPage]);
 
   const refreshLossHistory = useCallback(async () => {
     if (!sessionLocationGid) return;
@@ -535,8 +533,7 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
     detailId,
     detailEntry,
     detailLoading,
-    detailDisplayLimit,
-    loadMoreDetailItems,
+    detailListPage,
     entries,
     historyMode,
     activeCount,
@@ -741,8 +738,13 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
           <s-stack gap="base">
             {historyError ? <s-text tone="critical">{historyError}</s-text> : null}
 
-            {/* ✅ 商品リスト（設定の初回表示件数で表示、さらに読み込むで追加） */}
-            {((e.items ?? []).slice(0, detailDisplayLimit)).map((it, idx) => {
+            {/* ✅ 商品リスト（表示ページネーション） */}
+            {(() => {
+              const detailPageInfo = getListPageSlice(e.items ?? [], detailListPage);
+              return (
+                <>
+                  <ListPageControls pageInfo={detailPageInfo} onPageChange={setDetailListPage} />
+                  {detailPageInfo.displayed.map((it, idx) => {
             // ✅ productTitleとvariantTitleを取得（titleから分割する場合も考慮）
             let productTitle = String(it.productTitle || "").trim();
             let variantTitle = String(it.variantTitle || "").trim();
@@ -807,17 +809,100 @@ export function AdjustmentHistoryList({ onBack, locations: locationsProp = [], s
                 </s-box>
 
                 {/* divider は padding の外へ（上下の偏りを消す） */}
-                {idx < Math.min((e.items ?? []).length, detailDisplayLimit) - 1 ? <s-divider /> : null}
+                {idx < detailPageInfo.displayed.length - 1 ? <s-divider /> : null}
               </s-box>
             );
+                  })}
+                </>
+              );
+            })()}
+          </s-stack>
+        </s-box>
+      </>
+    );
+    }
+
+  return (
+    <s-box padding="base">
+      <s-stack gap="base">
+        {historyError ? <s-text tone="critical">{historyError}</s-text> : null}
+
+        {!sessionLocationGid ? (
+          <s-text tone="subdued" size="small">
+            読み込み中...
+          </s-text>
+        ) : loading ? (
+          <s-text tone="subdued" size="small">
+            読み込み中...
+          </s-text>
+        ) : listToShow.length === 0 ? (
+          <s-text tone="subdued" size="small">
+            表示できる履歴がありません
+          </s-text>
+        ) : (
+          <s-stack gap="base">
+            {listToShow.map((e, index) => {
+              // filteredByLocはentriesから動的に計算する（依存配列から除外）
+              const sessionNorm = sessionLocationGid ? normalizeLocationGidForCompare(sessionLocationGid) : "";
+              const currentFilteredByLoc = sessionNorm ? entries.filter((e) => normalizeLocationGidForCompare(e.locationId) === sessionNorm) : [];
+              const adjNameRow = formatAdjustmentName(e, currentFilteredByLoc, index);
+              const date = formatDate(e.date || e.createdAt);
+              const location = e.locationName || getLocationName(e.locationId);
+              const itemCount = e.items?.length ?? 0;
+              const totalQty = (e.items ?? []).reduce((s, it) => s + (Number(it.quantity) ?? 0), 0);
+              const statusJa = e.status === "cancelled" ? "キャンセル済み" : "登録済み";
+              const statusBadgeTone = getStatusBadgeTone(statusJa);
+
+              return (
+                <s-clickable key={e.id} onClick={() => onTapHistoryEntry(e)}>
+                  <s-box padding="small">
+                    <s-stack gap="tight">
+                      <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
+                        <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {adjNameRow}
+                        </s-text>
+                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                          {date}
+                        </s-text>
+                      </s-stack>
+
+                      <s-text
+                        tone="subdued"
+                        size="small"
+                        style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                      >
+                        ロケーション: {location}
+                      </s-text>
+
+                      <s-text
+                        tone="subdued"
+                        size="small"
+                        style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                      >
+                        スタッフ: {e.staffName || "-"}
+                      </s-text>
+
+                      <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
+                        <s-badge tone={statusBadgeTone}>{statusJa}</s-badge>
+                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                          {itemCount}件・合計{totalQty}
+                        </s-text>
+                      </s-stack>
+                    </s-stack>
+                  </s-box>
+                  <s-divider />
+                </s-clickable>
+              );
             })}
-            {(e.items ?? []).length > detailDisplayLimit ? (
-              <s-box padding="base" paddingBlockStart="none">
-                <s-button kind="secondary" onClick={loadMoreDetailItems} onPress={loadMoreDetailItems}>
-                  さらに読み込む
-                </s-button>
-              </s-box>
-            ) : null}
+          </s-stack>
+        )}
+      </s-stack>
+    </s-box>
+  );
+}                  })}
+                </>
+              );
+            })()}
           </s-stack>
         </s-box>
       </>

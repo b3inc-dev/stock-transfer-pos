@@ -47,6 +47,8 @@ import {
   adjustInventoryAtLocationWithFallback,
 } from "../../common/adjustInventoryViaApplyChange.js";
 import { ensureInventoryActivatedWithSkuBarcodeRetry } from "../../common/inventoryActivateRetry.js";
+import { getListPageSlice } from "../../common/listDisplayPagination.js";
+import { ListPageControls } from "../../common/ListPageControls.jsx";
 import {
   clearOutboundCreateCheckpoint,
   runChunkedOutboundCreateWithCheckpoint,
@@ -3677,6 +3679,11 @@ function OutboundHistoryDetail({
   const [detailError, setDetailError] = useState("");
   const [detail, setDetail] = useState(null);
   const [items, setItems] = useState([]);
+  const [listPage, setListPage] = useState(1);
+  const listPageInfo = useMemo(() => getListPageSlice(items, listPage), [items, listPage]);
+  useEffect(() => {
+    if (listPage !== listPageInfo.currentPage) setListPage(listPageInfo.currentPage);
+  }, [listPageInfo.currentPage, listPage]);
   const [lineItemsPageInfo, setLineItemsPageInfo] = useState({ hasNextPage: false, endCursor: null });
   const [loadingMore, setLoadingMore] = useState(false);
   const [cancelArmedAt, setCancelArmedAt] = useState(0);
@@ -5210,7 +5217,9 @@ function OutboundHistoryDetail({
                 </s-stack>
               </s-box>
             ) : null}
-            {items.map((it, idx) => {
+            <ListPageControls pageInfo={listPageInfo} onPageChange={setListPage} />
+            {listPageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
+            {listPageInfo.displayed.map((it, idx) => {
               const optionsLine = String(it.variantTitle || "").trim();
               const sku = String(it.sku || "").trim();
               const jan = String(it.barcode || "").trim();
@@ -5260,7 +5269,7 @@ function OutboundHistoryDetail({
                   </s-box>
 
                   {/* divider は padding の外へ（上下の偏りを消す） */}
-                  {idx < items.length - 1 ? <s-divider /> : null}
+                  {idx < listPageInfo.displayed.length - 1 ? <s-divider /> : null}
                 </s-box>
               );
             })}
@@ -5520,6 +5529,11 @@ function OutboundList({
 
   const destinationLocationId = String(outbound.destinationLocationId || "");
   const lines = Array.isArray(outbound.lines) ? outbound.lines : [];
+  const [listPage, setListPage] = useState(1);
+  const listPageInfo = useMemo(() => getListPageSlice(lines, listPage), [lines, listPage]);
+  useEffect(() => {
+    if (listPage !== listPageInfo.currentPage) setListPage(listPageInfo.currentPage);
+  }, [listPageInfo.currentPage, listPage]);
   const draftTransferId = String(outbound.draftTransferId || "").trim();
   const editingTransferId = String(outbound.editingTransferId || "").trim();
   const addingShipmentToTransferId = String(outbound.addingShipmentToTransferId || "").trim();
@@ -8720,8 +8734,10 @@ function OutboundList({
 
             {/* タイトル直下の余白を “明示” したい場合だけ spacer を足す */}
             <s-box style={{ blockSize: "8px" }} />
+            <ListPageControls pageInfo={listPageInfo} onPageChange={setListPage} />
+            {listPageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
 
-            {lines.map((l) => (
+            {listPageInfo.displayed.map((l) => (
               <OutboundAddedLineRowMemo
                 key={l.id}
                 line={l}

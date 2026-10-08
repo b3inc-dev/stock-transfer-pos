@@ -9,6 +9,8 @@ import {
   writeOrderEntries,
 } from "./orderApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
+import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
+import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -442,6 +444,11 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
   }, []);
 
   const [lines, setLines] = useState([]);
+  const [listPage, setListPage] = useState(1);
+  const listPageInfo = useMemo(() => getListPageSlice(lines, listPage), [lines, listPage]);
+  useEffect(() => {
+    if (listPage !== listPageInfo.currentPage) setListPage(listPageInfo.currentPage);
+  }, [listPageInfo.currentPage, listPage]);
   const [refreshing, setRefreshing] = useState(false);
   const linesRef = useRef(lines);
   useEffect(() => {
@@ -1415,7 +1422,9 @@ export function OrderProductList({ conds, onBack, onAfterConfirm, setHeader, set
           <s-stack gap="none">
             <s-text emphasis="bold">発注リスト</s-text>
             <s-box style={{ blockSize: "8px" }} />
-            {lines.map((l) => (
+            <ListPageControls pageInfo={listPageInfo} onPageChange={setListPage} />
+            {listPageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
+            {listPageInfo.displayed.map((l) => (
               <OrderAddedLineRowMemo
                 key={l.id}
                 line={l}

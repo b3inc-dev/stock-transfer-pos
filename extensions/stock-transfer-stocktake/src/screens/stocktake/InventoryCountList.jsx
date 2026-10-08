@@ -22,6 +22,7 @@ import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 import { reportStocktakeCompleteToApi } from "../../../../common/reportStocktakeComplete.js";
+import { LIST_ITEMS_PER_PAGE } from "../../../../common/listDisplayPagination.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -66,7 +67,7 @@ function inventoryCountDraftKeySingleGroup({ countId, locationId, productGroupId
 }
 const CONFIRM_INVENTORY_COUNT_MODAL_ID = "confirm-inventory-count-modal";
 /** 表示ページネーション: 1ページあたりの表示件数（STOCKTAKE_POS_LIST_PERFORMANCE_REQUIREMENTS.md） */
-const LIST_ITEMS_PER_PAGE = 50;
+// LIST_ITEMS_PER_PAGE: extensions/common/listDisplayPagination.js（E7 横断）
 
 // groupItems のキー照合（GID と数値 ID の混在で取れない不具合対策。管理画面と POS で明細数が一致するようにする）
 function getGroupItemsByKey(groupItemsMap, groupId) {
