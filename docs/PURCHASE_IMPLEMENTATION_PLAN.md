@@ -149,9 +149,19 @@ Phase A ができたら、Phase B（確定・キャンセル API）→ Phase C�
 | **1** | **Phase B** | 仕入「入庫確定」・「キャンセル」の API（在庫調整込み） | ✅ 完了 |
 | **2** | **管理画面：入庫確定UI** | 仕入詳細モーダルに「入庫確定」ボタン（status=pending のとき表示）。押下で Phase B の確定 API を呼ぶ | ✅ 完了 |
 | **3** | **管理画面：新規仕入作成** | 商品リストを登録して仕入IDを立ち上げる（「新規仕入」→ 入庫先・サプライヤー・日付等 → 商品追加 → 登録で #A0000 等を発行） | ✅ 完了 |
-| **4** | **Phase C** | POS 拡張 `stock-transfer-purchase`（コンディション・商品リスト・確定で #B0000 保存） | 未着手 |
+| **4** | **Phase C** | POS 拡張 `stock-transfer-purchase`（コンディション・商品リスト・確定で #B0000 保存） | ✅ 完了（コード実在。旧「未着手」表記は陳腐） |
 
 - **Phase B** が無いと、どこからも「入庫確定」ができないため最優先。
 - その次に、管理画面で **履歴から入庫確定** できるように **入庫確定ボタン** を追加。
 - **新規仕入作成** は、発注以外で仕入IDを増やす入口（管理画面から商品リスト登録で1件作成）。
-- **Phase C** は POS から直接 #B0000 で仕入する拡張。
+- **Phase C** は POS から直接 #B0000 で仕入する拡張（`extensions/stock-transfer-purchase`）。
+
+### 再監査メモ（2026-10-08 / Workstream E5）
+
+| 項目 | 状態 |
+|------|------|
+| POS `stock-transfer-purchase`（Conditions / ProductList / HistoryList） | ✅ 実装済み |
+| Admin `/app/purchase`・`/app/order`・設定サプライヤー | ✅ 実装済み |
+| 発注 POS `stock-transfer-order` | ✅ 実装済み |
+| entry の metafield→DB 移行 | 別 workstream（metafield-DB）担当。本トラックでは触らない |
+| 将来: Transfer 連携・発注→出庫自動変換 | 要件 §4 未決。スコープ外 |

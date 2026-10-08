@@ -9,6 +9,7 @@ import shopify from "../shopify.server";
 import type { PurchaseEntry, OrderRequestItem, LocationNode } from "../types";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 import { logInventoryChangesFromAdjustment } from "../utils/inventory-change-log";
+import db from "../db.server";
 
 const PURCHASE_NS = "stock_transfer_pos";
 const PURCHASE_KEY = "purchase_entries_v1";
@@ -150,6 +151,36 @@ async function executePurchaseCancel(
 ): Promise<{ ok: boolean; error?: string; adjustmentGroupId?: string | null }> {
   if (entry.status === "cancelled") return { ok: true };
   if (entry.status !== "received") return { ok: true }; // pending の場合は在庫増していないのでメタフィールド更新のみ
+
+  // 要件 Rule C: キャンセル完了済みログがあるときだけ在庫調整をスキップ。
+  // apply-change は setQuantities 前に quantityAfter=null の先行行を書くため、
+  // 未完了行までヒットさせると Admin×POS 同時キャンセルで「status のみ cancelled・在庫未戻し」になり得る。
+  try {
+    const completedCancelLog = await db.inventoryChangeLog.findFirst({
+      where: {
+        shop,
+        sourceType: "purchase_cancel",
+        sourceId: entry.id,
+        quantityAfter: { not: null },
+      },
+      select: { id: true },
+    });
+    if (completedCancelLog) return { ok: true };
+
+    const completedCancelEvent = await db.inventoryChangeEvent.findFirst({
+      where: {
+        shop,
+        activity: "purchase_cancel",
+        sourceId: entry.id,
+        status: "completed",
+      },
+      select: { id: true },
+    });
+    if (completedCancelEvent) return { ok: true };
+  } catch (e) {
+    console.error("[executePurchaseCancel] Rule C log lookup failed:", e);
+    // 参照失敗時は従来どおり在庫調整へ進む（idempotencyKey が最後の砦）
+  }
 
   const locationGid = normalizeLocationGid(entry.locationId);
   if (!locationGid) return { ok: false, error: "入庫先ロケーションIDが不正です" };
