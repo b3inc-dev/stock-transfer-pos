@@ -5922,7 +5922,15 @@ export default function InventoryCountPage() {
     });
   };
 
-  // 全選択/全解除（コメントアウトされたコード内で参照されているため定義）
+  /** Phase B3: 棚卸ID発行タブ用。登録済み全グループを一括選択／解除（履歴 CSV の selectedIds とは別） */
+  const selectAllCreateProductGroups = () => {
+    setCreateProductGroupIds(productGroups.map((g) => g.id));
+  };
+  const clearCreateProductGroups = () => {
+    setCreateProductGroupIds([]);
+  };
+
+  // 全選択/全解除（履歴 CSV 用 selectedIds。発行タブのグループ選択とは別）
   const toggleSelectAll = () => {
     if (selectedIds.size === filteredCounts.length) {
       setSelectedIds(new Set());
@@ -7410,6 +7418,69 @@ export default function InventoryCountPage() {
                           <s-text color="subdued">
                             対象の商品グループを1つ以上選びます。
                           </s-text>
+                          {productGroups.length > 0 ? (
+                            <div
+                              style={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                alignItems: "center",
+                                gap: "8px",
+                                justifyContent: "space-between",
+                              }}
+                            >
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                                <button
+                                  type="button"
+                                  onClick={selectAllCreateProductGroups}
+                                  disabled={
+                                    productGroups.length === 0 ||
+                                    createProductGroupIds.length === productGroups.length
+                                  }
+                                  style={{
+                                    padding: "6px 12px",
+                                    fontSize: "13px",
+                                    borderRadius: "6px",
+                                    border: "1px solid #2563eb",
+                                    background:
+                                      createProductGroupIds.length === productGroups.length
+                                        ? "#f3f4f6"
+                                        : "#fff",
+                                    color:
+                                      createProductGroupIds.length === productGroups.length
+                                        ? "#9ca3af"
+                                        : "#2563eb",
+                                    cursor:
+                                      createProductGroupIds.length === productGroups.length
+                                        ? "not-allowed"
+                                        : "pointer",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  すべて選択
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={clearCreateProductGroups}
+                                  disabled={createProductGroupIds.length === 0}
+                                  style={{
+                                    padding: "6px 12px",
+                                    fontSize: "13px",
+                                    borderRadius: "6px",
+                                    border: "1px solid #6b7280",
+                                    background: createProductGroupIds.length === 0 ? "#f3f4f6" : "#fff",
+                                    color: createProductGroupIds.length === 0 ? "#9ca3af" : "#374151",
+                                    cursor: createProductGroupIds.length === 0 ? "not-allowed" : "pointer",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  すべて解除
+                                </button>
+                              </div>
+                              <s-text color="subdued">
+                                選択中: {createProductGroupIds.length}/{productGroups.length}
+                              </s-text>
+                            </div>
+                          ) : null}
                           <div style={{ maxHeight: "240px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
                             {productGroups.length === 0 ? (
                               <s-text color="subdued">商品グループがありません。先に「商品グループ設定」で作成してください。</s-text>
@@ -7452,11 +7523,6 @@ export default function InventoryCountPage() {
                               </div>
                             )}
                           </div>
-                          {createProductGroupIds.length > 0 && (
-                            <s-text color="subdued">
-                              選択中: {createProductGroupIds.length}グループ
-                            </s-text>
-                          )}
                         </s-stack>
                         <s-divider />
 
