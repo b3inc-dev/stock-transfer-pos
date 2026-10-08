@@ -373,8 +373,28 @@ export async function runChunkedOutboundCreateWithCheckpoint({
   const label = String(splitLabel || "POS出庫").trim() || "POS出庫";
 
   for (let i = startIndex; i < n; i++) {
-    // 既に再開データがあるチャンクはスキップ
+    // 既に再開データがあるチャンクはスキップ（Shipment 欠落時のみ補完）
     if (transfers[i]?.id) {
+      if (!shipments[i]?.id && typeof afterRecoveredChunk === "function") {
+        try {
+          const completed = await afterRecoveredChunk({
+            transfer: transfers[i],
+            shipment: shipments[i] || null,
+            chunk: chunks[i],
+            note: mergeNoteWithAttemptMarker(
+              n > 1
+                ? `${String(splitLabel || "POS出庫").trim() || "POS出庫"} 分割 ${i + 1}/${n}（API上限250明細/Transfer）`
+                : undefined,
+              attemptId,
+              i + 1,
+              n
+            ),
+            chunkIndex0: i,
+            attemptId,
+          });
+          if (completed?.shipment?.id) shipments[i] = completed.shipment;
+        } catch (_) {}
+      }
       continue;
     }
 
