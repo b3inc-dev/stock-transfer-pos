@@ -521,42 +521,90 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
         if (existingQty === null) {
           // 大量入庫時: API が inbound_transfer で quantityAfter=null を作成→Webhook が後から届くパターン。新規 admin_webhook を作らず既存行を確定させる。
-          // POS 由来で API が delta を入れられていない場合に備え、既存行の delta が null なら「直前の確定数量」から算出して補完する。
-          let updateData: { quantityAfter: number; delta?: number } = { quantityAfter: available };
-          if (recentNonAdminLog.delta == null && db && typeof db.inventoryChangeLog !== "undefined") {
-            const prevWithQty = await db.inventoryChangeLog.findFirst({
-              where: {
-                shop,
-                inventoryItemId: { in: inventoryItemIdCandidates },
-                locationId: { in: locationIdCandidates },
-                quantityAfter: { not: null },
-                timestamp: { lt: recentNonAdminLog.timestamp },
-              },
-              orderBy: { timestamp: "desc" },
-            });
-            if (prevWithQty?.quantityAfter != null) {
-              const computedDelta = available - prevWithQty.quantityAfter;
-              updateData.delta = computedDelta;
-              console.log(
-                `[inventory_levels/update] Complementing delta for same-event update: id=${recentNonAdminLog.id}, prevAvailable=${prevWithQty.quantityAfter}, delta=${computedDelta}`
+          // Phase F: appEventId 先行履歴は quantityAfterExpected と available が一致するときだけ latch。
+          // 不一致（同時売上/返品など）は latch せず後続の pending マッチへ進み、業務行が売上を飲み込まないようにする。
+          let allowNullLatch = true;
+          const noteStr = typeof recentNonAdminLog.note === "string" ? recentNonAdminLog.note : "";
+          const appEventIdFromNote = noteStr.startsWith("appEventId:")
+            ? noteStr.slice("appEventId:".length).split(/[\s|]/)[0]
+            : "";
+          if (
+            appEventIdFromNote &&
+            db &&
+            typeof db.inventoryChangeEvent !== "undefined"
+          ) {
+            try {
+              const ev = await db.inventoryChangeEvent.findUnique({
+                where: { appEventId: appEventIdFromNote },
+                select: {
+                  lines: {
+                    select: { quantityAfterExpected: true, inventoryItemId: true },
+                  },
+                },
+              });
+              const candidateSet = new Set(
+                inventoryItemIdCandidates.map((id) => String(id).split("/").pop() || String(id))
+              );
+              const matchedLine = (ev?.lines ?? []).find((ln: { inventoryItemId?: string }) => {
+                const raw = String(ln.inventoryItemId ?? "").split("/").pop() || "";
+                return raw && candidateSet.has(raw);
+              });
+              const expected =
+                matchedLine && matchedLine.quantityAfterExpected != null
+                  ? matchedLine.quantityAfterExpected
+                  : null;
+              if (expected != null && expected !== available) {
+                allowNullLatch = false;
+                console.log(
+                  `[inventory_levels/update] Skipping null-latch (available !== expected): id=${recentNonAdminLog.id}, appEventId=${appEventIdFromNote}, expected=${expected}, available=${available}`
+                );
+              }
+            } catch (e: unknown) {
+              console.warn(
+                "[inventory_levels/update] expected-qty check failed; keeping null-latch:",
+                e instanceof Error ? e.message : String(e)
               );
             }
           }
-          try {
-            console.log(
-              `[inventory_levels/update] Existing log quantityAfter is null; updating to available (same event): id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter -> ${available}`
-            );
-            await db.inventoryChangeLog.update({
-              where: { id: recentNonAdminLog.id },
-              data: updateData,
-            });
-          } catch (e: unknown) {
-            console.error(
-              "[inventory_levels/update] Failed to update existing log (quantityAfter null):",
-              e instanceof Error ? e.message : String(e)
-            );
+          if (allowNullLatch) {
+            // POS 由来で API が delta を入れられていない場合に備え、既存行の delta が null なら「直前の確定数量」から算出して補完する。
+            let updateData: { quantityAfter: number; delta?: number } = { quantityAfter: available };
+            if (recentNonAdminLog.delta == null && db && typeof db.inventoryChangeLog !== "undefined") {
+              const prevWithQty = await db.inventoryChangeLog.findFirst({
+                where: {
+                  shop,
+                  inventoryItemId: { in: inventoryItemIdCandidates },
+                  locationId: { in: locationIdCandidates },
+                  quantityAfter: { not: null },
+                  timestamp: { lt: recentNonAdminLog.timestamp },
+                },
+                orderBy: { timestamp: "desc" },
+              });
+              if (prevWithQty?.quantityAfter != null) {
+                const computedDelta = available - prevWithQty.quantityAfter;
+                updateData.delta = computedDelta;
+                console.log(
+                  `[inventory_levels/update] Complementing delta for same-event update: id=${recentNonAdminLog.id}, prevAvailable=${prevWithQty.quantityAfter}, delta=${computedDelta}`
+                );
+              }
+            }
+            try {
+              console.log(
+                `[inventory_levels/update] Existing log quantityAfter is null; updating to available (same event): id=${recentNonAdminLog.id}, activity=${recentNonAdminLog.activity}, quantityAfter -> ${available}`
+              );
+              await db.inventoryChangeLog.update({
+                where: { id: recentNonAdminLog.id },
+                data: updateData,
+              });
+            } catch (e: unknown) {
+              console.error(
+                "[inventory_levels/update] Failed to update existing log (quantityAfter null):",
+                e instanceof Error ? e.message : String(e)
+              );
+            }
+            return new Response("OK", { status: 200 });
           }
-          return new Response("OK", { status: 200 });
+          // allowNullLatch === false: 先行履歴は触らず新規イベント扱いへ進む
         }
         console.log(
           `[inventory_levels/update] Existing log quantityAfter (${existingQty}) !== available (${available}); treating as new event, will create admin_webhook row`
