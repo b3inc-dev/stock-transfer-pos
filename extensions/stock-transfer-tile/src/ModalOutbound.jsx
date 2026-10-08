@@ -47,15 +47,12 @@ import {
   adjustInventoryAtLocationWithFallback,
 } from "../../common/adjustInventoryViaApplyChange.js";
 import { ensureInventoryActivatedWithSkuBarcodeRetry } from "../../common/inventoryActivateRetry.js";
-<<<<<<< HEAD
+import { getListPageSlice } from "../../common/listDisplayPagination.js";
+import { ListPageControls } from "../../common/ListPageControls.jsx";
 import {
   clearOutboundCreateCheckpoint,
   runChunkedOutboundCreateWithCheckpoint,
 } from "./outboundCreateCheckpoint.js";
-=======
-import { getListPageSlice } from "../../common/listDisplayPagination.js";
-import { ListPageControls } from "../../common/ListPageControls.jsx";
->>>>>>> 14756da (feat(pos): E7 明細リスト表示ページネーション（50件/ページ）)
 
 const SHOPIFY = globalThis?.shopify;
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
