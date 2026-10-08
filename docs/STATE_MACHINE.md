@@ -231,7 +231,7 @@ userErrors（ビジネス）はリトライしても同じ結果になりやす�
 
 ## 11. 棚卸確定の状態分離（COMPLETE_RETRY 正本）
 
-実装: `InventoryCountList.jsx` + `api.pos-stocktake-complete` + `api.inventory.apply-change`。  
+実装: `InventoryCountList.jsx` + `api.pos-stocktake-complete` + `api.inventory.apply-change` + Admin `pos_metafield_retry`。  
 詳細 UI: [`STOCKTAKE_COMPLETE_RETRY_DESIGN.md`](./STOCKTAKE_COMPLETE_RETRY_DESIGN.md)、画面方針: [`STOCKTAKE_UX_CANON.md`](./STOCKTAKE_UX_CANON.md)。
 
 ### 現行確定順（正本）
@@ -252,7 +252,8 @@ userErrors（ビジネス）はリトライしても同じ結果になりやす�
 | 状態 | 意味 | 再試行でやってよいこと |
 |------|------|------------------------|
 | `quantitiesApplied` | apply-change 成功 | **再 setQuantities 禁止**（同一 appEventId） |
-| `needMetafieldRetry` | メタ未反映 | `retryOnly` または同一ペイロードで metafield のみ |
+| `needMetafieldRetry` | メタ未反映 | POS `retryOnly` / Admin `pos_metafield_retry`（metafield のみ） |
 | `completed` | メタ反映済み | なし |
 
-二重 setQuantities 防止: `quantitiesAppliedRef` + `InventoryChangeEvent.appEventId` 冪等。
+二重 setQuantities 防止: `quantitiesAppliedRef` + `InventoryChangeEvent.appEventId` 冪等。  
+Admin 再試行は `pending_complete_v1` からメタのみ適用（在庫 API を叩かない）。

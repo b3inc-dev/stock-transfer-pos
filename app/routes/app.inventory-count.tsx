@@ -77,6 +77,7 @@ const ALLOWED_ACTION_TYPES = new Set([
   "reset_stocktake_all",
   "cancel_stocktake_group",
   "cancel_stocktake",
+  "pos_metafield_retry",
 ]);
 
 /** 商品グループ保存用メタフィールド（本體・ID一覧・ID→名前）。POS の一覧で軽量読取用 */
@@ -1615,6 +1616,58 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
+  // Phase F dual-read: list/main 由来の一覧にも DB overlay（shop があるとき）
+  if (shop && inventoryCounts.length >= 0) {
+    try {
+      const { mergeInventoryCountsWithDb } = await import("../utils/inventory-count-document.server");
+      inventoryCounts = await mergeInventoryCountsWithDb(shop, inventoryCounts);
+    } catch (e) {
+      console.warn("[inventory-count] loader dual-read skipped:", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // COMPLETE_RETRY: pending_complete_v1（メタ更新再試行必要）
+  let pendingMetafieldRetry: { countId: string; completedGroupIds: string[]; savedAt: string } | null = null;
+  try {
+    const PENDING_KEY = "pending_complete_v1";
+    const pendingQuery = `#graphql query PendingComplete { currentAppInstallation { metafield(namespace: "${NS}", key: "${PENDING_KEY}") { value } } }`;
+    let pendingRaw: string | null = null;
+    if (useDirectFetch) {
+      const pendingJson = await loaderGraphql(shop, accessToken, pendingQuery);
+      pendingRaw =
+        (pendingJson?.data as { currentAppInstallation?: { metafield?: { value?: string } } })?.currentAppInstallation
+          ?.metafield?.value ?? null;
+    } else {
+      try {
+        const pendingResp = await admin.graphql(pendingQuery);
+        const pendingJson = (await safeJsonFromResponseForLoader(pendingResp, {})) as {
+          data?: { currentAppInstallation?: { metafield?: { value?: string } } };
+        };
+        pendingRaw = pendingJson?.data?.currentAppInstallation?.metafield?.value ?? null;
+      } catch {
+        pendingRaw = null;
+      }
+    }
+    if (pendingRaw && pendingRaw !== "{}") {
+      const parsed = JSON.parse(pendingRaw) as {
+        countId?: string;
+        completedGroups?: Array<{ groupId?: string }>;
+        savedAt?: string;
+      };
+      if (parsed?.countId) {
+        pendingMetafieldRetry = {
+          countId: String(parsed.countId),
+          completedGroupIds: Array.isArray(parsed.completedGroups)
+            ? parsed.completedGroups.map((g) => String(g?.groupId ?? "")).filter(Boolean)
+            : [],
+          savedAt: String(parsed.savedAt ?? ""),
+        };
+      }
+    }
+  } catch (e) {
+    console.warn("[inventory-count] pending_complete read skipped:", e instanceof Error ? e.message : String(e));
+  }
+
   // ✅ 39グループ×5600SKU等でApplication Errorを防ぐ：クライアントには inventoryItemIdsByGroup を返さない（モーダルは action get_incomplete_group_products で取得）
   const inventoryCountsForClient = inventoryCounts.map((c) => {
     const { inventoryItemIdsByGroup: _omit, ...rest } = c as InventoryCount & { inventoryItemIdsByGroup?: unknown };
@@ -1633,6 +1686,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       shopTimezone,
       todayInShopTimezone,
       stocktakeCsvExportColumns,
+      pendingMetafieldRetry,
       loadError: false as const,
       loadErrorMessage: undefined,
     },
@@ -1658,6 +1712,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         shopTimezone: "Asia/Tokyo",
         todayInShopTimezone: new Date().toISOString().slice(0, 10),
         stocktakeCsvExportColumns: DEFAULT_STOCKTAKE_CSV_COLUMNS,
+        pendingMetafieldRetry: null,
         loadError: true as const,
         loadErrorMessage: message,
       },
@@ -2708,6 +2763,61 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (!ownerId) {
     return { ok: false, error: "currentAppInstallation.id が取得できませんでした" as const };
+  }
+
+  // COMPLETE_RETRY: 管理画面からメタ更新のみ再試行（pending_complete_v1 バックアップ）
+  if (actionTypeNorm === "pos_metafield_retry") {
+    const countId = String(formData.get("countId") ?? "").trim();
+    if (!countId) {
+      return { ok: false, error: "countId は必須です" as const };
+    }
+    try {
+      const { readPendingCompleteBackup, applyPendingCompleteFromBackup } = await import(
+        "../utils/stocktake-pending-complete.server"
+      );
+      const backup = await readPendingCompleteBackup(admin);
+      if (!backup || normalizeIdForMatch(backup.countId) !== normalizeIdForMatch(countId)) {
+        return {
+          ok: false,
+          error: "再試行用バックアップが見つかりません。既に完了しているか、別の棚卸の失敗です。",
+        } as const;
+      }
+      const result = await applyPendingCompleteFromBackup(admin, ownerId, backup);
+      if (!result.ok) {
+        return { ok: false, error: (result.error || "メタ更新の再試行に失敗しました") as const };
+      }
+      try {
+        const shopForDb = session?.shop ?? "";
+        if (shopForDb) {
+          // metafield のみ読取（直後の dual-read は古い DB で上書きしうる）
+          const counts = await readInventoryCountsChunked(admin);
+          const saved = counts.find(
+            (c) =>
+              String(c.id) === String(result.countId) ||
+              normalizeIdForMatch(c.id) === normalizeIdForMatch(result.countId)
+          );
+          if (saved) {
+            const { upsertInventoryCountDocument } = await import("../utils/inventory-count-document.server");
+            await upsertInventoryCountDocument({
+              shop: shopForDb,
+              countId: String(saved.id),
+              countName: saved.countName ?? null,
+              status: String(saved.status || "in_progress"),
+              locationId: saved.locationId ?? null,
+              locationName: saved.locationName ?? null,
+              payload: saved,
+              completedAt: saved.completedAt ?? null,
+            });
+          }
+        }
+      } catch (e) {
+        console.warn("[inventory-count] pos_metafield_retry DB dual-write skipped:", e);
+      }
+      return { ok: true, retriedCountId: result.countId } as const;
+    } catch (e) {
+      console.error("[inventory-count] pos_metafield_retry failed:", e);
+      return { ok: false, error: "メタ更新の再試行中にエラーが発生しました。" as const };
+    }
   }
 
   if (actionTypeNorm === "repair_count_names") {
@@ -4849,7 +4959,21 @@ export type SkuSearchVariant = {
 
 export default function InventoryCountPage() {
   const loaderData = useLoaderData<typeof loader>();
-  const { locations, collections, collectionDisplayMap = {}, productGroups, inventoryCounts, inventoryCountsVersion = 1, skuVariantList, shopTimezone, todayInShopTimezone, stocktakeCsvExportColumns, loadError = false, loadErrorMessage } = loaderData || {
+  const {
+    locations,
+    collections,
+    collectionDisplayMap = {},
+    productGroups,
+    inventoryCounts,
+    inventoryCountsVersion = 1,
+    skuVariantList,
+    shopTimezone,
+    todayInShopTimezone,
+    stocktakeCsvExportColumns,
+    pendingMetafieldRetry = null,
+    loadError = false,
+    loadErrorMessage,
+  } = loaderData || {
     locations: [],
     collections: [],
     collectionDisplayMap: {} as Record<string, CollectionNode>,
@@ -4858,8 +4982,10 @@ export default function InventoryCountPage() {
     skuVariantList: [],
     shopTimezone: "UTC",
     stocktakeCsvExportColumns: DEFAULT_STOCKTAKE_CSV_COLUMNS,
+    pendingMetafieldRetry: null,
     loadError: false,
   };
+  const metafieldRetryFetcher = useFetcher<typeof action>();
   const csvColumns = stocktakeCsvExportColumns ?? DEFAULT_STOCKTAKE_CSV_COLUMNS;
   const csvColumnsSummary = csvColumns.filter((id) => STOCKTAKE_SUMMARY_IDS.includes(id));
   const fetcher = useFetcher<typeof action>();
@@ -4980,6 +5106,10 @@ export default function InventoryCountPage() {
   const [modalEditedQuantities, setModalEditedQuantities] = useState<Record<string, Record<string, number>>>({});
   const historyActionFetcher = useFetcher<typeof action>();
   const revalidator = useRevalidator();
+  useEffect(() => {
+    const d = metafieldRetryFetcher.data as { ok?: boolean; error?: string; retriedCountId?: string } | undefined;
+    if (d?.ok) revalidator.revalidate();
+  }, [metafieldRetryFetcher.data, revalidator]);
   // 棚卸ID修復成功時に一覧を再取得
   useEffect(() => {
     const d = fetcher.data;
@@ -7496,6 +7626,61 @@ export default function InventoryCountPage() {
           {/* 履歴 */}
           {activeTab === "history" && (
             <s-box padding="base">
+              {pendingMetafieldRetry?.countId ? (
+                <div
+                  style={{
+                    marginBottom: 16,
+                    padding: 16,
+                    borderRadius: 12,
+                    background: "#fff7ed",
+                    border: "1px solid #fdba74",
+                  }}
+                >
+                  <s-stack gap="small">
+                    <s-text type="strong">メタ更新の再試行が必要です</s-text>
+                    <s-text>
+                      棚卸ID{" "}
+                      <strong>
+                        {inventoryCounts.find(
+                          (c) =>
+                            String(c.id) === String(pendingMetafieldRetry.countId) ||
+                            normalizeIdForMatch(c.id) === normalizeIdForMatch(pendingMetafieldRetry.countId)
+                        )?.countName || pendingMetafieldRetry.countId}
+                      </strong>
+                      は在庫調整済みですが、ステータス（メタフィールド）の反映に失敗しています。商品リストは編集せず、「再試行（メタ更新のみ）」を実行してください。
+                    </s-text>
+                    {pendingMetafieldRetry.completedGroupIds?.length ? (
+                      <s-text color="subdued">
+                        対象グループ数: {pendingMetafieldRetry.completedGroupIds.length}
+                        {pendingMetafieldRetry.savedAt ? ` / 失敗記録: ${pendingMetafieldRetry.savedAt}` : ""}
+                      </s-text>
+                    ) : null}
+                    {metafieldRetryFetcher.data && (metafieldRetryFetcher.data as { ok?: boolean }).ok === false ? (
+                      <s-text tone="critical">
+                        {(metafieldRetryFetcher.data as { error?: string }).error || "再試行に失敗しました"}
+                      </s-text>
+                    ) : null}
+                    {metafieldRetryFetcher.data && (metafieldRetryFetcher.data as { ok?: boolean }).ok === true ? (
+                      <s-text tone="success">メタ更新の再試行が完了しました。</s-text>
+                    ) : null}
+                    <div>
+                      <s-button
+                        variant="primary"
+                        disabled={metafieldRetryFetcher.state !== "idle"}
+                        onClick={() => {
+                          const fd = new FormData();
+                          fd.set("action", "pos_metafield_retry");
+                          fd.set("countId", pendingMetafieldRetry.countId);
+                          fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
+                          metafieldRetryFetcher.submit(fd, { method: "post" });
+                        }}
+                      >
+                        {metafieldRetryFetcher.state !== "idle" ? "再試行中..." : "再試行（メタ更新のみ）"}
+                      </s-button>
+                    </div>
+                  </s-stack>
+                </div>
+              ) : null}
               <div style={{ display: "flex", gap: "24px", alignItems: "flex-start", flexWrap: "wrap" }}>
                 {/* 左: タイトル＋説明 ＋ フィルター（白カード） */}
                 <div style={{ flex: "1 1 260px", minWidth: 0 }}>
@@ -8860,19 +9045,26 @@ export default function InventoryCountPage() {
                 <div style={{ marginTop: "24px", display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: "12px", alignItems: "center" }}>
                   {(() => {
                     const isCountFullyCompleted = modalCount?.status === "completed" || modalCount?.status === "cancelled";
+                    const isPendingMetafieldRetry =
+                      !!pendingMetafieldRetry?.countId &&
+                      !!modalCount?.id &&
+                      (String(modalCount.id) === String(pendingMetafieldRetry.countId) ||
+                        normalizeIdForMatch(modalCount.id) === normalizeIdForMatch(pendingMetafieldRetry.countId));
+                    const editDisabled = isCountFullyCompleted || isPendingMetafieldRetry;
                     return !modalEditMode ? (
                     <button
                       type="button"
-                      disabled={isCountFullyCompleted}
+                      disabled={editDisabled}
+                      title={isPendingMetafieldRetry ? "メタ更新の再試行が必要です。編集せず再試行してください。" : undefined}
                       onClick={() => setModalEditMode(true)}
                       style={{
                         padding: "8px 16px",
                         fontSize: "14px",
                         borderRadius: "6px",
                         border: "1px solid #2e7d32",
-                        background: isCountFullyCompleted ? "#f0f0f0" : "#fff",
-                        color: isCountFullyCompleted ? "#999" : "#2e7d32",
-                        cursor: isCountFullyCompleted ? "not-allowed" : "pointer",
+                        background: editDisabled ? "#f0f0f0" : "#fff",
+                        color: editDisabled ? "#999" : "#2e7d32",
+                        cursor: editDisabled ? "not-allowed" : "pointer",
                       }}
                     >
                       編集

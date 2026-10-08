@@ -88,6 +88,28 @@ export async function upsertInventoryCountDocument(
   }
 }
 
+function parseDocPayload(doc: {
+  payloadJson: string | null;
+  chunks?: Array<{ payload: string }>;
+}): unknown {
+  if (doc.payloadJson) {
+    try {
+      return JSON.parse(doc.payloadJson);
+    } catch {
+      return doc.payloadJson;
+    }
+  }
+  if (doc.chunks?.length) {
+    const joined = doc.chunks.map((c) => c.payload).join("");
+    try {
+      return JSON.parse(joined);
+    } catch {
+      return joined;
+    }
+  }
+  return null;
+}
+
 /**
  * DB 優先で 1 件読む。無ければ null（呼び出し側が metafield にフォールバック）。
  */
@@ -104,22 +126,12 @@ export async function readInventoryCountDocumentFromDb(
       include: { chunks: { orderBy: { chunkIndex: "asc" } } },
     });
     if (!doc) return null;
-    let payload: unknown = null;
-    if (doc.payloadJson) {
-      try {
-        payload = JSON.parse(doc.payloadJson);
-      } catch {
-        payload = doc.payloadJson;
-      }
-    } else if (doc.chunks?.length) {
-      const joined = doc.chunks.map((c: { payload: string }) => c.payload).join("");
-      try {
-        payload = JSON.parse(joined);
-      } catch {
-        payload = joined;
-      }
-    }
-    return { countId: doc.countId, status: doc.status, payload, version: doc.version };
+    return {
+      countId: doc.countId,
+      status: doc.status,
+      payload: parseDocPayload(doc),
+      version: doc.version,
+    };
   } catch (e: unknown) {
     console.warn(
       "[inventory-count-document] read failed:",
@@ -127,4 +139,121 @@ export async function readInventoryCountDocumentFromDb(
     );
     return null;
   }
+}
+
+export type DbCountOverlay = {
+  countId: string;
+  status: string;
+  countName?: string | null;
+  locationId?: string | null;
+  locationName?: string | null;
+  payload: unknown;
+  version: number;
+  updatedAt: Date;
+};
+
+/** ショップの DB 棚卸ドキュメント一覧（dual-read 用） */
+export async function listInventoryCountDocumentsForShop(shop: string): Promise<DbCountOverlay[]> {
+  try {
+    if (!db || typeof (db as { inventoryCountDocument?: unknown }).inventoryCountDocument === "undefined") {
+      return [];
+    }
+    const docs = await db.inventoryCountDocument.findMany({
+      where: { shop },
+      include: { chunks: { orderBy: { chunkIndex: "asc" } } },
+      orderBy: { updatedAt: "desc" },
+      take: 500,
+    });
+    return docs.map((doc: {
+      countId: string;
+      status: string;
+      countName: string | null;
+      locationId: string | null;
+      locationName: string | null;
+      payloadJson: string | null;
+      version: number;
+      updatedAt: Date;
+      chunks: Array<{ payload: string }>;
+    }) => ({
+      countId: doc.countId,
+      status: doc.status,
+      countName: doc.countName,
+      locationId: doc.locationId,
+      locationName: doc.locationName,
+      payload: parseDocPayload(doc),
+      version: doc.version,
+      updatedAt: doc.updatedAt,
+    }));
+  } catch (e: unknown) {
+    console.warn(
+      "[inventory-count-document] list failed:",
+      e instanceof Error ? e.message : String(e)
+    );
+    return [];
+  }
+}
+
+function normalizeCountId(id: unknown): string {
+  const s = String(id ?? "").trim();
+  return s.split("/").pop() || s;
+}
+
+/**
+ * metafield 配列を正としつつ、DB に存在する count は payload（または status 等）で上書きする dual-read。
+ * DB のみに存在する count は末尾に追加（metafield 未反映の確定成功分）。
+ */
+export async function mergeInventoryCountsWithDb<T extends { id?: string; status?: string }>(
+  shop: string,
+  metafieldCounts: T[]
+): Promise<T[]> {
+  const dbDocs = await listInventoryCountDocumentsForShop(shop);
+  if (dbDocs.length === 0) return metafieldCounts;
+
+  const byNorm = new Map<string, DbCountOverlay>();
+  for (const d of dbDocs) {
+    byNorm.set(normalizeCountId(d.countId), d);
+  }
+
+  const merged: T[] = metafieldCounts.map((c) => {
+    const overlay = byNorm.get(normalizeCountId(c.id));
+    if (!overlay) return c;
+    byNorm.delete(normalizeCountId(c.id));
+    if (overlay.payload && typeof overlay.payload === "object") {
+      return {
+        ...c,
+        ...(overlay.payload as object),
+        id: c.id,
+        status: overlay.status || (overlay.payload as { status?: string }).status || c.status,
+        _source: "db_overlay",
+      } as T;
+    }
+    return {
+      ...c,
+      status: overlay.status || c.status,
+      countName: overlay.countName ?? (c as { countName?: string }).countName,
+      _source: "db_overlay",
+    } as T;
+  });
+
+  for (const leftover of byNorm.values()) {
+    if (leftover.payload && typeof leftover.payload === "object") {
+      merged.push({
+        ...(leftover.payload as object),
+        id: leftover.countId,
+        status: leftover.status,
+        _source: "db_only",
+      } as T);
+    } else {
+      merged.push({
+        id: leftover.countId,
+        status: leftover.status,
+        countName: leftover.countName,
+        locationId: leftover.locationId,
+        locationName: leftover.locationName,
+        _source: "db_only",
+      } as T);
+    }
+  }
+
+  return merged;
 }

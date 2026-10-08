@@ -468,7 +468,7 @@ export async function action({ request }: ActionFunctionArgs) {
             sourceType: activity,
             sourceId,
             idempotencyKey,
-            note: null,
+            note: `appEventId:${appEventId}`,
           },
           update: {
             delta: l.delta,
@@ -478,6 +478,46 @@ export async function action({ request }: ActionFunctionArgs) {
             note: `appEventId:${appEventId}`,
           },
         });
+
+        // R-HIST: 同一物理変動の admin_webhook 行を業務 activity に上書き（二重行防止）。
+        // 売上/返品救済を壊さないため、quantityAfter が null または今回値と一致する行のみ、短い窓で合流。
+        try {
+          const itemCands = [rawItemId, `gid://shopify/InventoryItem/${rawItemId}`];
+          const locCands = [rawLocId, `gid://shopify/Location/${rawLocId}`];
+          const searchFrom = new Date(requestedAt.getTime() - 10 * 60 * 1000);
+          const searchTo = new Date(requestedAt.getTime() + 2 * 60 * 1000);
+          const recentAdmin = await db.inventoryChangeLog.findFirst({
+            where: {
+              shop,
+              inventoryItemId: { in: itemCands },
+              locationId: { in: locCands },
+              activity: "admin_webhook",
+              timestamp: { gte: searchFrom, lte: searchTo },
+              NOT: { idempotencyKey },
+              OR: [{ quantityAfter: null }, { quantityAfter: l.quantityAfter }],
+            },
+            orderBy: { timestamp: "desc" },
+          });
+          if (recentAdmin) {
+            await db.inventoryChangeLog.update({
+              where: { id: recentAdmin.id },
+              data: {
+                activity,
+                sourceType: activity,
+                sourceId,
+                delta: l.delta,
+                quantityAfter: l.quantityAfter,
+                locationName: resolvedLocationName,
+                note: `coalesced_from_admin_webhook;appEventId:${appEventId}`,
+              },
+            });
+          }
+        } catch (e: unknown) {
+          console.warn(
+            "[api.inventory.apply-change] admin_webhook coalesce skipped:",
+            e instanceof Error ? e.message : String(e)
+          );
+        }
       }
 
       return new Response(

@@ -9,17 +9,18 @@ import type { SessionStorageWithFindByShop } from "../types";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import {
-  readInventoryCountsChunked,
-  writeInventoryCountsChunked,
-  getGroupItemsByKey,
   normalizeIdForMatch,
-  type InventoryCount,
 } from "./app.inventory-count";
 import { upsertInventoryCountDocument } from "../utils/inventory-count-document.server";
+import {
+  writePendingCompleteBackup,
+  readPendingCompleteBackup,
+  applyPendingCompleteFromBackup,
+  type PendingCompleteBackup,
+  type PendingCompleteGroup,
+} from "../utils/stocktake-pending-complete.server";
 
 const API_VERSION = "2026-01";
-const NS = "stock_transfer_pos";
-const PENDING_COMPLETE_KEY = "pending_complete_v1";
 const META_RETRY_MAX = 3;
 const META_RETRY_DELAY_MS = 2500;
 
@@ -95,79 +96,7 @@ type AdminGraphql = {
   graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response>;
 };
 
-type ItemEntry = {
-  inventoryItemId: string;
-  currentQuantity: number;
-  actualQuantity: number;
-  variantId?: string;
-  sku?: string;
-  title?: string;
-};
-type CompletedGroup = { groupId: string; items: ItemEntry[] };
-
-type PendingCompleteBackup = {
-  countId: string;
-  completedGroups: CompletedGroup[];
-  savedAt: string;
-};
-
-async function writePendingCompleteBackup(
-  admin: AdminGraphql,
-  ownerId: string,
-  backup: PendingCompleteBackup | null
-): Promise<void> {
-  const value = backup ? JSON.stringify(backup) : "{}";
-  const mutation = `#graphql mutation SetPendingComplete($metafields: [MetafieldsSetInput!]!) {
-    metafieldsSet(metafields: $metafields) { userErrors { message } }
-  }`;
-  try {
-    const resp = await admin.graphql(mutation, {
-      variables: {
-        metafields: [
-          {
-            ownerId,
-            namespace: NS,
-            key: PENDING_COMPLETE_KEY,
-            type: "json",
-            value,
-          },
-        ],
-      },
-    });
-    const json = (await resp.json().catch(() => ({}))) as {
-      data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } };
-      errors?: unknown[];
-    };
-    if (json?.errors?.length || (json?.data?.metafieldsSet?.userErrors?.length ?? 0) > 0) {
-      console.warn("[api.pos-stocktake-complete] pending_complete write warnings:", json?.errors || json?.data?.metafieldsSet?.userErrors);
-    }
-  } catch (e: unknown) {
-    console.warn("[api.pos-stocktake-complete] pending_complete write failed:", e instanceof Error ? e.message : String(e));
-  }
-}
-
-async function readPendingCompleteBackup(
-  admin: AdminGraphql
-): Promise<PendingCompleteBackup | null> {
-  const query = `#graphql query PendingComplete {
-    currentAppInstallation {
-      metafield(namespace: "${NS}", key: "${PENDING_COMPLETE_KEY}") { value }
-    }
-  }`;
-  try {
-    const resp = await admin.graphql(query);
-    const json = (await resp.json().catch(() => ({}))) as {
-      data?: { currentAppInstallation?: { metafield?: { value?: string } } };
-    };
-    const raw = json?.data?.currentAppInstallation?.metafield?.value;
-    if (!raw || raw === "{}") return null;
-    const parsed = JSON.parse(raw) as PendingCompleteBackup;
-    if (!parsed?.countId || !Array.isArray(parsed.completedGroups)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
+type CompletedGroup = PendingCompleteGroup;
 
 export async function loader({ request }: LoaderFunctionArgs) {
   if (request.method === "OPTIONS") {
@@ -304,10 +233,10 @@ export async function action({ request }: ActionFunctionArgs) {
       const groupIdStr = String((g as { groupId: unknown }).groupId);
       const itemsArr = (g as { items: unknown }).items;
       if (!groupIdStr || !Array.isArray(itemsArr)) continue;
-      completedGroups.push({ groupId: groupIdStr, items: itemsArr as ItemEntry[] });
+      completedGroups.push({ groupId: groupIdStr, items: itemsArr as CompletedGroup["items"] });
     }
   } else if (typeof groupId === "string" && groupId.trim() && Array.isArray(itemsRaw)) {
-    completedGroups = [{ groupId: groupId.trim(), items: itemsRaw as ItemEntry[] }];
+    completedGroups = [{ groupId: groupId.trim(), items: itemsRaw as CompletedGroup["items"] }];
   }
 
   if (completedGroups.length === 0) {
@@ -325,94 +254,23 @@ export async function action({ request }: ActionFunctionArgs) {
   let lastError = "";
   for (let attempt = 1; attempt <= META_RETRY_MAX; attempt++) {
     try {
-      let inventoryCounts: InventoryCount[];
-      try {
-        inventoryCounts = await readInventoryCountsChunked(admin);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error("[api.pos-stocktake-complete] readInventoryCountsChunked failed:", msg);
-        if (isChunkCorruptionError(msg)) {
+      const result = await applyPendingCompleteFromBackup(admin, ownerId, backupPayload);
+      if (!result.ok) {
+        const message = result.error || "メタ更新に失敗しました";
+        lastError = message;
+        if (message.includes("棚卸が見つかりません")) {
+          return jsonResponse({ ok: false, error: message, needMetafieldRetry: false, countId }, 400);
+        }
+        if (isChunkCorruptionError(message)) {
           return jsonResponse(
             {
               ok: false,
-              error: "棚卸データの一部（メタフィールド）が欠落しています。管理画面の棚卸一覧で「修復」を実行するか、サポートにお問い合わせください。",
+              error:
+                "棚卸データの一部（メタフィールド）が欠落しています。管理画面の棚卸一覧で「修復」を実行するか、サポートにお問い合わせください。",
               needMetafieldRetry: true,
               countId,
               completedGroupIds,
             },
-            200
-          );
-        }
-        lastError = msg;
-        if (attempt < META_RETRY_MAX && isTransientMetaError(msg)) {
-          await sleep(META_RETRY_DELAY_MS * attempt);
-          continue;
-        }
-        return jsonResponse(
-          {
-            ok: false,
-            error: "棚卸データの読み取りに失敗しました。しばらくしてから再試行してください。",
-            needMetafieldRetry: true,
-            countId,
-            completedGroupIds,
-          },
-          200
-        );
-      }
-
-      const count = inventoryCounts.find(
-        (c) => String(c.id) === String(countId) || normalizeIdForMatch((c as { id?: string }).id) === normalizeIdForMatch(countId)
-      );
-      if (!count) {
-        return jsonResponse({ ok: false, error: "棚卸が見つかりません", needMetafieldRetry: false, countId }, 400);
-      }
-
-      const groupItemsMap: Record<string, unknown[]> =
-        (count as { groupItems?: Record<string, unknown[]> }).groupItems && typeof (count as { groupItems?: unknown }).groupItems === "object"
-          ? { ...((count as { groupItems: Record<string, unknown[]> }).groupItems) }
-          : {};
-
-      for (const { groupId: gid, items } of completedGroups) {
-        const entry = items.map((i) => ({
-          inventoryItemId: i.inventoryItemId,
-          variantId: i.variantId,
-          sku: i.sku ?? "",
-          title: i.title ?? "",
-          currentQuantity: Number(i.currentQuantity),
-          actualQuantity: Number(i.actualQuantity),
-          delta: Number(i.actualQuantity) - Number(i.currentQuantity),
-        }));
-        const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(gid)) ?? gid;
-        groupItemsMap[key] = entry;
-      }
-
-      const allIds =
-        Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0
-          ? count.productGroupIds
-          : (count as { productGroupId?: string }).productGroupId
-            ? [(count as { productGroupId: string }).productGroupId]
-            : [];
-      const allDone = allIds.length > 0 && allIds.every((id) => getGroupItemsByKey(groupItemsMap, id).length > 0);
-
-      const updatedCounts: InventoryCount[] = inventoryCounts.map((c) => {
-        if (String(c.id) !== String(countId) && normalizeIdForMatch((c as { id?: string }).id) !== normalizeIdForMatch(countId)) {
-          return c;
-        }
-        return {
-          ...c,
-          groupItems: groupItemsMap,
-          status: allDone ? ("completed" as const) : ("in_progress" as const),
-          completedAt: allDone ? new Date().toISOString() : undefined,
-        };
-      });
-
-      const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts, ownerId);
-      if (userErrors.length > 0) {
-        const message = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "保存に失敗しました";
-        lastError = message;
-        if (isChunkCorruptionError(message)) {
-          return jsonResponse(
-            { ok: false, error: message, needMetafieldRetry: true, countId, completedGroupIds },
             200
           );
         }
@@ -427,23 +285,26 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
 
-      await writePendingCompleteBackup(admin, ownerId, null);
-
-      // Phase F: metafield 成功後に DB へ dual-write（失敗しても metafield 成功は維持・Ciara 非破壊）
+      // Phase F: metafield 成功後に DB へ dual-write（失敗しても metafield 成功は維持）
+      // 直後の読取は metafield のみ（shop dual-read すると古い DB overlay で上書きされる）
       try {
-        const saved = updatedCounts.find(
-          (c) => String(c.id) === String(countId) || normalizeIdForMatch((c as { id?: string }).id) === normalizeIdForMatch(countId)
+        const { readInventoryCountsChunked } = await import("./app.inventory-count");
+        const counts = await readInventoryCountsChunked(admin);
+        const saved = counts.find(
+          (c) =>
+            String(c.id) === String(result.countId) ||
+            normalizeIdForMatch(c.id) === normalizeIdForMatch(result.countId)
         );
         if (saved) {
           await upsertInventoryCountDocument({
             shop,
             countId: String(saved.id),
-            countName: (saved as { countName?: string }).countName ?? null,
+            countName: saved.countName ?? null,
             status: String(saved.status || "in_progress"),
-            locationId: (saved as { locationId?: string }).locationId ?? null,
-            locationName: (saved as { locationName?: string }).locationName ?? null,
+            locationId: saved.locationId ?? null,
+            locationName: saved.locationName ?? null,
             payload: saved,
-            completedAt: (saved as { completedAt?: string }).completedAt ?? null,
+            completedAt: saved.completedAt ?? null,
           });
         }
       } catch (e: unknown) {

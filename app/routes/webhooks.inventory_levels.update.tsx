@@ -436,6 +436,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
         orderBy: { timestamp: "desc" },
       });
+
+      // R-HIST: appEventId 付き先行履歴（activity が既知でなくても note に appEventId: がある行）を合流
+      if (!recentNonAdminLog) {
+        const byAppEventNote = await db.inventoryChangeLog.findFirst({
+          where: {
+            shop,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            activity: { not: "admin_webhook" },
+            note: { startsWith: "appEventId:" },
+            timestamp: { gte: searchFrom, lte: searchTo },
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (byAppEventNote) {
+          recentNonAdminLog = byAppEventNote;
+          console.log(
+            `[inventory_levels/update] Found appEventId-note log: id=${byAppEventNote.id}, activity=${byAppEventNote.activity}`
+          );
+        }
+      }
       
       if (recentNonAdminLog) {
         console.log(

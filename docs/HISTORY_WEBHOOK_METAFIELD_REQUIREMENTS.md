@@ -37,10 +37,15 @@
 3. `settings_v1` は当面 metafield 可
 4. 数百チャンク／欠落を前提に失敗 UX と修復を要件化
 
-## 実装メモ（本 workstream）
+## 実装メモ（本 workstream / Phase F shippable）
 
-- apply-change: setQuantities **前**に `InventoryChangeLog` を `quantityAfter=null` で upsert（webhook early-return）
-- Prisma: `InventoryCountDocument` / `InventoryCountDocumentChunk` 基盤（metafield フォールバック併用）
+- apply-change: setQuantities **前**に `InventoryChangeLog` を `quantityAfter=null` + `note: appEventId:…` で upsert
+- webhook: 業務行（非 admin_webhook）に加え、`note` が `appEventId:` で始まる先行履歴も合流して early-return
+- apply-change 成功後: 同一 item/location の直近 `admin_webhook`（`quantityAfter` null または一致・短い時間窓）を業務 activity に coalesce（売上/返品救済を奪わない）
+- Prisma: `InventoryCountDocument` / `InventoryCountDocumentChunk`
+- **dual-write**: metafield 成功後に best-effort upsert（失敗しても metafield 成功は維持）
+- **dual-read**: Admin loader が metafield 配列に `mergeInventoryCountsWithDb` overlay（DB のみ行は末尾追加）。`readInventoryCountsChunked` 自体は metafield のみ（client bundle 制約）。metafield 直後の dual-write 再読取も overlay なし
 - Admin 変更履歴 UI は引き続き `InventoryChangeLog` のみ
+- フル DB 正本切替・本番 migrate は本 PR 対象外
 
 詳細監査: Agent Store `internal/history-webhook-metafield-requirements.md`（参照用）。
