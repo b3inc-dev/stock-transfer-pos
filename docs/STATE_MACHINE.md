@@ -226,3 +226,33 @@ userErrors（ビジネス）はリトライしても同じ結果になりやす�
 - 類似パターンは棚卸のグループ完了・apply-change の lineStatus 側に存在する
 
 過去に「ロケーション単位・timeout・途中再実行」の修正が入っている可能性が高い領域は **棚卸 / snapshot / Webhook**。移管作成にそのジョブモデルを投影しないこと。
+
+---
+
+## 11. 棚卸確定の状態分離（COMPLETE_RETRY 正本）
+
+実装: `InventoryCountList.jsx` + `api.pos-stocktake-complete` + `api.inventory.apply-change`。  
+詳細 UI: [`STOCKTAKE_COMPLETE_RETRY_DESIGN.md`](./STOCKTAKE_COMPLETE_RETRY_DESIGN.md)、画面方針: [`STOCKTAKE_UX_CANON.md`](./STOCKTAKE_UX_CANON.md)。
+
+### 現行確定順（正本）
+
+差異あり:
+
+```text
+確定タップ
+→ submitLockRef
+→ apply-change（履歴先行 upsert → setQuantities → 履歴 quantityAfter 確定）  // 冪等: appEventId
+→ pos-stocktake-complete（metafield read/merge/write、サーバー自動リトライ）
+→ 成功: toast / clear draft / unlock
+→ metafield 失敗かつ setQuantities 済み: needMetafieldRetry（編集不可・メタのみ再試行）
+```
+
+差異なし: metafield 更新のみ（setQuantities なし）。
+
+| 状態 | 意味 | 再試行でやってよいこと |
+|------|------|------------------------|
+| `quantitiesApplied` | apply-change 成功 | **再 setQuantities 禁止**（同一 appEventId） |
+| `needMetafieldRetry` | メタ未反映 | `retryOnly` または同一ペイロードで metafield のみ |
+| `completed` | メタ反映済み | なし |
+
+二重 setQuantities 防止: `quantitiesAppliedRef` + `InventoryChangeEvent.appEventId` 冪等。

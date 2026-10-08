@@ -142,3 +142,40 @@ model RefundPendingLocation {
   @@unique([shop, refundId, inventoryItemId, locationId])
   @@index([shop, inventoryItemId, locationId, refundCreatedAt])
 }
+
+// Phase F / R-META: 棚卸ドキュメントの DB SoT 基盤（metafield は移行期間のフォールバック）
+// Admin 在庫変動履歴は引き続き InventoryChangeLog。本テーブルは棚卸ID（inventory_counts_*）用。
+model InventoryCountDocument {
+  id            String   @id @default(cuid())
+  shop          String
+  countId       String   // アプリ内棚卸ID（metafield の count.id と同一）
+  countName     String?
+  status        String   // draft | in_progress | completed | cancelled
+  locationId    String?
+  locationName  String?
+  payloadJson   String?  // 小規模時の全文 JSON（大きい場合は chunks へ）
+  version       Int      @default(1)
+  source        String   @default("db") // db | metafield_mirror
+  completedAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  chunks InventoryCountDocumentChunk[]
+
+  @@unique([shop, countId])
+  @@index([shop, status])
+  @@index([shop, updatedAt])
+}
+
+model InventoryCountDocumentChunk {
+  id         String   @id @default(cuid())
+  documentId String
+  document   InventoryCountDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  chunkIndex Int
+  payload    String   // JSON chunk
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([documentId, chunkIndex])
+  @@index([documentId])
+}

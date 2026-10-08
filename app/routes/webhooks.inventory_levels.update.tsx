@@ -11,9 +11,14 @@ import type { AdminGraphQLRequestClient } from "../types";
 // APIバージョン（shopify.server.tsと同じ値を使用）
 const API_VERSION = "2026-01";
 
-/** オンライン受注で inventory_levels/update が orders/updated より先に届いた場合に、OrderPendingLocation の登録を待つための待機・再検索 */
-const PENDING_ORDER_WAIT_MS = 2500;
-const PENDING_ORDER_MAX_RETRIES = 3; // 2.5秒×3回＝最大約7.5秒待機（履歴を意図通りにするため1回増）
+/**
+ * オンライン受注で inventory_levels/update が orders/updated より先に届いた場合の待機・再検索。
+ * Shopify の webhook ack 予算（〜5s）を超えないよう、待機は短く限定する。
+ * 棚卸・調整など非売上洪水では待機しない（注文救済は orders/updated 側の overwrite + findWithAdminWebhookRetry に委譲）。
+ * WITH C: 売上/返品の初回即時マッチと pending テーブルは維持。
+ */
+const PENDING_ORDER_WAIT_MS = 800;
+const PENDING_ORDER_MAX_RETRIES = 1; // 最大約 0.8s（旧 2.5s×3 は棚卸洪水で ~5s 超過の主因）
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -707,38 +712,87 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
-    // まだ「管理」で保存しようとしている場合、orders/updated または refunds/create の登録を待って再検索する（完全反映のため）
-    // Shopify は inventory_levels/update を先に送ることがあり、その時点では OrderPendingLocation / RefundPendingLocation がまだ無いため待機＋最大2回再検索
-    if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && db) {
-      if (typeof db.orderPendingLocation !== "undefined") {
-      const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
-      const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
-      for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
-        await sleep(PENDING_ORDER_WAIT_MS);
-        const orderLocCandsRetry = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""];
-        const allRetry = await db.orderPendingLocation.findMany({
-          where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsRetry }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
-          orderBy: { orderCreatedAt: "desc" },
-        });
-        const prevForRetry = prevAvailable ?? null;
-        const matchedRetry =
-          prevForRetry != null
-            ? allRetry.find((p: { quantity: number }) => available + Math.max(1, Number(p.quantity) || 1) === prevForRetry)
-            : allRetry[0] ?? null;
-        const pendingRetry = matchedRetry ?? allRetry[0] ?? null;
-        if (pendingRetry) {
-          const qty = Math.max(1, Number(pendingRetry.quantity) || 1);
-          pendingOrder = { orderId: pendingRetry.orderId, quantity: qty, locationId: pendingRetry.locationId ?? "" };
-          finalActivity = "order_sales";
-          finalSourceId = `order_${pendingOrder.orderId}`;
-          finalNote = `注文: #${pendingOrder.orderId}`;
-          finalDelta = -pendingOrder.quantity;
-          console.log(`[inventory_levels/update] After wait (retry ${retry + 1}): matched OrderPendingLocation orderId=${pendingOrder.orderId}, quantity=${qty}, will save as order_sales`);
-          break;
+    // まだ「管理」で保存しようとしている場合、短時間だけ pending 登録を待って再検索する。
+    // 棚卸・ロス・調整など非売上の洪水では待機しない（ack 超過・再送増幅を防ぐ）。
+    // 売上/返品の救済: (1) 上記の即時マッチ (2) 本ブロックの短い待機 (3) orders/updated・refunds/create 側の overwrite。
+    // 待機条件: delta が売上/返品っぽい AND 直近2分にショップで pending 行が存在する（注文トラフィックの気配）。
+    const looksLikeSalesTraffic = finalDelta !== null && finalDelta < 0;
+    const looksLikeRefundTraffic = finalDelta !== null && finalDelta > 0;
+    let shopHasRecentPendingTraffic = false;
+    if (
+      !pendingOrder &&
+      !pendingRefund &&
+      finalActivity === "admin_webhook" &&
+      db &&
+      (looksLikeSalesTraffic || looksLikeRefundTraffic)
+    ) {
+      const recentPendingSince = new Date(Date.now() - 2 * 60 * 1000);
+      try {
+        if (looksLikeSalesTraffic && typeof db.orderPendingLocation !== "undefined") {
+          const hit = await db.orderPendingLocation.findFirst({
+            where: { shop, orderCreatedAt: { gte: recentPendingSince } },
+            select: { id: true },
+          });
+          shopHasRecentPendingTraffic = !!hit;
+        }
+        if (!shopHasRecentPendingTraffic && looksLikeRefundTraffic && typeof db.refundPendingLocation !== "undefined") {
+          const hit = await db.refundPendingLocation.findFirst({
+            where: { shop, refundCreatedAt: { gte: recentPendingSince } },
+            select: { id: true },
+          });
+          shopHasRecentPendingTraffic = !!hit;
+        }
+      } catch (e: unknown) {
+        console.warn(
+          "[inventory_levels/update] recent pending probe failed:",
+          e instanceof Error ? e.message : String(e)
+        );
+      }
+    }
+    const shouldWaitForPendingOrderOrRefund =
+      !pendingOrder &&
+      !pendingRefund &&
+      finalActivity === "admin_webhook" &&
+      !!db &&
+      shopHasRecentPendingTraffic &&
+      (looksLikeSalesTraffic || looksLikeRefundTraffic);
+
+    if (shouldWaitForPendingOrderOrRefund) {
+      if (looksLikeSalesTraffic && typeof db.orderPendingLocation !== "undefined") {
+        const pendingFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
+        const pendingTo = new Date(updatedAt.getTime() + 2 * 60 * 1000);
+        for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
+          await sleep(PENDING_ORDER_WAIT_MS);
+          const orderLocCandsRetry = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`, ""];
+          const allRetry = await db.orderPendingLocation.findMany({
+            where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsRetry }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
+            orderBy: { orderCreatedAt: "desc" },
+          });
+          const prevForRetry = prevAvailable ?? null;
+          const matchedRetry =
+            prevForRetry != null
+              ? allRetry.find((p: { quantity: number }) => available + Math.max(1, Number(p.quantity) || 1) === prevForRetry)
+              : allRetry[0] ?? null;
+          const pendingRetry = matchedRetry ?? allRetry[0] ?? null;
+          if (pendingRetry) {
+            const qty = Math.max(1, Number(pendingRetry.quantity) || 1);
+            pendingOrder = { orderId: pendingRetry.orderId, quantity: qty, locationId: pendingRetry.locationId ?? "" };
+            finalActivity = "order_sales";
+            finalSourceId = `order_${pendingOrder.orderId}`;
+            finalNote = `注文: #${pendingOrder.orderId}`;
+            finalDelta = -pendingOrder.quantity;
+            console.log(`[inventory_levels/update] After wait (retry ${retry + 1}): matched OrderPendingLocation orderId=${pendingOrder.orderId}, quantity=${qty}, will save as order_sales`);
+            break;
+          }
         }
       }
-      }
-      if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook" && (delta === null || (delta !== null && delta > 0)) && typeof db.refundPendingLocation !== "undefined") {
+      if (
+        !pendingOrder &&
+        !pendingRefund &&
+        looksLikeRefundTraffic &&
+        finalActivity === "admin_webhook" &&
+        typeof db.refundPendingLocation !== "undefined"
+      ) {
         for (let retry = 0; retry < PENDING_ORDER_MAX_RETRIES; retry++) {
           await sleep(PENDING_ORDER_WAIT_MS);
           const refundFrom = new Date(updatedAt.getTime() - 5 * 60 * 1000);
@@ -766,6 +820,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
         }
       }
+    } else if (!pendingOrder && !pendingRefund && finalActivity === "admin_webhook") {
+      console.log(
+        `[inventory_levels/update] Skipping pending-order wait (non-sales traffic or no delta hint); delta=${finalDelta ?? "n/a"}`
+      );
     }
 
     // OrderPendingLocation にマッチした場合、既存の admin_webhook 行を order_sales に更新して新規行を作らない（20:11/20:14 型の二重「管理」防止）

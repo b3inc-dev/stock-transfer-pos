@@ -318,6 +318,53 @@ export async function action({ request }: ActionFunctionArgs) {
       data: { status: "applying" },
     });
 
+    const rawLocIdEarly = toRawId(locationId);
+    const resolvedLocationNameEarly = locationName || rawLocIdEarly || locationId;
+    const shopTimezoneEarly = await getShopTimezone(admin).catch(() => "UTC");
+    const shopDateEarly = getDateInShopTimezone(requestedAt, shopTimezoneEarly);
+    const idempotencyKeyBaseEarly = `${shop}_app_${appEventId}`;
+
+    // R-HIST / Phase F: setQuantities 前に InventoryChangeLog を先行書き込み（quantityAfter=null）。
+    // webhook が同一 appEventId 軸の業務行を見つけて early-return できるようにし、admin_webhook 二重行を減らす。
+    for (const l of lineRecords) {
+      const rawItemId = toRawId(l.inventoryItemId);
+      const idempotencyKey = `${idempotencyKeyBaseEarly}_${rawItemId}_${rawLocIdEarly}`;
+      try {
+        await db.inventoryChangeLog.upsert({
+          where: { shop_idempotencyKey: { shop, idempotencyKey } },
+          create: {
+            shop,
+            timestamp: requestedAt,
+            date: shopDateEarly,
+            inventoryItemId: rawItemId,
+            variantId: l.variantId,
+            sku: l.sku,
+            locationId: rawLocIdEarly,
+            locationName: resolvedLocationNameEarly,
+            activity,
+            delta: l.delta,
+            quantityAfter: null,
+            sourceType: activity,
+            sourceId,
+            idempotencyKey,
+            note: `appEventId:${appEventId}`,
+          },
+          update: {
+            delta: l.delta,
+            activity,
+            sourceType: activity,
+            sourceId,
+            note: `appEventId:${appEventId}`,
+          },
+        });
+      } catch (e: unknown) {
+        console.warn(
+          "[api.inventory.apply-change] pre-setQuantities history upsert failed:",
+          e instanceof Error ? e.message : String(e)
+        );
+      }
+    }
+
     const shopifyItems = lineRecords.map((l) => ({ inventoryItemId: l.inventoryItemId, quantity: l.quantityAfter }));
     // 在庫レベルがないアイテムを先に有効化（調整・棚卸で「not stocked at the location」エラーを防ぐ）
     let activateResult = await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems);
@@ -343,6 +390,25 @@ export async function action({ request }: ActionFunctionArgs) {
         where: { id: event.id },
         data: { status: "failed", errorSummary: errSummary },
       });
+      // 先行履歴が webhook に latch されないよう、未確定（quantityAfter null）行を削除
+      try {
+        await db.inventoryChangeLog.deleteMany({
+          where: {
+            shop,
+            idempotencyKey: {
+              in: lineRecords.map(
+                (l) => `${idempotencyKeyBaseEarly}_${toRawId(l.inventoryItemId)}_${rawLocIdEarly}`
+              ),
+            },
+            quantityAfter: null,
+          },
+        });
+      } catch (e: unknown) {
+        console.warn(
+          "[api.inventory.apply-change] cleanup pre-write logs (activate fail):",
+          e instanceof Error ? e.message : String(e)
+        );
+      }
       return new Response(
         JSON.stringify({
           ok: false,
@@ -409,7 +475,7 @@ export async function action({ request }: ActionFunctionArgs) {
             quantityAfter: l.quantityAfter,
             locationName: resolvedLocationName,
             sourceId,
-            note: null,
+            note: `appEventId:${appEventId}`,
           },
         });
       }
@@ -440,6 +506,28 @@ export async function action({ request }: ActionFunctionArgs) {
       where: { id: event.id },
       data: { status: finalStatus, errorSummary },
     });
+
+    // 完全失敗時のみ先行履歴を削除（partial_failed は在庫が一部変わっている可能性があるため残す）
+    if (!result.partiallyApplied) {
+      try {
+        await db.inventoryChangeLog.deleteMany({
+          where: {
+            shop,
+            idempotencyKey: {
+              in: lineRecords.map(
+                (l) => `${idempotencyKeyBaseEarly}_${toRawId(l.inventoryItemId)}_${rawLocIdEarly}`
+              ),
+            },
+            quantityAfter: null,
+          },
+        });
+      } catch (e: unknown) {
+        console.warn(
+          "[api.inventory.apply-change] cleanup pre-write logs (setQuantities fail):",
+          e instanceof Error ? e.message : String(e)
+        );
+      }
+    }
 
     return new Response(
       JSON.stringify({
