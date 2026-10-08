@@ -35,13 +35,23 @@
 
 | 層 | 方針 |
 |----|------|
-| Transfer create | idempotency key **なし** |
+| Transfer create | Shopify API 側 idempotency key **なし**（従来どおり） |
 | 二重タップ | `submitLockRef` |
 | 履歴 | `buildStableAppEventId` + DB unique |
 | 数量調整 | `InventoryChangeEvent.appEventId` |
 
-**意図**: 履歴・調整の再送安全性を先に固めた（Phase0/1）。\
-**未完了**: 作成そのものの冪等。
+**意図**: 履歴・調整の再送安全性を先に固めた（Phase0/1）。
+
+### D3b. 出庫作成チェックポイント（2026-10-08 / E3）
+
+| 層 | 方針 |
+|----|------|
+| 作成進捗 | `SHOPIFY.storage` に fingerprint + attemptId + `nextChunkIndex` + created Transfer/Shipment IDs |
+| timeout 成功確認 | Transfer note の `[pos-cp:<attemptId>#i/n]` を直近一覧から照会。見つかれば作成スキップ / Shipment 補完 |
+| 再確定 | 同一 fingerprint なら途中チャンクから再開。不一致なら新規 attempt |
+| 正の所在 | **引き続き Shopify Transfer/Shipment**（Prisma job は作らない = D1 維持） |
+
+**残ギャップ**: 2 端末同時・指紋を変える編集後の再確定・add-shipment チャンク途中失敗は別途。
 
 ---
 
@@ -102,10 +112,10 @@
 
 | 優先度 | 項目 | 理由 |
 |--------|------|------|
-| **P0** | 部分成功・timeout 後の二重発行防止設計 | 実在庫・実 Transfer が壊れる |
+| **P0** | ~~部分成功・timeout 後の二重発行防止設計~~ → **E3 で CP+照会を導入**（端末ローカル。2端末は残） | 実在庫・実 Transfer |
 | **P0** | 運用手順の明文化（Admin で残った Transfer の扱い） | 手動依存が現状の安全弁 |
-| **P1** | 250 分割の進捗永続 or オールオアナッシングに近い UX | 最大の部分成功源 |
-| **P1** | POS GraphQL の 429/成功確認 | timeout グレーゾーン削減 |
+| **P1** | ~~250 分割の進捗永続~~ → **E3 で進捗永続**。オールオアナッシング UX は未 | 部分成功の UX |
+| **P1** | POS GraphQL の 429/成功確認（作成経路は note 照会で一部カバー） | timeout グレーゾーン削減 |
 | **P2** | 履歴の多 Transfer 対応 | 監査・サポート |
 | **P2** | ModalOutbound 分割・分岐整理 | 将来の症状継ぎ足し防止 |
 | **P3** | 陳腐化 docs の整理・アーカイブ | 調査コスト削減 |

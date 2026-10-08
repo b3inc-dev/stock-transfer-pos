@@ -36,7 +36,8 @@ Shopify 制約: Transfer に無い SKU を同一 movement の別 Shipment に載
 | 新規 **下書き** | **DRAFT Transfer を複数**（Draft では Shipment 追加不可） |
 | 既存 Transfer へ **Shipment 追加** | 同一 `movementId` で Shipment 分割（Transfer 上に SKU/数量が載っていることが前提） |
 
-分割メモ例: `POS出庫 分割 i/n（API上限250明細/Transfer）`
+分割メモ例: `POS出庫 分割 i/n（API上限250明細/Transfer）`  
+再実行用マーカー（E3）: note 末尾に `[pos-cp:<attemptId>#i/n]` を付与。同一内容の再確定はチェックポイントから再開。
 
 ## 4. Transfer / Shipment ステータス語彙
 
