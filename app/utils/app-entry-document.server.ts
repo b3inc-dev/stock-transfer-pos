@@ -3,7 +3,7 @@
  * POS v2 チャンク相当を 1 行 1 エントリで保持。
  */
 import db from "../db.server";
-import type { AppEntryType } from "./metafield-db-sot";
+import { preferDbSot, type AppEntryType } from "./metafield-db-sot";
 
 export type AppEntryLike = {
   id?: string;
@@ -189,6 +189,9 @@ export async function preferEntriesFromDb(
   entryType: AppEntryType,
   metafieldEntries: AppEntryLike[]
 ): Promise<AppEntryLike[]> {
+  if (!preferDbSot("entries")) {
+    return Array.isArray(metafieldEntries) ? metafieldEntries : [];
+  }
   const n = await countEntriesFromDb(shop, entryType);
   if (n > 0) return listEntriesFromDb(shop, entryType);
   return Array.isArray(metafieldEntries) ? metafieldEntries : [];

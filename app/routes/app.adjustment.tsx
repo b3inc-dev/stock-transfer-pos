@@ -214,7 +214,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    const { admin, session } = await authenticate.admin(request);
+    const shop = session?.shop ?? "";
     const formData = await request.formData();
     const entryId = String(formData.get("entryId") || "").trim();
 
@@ -242,6 +243,14 @@ export async function action({ request }: ActionFunctionArgs) {
         entries = Array.isArray(parsed) ? parsed : [];
       } catch {
         entries = [];
+      }
+    }
+    if (shop) {
+      try {
+        const { preferEntriesFromDb } = await import("../utils/app-entry-document.server");
+        entries = (await preferEntriesFromDb(shop, "adjustment", entries)) as AdjustmentEntry[];
+      } catch (e) {
+        console.warn("[adjustment action] DB prefer skipped:", e instanceof Error ? e.message : String(e));
       }
     }
 

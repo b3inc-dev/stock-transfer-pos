@@ -1025,43 +1025,32 @@ export async function writeInventoryCounts(counts, expectedVersion) {
   if (WRITE_START_DELAY_MS > 0) {
     await new Promise((r) => setTimeout(r, WRITE_START_DELAY_MS));
   }
-  // DB SoT: 成功時は metafield 書き込みをスキップ（移行後）。失敗時のみ metafield フォールバック。
-  try {
-    const { saveInventoryCountsToDb } = await import("../../../../common/appDocumentsApi.js");
-    const ok = await saveInventoryCountsToDb(Array.isArray(counts) ? counts : []);
-    if (ok) return;
-  } catch (e) {
-    console.warn("[stocktakeApi] inventory_counts DB write fallback to metafield:", e?.message || e);
-  }
-  const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
-  const d = await runWithThrottleRetry(() => graphql(gqlApp));
-  const ownerId = d?.currentAppInstallation?.id;
-  if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
-
-  const currentVersion = await runWithThrottleRetry(() => getInventoryCountsVersion());
-  if (expectedVersion != null && expectedVersion !== currentVersion) {
-    throw new Error("他の操作でデータが更新されています。画面を再読み込みしてから再度お試しください。");
-  }
-
+  // 既存読取 → マージ → DB 保存（成功時 metafield スキップ）。楽観ロックは metafield version 経路のみ。
   let existing = [];
   try {
-    existing = await runWithThrottleRetry(() => readInventoryCountsRaw());
-  } catch (e) {
-    // 既存読取失敗時は1回だけ再読（Throttle 等の一時失敗を吸収）
-    if (Array.isArray(counts) && counts.length > 0) {
-      try {
-        existing = await runWithThrottleRetry(() => readInventoryCountsRaw());
-      } catch {
-        // 再読も失敗した場合は新規ショップ等とみなし existing = [] のまま
+    const { fetchInventoryCountsFromDb } = await import("../../../../common/appDocumentsApi.js");
+    const fromDb = await fetchInventoryCountsFromDb();
+    if (fromDb) existing = fromDb;
+  } catch {
+    /* ignore */
+  }
+  if (!existing.length) {
+    try {
+      existing = await runWithThrottleRetry(() => readInventoryCountsRaw());
+    } catch (e) {
+      if (Array.isArray(counts) && counts.length > 0) {
+        try {
+          existing = await runWithThrottleRetry(() => readInventoryCountsRaw());
+        } catch {
+          /* existing = [] */
+        }
       }
     }
   }
-  // existing が空のまま counts が 1 件だけのときは「読取失敗で list が空→1件だけ渡された」経路の可能性があり上書きすると他棚卸が消えるためブロック
   if (existing.length === 0 && Array.isArray(counts) && counts.length === 1) {
     throw new Error("棚卸データの読み取りに失敗している可能性があります。しばらくしてから再試行するか、管理画面で修復を試してください。");
   }
   let merged = mergeExistingNonBlank(Array.isArray(counts) ? counts : [], existing);
-  // ✅ 呼び出し元の read が空を返した場合に既存棚卸IDを消さないよう、existing にあり merged に無い件を足す
   if (Array.isArray(existing) && existing.length > 0 && merged.length < existing.length) {
     const mergedIds = new Set(
       merged.map((c) => String(c?.id ?? c?.countId ?? "")).filter(Boolean)
@@ -1074,6 +1063,24 @@ export async function writeInventoryCounts(counts, expectedVersion) {
   }
   const withNames = ensureCountNamesBeforeWrite(merged);
   const arr = filterInvalidCountsBeforeWrite(withNames);
+
+  try {
+    const { saveInventoryCountsToDb } = await import("../../../../common/appDocumentsApi.js");
+    const ok = await saveInventoryCountsToDb(arr);
+    if (ok) return;
+  } catch (e) {
+    console.warn("[stocktakeApi] inventory_counts DB write fallback to metafield:", e?.message || e);
+  }
+
+  const gqlApp = `#graphql query AppId { currentAppInstallation { id } }`;
+  const d = await runWithThrottleRetry(() => graphql(gqlApp));
+  const ownerId = d?.currentAppInstallation?.id;
+  if (!ownerId) throw new Error("currentAppInstallation.id が取得できません");
+
+  const currentVersion = await runWithThrottleRetry(() => getInventoryCountsVersion());
+  if (expectedVersion != null && expectedVersion !== currentVersion) {
+    throw new Error("他の操作でデータが更新されています。画面を再読み込みしてから再度お試しください。");
+  }
   try {
     const backupList = (existing.length > 0 ? existing : withNames).map(toMinimalCountForList).filter(Boolean);
     const backupValue = JSON.stringify(backupList);

@@ -3,6 +3,7 @@
  */
 import db from "../db.server";
 import type { DailyInventorySnapshot, InventorySnapshotsData } from "./inventory-snapshot";
+import { preferDbSot } from "./metafield-db-sot";
 
 function modelReady(): boolean {
   return Boolean(
@@ -126,6 +127,11 @@ export async function preferDailySnapshotsFromDb(
   shop: string,
   metafieldData: InventorySnapshotsData
 ): Promise<InventorySnapshotsData> {
+  if (!preferDbSot("daily_snapshots")) {
+    return metafieldData?.version === 1 && Array.isArray(metafieldData.snapshots)
+      ? metafieldData
+      : { version: 1, snapshots: [] };
+  }
   const fromDb = await listDailySnapshotsFromDb(shop);
   if (fromDb.length > 0) return { version: 1, snapshots: fromDb };
   return metafieldData?.version === 1 && Array.isArray(metafieldData.snapshots)

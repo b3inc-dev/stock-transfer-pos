@@ -122,13 +122,14 @@ async function readEntriesV2OrV1(accessToken, v1Key, metaKey, chunkPrefix) {
 
 async function migrateInventoryCounts(accessToken) {
   const counts = await readChunkedArray(accessToken, "inventory_counts_v1", "inventory_counts_v1_c");
+  const CHUNK = 100_000;
   let n = 0;
   for (const c of counts) {
     const countId = String(c?.id || "").trim();
     if (!countId) continue;
     const payloadJson = JSON.stringify(c);
-    const useInline = payloadJson.length <= 100_000;
-    await prisma.inventoryCountDocument.upsert({
+    const useInline = payloadJson.length <= CHUNK;
+    const doc = await prisma.inventoryCountDocument.upsert({
       where: { shop_countId: { shop, countId } },
       create: {
         shop,
@@ -153,6 +154,20 @@ async function migrateInventoryCounts(accessToken) {
         completedAt: c.completedAt ? new Date(c.completedAt) : null,
       },
     });
+    if (!useInline) {
+      await prisma.inventoryCountDocumentChunk.deleteMany({ where: { documentId: doc.id } });
+      let idx = 0;
+      for (let offset = 0; offset < payloadJson.length; offset += CHUNK) {
+        await prisma.inventoryCountDocumentChunk.create({
+          data: {
+            documentId: doc.id,
+            chunkIndex: idx,
+            payload: payloadJson.slice(offset, offset + CHUNK),
+          },
+        });
+        idx += 1;
+      }
+    }
     n += 1;
   }
   console.log(`[inventory_counts] upserted ${n}`);

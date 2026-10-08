@@ -3,6 +3,7 @@
  * Admin が書き、POS は読取のみ（API 経由）。
  */
 import db from "../db.server";
+import { preferDbSot } from "./metafield-db-sot";
 
 export type ProductGroupLike = {
   id?: string;
@@ -104,6 +105,9 @@ export async function preferProductGroupsFromDb(
   shop: string,
   metafieldGroups: ProductGroupLike[]
 ): Promise<ProductGroupLike[]> {
+  if (!preferDbSot("product_groups")) {
+    return Array.isArray(metafieldGroups) ? metafieldGroups : [];
+  }
   const fromDb = await listProductGroupsFromDb(shop);
   if (fromDb.length > 0) return fromDb;
   return Array.isArray(metafieldGroups) ? metafieldGroups : [];

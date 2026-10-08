@@ -254,7 +254,7 @@ export async function action({ request }: ActionFunctionArgs) {
   let lastError = "";
   for (let attempt = 1; attempt <= META_RETRY_MAX; attempt++) {
     try {
-      const result = await applyPendingCompleteFromBackup(admin, ownerId, backupPayload);
+      const result = await applyPendingCompleteFromBackup(admin, ownerId, backupPayload, { shop });
       if (!result.ok) {
         const message = result.error || "ステータスの反映に失敗しました";
         lastError = message;

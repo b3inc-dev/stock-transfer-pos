@@ -2854,7 +2854,9 @@ export async function action({ request }: ActionFunctionArgs) {
           error: "再試行用バックアップが見つかりません。既に完了しているか、別の棚卸の失敗です。",
         } as const;
       }
-      const result = await applyPendingCompleteFromBackup(admin, ownerId, backup);
+      const result = await applyPendingCompleteFromBackup(admin, ownerId, backup, {
+        shop: session?.shop ?? null,
+      });
       if (!result.ok) {
         return { ok: false, error: (result.error || "再試行に失敗しました") as const };
       }
@@ -3845,6 +3847,26 @@ export async function action({ request }: ActionFunctionArgs) {
       const { userErrors: saveErrs } = await appendNewCountToChunked(admin, newCount, ownerId, expectedVersionNum, session);
       if (saveErrs.length) {
         return { ok: false, error: saveErrs.map((e: { message?: string }) => e.message).join(" / ") as const };
+      }
+      // DB SoT: 発行直後に必ず DB upsert（append 経路は metafield 専用のため）
+      if (session?.shop) {
+        const { upsertInventoryCountDocument } = await import("../utils/inventory-count-document.server");
+        const dbRes = await upsertInventoryCountDocument({
+          shop: session.shop,
+          countId: String(newCount.id),
+          countName: newCount.countName ?? null,
+          status: String(newCount.status || "draft"),
+          locationId: newCount.locationId ?? null,
+          locationName: newCount.locationName ?? null,
+          payload: newCount,
+          completedAt: null,
+        });
+        if (!dbRes.ok) {
+          return {
+            ok: false,
+            error: (dbRes.error || "棚卸の DB 保存に失敗しました") as const,
+          };
+        }
       }
 
       return {

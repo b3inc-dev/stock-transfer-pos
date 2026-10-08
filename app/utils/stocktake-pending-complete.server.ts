@@ -91,12 +91,14 @@ export async function readPendingCompleteBackup(
 }
 
 /**
- * バックアップの completedGroups を metafield 棚卸にマージして書く。成功時バックアップを削除。
+ * バックアップの completedGroups を棚卸ドキュメントにマージして書く（DB SoT + 任意 metafield ミラー）。
+ * 成功時バックアップを削除。
  */
 export async function applyPendingCompleteFromBackup(
   admin: AdminGraphql,
   ownerId: string,
-  backup: PendingCompleteBackup
+  backup: PendingCompleteBackup,
+  opts?: { shop?: string | null }
 ): Promise<{
   ok: boolean;
   error?: string;
@@ -110,10 +112,20 @@ export async function applyPendingCompleteFromBackup(
     return { ok: false, error: "バックアップが不正です", countId: countId || "" };
   }
 
+  const shop = opts?.shop?.trim() || "";
+  const { shouldWriteMetafield } = await import("./metafield-db-sot");
+  const { upsertInventoryCountsBulk, listInventoryCountDocumentsForShop, mergeInventoryCountsWithDb } =
+    await import("./inventory-count-document.server");
+  const skipMetafieldWrite = !shouldWriteMetafield("inventory_counts");
+
   let inventoryCounts: InventoryCount[];
   try {
-    // shop は呼び出し側で dual-read したい場合に別途渡す。ここでは metafield 正本＋バックアップ適用。
-    inventoryCounts = await readInventoryCountsChunked(admin);
+    if (shop) {
+      const fromMeta = await readInventoryCountsChunked(admin).catch(() => [] as InventoryCount[]);
+      inventoryCounts = await mergeInventoryCountsWithDb(shop, fromMeta);
+    } else {
+      inventoryCounts = await readInventoryCountsChunked(admin);
+    }
   } catch (e: unknown) {
     return { ok: false, error: e instanceof Error ? e.message : String(e), countId };
   }
@@ -174,7 +186,29 @@ export async function applyPendingCompleteFromBackup(
     return next;
   });
 
-  const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts, ownerId);
+  const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts, ownerId, undefined, {
+    shop: shop || null,
+    skipMetafieldWrite,
+    loadExisting: skipMetafieldWrite && shop
+      ? async () => {
+          const docs = await listInventoryCountDocumentsForShop(shop);
+          return docs.map((d) =>
+            d.payload && typeof d.payload === "object"
+              ? ({ ...(d.payload as object), id: d.countId, status: d.status } as InventoryCount)
+              : ({
+                  id: d.countId,
+                  status: d.status as InventoryCount["status"],
+                  countName: d.countName ?? undefined,
+                  locationId: d.locationId ?? "",
+                  locationName: d.locationName ?? undefined,
+                } as InventoryCount)
+          );
+        }
+      : undefined,
+    persistPrepared: shop
+      ? async (prepared) => upsertInventoryCountsBulk(shop, prepared as Array<{ id?: string; status?: string }>)
+      : async () => ({ ok: false, error: "棚卸の DB 保存には shop が必要です" }),
+  });
   if (userErrors.length > 0) {
     const message = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "保存に失敗しました";
     return { ok: false, error: message, countId };

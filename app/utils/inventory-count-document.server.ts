@@ -257,7 +257,7 @@ export async function mergeInventoryCountsWithDb<T extends { id?: string; status
   return merged;
 }
 
-/** 棚卸一覧を DB に全件 upsert（migrate / Admin persist）。削除はしない。 */
+/** 棚卸一覧を DB に全件 upsert（migrate / Admin persist）。削除はしない。1件失敗で ok:false。 */
 export async function upsertInventoryCountsBulk(
   shop: string,
   counts: Array<{
@@ -272,6 +272,7 @@ export async function upsertInventoryCountsBulk(
 ): Promise<{ ok: boolean; count: number; error?: string }> {
   try {
     let n = 0;
+    const errors: string[] = [];
     for (const c of counts) {
       const countId = String(c?.id ?? "").trim();
       if (!countId) continue;
@@ -286,6 +287,10 @@ export async function upsertInventoryCountsBulk(
         completedAt: c.completedAt ?? null,
       });
       if (res.ok) n += 1;
+      else errors.push(`${countId}: ${res.error || "upsert failed"}`);
+    }
+    if (errors.length > 0) {
+      return { ok: false, count: n, error: errors.slice(0, 5).join(" / ") };
     }
     return { ok: true, count: n };
   } catch (e: unknown) {
