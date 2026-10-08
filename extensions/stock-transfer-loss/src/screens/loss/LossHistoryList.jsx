@@ -11,6 +11,8 @@ import {
 } from "./lossApi.js";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
+import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 import { getStatusBadgeTone } from "../../lossHelpers.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 
@@ -191,8 +193,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
   const [detailEntry, setDetailEntry] = useState(null);
   const fullEntriesByIdRef = useRef(new Map());
   const [settings, setSettings] = useState(null);
-  const [detailDisplayLimit, setDetailDisplayLimit] = useState(250); // ✅ 履歴詳細の商品リスト初回表示件数（設定で上書き）
-  const DETAIL_LOAD_PAGE_SIZE = 600;
+  const [detailListPage, setDetailListPage] = useState(1);
 
   useEffect(() => {
     let mounted = true;
@@ -207,19 +208,16 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     return () => { mounted = false; };
   }, []);
 
-  const detailInitialLimit = useMemo(
-    () => Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250))),
-    [settings?.productList?.initialLimit]
-  );
+  useEffect(() => {
+    setDetailListPage(1);
+  }, [detailId]);
 
   useEffect(() => {
     if (!detailId) return;
-    setDetailDisplayLimit(detailInitialLimit);
-  }, [detailId, detailInitialLimit]);
-
-  const loadMoreDetailItems = useCallback(() => {
-    setDetailDisplayLimit((prev) => prev + DETAIL_LOAD_PAGE_SIZE);
-  }, []);
+    const items = detailEntry?.items ?? fullEntriesByIdRef.current.get(detailId)?.items ?? [];
+    const info = getListPageSlice(items, detailListPage);
+    if (info.currentPage !== detailListPage) setDetailListPage(info.currentPage);
+  }, [detailId, detailEntry, detailListPage]);
 
   const refreshLossHistory = useCallback(async () => {
     if (!sessionLocationGid) return;
@@ -547,8 +545,7 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
     detailId,
     detailEntry,
     detailLoading,
-    detailDisplayLimit,
-    loadMoreDetailItems,
+    detailListPage,
     entries,
     historyMode,
     activeCount,
@@ -748,8 +745,13 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
           <s-stack gap="base">
             {historyError ? <s-text tone="critical">{historyError}</s-text> : null}
 
-            {/* ✅ 商品リスト（設定の初回表示件数で表示、さらに読み込むで追加） */}
-            {((e.items ?? []).slice(0, detailDisplayLimit)).map((it, idx) => {
+            {/* ✅ 商品リスト（表示ページネーション・最大 LIST_ITEMS_PER_PAGE 件） */}
+            {(() => {
+              const detailPageInfo = getListPageSlice(e.items ?? [], detailListPage);
+              return (
+                <>
+                  <ListPageControls pageInfo={detailPageInfo} onPageChange={setDetailListPage} />
+                  {detailPageInfo.displayed.map((it, idx) => {
             // ✅ productTitleとvariantTitleを取得（titleから分割する場合も考慮）
             let productTitle = String(it.productTitle || "").trim();
             let variantTitle = String(it.variantTitle || "").trim();
@@ -812,21 +814,13 @@ export function LossHistoryList({ onBack, locations: locationsProp = [], setLoca
                 </s-box>
 
                 {/* divider は padding の外へ（上下の偏りを消す） */}
-                {idx < Math.min((e.items ?? []).length, detailDisplayLimit) - 1 ? <s-divider /> : null}
+                {idx < detailPageInfo.displayed.length - 1 ? <s-divider /> : null}
               </s-box>
             );
-            })}
-            {(e.items ?? []).length > detailDisplayLimit ? (
-              <s-box padding="base" paddingBlockStart="none">
-                <s-button
-                  kind="secondary"
-                  onClick={loadMoreDetailItems}
-                  onPress={loadMoreDetailItems}
-                >
-                  さらに読み込む
-                </s-button>
-              </s-box>
-            ) : null}
+                  })}
+                </>
+              );
+            })()}
           </s-stack>
         </s-box>
       </>

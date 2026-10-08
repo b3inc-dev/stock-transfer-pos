@@ -20,6 +20,8 @@ import { getStatusBadgeTone } from "../../lossHelpers.js";
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
+import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
 function stripEntryForList(entry) {
   if (!entry) return entry;
@@ -469,8 +471,10 @@ export function PurchaseHistoryList({
   const [loadedChunkCount, setLoadedChunkCount] = useState(0);
   const fullEntriesByIdRef = useRef(new Map());
   const [settings, setSettings] = useState(null);
-  const [detailDisplayLimit, setDetailDisplayLimit] = useState(250);
-  const DETAIL_LOAD_PAGE_SIZE = 600;
+  const [detailListPage, setDetailListPage] = useState(1);
+  const [extrasListPage, setExtrasListPage] = useState(1);
+  const detailPageInfo = useMemo(() => getListPageSlice(lines, detailListPage), [lines, detailListPage]);
+  const extrasPageInfo = useMemo(() => getListPageSlice(extras, extrasListPage), [extras, extrasListPage]);
 
   useEffect(() => {
     let mounted = true;
@@ -485,19 +489,18 @@ export function PurchaseHistoryList({
     return () => { mounted = false; };
   }, []);
 
-  const detailInitialLimit = useMemo(
-    () => Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250))),
-    [settings?.productList?.initialLimit]
-  );
+  useEffect(() => {
+    setDetailListPage(1);
+    setExtrasListPage(1);
+  }, [selectedEntryId]);
 
   useEffect(() => {
-    if (!selectedEntryId) return;
-    setDetailDisplayLimit(detailInitialLimit);
-  }, [selectedEntryId, detailInitialLimit]);
+    if (detailPageInfo.currentPage !== detailListPage) setDetailListPage(detailPageInfo.currentPage);
+  }, [detailPageInfo.currentPage, detailListPage]);
 
-  const loadMoreDetailItems = useCallback(() => {
-    setDetailDisplayLimit((prev) => prev + DETAIL_LOAD_PAGE_SIZE);
-  }, []);
+  useEffect(() => {
+    if (extrasPageInfo.currentPage !== extrasListPage) setExtrasListPage(extrasPageInfo.currentPage);
+  }, [extrasPageInfo.currentPage, extrasListPage]);
 
   const selectedEntry = useMemo(() => {
     if (!selectedEntryId) return null;
@@ -1564,7 +1567,8 @@ export function PurchaseHistoryList({
               <s-text tone="subdued" size="small">商品がありません</s-text>
             ) : (
               <s-stack gap="none">
-                {lines.slice(0, detailDisplayLimit).map((l, idx) => {
+                <ListPageControls pageInfo={detailPageInfo} onPageChange={setDetailListPage} />
+                {detailPageInfo.displayed.map((l, idx) => {
                   const sku = String(l.sku || "").trim();
                   const barcode = String(l.barcode || "").trim();
                   const skuLine = `${sku ? `SKU: ${sku}` : ""}${sku && barcode ? " / " : ""}${barcode ? `JAN: ${barcode}` : ""}`.trim();
@@ -1602,17 +1606,10 @@ export function PurchaseHistoryList({
                           </s-stack>
                         </s-stack>
                       </s-box>
-                      {idx < Math.min(lines.length, detailDisplayLimit) - 1 ? <s-divider /> : null}
+                      {idx < detailPageInfo.displayed.length - 1 ? <s-divider /> : null}
                     </s-box>
                   );
                 })}
-                {lines.length > detailDisplayLimit ? (
-                  <s-box padding="base" paddingBlockStart="none">
-                    <s-button kind="secondary" onClick={loadMoreDetailItems} onPress={loadMoreDetailItems}>
-                      さらに読み込む
-                    </s-button>
-                  </s-box>
-                ) : null}
               </s-stack>
             )}
           </s-stack>
@@ -1626,7 +1623,8 @@ export function PurchaseHistoryList({
                 <s-text emphasis="bold">予定外仕入（リストにない商品）</s-text>
               </s-box>
               <s-stack gap="none">
-                {extras.map((l, idx) => {
+                <ListPageControls pageInfo={extrasPageInfo} onPageChange={setExtrasListPage} />
+                {extrasPageInfo.displayed.map((l, idx) => {
                   const sku = String(l.sku || "").trim();
                   const barcode = String(l.barcode || "").trim();
                   const skuLine = `${sku ? `SKU: ${sku}` : ""}${sku && barcode ? " / " : ""}${barcode ? `JAN: ${barcode}` : ""}`.trim();
@@ -1668,7 +1666,7 @@ export function PurchaseHistoryList({
                           </s-stack>
                         </s-stack>
                       </s-box>
-                      {idx < extras.length - 1 ? <s-divider /> : null}
+                      {idx < extrasPageInfo.displayed.length - 1 ? <s-divider /> : null}
                     </s-box>
                   );
                 })}

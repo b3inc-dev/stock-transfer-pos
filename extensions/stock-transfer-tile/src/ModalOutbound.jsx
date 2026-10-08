@@ -3682,6 +3682,11 @@ function OutboundHistoryDetail({
   const [detailError, setDetailError] = useState("");
   const [detail, setDetail] = useState(null);
   const [items, setItems] = useState([]);
+  const [listPage, setListPage] = useState(1);
+  const listPageInfo = useMemo(() => getListPageSlice(items, listPage), [items, listPage]);
+  useEffect(() => {
+    if (listPage !== listPageInfo.currentPage) setListPage(listPageInfo.currentPage);
+  }, [listPageInfo.currentPage, listPage]);
   const [lineItemsPageInfo, setLineItemsPageInfo] = useState({ hasNextPage: false, endCursor: null });
   const [loadingMore, setLoadingMore] = useState(false);
   const [cancelArmedAt, setCancelArmedAt] = useState(0);
@@ -5215,7 +5220,9 @@ function OutboundHistoryDetail({
                 </s-stack>
               </s-box>
             ) : null}
-            {items.map((it, idx) => {
+            <ListPageControls pageInfo={listPageInfo} onPageChange={setListPage} />
+            {listPageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
+            {listPageInfo.displayed.map((it, idx) => {
               const optionsLine = String(it.variantTitle || "").trim();
               const sku = String(it.sku || "").trim();
               const jan = String(it.barcode || "").trim();
@@ -5265,7 +5272,7 @@ function OutboundHistoryDetail({
                   </s-box>
 
                   {/* divider は padding の外へ（上下の偏りを消す） */}
-                  {idx < items.length - 1 ? <s-divider /> : null}
+                  {idx < listPageInfo.displayed.length - 1 ? <s-divider /> : null}
                 </s-box>
               );
             })}
