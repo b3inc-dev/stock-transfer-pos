@@ -17,7 +17,7 @@
 | **E4** | 後 | 入庫: multi-shipment 一括表示・settings 未適用 | | 一括表示 UX、settings 適用のコード突合 | Modal.jsx 前提の陳腐 gap | `MULTI_SHIPMENT_REQUIREMENTS`, `INBOUND_MODAL_MIGRATION_GAP`（要コード確認） |
 | **E5** | 後 | 仕入/発注: docs「未着手」と実コード突合後の残件のみ | | 再監査 → 残ギャップのみ PR | docs の「未着手」をそのまま実装前提にしない | `REQUIREMENTS_PURCHASE_AND_ORDER`, `PURCHASE_*` |
 | **E6** | 後 | ロス/調整: changeFromQuantity・履歴ラベル・残 UX | | ラベル整合、残 UX | 棚卸 COMPLETE_RETRY の再発明 | `LOSS_*`, `SIMPLE_STOCKTAKE_ADJUSTMENT_*` |
-| **E7** | 後 | 横断 perf: 全タイル表示件数・ページネーション | | 明細 DOM ページネーション等 | 棚卸グループ選択 P0（A–B2 済み想定） | `PERFORMANCE_UX_REQUIREMENTS_ALL_FEATURES`, `STOCKTAKE_POS_LIST_PERFORMANCE_REQUIREMENTS` |
+| **E7** | 後 | 横断 perf: 全タイル表示件数・ページネーション | Cursor | 明細 DOM ページネーション等（出庫・入庫・ロス・調整・発注・仕入）。棚卸明細ページネーションは既存＋共通定数化 | 棚卸グループ選択 P0（A–B2 済み） | `PERFORMANCE_UX_REQUIREMENTS_ALL_FEATURES`, `STOCKTAKE_POS_LIST_PERFORMANCE_REQUIREMENTS` |
 | **E8** | 後 | 全機能販売監査 | | App Store skill + `REQUIREMENTS_FINAL` 突合 | 本番 deploy | App Store skill, `REQUIREMENTS_FINAL` |
 
 ---
