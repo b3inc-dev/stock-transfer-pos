@@ -142,25 +142,30 @@ export async function getShopPlan(
   };
 
   // 公開・本番・Lite/Pro・10ロケーション超のとき、従量課金を 1 回だけ報告（同一期間は idempotencyKey で重複防止）
+  // ※ 引数名は admin。未定義の adminApi 参照で layout loader が 500 になる事故を防ぐ
   if (
     distribution === "public" &&
     !isDevelopmentStore &&
     (plan === "lite" || plan === "pro") &&
     locationsCount > 10
   ) {
-    const active = activeSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
-    const sub = active.find((s) => getUsageLineItemId(s as ActiveSubscription) && s.currentPeriodEnd) as (ActiveSubscription & { currentPeriodEnd?: string | null }) | undefined;
-    const usageLineItemId = sub ? getUsageLineItemId(sub) : null;
-    const periodEnd = sub?.currentPeriodEnd;
-    if (usageLineItemId && periodEnd) {
-      const { amountUsd, extraLocations } = calculateUsageAmount(plan, locationsCount);
-      if (amountUsd > 0) {
-        const idempotencyKey = `usage-${sub.id}-${periodEnd}`;
-        const description = `${extraLocations} extra location(s) (${locationsCount} total): $${amountUsd.toFixed(2)}`;
-        reportUsageRecord(adminApi, usageLineItemId, amountUsd, description, idempotencyKey).catch(() => {
-          // ローダーの応答をブロックしない。失敗時は次回アクセス時に再試行される
-        });
+    try {
+      const active = activeSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
+      const sub = active.find((s) => getUsageLineItemId(s as ActiveSubscription) && s.currentPeriodEnd) as (ActiveSubscription & { currentPeriodEnd?: string | null }) | undefined;
+      const usageLineItemId = sub ? getUsageLineItemId(sub) : null;
+      const periodEnd = sub?.currentPeriodEnd;
+      if (usageLineItemId && periodEnd && sub?.id) {
+        const { amountUsd, extraLocations } = calculateUsageAmount(plan, locationsCount);
+        if (amountUsd > 0) {
+          const idempotencyKey = `usage-${sub.id}-${periodEnd}`;
+          const description = `${extraLocations} extra location(s) (${locationsCount} total): $${amountUsd.toFixed(2)}`;
+          reportUsageRecord(admin, usageLineItemId, amountUsd, description, idempotencyKey).catch(() => {
+            // ローダーの応答をブロックしない。失敗時は次回アクセス時に再試行される
+          });
+        }
       }
+    } catch {
+      // Usage 報告失敗で設定・ホーム等の loader を落とさない
     }
   }
 
@@ -208,7 +213,30 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   try {
     const { admin, session } = await authenticate.admin(request);
     const adminApi = withGraphQLRetry(admin);
-    const shopPlan = await getShopPlan(adminApi, session?.shop);
+    let shopPlan: ShopPlan;
+    try {
+      shopPlan = await getShopPlan(adminApi, session?.shop);
+    } catch (planErr) {
+      // getShopPlan 失敗で設定・全 /app が 500 にならないようフォールバック（審査 2.1.1）
+      console.error("[app layout] getShopPlan failed:", planErr instanceof Error ? planErr.message : planErr);
+      const distEnv = (process.env.APP_DISTRIBUTION ?? "").trim().toLowerCase();
+      const distribution = distEnv === "inhouse" ? "inhouse" : "public";
+      shopPlan = {
+        distribution,
+        plan: distribution === "inhouse" ? "pro" : null,
+        features: {
+          inventoryInfo: distribution === "inhouse",
+          history: true,
+          purchase: distribution === "inhouse",
+          loss: distribution === "inhouse",
+          order: distribution === "inhouse",
+          stocktake: distribution === "inhouse",
+          adjustment: distribution === "inhouse",
+        },
+        locationsCount: 0,
+        isDevelopmentStore: false,
+      };
+    }
     const storeHandle =
       session?.shop?.replace(/\.myshopify\.com$/i, "") ?? "";
 
@@ -247,6 +275,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       { headers: { "Cache-Control": "private, no-store" } }
     );
   } catch (e) {
+    // OAuth / App Bridge 用 Response はそのまま伝播（設定クリック時に 500 化しない）
+    if (e instanceof Response) throw e;
     const msg = e instanceof Error ? e.message : String(e);
     const stack = e instanceof Error ? e.stack : undefined;
     if (/syntax\s*error|unexpected\s*end\s*of\s*file/i.test(String(msg))) {

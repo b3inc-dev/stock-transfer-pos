@@ -695,10 +695,29 @@ export async function loader({ request }: LoaderFunctionArgs) {
     );
 
     // 変数名を data にしない（react-router の data() と衝突し「is not a function」になる）
-    const gqlJson = await resp.json();
+    let gqlJson: { errors?: Array<{ message?: string }>; data?: { locations?: { nodes?: LocationNode[] }; currentAppInstallation?: { metafield?: { value?: string | null } | null } } } | null = null;
+    try {
+      const text = typeof resp?.text === "function" ? await resp.text() : "";
+      if (text && String(text).trim()) {
+        gqlJson = JSON.parse(text) as typeof gqlJson;
+      }
+    } catch (parseErr) {
+      const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      console.error("Settings loader JSON parse error:", msg);
+      return data(
+        { locations: [] as LocationNode[], settings: defaultSettings(), loadError: `設定の読み込みに失敗しました: ${msg}` },
+        { headers: { "Cache-Control": "private, no-store" } }
+      );
+    }
+
     if (gqlJson?.errors?.length) {
-      const errMsg = gqlJson.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ");
-      throw new Error(`GraphQL error: ${errMsg}`);
+      const errMsg = gqlJson.errors.map((e) => e?.message ?? String(e)).join(", ");
+      console.error("Settings loader GraphQL errors:", errMsg);
+      // GraphQL エラーでも画面は開き、審査 2.1.1 の致命的 500 を避ける
+      return data(
+        { locations: [] as LocationNode[], settings: defaultSettings(), loadError: `GraphQL error: ${errMsg}` },
+        { headers: { "Cache-Control": "private, no-store" } }
+      );
     }
     const locations: LocationNode[] = gqlJson?.data?.locations?.nodes ?? [];
     const raw = gqlJson?.data?.currentAppInstallation?.metafield?.value ?? null;
@@ -706,7 +725,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     let settings = safeParseSettings(raw);
 
     // 初回インストール時（carriersが空の場合）はデフォルト値を設定
-    if (settings.carriers.length === 0) {
+    if (!Array.isArray(settings.carriers) || settings.carriers.length === 0) {
       settings = {
         ...settings,
         carriers: DEFAULT_CARRIERS_JP.map((c) => ({ ...c })),
@@ -1859,10 +1878,8 @@ export default function SettingsPage() {
         <s-stack gap="base">
           {loadError && (
             <s-box padding="base">
-              <div style={{ padding: "10px 12px", background: "#fff4e5", border: "1px solid #e0b252", borderRadius: 6 }}>
-                <s-text tone="caution">
-                  一部の設定読み込みに失敗しました。ページを再読み込みしても続く場合はサポートに連絡してください。
-                </s-text>
+              <div style={{ padding: "10px 12px", background: "#fff4e5", border: "1px solid #e0b252", borderRadius: 6, fontSize: 14, color: "#202223" }}>
+                一部の設定読み込みに失敗しました。ページを再読み込みしても続く場合はサポートに連絡してください。
               </div>
             </s-box>
           )}
