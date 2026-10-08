@@ -9,6 +9,7 @@ import shopify from "../shopify.server";
 import type { PurchaseEntry, OrderRequestItem, LocationNode } from "../types";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 import { logInventoryChangesFromAdjustment } from "../utils/inventory-change-log";
+import db from "../db.server";
 
 const PURCHASE_NS = "stock_transfer_pos";
 const PURCHASE_KEY = "purchase_entries_v1";
@@ -150,6 +151,18 @@ async function executePurchaseCancel(
 ): Promise<{ ok: boolean; error?: string; adjustmentGroupId?: string | null }> {
   if (entry.status === "cancelled") return { ok: true };
   if (entry.status !== "received") return { ok: true }; // pending の場合は在庫増していないのでメタフィールド更新のみ
+
+  // 要件 Rule C: purchase_cancel ログが既にあれば在庫調整をスキップ（同時実行・再送の二重減を防ぐ）
+  try {
+    const existingCancelLog = await db.inventoryChangeLog.findFirst({
+      where: { shop, sourceType: "purchase_cancel", sourceId: entry.id },
+      select: { id: true },
+    });
+    if (existingCancelLog) return { ok: true };
+  } catch (e) {
+    console.error("[executePurchaseCancel] Rule C log lookup failed:", e);
+    // 参照失敗時は従来どおり在庫調整へ進む（idempotencyKey が最後の砦）
+  }
 
   const locationGid = normalizeLocationGid(entry.locationId);
   if (!locationGid) return { ok: false, error: "入庫先ロケーションIDが不正です" };

@@ -967,8 +967,13 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         };
       });
       const existing = await readPurchaseEntries();
-      const existingCount = Array.isArray(existing) ? existing.length : 0;
-      const purchaseName = `#B${String(existingCount + 1).padStart(4, "0")}`;
+      // Admin 新規仕入と同型: 既存 #B の最大値+1（全件数+1だと #P/#A 混在で欠番・衝突しやすい）
+      let maxB = 0;
+      for (const e of Array.isArray(existing) ? existing : []) {
+        const m = String(e?.purchaseName || "").trim().match(/^#B(\d+)$/);
+        if (m) maxB = Math.max(maxB, Number(m[1]) || 0);
+      }
+      const purchaseName = `#B${String(maxB + 1).padStart(4, "0")}`;
       const entry = {
         id: purchaseEntryId,
         purchaseName,

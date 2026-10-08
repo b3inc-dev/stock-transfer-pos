@@ -457,6 +457,9 @@ export function PurchaseHistoryList({
   const [candidates, setCandidates] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
+  const [cancelling, setCancelling] = useState("");
+  const cancelLockRef = useRef(false);
+  const cancelConfirmEntryRef = useRef(null);
   const [lines, setLines] = useState([]);
   const [extras, setExtras] = useState([]); // 予定外仕入（検索で追加したもの）
   const [addQtyById, setAddQtyById] = useState({}); // 検索リストでの「追加済み」表示（variantId -> qty）
@@ -992,12 +995,17 @@ export function PurchaseHistoryList({
         });
       }
 
-      // #P → #B 付番（既に #B の場合は維持）
+      // 発注由来の #Pxxxx / 既存 #Bxxxx は維持（PURCHASE_ORDER_FIXES: 名称引き継ぎ）
+      // 名称が空のときだけ #B を採番。正規表現は /^#B\d+$/（\\d はバグで常に不一致になっていた）
       let nextPurchaseName = String(entry.purchaseName || "").trim();
-      if (!/^#B\\d+$/.test(nextPurchaseName)) {
+      if (!nextPurchaseName) {
         const all = await readPurchaseEntries();
-        const bCount = (Array.isArray(all) ? all : []).filter((p) => /^#B\\d+$/.test(String(p?.purchaseName || "").trim())).length;
-        nextPurchaseName = `#B${String(bCount + 1).padStart(4, "0")}`;
+        let maxB = 0;
+        for (const p of Array.isArray(all) ? all : []) {
+          const m = String(p?.purchaseName || "").trim().match(/^#B(\d+)$/);
+          if (m) maxB = Math.max(maxB, Number(m[1]) || 0);
+        }
+        nextPurchaseName = `#B${String(maxB + 1).padStart(4, "0")}`;
       }
 
       const now = new Date().toISOString();
@@ -1066,6 +1074,74 @@ export function PurchaseHistoryList({
       setSubmitting(false);
     }
   }, [entries, selectedEntryId, lines, extras, receiveTotal, submitting]);
+
+  // 仕入キャンセル（ロス履歴と同型）。received は在庫マイナス戻し＋purchase_cancel。pending はメタ更新のみ。
+  const handleCancel = useCallback(
+    async (entry) => {
+      if (!entry?.id) return;
+      if (entry.status !== "received" && entry.status !== "pending") return;
+      if (cancelLockRef.current || cancelling) return;
+      cancelLockRef.current = true;
+      setCancelling(entry.id);
+      try {
+        const latest = await readPurchaseEntryById(entry.id);
+        if (!latest || latest.status === "cancelled") {
+          toast("既にキャンセル済みです");
+          return;
+        }
+        if (latest.status === "received") {
+          const entriesForApply = (latest.items || [])
+            .map((it) => ({
+              inventoryItemId: it.inventoryItemId,
+              delta: -Math.abs(Number(it.quantity) || 0),
+              variantId: it.variantId ?? undefined,
+              sku: it.sku ?? undefined,
+            }))
+            .filter((d) => d.inventoryItemId && d.delta < 0);
+          if (entriesForApply.length === 0) {
+            toast("キャンセル対象の商品がありません");
+            return;
+          }
+          await applyInventoryChangeToApi({
+            appEventId: buildStableAppEventId("purchase_cancel", latest.id),
+            activity: "purchase_cancel",
+            locationId: latest.locationId,
+            locationName: latest.locationName || "",
+            sourceId: latest.id,
+            referenceDocumentUri: latest.id,
+            entries: entriesForApply,
+          });
+        }
+
+        const now = new Date().toISOString();
+        const nextEntry = { ...latest, status: "cancelled", cancelledAt: now };
+        const all = await readPurchaseEntries();
+        const list = Array.isArray(all) ? all : [];
+        const merged = list.map((e) => (String(e.id) === String(latest.id) ? nextEntry : e));
+        await writePurchaseEntries(merged);
+
+        try {
+          if (SHOPIFY?.storage?.delete) {
+            await SHOPIFY.storage.delete(`${PURCHASE_HISTORY_DRAFT_PREFIX}${latest.id}`);
+          }
+        } catch (e) {
+          console.error("[PurchaseHistoryList] failed to delete draft on cancel", e);
+        }
+
+        fullEntriesByIdRef.current.set(latest.id, nextEntry);
+        setEntries((prev) => prev.map((e) => (String(e.id) === String(latest.id) ? stripEntryForList(nextEntry) : e)));
+        setSelectedEntryId("");
+        toast(latest.status === "received" ? "キャンセルしました（在庫を戻しました）" : "キャンセルしました");
+      } catch (e) {
+        toast(`キャンセルエラー: ${String(e?.message ?? e)}`);
+      } finally {
+        cancelLockRef.current = false;
+        setCancelling("");
+        cancelConfirmEntryRef.current = null;
+      }
+    },
+    [cancelling]
+  );
 
   // 仕入履歴詳細の編集中下書きを自動保存（pending のときのみ）
   useEffect(() => {
@@ -1335,15 +1411,33 @@ export function PurchaseHistoryList({
             </s-box>
 
             <s-box style={{ flex: "0 0 auto" }}>
-              <s-button
-                tone={entry.status === "pending" ? "success" : undefined}
-                disabled={entry.status !== "pending" || submitting || receiveTotal <= 0}
-                onClick={handleConfirmSelected}
-                onPress={handleConfirmSelected}
-                style={{ whiteSpace: "nowrap" }}
-              >
-                {entry.status === "pending" ? (submitting ? "確定中..." : "確定") : "確定"}
-              </s-button>
+              {entry.status === "pending" ? (
+                <s-button
+                  tone="success"
+                  disabled={submitting || !!cancelling || receiveTotal <= 0}
+                  onClick={handleConfirmSelected}
+                  onPress={handleConfirmSelected}
+                  style={{ whiteSpace: "nowrap" }}
+                >
+                  {submitting ? "確定中..." : "確定"}
+                </s-button>
+              ) : (
+                <s-button
+                  tone="critical"
+                  disabled={entry.status !== "received" || submitting || !!cancelling}
+                  command="--show"
+                  commandFor={`purchase-cancel-confirm-${entry.id}`}
+                  onClick={() => {
+                    cancelConfirmEntryRef.current = entry;
+                  }}
+                  onPress={() => {
+                    cancelConfirmEntryRef.current = entry;
+                  }}
+                  style={{ whiteSpace: "nowrap" }}
+                >
+                  {cancelling ? "処理中..." : "キャンセル"}
+                </s-button>
+              )}
             </s-box>
           </s-stack>
         </s-box>
@@ -1367,7 +1461,7 @@ export function PurchaseHistoryList({
       />
     );
     return () => setFooter?.(null);
-  }, [setFooter, selectedEntryId, entries, displayLocationName, viewMode, listToShow.length, liteMode, onToggleLiteMode, refresh, loading, locationGid, submitting, handleConfirmSelected]);
+  }, [setFooter, selectedEntryId, entries, displayLocationName, viewMode, listToShow.length, liteMode, onToggleLiteMode, refresh, loading, locationGid, submitting, cancelling, handleConfirmSelected, plannedTotal, receiveTotal, overQtyTotal, shortageQtyTotal, extrasQtyTotal]);
 
   // 商品リスト表示（入庫・出庫と同様にタップ後に詳細＝refから取得）
   if (selectedEntryId) {
@@ -1382,9 +1476,47 @@ export function PurchaseHistoryList({
 
     const showImages = !liteMode;
     const readOnly = entry.status !== "pending";
+    const CANCEL_CONFIRM_MODAL_ID = `purchase-cancel-confirm-${entry.id}`;
 
     return (
       <s-stack gap="base">
+        <s-modal id={CANCEL_CONFIRM_MODAL_ID} heading="仕入をキャンセルしますか？">
+          <s-box padding="base" paddingBlockEnd="none">
+            <s-stack gap="base">
+              <s-text tone="subdued">
+                {entry.status === "received"
+                  ? "この操作により、仕入で増やした在庫が戻されます。この操作は取り消せません。"
+                  : "この仕入予定をキャンセルします。この操作は取り消せません。"}
+              </s-text>
+              <s-divider />
+              <s-box>
+                <s-button
+                  command="--hide"
+                  commandFor={CANCEL_CONFIRM_MODAL_ID}
+                  onClick={() => {
+                    cancelConfirmEntryRef.current = null;
+                  }}
+                >
+                  戻る
+                </s-button>
+              </s-box>
+            </s-stack>
+          </s-box>
+          <s-button
+            slot="primary-action"
+            tone="critical"
+            command="--hide"
+            commandFor={CANCEL_CONFIRM_MODAL_ID}
+            disabled={!!cancelling}
+            onClick={() => {
+              const target = cancelConfirmEntryRef.current || entry;
+              if (target) handleCancel(target);
+            }}
+          >
+            {cancelling ? "処理中..." : "キャンセルする"}
+          </s-button>
+        </s-modal>
+
         {/* 1. 検索結果ブロック（スクロール部分の入庫リスト上に表示） */}
         {String(query || "").trim().length >= 1 ? (
           <s-box padding="base" style={readOnly ? { opacity: 0.6 } : undefined}>
