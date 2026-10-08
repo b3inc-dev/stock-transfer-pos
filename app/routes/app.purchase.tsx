@@ -152,13 +152,31 @@ async function executePurchaseCancel(
   if (entry.status === "cancelled") return { ok: true };
   if (entry.status !== "received") return { ok: true }; // pending の場合は在庫増していないのでメタフィールド更新のみ
 
-  // 要件 Rule C: purchase_cancel ログが既にあれば在庫調整をスキップ（同時実行・再送の二重減を防ぐ）
+  // 要件 Rule C: キャンセル完了済みログがあるときだけ在庫調整をスキップ。
+  // apply-change は setQuantities 前に quantityAfter=null の先行行を書くため、
+  // 未完了行までヒットさせると Admin×POS 同時キャンセルで「status のみ cancelled・在庫未戻し」になり得る。
   try {
-    const existingCancelLog = await db.inventoryChangeLog.findFirst({
-      where: { shop, sourceType: "purchase_cancel", sourceId: entry.id },
+    const completedCancelLog = await db.inventoryChangeLog.findFirst({
+      where: {
+        shop,
+        sourceType: "purchase_cancel",
+        sourceId: entry.id,
+        quantityAfter: { not: null },
+      },
       select: { id: true },
     });
-    if (existingCancelLog) return { ok: true };
+    if (completedCancelLog) return { ok: true };
+
+    const completedCancelEvent = await db.inventoryChangeEvent.findFirst({
+      where: {
+        shop,
+        activity: "purchase_cancel",
+        sourceId: entry.id,
+        status: "completed",
+      },
+      select: { id: true },
+    });
+    if (completedCancelEvent) return { ok: true };
   } catch (e) {
     console.error("[executePurchaseCancel] Rule C log lookup failed:", e);
     // 参照失敗時は従来どおり在庫調整へ進む（idempotencyKey が最後の砦）

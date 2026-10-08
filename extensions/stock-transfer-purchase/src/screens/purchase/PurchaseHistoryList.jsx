@@ -1098,19 +1098,18 @@ export function PurchaseHistoryList({
               sku: it.sku ?? undefined,
             }))
             .filter((d) => d.inventoryItemId && d.delta < 0);
-          if (entriesForApply.length === 0) {
-            toast("キャンセル対象の商品がありません");
-            return;
+          // 明細が空でも status は cancelled に更新（在庫戻し対象なし）
+          if (entriesForApply.length > 0) {
+            await applyInventoryChangeToApi({
+              appEventId: buildStableAppEventId("purchase_cancel", latest.id),
+              activity: "purchase_cancel",
+              locationId: latest.locationId,
+              locationName: latest.locationName || "",
+              sourceId: latest.id,
+              referenceDocumentUri: latest.id,
+              entries: entriesForApply,
+            });
           }
-          await applyInventoryChangeToApi({
-            appEventId: buildStableAppEventId("purchase_cancel", latest.id),
-            activity: "purchase_cancel",
-            locationId: latest.locationId,
-            locationName: latest.locationName || "",
-            sourceId: latest.id,
-            referenceDocumentUri: latest.id,
-            entries: entriesForApply,
-          });
         }
 
         const now = new Date().toISOString();
@@ -1140,7 +1139,7 @@ export function PurchaseHistoryList({
         cancelConfirmEntryRef.current = null;
       }
     },
-    [cancelling]
+    []
   );
 
   // 仕入履歴詳細の編集中下書きを自動保存（pending のときのみ）
@@ -1421,10 +1420,10 @@ export function PurchaseHistoryList({
                 >
                   {submitting ? "確定中..." : "確定"}
                 </s-button>
-              ) : (
+              ) : entry.status === "received" ? (
                 <s-button
                   tone="critical"
-                  disabled={entry.status !== "received" || submitting || !!cancelling}
+                  disabled={submitting || !!cancelling}
                   command="--show"
                   commandFor={`purchase-cancel-confirm-${entry.id}`}
                   onClick={() => {
@@ -1437,6 +1436,8 @@ export function PurchaseHistoryList({
                 >
                   {cancelling ? "処理中..." : "キャンセル"}
                 </s-button>
+              ) : (
+                <s-box />
               )}
             </s-box>
           </s-stack>
