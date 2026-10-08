@@ -146,3 +146,19 @@
 | 管理画面 | バックアップに countId がある棚卸を「再試行必要」表示し、編集不可＋再試行ボタンのみ。 |
 
 この設計で実装を進められる。
+
+---
+
+## 8. 現行実装との整合（2026-10-08）
+
+**確定順（正本）**: 差異ありは **apply-change（setQuantities + 履歴）→ metafield（pos-stocktake-complete）**。  
+差異なしは metafield のみ。`needMetafieldRetry` は setQuantities 済みで metafield 失敗時。二重 setQuantities は `appEventId` + `quantitiesAppliedRef` で防止。  
+状態遷移: [`STATE_MACHINE.md`](./STATE_MACHINE.md) §11。画面: [`STOCKTAKE_UX_CANON.md`](./STOCKTAKE_UX_CANON.md)。
+
+**実装済み（Phase D）**:
+- POS: `needMetafieldRetry` UI・`quantitiesAppliedRef`・`retryOnly`
+- API: `pending_complete_v1` バックアップ、サーバー自動リトライ、`needMetafieldRetry` 応答
+- 共有: `app/utils/stocktake-pending-complete.server.ts`（POS API / Admin 共用）
+- Admin: 履歴タブに再試行バナー + action `pos_metafield_retry`（メタ更新のみ・setQuantities なし）
+
+§6 の旧「メタ成功後に在庫調整」記述は歴史的経緯。現行コード・§8 を優先。

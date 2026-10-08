@@ -121,6 +121,32 @@
 
 ---
 
+## D7. 陳腐 docs の扱い（2026-10-08）
+
+gap / 原因分析ドキュメントで「未実装」「準備中」と書いてあっても、**コード再検証なしに正本としない**。  
+棚卸 UX の正本は [`STOCKTAKE_UX_CANON.md`](./STOCKTAKE_UX_CANON.md) + 39GROUPS + COMPLETE_RETRY。  
+陳腐候補リスト（`Modal.jsx` 前提、仕入「未着手」矛盾等）は Canon §4。Issue/PR では「参照しない」と明記する。
+
+## D8. REQUIREMENTS_FINAL の役割（2026-10-08）
+
+- **`REQUIREMENTS_FINAL.md`**: 進捗台帳・横断チェックリスト
+- **詳細要件**: 各機能の正本（棚卸は Canon / 39GROUPS / COMPLETE_RETRY、履歴は `HISTORY_WEBHOOK_METAFIELD_REQUIREMENTS.md`）
+- 台帳と詳細が矛盾する場合は **詳細正本 + 現行コード** を優先し、台帳側を更新する
+
+## D9. API 2026-04 `changeFromQuantity`（記録のみ・2026-10-08）
+
+Shopify Inventory API 2026-04 で concurrency 制御として `changeFromQuantity` が必須化される見込み。  
+**本 workstream では実装しない**（Phase E2）。適用対象は apply-change / loss / order / stocktake setQuantities 経路。  
+API バージョンバンプとセットで別 PR。
+
+## D10. 棚卸確定順と webhook（2026-10-08）
+
+- 差異あり確定: **apply-change → metafield**（履歴先行で webhook が early-returnしやすくする）
+- 非売上 webhook: PENDING_ORDER 長時間 sleep しない（Phase C）
+- メタ失敗時: `needMetafieldRetry`、二重 setQuantities 禁止（Phase D）
+
+---
+
 ## 関連正本
 
 - [`STATE_MACHINE.md`](./STATE_MACHINE.md)
@@ -128,4 +154,7 @@
 - [`BUSINESS_RULES.md`](./BUSINESS_RULES.md)
 - [`SHOPIFY.md`](./SHOPIFY.md)
 - [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md)
+- [`STOCKTAKE_UX_CANON.md`](./STOCKTAKE_UX_CANON.md)
+- [`HISTORY_WEBHOOK_METAFIELD_REQUIREMENTS.md`](./HISTORY_WEBHOOK_METAFIELD_REQUIREMENTS.md)
+- [`STOCKTAKE_PHASE_E_WORKSTREAMS.md`](./STOCKTAKE_PHASE_E_WORKSTREAMS.md)
 - [`../AGENTS.md`](../AGENTS.md)
