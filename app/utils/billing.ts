@@ -1,11 +1,36 @@
 /**
  * 公開アプリ用 Billing ユーティリティ
  * - サブスクリプション名からプラン（lite/pro）を判定
+ * - Managed Pricing（Shopify App Pricing）のプラン選択 URL
  * - Usage-based: 基本料金＋(ロケーション数−10)×単価（10 loc 超）
  * 設計: docs/PUBLIC_APP_PLAN_FEATURES_DESIGN.md
  */
 
 export type PlanType = "lite" | "pro";
+
+/**
+ * 公開アプリの App Handle（Managed Pricing / pricing_plans URL 用）。
+ * 優先: SHOPIFY_APP_HANDLE → 既定 "pos-stock"（shopify.app.public.toml の公開アプリ）。
+ * フォールバックに "app" は使わない（誤 URL → accounts.shopify.com 拒否の原因になる）。
+ */
+export function getPublicAppHandle(): string {
+  const fromEnv = (process.env.SHOPIFY_APP_HANDLE ?? "").trim();
+  return fromEnv || "pos-stock";
+}
+
+/**
+ * Shopify Managed Pricing（App Pricing）のプラン選択ページ URL。
+ * 必ず admin.shopify.com を使う（*.myshopify.com だと accounts.shopify.com へ飛び iframe で拒否される）。
+ * 埋め込みアプリからは target="_top" で開くこと。
+ */
+export function buildManagedPricingPlansUrl(shopDomain: string | undefined | null): string | null {
+  const shop = String(shopDomain ?? "").trim().toLowerCase();
+  if (!shop) return null;
+  const storeHandle = shop.replace(/\.myshopify\.com$/i, "").replace(/^https?:\/\//, "").split("/")[0];
+  if (!storeHandle || storeHandle.includes(".") || storeHandle === "admin") return null;
+  const appHandle = getPublicAppHandle();
+  return `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/charges/${encodeURIComponent(appHandle)}/pricing_plans`;
+}
 
 /** アクティブなサブスクリプション（GraphQL 取得結果の型） */
 export type ActiveSubscription = {
