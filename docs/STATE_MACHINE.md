@@ -33,10 +33,11 @@ stateDiagram-v2
 | Shopify Transfer | DRAFT / READY_TO_SHIP / IN_PROGRESS / TRANSFERRED / CANCELED | 永続（正） |
 | Shopify Shipment | DRAFT / IN_TRANSIT / PARTIALLY_RECEIVED / RECEIVED | 永続（正） |
 | Draft 明細 | `SHOPIFY.storage` | 成功後削除。失敗時は残る場合あり |
+| 作成チェックポイント | `SHOPIFY.storage` (`outboundCreateCheckpoint.js`) | チャンク進捗・attemptId。成功後削除 |
 | 履歴 | `InventoryChangeLog` | 永続・idempotent |
 | apply-change | `InventoryChangeEvent` | 永続・idempotent（**Transfer 作成では未使用**） |
 
-**結論**: 「未処理→処理中→完了」のアプリ job は無く、**UI ロック + Shopify オブジェクト状態**が実質の状態機械。
+**結論**: 「未処理→処理中→完了」の **Prisma job は無い**。正は Shopify Transfer/Shipment。再実行安全は **UI ロック + クライアントチェックポイント + note の attempt マーカー**で補う（D1/D3）。
 
 ---
 
@@ -84,35 +85,35 @@ activate / wait
 → clear / unlock
 ```
 
-**チェックポイントなし。** i=2 で失敗しても i=1 の Transfer/Shipment は Shopify に残る。
+**チェックポイントあり（E3）:** 各チャンク成功後に `nextChunkIndex` / `created[]` を永続化。i=2 で失敗しても i=1 は Shopify に残るが、**同一指紋で再確定すると i=2 から再開**する（先頭チャンクの二重作成を避ける）。
 
 ---
 
-## 4. Timeout → retry → resume → 完了（実態）
+## 4. Timeout → retry → resume → 完了（E3 以降）
 
-アプリに「resume トークン付きワーカー」は **ない**。実態は次のとおり。
+サーバー側ワーカーは無い。クライアントが attempt マーカー付き note と storage チェックポイントで再開する。
 
 ```mermaid
 flowchart TD
-  A[処理中] -->|adminGraphql 20s abort| B[例外 / unlock]
+  A[処理中] -->|adminGraphql 20s abort| B[例外 / unlock / CP 保持]
   A -->|level wait 30s| B
-  B --> C{下書きは残っているか}
-  C -->|残る| D[ユーザーが内容確認し再確定]
-  C -->|成功後クリア済み / 一部成功| E[Shopify 上に部分オブジェクト]
-  D --> F[フルフロー再実行]
-  F --> G{前回 Shopify 成功分}
-  G -->|なし| H[正常完了]
-  G -->|あり| I[追加 Transfer の二重発行リスク]
-  E --> J[手動: Admin で確認・キャンセル/統合]
-  J --> D
+  B --> C{同一指紋の CP があるか}
+  C -->|ある| D[再確定 → pending チャンクを note 照会]
+  C -->|なし / 指紋不一致| E[新規 attempt でフル作成]
+  D --> F{Transfer が Shopify に存在}
+  F -->|あり| G[Shipment 補完後 nextChunk から再開]
+  F -->|なし| H[当該チャンクを作成して続行]
+  G --> I[残りチャンク完了 → CP クリア]
+  H --> I
+  E --> I
 ```
 
 | 事象 | コード上の挙動 | Resume の意味 |
 |------|----------------|---------------|
 | 二重タップ | lock 中は toast「処理中です…」で no-op | — |
-| activate / level timeout | throw → alert → unlock | 最初から再実行 |
-| GraphQL 20s timeout | throw。サーバー側で mutation 成功済みの可能性 | **危険域** |
-| 複数 Transfer 途中失敗 | 先行分は残存 | **自動 resume なし** |
+| activate / level timeout | throw → alert → unlock | 最初から再実行（CP 未書込なら新規） |
+| GraphQL 20s timeout（Transfer create） | CP の `pendingChunkIndex` を保持。再確定時に note `[pos-cp:…]` で成功確認 | **成功確認 → 再開** |
+| 複数 Transfer 途中失敗 | 先行分は残存 + CP に created 記録 | **同一内容の再確定で続きから** |
 | ログのみ失敗 | Transfer 残存、UI はクリア方向 | ログ再送は appEventId で比較的安全 |
 
 ---
@@ -163,12 +164,12 @@ pending → applying → completed
 |----------|--------|------------|------------|
 | 二重タップ | 二重 Transfer | `submitLockRef` | ロックはメモリのみ |
 | API 成功後・状態保存（ログ）失敗 | 履歴欠落。在庫は Transfer 済み | log の idempotency | Transfer ロールバックなし |
-| timeout 直前に Shopify のみ成功 | ユーザー再実行で二重 | なし | **高** |
-| retry 重複（出庫作成） | 二重 Transfer | なし（作成 API に idempotency key なし） | **高** |
+| timeout 直前に Shopify のみ成功 | ユーザー再実行で二重 | note attempt マーカー照会 + CP | **中**（端末ローカル CP。他端末は未カバー） |
+| retry 重複（出庫作成） | 二重 Transfer | 同一指紋 CP 再開 / 作成前照会 | **中**（指紋不一致の編集後再確定は新規 attempt） |
 | 完了済ロケーションの再実行 | 出庫は「ロケ完了フラグ」モデルではない | — | 該当 job なし。再確定は新規作成扱い |
-| 部分成功（250 分割） | 先頭チャンクのみ成功 | なし | **高** |
-| 途中停止（アプリクラッシュ） | 上に同じ | 下書きが残れば再入力容易 | Shopify 側の掃除は手動 |
-| 同時実行（2 端末） | 二重 | 端末ローカル lock のみ | **高** |
+| 部分成功（250 分割） | 先頭チャンクのみ成功 | CP `nextChunkIndex` + created[] | **中**（成功分はスキップして再開） |
+| 途中停止（アプリクラッシュ） | 上に同じ | CP + 下書きが残れば再開容易 | Shopify 側の掃除は手動（孤児 Transfer） |
+| 同時実行（2 端末） | 二重 | 端末ローカル lock / CP のみ | **高**（分散ロックなし） |
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
 | 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー | 比較的低い |
 | apply-change 再送 | 二重 set | `appEventId` unique | 設計意図どおり |
@@ -182,9 +183,9 @@ pending → applying → completed
   Webhook 系 idempotencyKey
   入庫 receive の差分計算
 
-[防御なし / 弱い]
-  inventoryTransferCreate*
-  inventoryShipmentCreate* / MarkInTransit
+[弱い / 端末ローカル]
+  inventoryTransferCreate*（Shopify 側 idempotency key なし。アプリは CP + note マーカー）
+  inventoryShipmentCreate* / MarkInTransit（Transfer 回復後の Shipment 補完あり）
   出庫 UI ロック（永続・分散なし）
 ```
 
