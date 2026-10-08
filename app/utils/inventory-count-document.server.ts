@@ -199,8 +199,9 @@ function normalizeCountId(id: unknown): string {
 }
 
 /**
- * metafield 配列を正としつつ、DB に存在する count は payload（または status 等）で上書きする dual-read。
- * DB のみに存在する count は末尾に追加（metafield 未反映の確定成功分）。
+ * dual-read（移行期）: metafield を SoT とし、既存 count は上書きしない。
+ * DB にだけある count（metafield 未反映の確定成功分）のみ末尾追加する。
+ * cancel/edit が metafield のみ更新する間、古い DB payload で status を巻き戻さないため。
  */
 export async function mergeInventoryCountsWithDb<T extends { id?: string; status?: string }>(
   shop: string,
@@ -209,33 +210,15 @@ export async function mergeInventoryCountsWithDb<T extends { id?: string; status
   const dbDocs = await listInventoryCountDocumentsForShop(shop);
   if (dbDocs.length === 0) return metafieldCounts;
 
-  const byNorm = new Map<string, DbCountOverlay>();
-  for (const d of dbDocs) {
-    byNorm.set(normalizeCountId(d.countId), d);
-  }
+  const seen = new Set(
+    metafieldCounts.map((c) => normalizeCountId(c.id)).filter(Boolean)
+  );
+  const merged: T[] = [...metafieldCounts];
 
-  const merged: T[] = metafieldCounts.map((c) => {
-    const overlay = byNorm.get(normalizeCountId(c.id));
-    if (!overlay) return c;
-    byNorm.delete(normalizeCountId(c.id));
-    if (overlay.payload && typeof overlay.payload === "object") {
-      return {
-        ...c,
-        ...(overlay.payload as object),
-        id: c.id,
-        status: overlay.status || (overlay.payload as { status?: string }).status || c.status,
-        _source: "db_overlay",
-      } as T;
-    }
-    return {
-      ...c,
-      status: overlay.status || c.status,
-      countName: overlay.countName ?? (c as { countName?: string }).countName,
-      _source: "db_overlay",
-    } as T;
-  });
-
-  for (const leftover of byNorm.values()) {
+  for (const leftover of dbDocs) {
+    const norm = normalizeCountId(leftover.countId);
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
     if (leftover.payload && typeof leftover.payload === "object") {
       merged.push({
         ...(leftover.payload as object),
