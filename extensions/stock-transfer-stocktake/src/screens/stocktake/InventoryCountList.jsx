@@ -2061,7 +2061,7 @@ export function InventoryCountList({
             setSubmitting(false);
             return false;
           }
-          toast(result.error || "メタの更新に失敗しました。再読み込みしてから再度確定してください。");
+          toast(result.error || "ステータスの反映に失敗しました。再読み込みしてから再度確定してください。");
           setSubmitting(false);
           return false;
         }
@@ -2137,7 +2137,7 @@ export function InventoryCountList({
           setSubmitting(false);
           return false;
         }
-        toast(resultResult.error || "メタの更新に失敗しました。再読み込みしてから再度確定してください。");
+        toast(resultResult.error || "ステータスの反映に失敗しました。再読み込みしてから再度確定してください。");
         setSubmitting(false);
         return false;
       }
