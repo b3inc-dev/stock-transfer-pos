@@ -2784,7 +2784,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
       const result = await applyPendingCompleteFromBackup(admin, ownerId, backup);
       if (!result.ok) {
-        return { ok: false, error: (result.error || "メタ更新の再試行に失敗しました") as const };
+        return { ok: false, error: (result.error || "再試行に失敗しました") as const };
       }
       try {
         const shopForDb = session?.shop ?? "";
@@ -2802,21 +2802,26 @@ export async function action({ request }: ActionFunctionArgs) {
               shop: shopForDb,
               countId: String(saved.id),
               countName: saved.countName ?? null,
-              status: String(saved.status || "in_progress"),
+              status: String(result.status || saved.status || "in_progress"),
               locationId: saved.locationId ?? null,
               locationName: saved.locationName ?? null,
-              payload: saved,
-              completedAt: saved.completedAt ?? null,
+              payload: { ...saved, status: result.status || saved.status },
+              completedAt: result.completedAt ?? saved.completedAt ?? null,
             });
           }
         }
       } catch (e) {
         console.warn("[inventory-count] pos_metafield_retry DB dual-write skipped:", e);
       }
-      return { ok: true, retriedCountId: result.countId } as const;
+      return {
+        ok: true,
+        retriedCountId: result.countId,
+        status: result.status,
+        completedAt: result.completedAt,
+      } as const;
     } catch (e) {
       console.error("[inventory-count] pos_metafield_retry failed:", e);
-      return { ok: false, error: "メタ更新の再試行中にエラーが発生しました。" as const };
+      return { ok: false, error: "再試行中にエラーが発生しました。" as const };
     }
   }
 
