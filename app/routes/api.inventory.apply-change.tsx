@@ -13,8 +13,15 @@ import {
   setInventoryQuantitiesServer,
   fetchCurrentQuantityServer,
 } from "../utils/inventory-set-quantities-server";
-import { ensureInventoryActivatedAtLocation } from "../utils/ensure-inventory-activated-server";
+import {
+  ensureInventoryActivatedAtLocation,
+  verifyInventoryLevelsAtLocation,
+} from "../utils/ensure-inventory-activated-server";
 import { decideOuterCatchAction } from "../utils/apply-change-outer-catch-guard";
+import {
+  formatInventoryApiError,
+  isNotStockedRetryableError,
+} from "../utils/format-inventory-api-error";
 
 /** 一時的な障害とみなしてリトライするか（429/5xx/ネットワーク系） */
 function isTransientError(errorSummary: string | undefined): boolean {
@@ -31,6 +38,9 @@ function isTransientError(errorSummary: string | undefined): boolean {
     s.includes("network")
   );
 }
+
+/** activate 成功後〜setQuantities 直前の短い settle（伝播レース緩和。CAS #19 は取り込まない） */
+const POST_ACTIVATE_SETTLE_BEFORE_SET_MS = 600;
 
 const API_VERSION = "2026-01";
 const CORS_HEADERS = {
@@ -495,20 +505,23 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const shopifyItems = lineRecords.map((l) => ({ inventoryItemId: l.inventoryItemId, quantity: l.quantityAfter }));
+    const toItemGid = (id: string) =>
+      /^\d+$/.test(String(id).trim()) ? `gid://shopify/InventoryItem/${String(id).trim()}` : String(id).trim();
+
     // 在庫レベルがないアイテムを先に有効化（調整・棚卸で「not stocked at the location」エラーを防ぐ）
     let activateResult = await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems);
     const maxActivateRetries = 2;
     for (let r = 0; r < maxActivateRetries && (activateResult.errors?.length ?? 0) > 0; r++) {
       const failedGids = new Set(activateResult.errors?.map((e) => e.inventoryItemId) ?? []);
-      const toItemGid = (id: string) =>
-        /^\d+$/.test(String(id).trim()) ? `gid://shopify/InventoryItem/${String(id).trim()}` : String(id).trim();
       const failedItems = shopifyItems.filter((q) => failedGids.has(toItemGid(q.inventoryItemId)));
       if (failedItems.length === 0) break;
       await new Promise((resolve) => setTimeout(resolve, 1000 * (r + 1)));
       activateResult = await ensureInventoryActivatedAtLocation(admin, locationId, failedItems);
     }
     if ((activateResult.errors?.length ?? 0) > 0) {
-      const errSummary = activateResult.errors?.map((e) => e.message).join(" / ") ?? "在庫有効化に失敗しました";
+      const errSummary = formatInventoryApiError(
+        activateResult.errors?.map((e) => e.message).join(" / ") ?? "在庫有効化に失敗しました"
+      );
       for (const l of lineRecords) {
         await db.inventoryChangeEventLine.update({
           where: { id: l.id },
@@ -542,6 +555,7 @@ export async function action({ request }: ActionFunctionArgs) {
         JSON.stringify({
           ok: false,
           error: errSummary,
+          errorCode: "activate_failed",
           eventId: event.id,
           appEventId,
           status: "failed",
@@ -550,12 +564,36 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
+    // activate 成功後: settle + level 確認は助言のみ（uncertain/lag でハード失敗しない。B1/B2）
+    // 確かな missing だけ再 ensure。setQuantities は常に試行し、not-stocked は下の 1 回再試行に委ねる。
+    await new Promise((r) => setTimeout(r, POST_ACTIVATE_SETTLE_BEFORE_SET_MS));
+    const levelVerify = await verifyInventoryLevelsAtLocation(
+      admin,
+      locationId,
+      shopifyItems.map((q) => q.inventoryItemId)
+    );
+    if (levelVerify.missingInventoryItemIds.length > 0) {
+      const missingSet = new Set(levelVerify.missingInventoryItemIds);
+      const missingItems = shopifyItems.filter((q) => missingSet.has(toItemGid(q.inventoryItemId)));
+      if (missingItems.length > 0) {
+        console.warn(
+          `[api.inventory.apply-change] post-activate confident missing (${missingItems.length}); re-ensure + settle (no hard abort)`
+        );
+        await ensureInventoryActivatedAtLocation(admin, locationId, missingItems);
+        await new Promise((r) => setTimeout(r, POST_ACTIVATE_SETTLE_BEFORE_SET_MS));
+      }
+    } else if (levelVerify.uncertainInventoryItemIds.length > 0) {
+      console.warn(
+        `[api.inventory.apply-change] post-activate verify uncertain (${levelVerify.uncertainInventoryItemIds.length}); proceed to setQuantities`
+      );
+    }
+
     const refUri = referenceDocumentUriForActivity(activity, referenceDocumentUri);
     let result: Awaited<ReturnType<typeof setInventoryQuantitiesServer>>;
     try {
       result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
     } catch (setErr: unknown) {
-      // ヘルパー外への例外は成否不明（再 set 禁止）
+      // ヘルパー外への例外は成否不明（再 set 禁止）— #22 post-success
       result = {
         ok: false,
         error: formatCaughtError(setErr),
@@ -563,6 +601,26 @@ export async function action({ request }: ActionFunctionArgs) {
         applicationUncertain: true,
         appliedInventoryItemIds: [],
       };
+    }
+    // not stocked: 厳格マッチのみ。再 activate + settle 後に 1 回だけ再 set（partial は再実行しない）
+    if (!result.ok && !result.partiallyApplied && isNotStockedRetryableError(result.error)) {
+      console.warn(
+        "[api.inventory.apply-change] setQuantities not-stocked; re-activate once before retry"
+      );
+      await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems);
+      await new Promise((r) => setTimeout(r, POST_ACTIVATE_SETTLE_BEFORE_SET_MS));
+      try {
+        const stockedRetry = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+        result = stockedRetry;
+      } catch (stockedErr: unknown) {
+        result = {
+          ok: false,
+          error: formatCaughtError(stockedErr),
+          partiallyApplied: true,
+          applicationUncertain: true,
+          appliedInventoryItemIds: result.appliedInventoryItemIds ?? [],
+        };
+      }
     }
     if (!result.ok && isTransientError(result.error) && !result.partiallyApplied) {
       // partial 適用済みを再 set すると二重になるため、完全失敗（または rollback 済み）のみリトライ
@@ -764,9 +822,9 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    const errorSummary = result.error || "Shopify API error";
+    const errorSummary = formatInventoryApiError(result.error || "Shopify API error");
 
-    // partiallyApplied: チャンク分割で一部適用 / 成否不明。自動再 set 禁止（sticky partial_failed）
+    // partiallyApplied: チャンク分割で一部適用 / 成否不明。自動再 set 禁止（sticky partial_failed）— #22
     // status=partial_failed は setQuantities 直後に確定済み。ここでは行状態と errorSummary を精緻化。
     if (result.partiallyApplied) {
       const knownAppliedLines = lineRecords.filter((l) => appliedRawIds.has(toRawId(l.inventoryItemId)));
@@ -839,6 +897,7 @@ export async function action({ request }: ActionFunctionArgs) {
         JSON.stringify({
           ok: false,
           error: errorSummary,
+          errorCode: "partial_failed",
           eventId: event.id,
           appEventId,
           status: "partial_failed",
@@ -859,6 +918,9 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // 完全失敗（未適用 or ロールバック成功）
+    const errorCode = isNotStockedRetryableError(result.error)
+      ? "not_stocked"
+      : "set_quantities_failed";
     for (const l of lineRecords) {
       await db.inventoryChangeEventLine.update({
         where: { id: l.id },
@@ -893,6 +955,7 @@ export async function action({ request }: ActionFunctionArgs) {
       JSON.stringify({
         ok: false,
         error: errorSummary,
+        errorCode,
         eventId: event.id,
         appEventId,
         status: "failed",

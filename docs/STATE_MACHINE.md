@@ -258,3 +258,11 @@ userErrors（ビジネス）はリトライしても同じ結果になりやす�
 
 二重 setQuantities 防止: `quantitiesAppliedRef` + `InventoryChangeEvent.appEventId` 冪等。  
 Admin 再試行は `pending_complete_v1` からメタのみ適用（在庫 API を叩かない）。
+
+### 差異あり apply-change: activate 伝播と setQuantities 失敗（2026-10-09）
+
+- activate 成功後に短い settle + `inventoryLevel` 再確認。**確かな missing だけ再 ensure**。verify uncertain / lag では set 前にハード失敗しない（set + not-stocked 1 回再試行へ）。
+- setQuantities が **厳格な** `not stocked at the location` 等で失敗し `partiallyApplied` でないときだけ、再 activate→settle→set を **1 回**。
+- POS 向け `error` は `formatInventoryApiError` で空/Unknown 固定を避け、`errorCode`（`activate_failed` / `not_stocked` / `set_quantities_failed` / `partial_failed`）を付与。
+- **#19 CAS は使わない**。post-success / outer-catch は #22（旧 #20/#21）を維持し、本硬化は activate→set 窓のみ。
+- **残存**: Shopify 伝播遅延・権限・追跡無効・同時売上の絶対上書き（#19）。

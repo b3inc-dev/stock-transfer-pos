@@ -2055,7 +2055,9 @@ export function InventoryCountList({
             }
             quantitiesAppliedRef.current = true;
           } catch (applyErr) {
-            const msg = String(applyErr?.message ?? applyErr);
+            const msg =
+              String(applyErr?.message ?? applyErr).trim() ||
+              "在庫APIの応答を取得できませんでした。通信状況を確認して再度確定してください。";
             toast(`在庫調整エラー: ${msg}`);
             setSubmitting(false);
             return false;
@@ -2143,7 +2145,9 @@ export function InventoryCountList({
           }
           quantitiesAppliedRef.current = true;
         } catch (applyErr) {
-          const msg = String(applyErr?.message ?? applyErr);
+          const msg =
+            String(applyErr?.message ?? applyErr).trim() ||
+            "在庫APIの応答を取得できませんでした。通信状況を確認して再度確定してください。";
           toast(`在庫調整エラー: ${msg}`);
           setSubmitting(false);
           return false;
