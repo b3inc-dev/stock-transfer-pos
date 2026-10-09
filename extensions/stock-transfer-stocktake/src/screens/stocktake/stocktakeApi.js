@@ -964,8 +964,11 @@ function mergeExistingNonBlank(counts, existing) {
     }
     if (ex.status === "completed" || ex.status === "cancelled") {
       if (out.status !== "completed" && out.status !== "cancelled") {
+        // status 拒否時は古い payload の groupItems/items で完了ドキュメントを壊さない
         out.status = ex.status;
         out.completedAt = ex.completedAt ?? out.completedAt;
+        if (exHasGroupItems) out.groupItems = ex.groupItems;
+        if (exItems) out.items = ex.items;
       }
     }
     return out;

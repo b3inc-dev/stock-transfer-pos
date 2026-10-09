@@ -2164,10 +2164,13 @@ function mergeExistingNonBlank(counts: InventoryCount[], existing: InventoryCoun
       out.completedAt = ex.completedAt;
     }
     // ✅ 既存が完了/キャンセルのとき、payload の in_progress や draft で上書きしない（多発していた「完了→未処理」の要因を残さない）
+    // status 拒否時は古い payload の groupItems/items で完了ドキュメントを壊さない
     if (ex.status === "completed" || ex.status === "cancelled") {
       if (out.status !== "completed" && out.status !== "cancelled") {
         out.status = ex.status;
         out.completedAt = ex.completedAt ?? out.completedAt;
+        if (exHasGroupItems) out.groupItems = ex.groupItems;
+        if (exItems) out.items = ex.items;
       }
     }
     return out;
