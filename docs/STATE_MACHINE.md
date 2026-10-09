@@ -258,3 +258,9 @@ userErrors（ビジネス）はリトライしても同じ結果になりやす�
 
 二重 setQuantities 防止: `quantitiesAppliedRef` + `InventoryChangeEvent.appEventId` 冪等。  
 Admin 再試行は `pending_complete_v1` からメタのみ適用（在庫 API を叩かない）。
+
+### 同時売上/返品と絶対値 set（analyze: concurrent overwrite）
+
+- 差異あり apply-change（`inventory_count` / `adjustment`）は **activate 成功後**、チャンク直前に available を再読取し `changeFromQuantity` CAS する（`casFromLiveSnapshot`）。
+- 目標値と live が一致する行は set を skip。CAS stale は 1 回再スナップショット後、なお不一致なら明確なエラーで失敗（failed → #16 で再試行可）。
+- **残存**: カウント中〜確定タップ前の売上は絶対値（実数）で上書きし得る（棚卸の業務意図）。差異なし行は apply-change 自体を呼ばない。Admin / POS 直 setQuantities は別経路。

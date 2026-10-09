@@ -143,11 +143,22 @@ gap / 原因分析ドキュメントで「未実装」「準備中」と書い�
 - **詳細要件**: 各機能の正本（棚卸は Canon / 39GROUPS / COMPLETE_RETRY、履歴は `HISTORY_WEBHOOK_METAFIELD_REQUIREMENTS.md`）
 - 台帳と詳細が矛盾する場合は **詳細正本 + 現行コード** を優先し、台帳側を更新する
 
-## D9. API 2026-04 `changeFromQuantity`（記録のみ・2026-10-08）
+## D9. API 2026-04 `changeFromQuantity`（段階実装・更新 2026-10-09）
 
-Shopify Inventory API 2026-04 で concurrency 制御として `changeFromQuantity` が必須化される見込み。  
-**本 workstream では実装しない**（Phase E2）。適用対象は apply-change / loss / order / stocktake setQuantities 経路。  
-API バージョンバンプとセットで別 PR。
+Shopify Inventory API は `changeFromQuantity` を **2026-01 で導入**し、**2026-04 で実質必須**（省略時ランタイムエラー）。
+
+### 実装方針
+
+| 経路 | `changeFromQuantity` | 根拠 |
+|------|----------------------|------|
+| apply-change → setQuantities（**`inventory_count` / `adjustment`**） | **activate 後チャンク直前の live available（CAS）** | 絶対値上書きと同時売上の last-write を縮小。読取失敗は fail-closed。目標値一致行は skip |
+| apply-change → その他 activity（ロス・仕入・転送など） | **`null`（オプトアウト）** | delta 正規化経路。E2 (#13) の明示 null と整合 |
+| ロールバック setQuantities | **`null`** | 復旧優先 |
+| POS 直呼び出し / Admin 棚卸（apply-change 外） | 各経路の既存方針（多くは null） | 本 follow-up の対象外 → **残存リスク** |
+
+- activate **前**に読んだ値での CAS は、`inventoryActivate` が available を書く場合に不整合（従来 D9）。**post-activate / チャンク直前スナップショット**なら安全。
+- 棚卸の業務意図として「計上実数（absolute）を正」は維持。CAS は確定 API 実行中の競合検出であり、カウント中〜確定前の売上を自動マージするわけではない。
+- **API バージョンは `2026-01` 維持**。2026-04 バンプは `@idempotent` とセットの別 PR（E2 #13 方針）。
 
 ## D10. 棚卸確定順と webhook（2026-10-08）
 

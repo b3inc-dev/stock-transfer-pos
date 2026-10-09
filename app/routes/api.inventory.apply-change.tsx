@@ -31,6 +31,22 @@ function isTransientError(errorSummary: string | undefined): boolean {
   );
 }
 
+/** Shopify changeFromQuantity CAS 不一致（同時売上/返品等） */
+function isChangeFromQuantityStale(errorSummary: string | undefined): boolean {
+  if (!errorSummary) return false;
+  const s = errorSummary.toLowerCase();
+  return (
+    s.includes("changefromquantity") ||
+    s.includes("change_from_quantity") ||
+    s.includes("change from quantity")
+  );
+}
+
+/** 棚卸・調整の絶対値 set: activate 後スナップショット CAS（D9 follow-up） */
+function usesPostActivateCas(activity: string): boolean {
+  return activity === "inventory_count" || activity === "adjustment";
+}
+
 const API_VERSION = "2026-01";
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -545,10 +561,29 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const refUri = referenceDocumentUriForActivity(activity, referenceDocumentUri);
-    let result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
-    if (!result.ok && isTransientError(result.error)) {
+    // 棚卸・調整: activate 後に live available を読んで CAS（#13 の null オプトアウトを補完。
+    // activate 前読取での CAS は D9 どおり不整合のため使わない）。
+    const casOpts = usesPostActivateCas(activity) ? { casFromLiveSnapshot: true } : undefined;
+    let result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, casOpts);
+    if (!result.ok && casOpts && isChangeFromQuantityStale(result.error)) {
+      // 再読取スナップショットで 1 回だけ再試行（同時売上の短いレース）
+      await new Promise((r) => setTimeout(r, 400));
+      const staleRetry = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, casOpts);
+      if (staleRetry.ok) {
+        result = staleRetry;
+      } else if (isChangeFromQuantityStale(staleRetry.error)) {
+        result = {
+          ...staleRetry,
+          error:
+            "確定処理中に在庫数が変更されました（売上・返品など）。" +
+            "画面を再読み込みし、在庫数を確認してから再度確定してください。",
+        };
+      } else {
+        result = staleRetry;
+      }
+    } else if (!result.ok && isTransientError(result.error)) {
       await new Promise((r) => setTimeout(r, 1500));
-      const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+      const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, casOpts);
       if (retryResult.ok) result = retryResult;
     }
 
