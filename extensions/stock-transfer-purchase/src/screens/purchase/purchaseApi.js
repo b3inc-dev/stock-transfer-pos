@@ -273,11 +273,25 @@ export async function readPurchaseEntriesFull() {
 }
 
 export async function readPurchaseEntries() {
+  try {
+    const { fetchEntriesFromDb } = await import("../../../../common/appDocumentsApi.js");
+    const fromDb = await fetchEntriesFromDb("purchase");
+    if (fromDb) return fromDb;
+  } catch (e) {
+    console.warn("[purchaseApi] DB read fallback:", e?.message || e);
+  }
   return readPurchaseEntriesFull();
 }
 
 export async function writePurchaseEntries(entries) {
   const arr = Array.isArray(entries) ? entries : [];
+  try {
+    const { saveEntriesToDb } = await import("../../../../common/appDocumentsApi.js");
+    const ok = await saveEntriesToDb("purchase", arr);
+    if (ok) return;
+  } catch (e) {
+    console.warn("[purchaseApi] DB write fallback to metafield:", e?.message || e);
+  }
   const chunkSize = await getPurchaseChunkSize();
   const chunks = [];
   for (let i = 0; i < arr.length; i += chunkSize) {

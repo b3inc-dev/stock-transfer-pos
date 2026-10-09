@@ -67,7 +67,8 @@ async function processOneShop(sessionRecord: {
         admin.request!(opts),
     };
 
-    const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
+    const shopOpts = { shopDomain: shopDomain };
+    const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot, shopOpts);
 
     const now = new Date();
     const hourInShop = getHourInShopTimezone(now, shopTimezone);
@@ -85,7 +86,8 @@ async function processOneShop(sessionRecord: {
       shopId,
       savedSnapshots,
       newSnapshots,
-      dateToSaveStr
+      dateToSaveStr,
+      shopOpts
     );
 
     if (userErrors.length > 0) {

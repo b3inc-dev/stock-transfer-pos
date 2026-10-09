@@ -11,7 +11,6 @@ import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session"
 import {
   normalizeIdForMatch,
 } from "./app.inventory-count";
-import { upsertInventoryCountDocument } from "../utils/inventory-count-document.server";
 import {
   writePendingCompleteBackup,
   readPendingCompleteBackup,
@@ -254,7 +253,7 @@ export async function action({ request }: ActionFunctionArgs) {
   let lastError = "";
   for (let attempt = 1; attempt <= META_RETRY_MAX; attempt++) {
     try {
-      const result = await applyPendingCompleteFromBackup(admin, ownerId, backupPayload);
+      const result = await applyPendingCompleteFromBackup(admin, ownerId, backupPayload, { shop });
       if (!result.ok) {
         const message = result.error || "ステータスの反映に失敗しました";
         lastError = message;
@@ -285,34 +284,8 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
 
-      // Phase F: metafield 成功後に DB へ dual-write（失敗しても metafield 成功は維持）
-      // 直後の読取は metafield のみ（shop dual-read すると古い DB overlay で上書きされる）
-      try {
-        const { readInventoryCountsChunked } = await import("./app.inventory-count");
-        const counts = await readInventoryCountsChunked(admin);
-        const saved = counts.find(
-          (c) =>
-            String(c.id) === String(result.countId) ||
-            normalizeIdForMatch(c.id) === normalizeIdForMatch(result.countId)
-        );
-        if (saved) {
-          await upsertInventoryCountDocument({
-            shop,
-            countId: String(saved.id),
-            countName: saved.countName ?? null,
-            status: String(saved.status || "in_progress"),
-            locationId: saved.locationId ?? null,
-            locationName: saved.locationName ?? null,
-            payload: saved,
-            completedAt: saved.completedAt ?? null,
-          });
-        }
-      } catch (e: unknown) {
-        console.warn(
-          "[api.pos-stocktake-complete] DB dual-write skipped:",
-          e instanceof Error ? e.message : String(e)
-        );
-      }
+      // DB SoT は applyPendingCompleteFromBackup の persistPrepared で済み。
+      // metafield 再読取→upsert は mirror OFF 時に古い metafield で DB を壊すため行わない。
 
       console.warn(
         "STOCKTAKE_API_ORIGIN [server] response 200 ok:true (success) attempt=" +

@@ -638,11 +638,25 @@ export async function readLossEntriesFull() {
 }
 
 export async function readLossEntries() {
+  try {
+    const { fetchEntriesFromDb } = await import("../../../../common/appDocumentsApi.js");
+    const fromDb = await fetchEntriesFromDb("loss");
+    if (fromDb) return fromDb;
+  } catch (e) {
+    console.warn("[lossApi] DB read fallback:", e?.message || e);
+  }
   return readLossEntriesFull();
 }
 
 export async function writeLossEntries(entries) {
   const arr = Array.isArray(entries) ? entries : [];
+  try {
+    const { saveEntriesToDb } = await import("../../../../common/appDocumentsApi.js");
+    const ok = await saveEntriesToDb("loss", arr);
+    if (ok) return;
+  } catch (e) {
+    console.warn("[lossApi] DB write fallback to metafield:", e?.message || e);
+  }
   const chunkSize = await getLossChunkSize();
   const chunks = [];
   for (let i = 0; i < arr.length; i += chunkSize) {

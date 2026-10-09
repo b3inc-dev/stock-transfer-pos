@@ -29,8 +29,9 @@ export type { LocationNode, LossEntryItem, LossEntry } from "../types";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-    let { admin } = await authenticate.admin(request);
+    let { admin, session } = await authenticate.admin(request);
     admin = withGraphQLRetry(admin);
+    const shop = session?.shop ?? "";
 
     // ショップのタイムゾーンを取得
     const shopTimezone = await getShopTimezone(admin);
@@ -78,6 +79,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
       entries = Array.isArray(parsed) ? parsed : [];
     } catch {
       entries = [];
+    }
+  }
+  if (shop) {
+    try {
+      const { preferEntriesFromDb } = await import("../utils/app-entry-document.server");
+      entries = (await preferEntriesFromDb(shop, "loss", entries)) as LossEntry[];
+    } catch (e) {
+      console.warn("[loss] DB prefer skipped:", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -137,34 +146,20 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return entry;
   });
 
-  // lossNameを割り当てたエントリがある場合、metafieldに保存する
+  // lossNameを割り当てたエントリがある場合、DB（+任意ミラー）に保存する
   if (needsUpdate) {
     try {
       const appInstallationId = appData?.data?.currentAppInstallation?.id;
-      if (appInstallationId) {
-        await admin.graphql(
-          `#graphql
-            mutation SetLossEntries($metafields: [MetafieldsSetInput!]!) {
-              metafieldsSet(metafields: $metafields) {
-                metafields { id namespace key }
-                userErrors { field message }
-              }
-            }
-          `,
-          {
-            variables: {
-              metafields: [
-                {
-                  ownerId: appInstallationId,
-                  namespace: LOSS_NS,
-                  key: LOSS_KEY,
-                  type: "json",
-                  value: JSON.stringify(entriesWithLossName),
-                },
-              ],
-            },
-          }
+      if (appInstallationId && shop) {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const res = await persistEntriesForShop(
+          admin,
+          appInstallationId,
+          shop,
+          "loss",
+          entriesWithLossName
         );
+        if (!res.ok) console.error("Failed to update loss entries with lossName:", res.error);
       }
     } catch (error) {
       // エラーが発生しても処理を続行（既存のエントリのlossNameは表示時に計算される）
@@ -216,7 +211,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    const { admin, session } = await authenticate.admin(request);
+    const shop = session?.shop ?? "";
     const formData = await request.formData();
     const entryId = String(formData.get("entryId") || "").trim();
 
@@ -244,6 +240,14 @@ export async function action({ request }: ActionFunctionArgs) {
         entries = Array.isArray(parsed) ? parsed : [];
       } catch {
         entries = [];
+      }
+    }
+    if (shop) {
+      try {
+        const { preferEntriesFromDb } = await import("../utils/app-entry-document.server");
+        entries = (await preferEntriesFromDb(shop, "loss", entries)) as LossEntry[];
+      } catch (e) {
+        console.warn("[loss action] DB prefer skipped:", e instanceof Error ? e.message : String(e));
       }
     }
 

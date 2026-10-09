@@ -271,8 +271,9 @@ async function executePurchaseCancel(
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-    let { admin } = await authenticate.admin(request);
+    let { admin, session } = await authenticate.admin(request);
     admin = withGraphQLRetry(admin);
+    const shop = session?.shop ?? "";
 
     // ショップのタイムゾーンを取得
     const shopTimezone = await getShopTimezone(admin);
@@ -321,6 +322,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
       entries = Array.isArray(parsed) ? parsed : [];
     } catch {
       entries = [];
+    }
+  }
+  if (shop) {
+    try {
+      const { preferEntriesFromDb } = await import("../utils/app-entry-document.server");
+      entries = (await preferEntriesFromDb(shop, "purchase", entries)) as PurchaseEntry[];
+    } catch (e) {
+      console.warn("[purchase] DB prefer skipped:", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -423,6 +432,14 @@ export async function action({ request }: ActionFunctionArgs) {
         entries = Array.isArray(parsed) ? parsed : [];
       } catch {
         entries = [];
+      }
+    }
+    if (shop) {
+      try {
+        const { preferEntriesFromDb } = await import("../utils/app-entry-document.server");
+        entries = (await preferEntriesFromDb(shop, "purchase", entries)) as PurchaseEntry[];
+      } catch (e) {
+        console.warn("[purchase action] DB prefer skipped:", e instanceof Error ? e.message : String(e));
       }
     }
 
@@ -718,29 +735,11 @@ export async function action({ request }: ActionFunctionArgs) {
       const appInstallationId = appData?.data?.currentAppInstallation?.id;
       if (!appInstallationId) return { error: "アプリインストールIDが取得できません" };
       const updated = [newEntry, ...entries];
-      await admin.graphql(
-        `#graphql
-          mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: PURCHASE_NS,
-                key: PURCHASE_KEY,
-                type: "json",
-                value: JSON.stringify(updated),
-              },
-            ],
-          },
-        }
-      );
+      {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "purchase", updated);
+        if (!persistRes.ok) return { error: persistRes.error || "仕入の DB 保存に失敗しました" };
+      }
       return { ok: true, purchaseId: id, purchaseName, revalidate: true };
     }
 
@@ -846,29 +845,11 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!appInstallationId) {
         return { error: "アプリインストールIDが取得できません" };
       }
-      await admin.graphql(
-        `#graphql
-          mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: PURCHASE_NS,
-                key: PURCHASE_KEY,
-                type: "json",
-                value: JSON.stringify(updated),
-              },
-            ],
-          },
-        }
-      );
+      {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "purchase", updated);
+        if (!persistRes.ok) return { error: persistRes.error || "仕入の DB 保存に失敗しました" };
+      }
       return { ok: true };
     }
 
@@ -901,29 +882,11 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!appInstallationId) {
         return { error: "アプリインストールIDが取得できません" };
       }
-      await admin.graphql(
-        `#graphql
-          mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: PURCHASE_NS,
-                key: PURCHASE_KEY,
-                type: "json",
-                value: JSON.stringify(updated),
-              },
-            ],
-          },
-        }
-      );
+      {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "purchase", updated);
+        if (!persistRes.ok) return { error: persistRes.error || "仕入の DB 保存に失敗しました" };
+      }
       return { ok: true };
     }
 

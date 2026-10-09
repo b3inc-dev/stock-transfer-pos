@@ -154,8 +154,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
         admin.graphql(opts.data, { variables: opts.variables ?? {} }),
     };
 
-    // Metafieldから日次スナップショットを読み取る（共通モジュール）
-    const { shopId, shopName, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
+    // DB 優先で日次スナップショットを読み取る（共通モジュール）
+    const { shopId, shopName, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot, {
+      shopDomain: session.shop,
+    });
 
   // ショップのタイムゾーンに基づいて今日の日付を取得
   const now = new Date();
@@ -588,7 +590,8 @@ export async function action({ request }: ActionFunctionArgs) {
         request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
           admin.graphql(opts.data, { variables: opts.variables ?? {} }),
       };
-      const { shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
+      const shopOpts = { shopDomain: session.shop };
+      const { shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot, shopOpts);
       const now = new Date();
       const todayStr = getDateInShopTimezone(now, shopTimezone);
       const [y, m, d] = todayStr.split("-").map(Number);
@@ -597,7 +600,7 @@ export async function action({ request }: ActionFunctionArgs) {
       if (savedSnapshots.snapshots.some((s) => s.date === dateToSaveStr)) {
         return { ok: true, skipped: true, message: "前日分は既に保存済みです。" };
       }
-      const result = await fetchAndSaveSnapshotsForDate(adminForSnapshot, dateToSaveStr);
+      const result = await fetchAndSaveSnapshotsForDate(adminForSnapshot, dateToSaveStr, shopOpts);
       if (!result.ok && result.userErrors?.length) {
         return { ok: false, error: result.userErrors.join(", ") };
       }
@@ -610,14 +613,22 @@ export async function action({ request }: ActionFunctionArgs) {
         request: async (opts: { data: string; variables?: Record<string, unknown> }) =>
           admin.graphql(opts.data, { variables: opts.variables ?? {} }),
       };
-      const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot);
+      const shopOpts = { shopDomain: session.shop };
+      const { shopId, shopTimezone, savedSnapshots } = await getSavedSnapshots(adminForSnapshot, shopOpts);
       const now = new Date();
       const todayStr = getDateInShopTimezone(now, shopTimezone);
       // リアルタイムで在庫情報を取得
       const allItems = await fetchAllInventoryItems(adminForSnapshot);
       const newSnapshots = aggregateSnapshotsFromItems(allItems, todayStr);
-      // スナップショットを保存
-      const { userErrors } = await saveSnapshotsForDate(adminForSnapshot, shopId, savedSnapshots, newSnapshots, todayStr);
+      // スナップショットを保存（DB SoT）
+      const { userErrors } = await saveSnapshotsForDate(
+        adminForSnapshot,
+        shopId,
+        savedSnapshots,
+        newSnapshots,
+        todayStr,
+        shopOpts
+      );
       if (userErrors.length > 0) {
         return { ok: false, error: userErrors.map((e: { message?: string }) => e.message ?? "").join(", ") };
       }

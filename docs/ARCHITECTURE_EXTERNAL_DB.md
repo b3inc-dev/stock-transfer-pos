@@ -190,13 +190,13 @@
    - **Session と InventoryChangeLog だけ** をその PostgreSQL に保存するようにする（Prisma の datasource を `DATABASE_URL` の PostgreSQL に変更し、マイグレーション実施）。  
    - これで「デプロイで履歴が消えない」と「セッションが消えない」を満たす。
 
-2. **Phase 1（次のステップ）**  
-   - 在庫高の**日次スナップショット**を Metafield から DB の新規テーブル（例: `InventoryDailySnapshot`）に移行。  
-   - 書き込み・読み込みを Prisma 経由に切り替え、Metafield の該当キーは使わないようにする。
+2. **歴史的メモ（旧案 Phase 順）** — 日次スナップ → ロス → 棚卸… の順は採用しない。  
+   - 正本は Workstream F の承認順（下記 3）。
 
-3. **Phase 2 以降**  
-   - **ロス履歴** → **棚卸（商品グループ・棚卸ID）** → **仕入履歴** → **発注履歴** の順で、Metafield から DB へ移行。  
-   - 各機能ごとに「Metafield 読み込み」と「DB 読み込み」の切り替え（または DB 優先で Metafield はフォールバック）を実装し、データ移行スクリプトで既存 Metafield を DB に投入。
+3. **実装状況（2026-10 / Workstream F）**  
+   - 承認済み段階移行順: **inventory_counts → product_groups → entries → daily_snapshots**（`settings_v1` は metafield 残置）。  
+   - 実装・運用の正本: [`METAFIELD_DB_CUTOVER.md`](./METAFIELD_DB_CUTOVER.md)。  
+   - 各タイプは DB 優先読取 + metafield フォールバック / ミラー opt-in。
 
 4. **店舗設定**  
    - DB に移すかは任意。移す場合は `AppSettings` テーブルを追加し、設定画面の読み書きを Prisma に切り替える。

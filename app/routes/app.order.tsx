@@ -308,29 +308,11 @@ async function createPurchaseFromOrder(
     // 仕入予定を保存
     const updatedPurchases = [...existingPurchases, newPurchase];
 
-    await admin.graphql(
-      `#graphql
-        mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key }
-            userErrors { field message }
-          }
-        }
-      `,
-      {
-        variables: {
-          metafields: [
-            {
-              ownerId: appInstallationId,
-              namespace: PURCHASE_NS,
-              key: PURCHASE_KEY,
-              type: "json",
-              value: JSON.stringify(updatedPurchases),
-            },
-          ],
-        },
+    {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "purchase", updatedPurchases);
+        if (!persistRes.ok) return { error: persistRes.error || "仕入の DB 保存に失敗しました" };
       }
-    );
 
     return { purchaseId, purchaseName, error: null };
   } catch (e) {
@@ -342,8 +324,9 @@ async function createPurchaseFromOrder(
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
-    let { admin } = await authenticate.admin(request);
+    let { admin, session } = await authenticate.admin(request);
     admin = withGraphQLRetry(admin);
+    const shop = session?.shop ?? "";
 
     // ショップのタイムゾーンを取得
     const shopTimezone = await getShopTimezone(admin);
@@ -419,6 +402,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
       entries = [];
     }
   }
+  if (shop) {
+    try {
+      const { preferEntriesFromDb } = await import("../utils/app-entry-document.server");
+      entries = (await preferEntriesFromDb(shop, "order_request", entries)) as OrderRequestEntry[];
+    } catch (e) {
+      console.warn("[order] DB prefer skipped:", e instanceof Error ? e.message : String(e));
+    }
+  }
 
   // createdAt の新しい順にソート
   entries = [...entries].sort((a, b) => {
@@ -488,29 +479,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
     try {
       const appInstallationId = appData?.data?.currentAppInstallation?.id;
       if (appInstallationId) {
-        await admin.graphql(
-          `#graphql
-            mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-              metafieldsSet(metafields: $metafields) {
-                metafields { id namespace key }
-                userErrors { field message }
-              }
-            }
-          `,
-          {
-            variables: {
-              metafields: [
-                {
-                  ownerId: appInstallationId,
-                  namespace: ORDER_NS,
-                  key: ORDER_KEY,
-                  type: "json",
-                  value: JSON.stringify(entriesWithOrderName),
-                },
-              ],
-            },
-          }
-        );
+        {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "order_request", entriesWithOrderName);
+        if (!persistRes.ok) return { error: persistRes.error || "発注の DB 保存に失敗しました" };
+      }
       }
     } catch (error) {
       console.error("Failed to update order entries with orderName:", error);
@@ -554,7 +527,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    const { admin, session } = await authenticate.admin(request);
+    const shop = session?.shop ?? "";
     const formData = await request.formData();
 
     const intentRaw = String(formData.get("intent") || "loadItems").trim();
@@ -585,6 +559,14 @@ export async function action({ request }: ActionFunctionArgs) {
         entries = Array.isArray(parsed) ? parsed : [];
       } catch {
         entries = [];
+      }
+    }
+    if (shop) {
+      try {
+        const { preferEntriesFromDb } = await import("../utils/app-entry-document.server");
+        entries = (await preferEntriesFromDb(shop, "order_request", entries)) as OrderRequestEntry[];
+      } catch (e) {
+        console.warn("[order action] DB prefer skipped:", e instanceof Error ? e.message : String(e));
       }
     }
 
@@ -725,29 +707,17 @@ export async function action({ request }: ActionFunctionArgs) {
               
               const appInstallationId = appData?.data?.currentAppInstallation?.id;
               if (appInstallationId) {
-                await admin.graphql(
-                  `#graphql
-                    mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-                      metafieldsSet(metafields: $metafields) {
-                        metafields { id namespace key }
-                        userErrors { field message }
-                      }
-                    }
-                  `,
-                  {
-                    variables: {
-                      metafields: [
-                        {
-                          ownerId: appInstallationId,
-                          namespace: ORDER_NS,
-                          key: ORDER_KEY,
-                          type: "json",
-                          value: JSON.stringify(updatedEntries),
-                        },
-                      ],
-                    },
-                  }
+                const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+                const persistRes = await persistEntriesForShop(
+                  admin,
+                  appInstallationId,
+                  shop,
+                  "order_request",
+                  updatedEntries
                 );
+                if (!persistRes.ok) {
+                  return { error: persistRes.error || "発注の DB 保存に失敗しました" };
+                }
               }
             }
             
@@ -791,29 +761,11 @@ export async function action({ request }: ActionFunctionArgs) {
       );
 
       // Metafield に保存
-      await admin.graphql(
-        `#graphql
-          mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: ORDER_NS,
-                key: ORDER_KEY,
-                type: "json",
-                value: JSON.stringify(updatedEntries),
-              },
-            ],
-          },
-        }
-      );
+      {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "order_request", updatedEntries);
+        if (!persistRes.ok) return { error: persistRes.error || "発注の DB 保存に失敗しました" };
+      }
 
       return {
         ok: true,
@@ -900,29 +852,11 @@ export async function action({ request }: ActionFunctionArgs) {
       );
 
       // Metafield に保存
-      await admin.graphql(
-        `#graphql
-          mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: ORDER_NS,
-                key: ORDER_KEY,
-                type: "json",
-                value: JSON.stringify(updatedEntries),
-              },
-            ],
-          },
-        }
-      );
+      {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "order_request", updatedEntries);
+        if (!persistRes.ok) return { error: persistRes.error || "発注の DB 保存に失敗しました" };
+      }
 
       return {
         ok: true,
@@ -965,29 +899,11 @@ export async function action({ request }: ActionFunctionArgs) {
       );
 
       // Metafield に保存
-      await admin.graphql(
-        `#graphql
-          mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: ORDER_NS,
-                key: ORDER_KEY,
-                type: "json",
-                value: JSON.stringify(updatedEntries),
-              },
-            ],
-          },
-        }
-      );
+      {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "order_request", updatedEntries);
+        if (!persistRes.ok) return { error: persistRes.error || "発注の DB 保存に失敗しました" };
+      }
 
       return {
         ok: true,
@@ -1015,29 +931,11 @@ export async function action({ request }: ActionFunctionArgs) {
       );
 
       // Metafield に保存
-      await admin.graphql(
-        `#graphql
-          mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: ORDER_NS,
-                key: ORDER_KEY,
-                type: "json",
-                value: JSON.stringify(updatedEntries),
-              },
-            ],
-          },
-        }
-      );
+      {
+        const { persistEntriesForShop } = await import("../utils/persist-app-entries.server");
+        const persistRes = await persistEntriesForShop(admin, appInstallationId, shop, "order_request", updatedEntries);
+        if (!persistRes.ok) return { error: persistRes.error || "発注の DB 保存に失敗しました" };
+      }
 
       return {
         ok: true,
