@@ -1955,16 +1955,20 @@ export function InventoryCountList({
     });
   }, [lines]);
 
-  const enterMetafieldRetryState = useCallback((countId, payload, message) => {
+  const enterMetafieldRetryState = useCallback((countId, payload, message, backupPersisted) => {
     setNeedMetafieldRetry(true);
     setMetafieldRetryCountId(countId || count?.id || null);
     pendingCompletePayloadRef.current = payload || null;
     setIsReadOnlyState(true);
     // ゼロ差分（apply-change 未実行）では「在庫調整は完了」と誤認させない
     const defaultMsg = quantitiesAppliedRef.current
-      ? "在庫調整は完了しています。ステータスの反映に失敗しました。「再試行」を押してください。"
+      ? "在庫調整は完了しています。ステータスの反映に失敗しました。「再試行」を押してください（在庫は二重に変わりません）。"
       : "ステータスの反映に失敗しました。「再試行」を押してください。";
-    toast(message || defaultMsg);
+    const backupHint =
+      backupPersisted === false
+        ? "（再試行用バックアップ未保存。この画面の「再試行」でフル送信してください）"
+        : "";
+    toast((message || defaultMsg) + backupHint);
   }, [count?.id]);
 
   const handleComplete = useCallback(async () => {
@@ -2067,7 +2071,7 @@ export function InventoryCountList({
         const result = await reportStocktakeCompleteToApi(payload);
         if (!result.ok) {
           if (result.needMetafieldRetry || quantitiesAppliedRef.current) {
-            enterMetafieldRetryState(count.id, payload, result.error);
+            enterMetafieldRetryState(count.id, payload, result.error, result.backupPersisted);
             setSubmitting(false);
             return false;
           }
@@ -2157,7 +2161,7 @@ export function InventoryCountList({
       const resultResult = await reportStocktakeCompleteToApi(payloadResult);
       if (!resultResult.ok) {
         if (resultResult.needMetafieldRetry || quantitiesAppliedRef.current) {
-          enterMetafieldRetryState(count.id, payloadResult, resultResult.error);
+          enterMetafieldRetryState(count.id, payloadResult, resultResult.error, resultResult.backupPersisted);
           setSubmitting(false);
           return false;
         }

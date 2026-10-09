@@ -8,7 +8,10 @@ import {
   normalizeIdForMatch,
   type InventoryCount,
 } from "../routes/app.inventory-count";
-import { resolveStocktakeCompleteStatus } from "./stocktake-complete-status";
+import {
+  interpretMetafieldsSetWriteResult,
+  mergePendingCompleteIntoCounts,
+} from "./stocktake-pending-complete-merge";
 
 export const STOCKTAKE_NS = "stock_transfer_pos";
 export const PENDING_COMPLETE_KEY = "pending_complete_v1";
@@ -32,11 +35,15 @@ type AdminGraphql = {
   graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response>;
 };
 
+/**
+ * pending_complete_v1 を書く。成功/失敗を呼び出し元が判定できるようにする
+ * （失敗を握りつぶすと Admin retryOnly が 404 になるギャップがあった）。
+ */
 export async function writePendingCompleteBackup(
   admin: AdminGraphql,
   ownerId: string,
   backup: PendingCompleteBackup | null
-): Promise<void> {
+): Promise<{ ok: boolean; error?: string }> {
   const value = backup ? JSON.stringify(backup) : "{}";
   const mutation = `#graphql mutation SetPendingComplete($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) { userErrors { message } }
@@ -57,13 +64,22 @@ export async function writePendingCompleteBackup(
     });
     const json = (await resp.json().catch(() => ({}))) as {
       data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } };
-      errors?: unknown[];
+      errors?: Array<{ message?: string }>;
     };
-    if (json?.errors?.length || (json?.data?.metafieldsSet?.userErrors?.length ?? 0) > 0) {
-      console.warn("[pending-complete] write warnings:", json?.errors || json?.data?.metafieldsSet?.userErrors);
+    const interpreted = interpretMetafieldsSetWriteResult({
+      httpOk: resp.ok,
+      httpStatus: resp.status,
+      json,
+    });
+    if (!interpreted.ok) {
+      console.warn("[pending-complete] write failed:", interpreted.error);
+      return interpreted;
     }
+    return { ok: true };
   } catch (e: unknown) {
-    console.warn("[pending-complete] write failed:", e instanceof Error ? e.message : String(e));
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[pending-complete] write failed:", msg);
+    return { ok: false, error: msg };
   }
 }
 
@@ -103,6 +119,8 @@ export async function applyPendingCompleteFromBackup(
   countId: string;
   status?: "completed" | "in_progress";
   completedAt?: string;
+  /** dual-write 用。成功時は再 readInventoryCountsChunked 不要 */
+  savedCount?: InventoryCount;
 }> {
   const countId = backup.countId;
   const completedGroups = backup.completedGroups;
@@ -125,61 +143,35 @@ export async function applyPendingCompleteFromBackup(
     return { ok: false, error: "棚卸が見つかりません", countId };
   }
 
-  const groupItemsMap: Record<string, unknown[]> =
-    (count as { groupItems?: Record<string, unknown[]> }).groupItems && typeof (count as { groupItems?: unknown }).groupItems === "object"
-      ? { ...((count as { groupItems: Record<string, unknown[]> }).groupItems) }
-      : {};
-
-  for (const { groupId: gid, items } of completedGroups) {
-    const entry = items.map((i) => ({
-      inventoryItemId: i.inventoryItemId,
-      variantId: i.variantId,
-      sku: i.sku ?? "",
-      title: i.title ?? "",
-      currentQuantity: Number(i.currentQuantity),
-      actualQuantity: Number(i.actualQuantity),
-      delta: Number(i.actualQuantity) - Number(i.currentQuantity),
-    }));
-    const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(gid)) ?? gid;
-    groupItemsMap[key] = entry;
+  const { updatedCounts, savedCount, status, completedAt } = mergePendingCompleteIntoCounts({
+    inventoryCounts: inventoryCounts as InventoryCount[],
+    countId,
+    completedGroups,
+  });
+  if (!savedCount) {
+    return { ok: false, error: "棚卸が見つかりません", countId };
   }
 
-  const completedGroupIds = completedGroups.map((g) => g.groupId);
-  const { status, allDone, groupIdsForCheck } = resolveStocktakeCompleteStatus({
-    productGroupIds: count.productGroupIds,
-    productGroupId: (count as { productGroupId?: string }).productGroupId,
-    cancelledGroupIds: (count as { cancelledGroupIds?: string[] }).cancelledGroupIds,
-    groupItemsMap,
-    completedGroupIds,
-  });
-  const completedAt = allDone ? new Date().toISOString() : undefined;
-  const hadProductGroupIds =
-    (Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0) ||
-    Boolean((count as { productGroupId?: string }).productGroupId);
-
-  const updatedCounts: InventoryCount[] = inventoryCounts.map((c) => {
-    if (String(c.id) !== String(countId) && normalizeIdForMatch((c as { id?: string }).id) !== normalizeIdForMatch(countId)) {
-      return c;
-    }
-    const next: InventoryCount = {
-      ...c,
-      groupItems: groupItemsMap,
-      status,
-      completedAt,
-    };
-    // 単一グループ等で productGroupIds が欠落していた場合、補完して次回読込でも allDone が正しくなるようにする
-    if (!hadProductGroupIds && groupIdsForCheck.length > 0) {
-      next.productGroupIds = groupIdsForCheck;
-    }
-    return next;
-  });
-
-  const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts, ownerId);
+  const { userErrors } = await writeInventoryCountsChunked(
+    admin,
+    updatedCounts as InventoryCount[],
+    ownerId
+  );
   if (userErrors.length > 0) {
     const message = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "保存に失敗しました";
     return { ok: false, error: message, countId };
   }
 
-  await writePendingCompleteBackup(admin, ownerId, null);
-  return { ok: true, countId, status, completedAt };
+  const clearResult = await writePendingCompleteBackup(admin, ownerId, null);
+  if (!clearResult.ok) {
+    // メタ本体は更新済み。バックアップ削除失敗は Admin が誤って再試行必要と見なす程度のため非致命。
+    console.warn("[pending-complete] clear backup after success failed:", clearResult.error);
+  }
+  return {
+    ok: true,
+    countId,
+    status,
+    completedAt,
+    savedCount: savedCount as InventoryCount,
+  };
 }
