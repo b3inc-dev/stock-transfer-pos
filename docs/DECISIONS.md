@@ -175,6 +175,7 @@ Shopify Inventory API は `changeFromQuantity` を **2026-01 で導入**し、**
 - E2 が apply-change に明示 `null` を入れる場合でも、**`inventory_count` / `adjustment` の post-activate CAS を再 null 化しない**。
 - activate **前**読取 CAS は不整合（従来 D9）。**post-activate / チャンク直前**のみ。
 - **API バージョンは `2026-01` 維持**。2026-04 バンプは `@idempotent` とセットの別 PR。
+- **検証（2026-10-09）**: #13 tip `3e11437`（main `f8efd40`）は count/adjustment を再 null せず #19 に委譲。delta のみ post-activate CAS。双方 #19-first 合意。#13 tip を本 PR に先行 merge しない（着地後に #13 rebase）。
 
 ## D10. 棚卸確定順と webhook（2026-10-08）
 
