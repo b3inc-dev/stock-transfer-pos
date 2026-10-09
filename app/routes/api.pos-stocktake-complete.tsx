@@ -314,8 +314,21 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
 
-      console.warn("STOCKTAKE_API_ORIGIN [server] response 200 ok:true (success) attempt=" + attempt);
-      return jsonResponse({ ok: true }, 200);
+      console.warn(
+        "STOCKTAKE_API_ORIGIN [server] response 200 ok:true (success) attempt=" +
+          attempt +
+          " status=" +
+          (result.status ?? "?")
+      );
+      return jsonResponse(
+        {
+          ok: true,
+          status: result.status ?? "in_progress",
+          completedAt: result.completedAt,
+          countId: result.countId,
+        },
+        200
+      );
     } catch (e: unknown) {
       lastError = e instanceof Error ? e.message : String(e);
       console.error("[api.pos-stocktake-complete] attempt failed:", lastError);

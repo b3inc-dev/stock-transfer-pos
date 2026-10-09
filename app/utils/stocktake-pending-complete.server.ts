@@ -5,10 +5,10 @@
 import {
   readInventoryCountsChunked,
   writeInventoryCountsChunked,
-  getGroupItemsByKey,
   normalizeIdForMatch,
   type InventoryCount,
 } from "../routes/app.inventory-count";
+import { resolveStocktakeCompleteStatus } from "./stocktake-complete-status";
 
 export const STOCKTAKE_NS = "stock_transfer_pos";
 export const PENDING_COMPLETE_KEY = "pending_complete_v1";
@@ -97,7 +97,13 @@ export async function applyPendingCompleteFromBackup(
   admin: AdminGraphql,
   ownerId: string,
   backup: PendingCompleteBackup
-): Promise<{ ok: boolean; error?: string; countId: string }> {
+): Promise<{
+  ok: boolean;
+  error?: string;
+  countId: string;
+  status?: "completed" | "in_progress";
+  completedAt?: string;
+}> {
   const countId = backup.countId;
   const completedGroups = backup.completedGroups;
   if (!countId || !completedGroups?.length) {
@@ -138,24 +144,34 @@ export async function applyPendingCompleteFromBackup(
     groupItemsMap[key] = entry;
   }
 
-  const allIds =
-    Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0
-      ? count.productGroupIds
-      : (count as { productGroupId?: string }).productGroupId
-        ? [(count as { productGroupId: string }).productGroupId]
-        : [];
-  const allDone = allIds.length > 0 && allIds.every((id) => getGroupItemsByKey(groupItemsMap, id).length > 0);
+  const completedGroupIds = completedGroups.map((g) => g.groupId);
+  const { status, allDone, groupIdsForCheck } = resolveStocktakeCompleteStatus({
+    productGroupIds: count.productGroupIds,
+    productGroupId: (count as { productGroupId?: string }).productGroupId,
+    cancelledGroupIds: (count as { cancelledGroupIds?: string[] }).cancelledGroupIds,
+    groupItemsMap,
+    completedGroupIds,
+  });
+  const completedAt = allDone ? new Date().toISOString() : undefined;
+  const hadProductGroupIds =
+    (Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0) ||
+    Boolean((count as { productGroupId?: string }).productGroupId);
 
   const updatedCounts: InventoryCount[] = inventoryCounts.map((c) => {
     if (String(c.id) !== String(countId) && normalizeIdForMatch((c as { id?: string }).id) !== normalizeIdForMatch(countId)) {
       return c;
     }
-    return {
+    const next: InventoryCount = {
       ...c,
       groupItems: groupItemsMap,
-      status: allDone ? ("completed" as const) : ("in_progress" as const),
-      completedAt: allDone ? new Date().toISOString() : undefined,
+      status,
+      completedAt,
     };
+    // 単一グループ等で productGroupIds が欠落していた場合、補完して次回読込でも allDone が正しくなるようにする
+    if (!hadProductGroupIds && groupIdsForCheck.length > 0) {
+      next.productGroupIds = groupIdsForCheck;
+    }
+    return next;
   });
 
   const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts, ownerId);
@@ -165,5 +181,5 @@ export async function applyPendingCompleteFromBackup(
   }
 
   await writePendingCompleteBackup(admin, ownerId, null);
-  return { ok: true, countId };
+  return { ok: true, countId, status, completedAt };
 }

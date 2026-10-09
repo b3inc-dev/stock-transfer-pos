@@ -7703,7 +7703,7 @@ export default function InventoryCountPage() {
                   }}
                 >
                   <s-stack gap="small">
-                    <s-text type="strong">メタ更新の再試行が必要です</s-text>
+                    <s-text type="strong">再試行が必要です</s-text>
                     <s-text>
                       棚卸ID{" "}
                       <strong>
@@ -7713,7 +7713,7 @@ export default function InventoryCountPage() {
                             normalizeIdForMatch(c.id) === normalizeIdForMatch(pendingMetafieldRetry.countId)
                         )?.countName || pendingMetafieldRetry.countId}
                       </strong>
-                      は在庫調整済みですが、ステータス（メタフィールド）の反映に失敗しています。商品リストは編集せず、「再試行（メタ更新のみ）」を実行してください。
+                      は在庫調整済みですが、ステータス反映に失敗しています。商品リストは編集せず、「再試行」を実行してください。
                     </s-text>
                     {pendingMetafieldRetry.completedGroupIds?.length ? (
                       <s-text color="subdued">
@@ -7727,7 +7727,7 @@ export default function InventoryCountPage() {
                       </s-text>
                     ) : null}
                     {metafieldRetryFetcher.data && (metafieldRetryFetcher.data as { ok?: boolean }).ok === true ? (
-                      <s-text tone="success">メタ更新の再試行が完了しました。</s-text>
+                      <s-text tone="success">再試行が完了しました。</s-text>
                     ) : null}
                     <div>
                       <s-button
@@ -7741,7 +7741,7 @@ export default function InventoryCountPage() {
                           metafieldRetryFetcher.submit(fd, { method: "post" });
                         }}
                       >
-                        {metafieldRetryFetcher.state !== "idle" ? "再試行中..." : "再試行（メタ更新のみ）"}
+                        {metafieldRetryFetcher.state !== "idle" ? "再試行中..." : "再試行"}
                       </s-button>
                     </div>
                   </s-stack>
@@ -9121,7 +9121,7 @@ export default function InventoryCountPage() {
                     <button
                       type="button"
                       disabled={editDisabled}
-                      title={isPendingMetafieldRetry ? "メタ更新の再試行が必要です。編集せず再試行してください。" : undefined}
+                      title={isPendingMetafieldRetry ? "再試行が必要です。編集せず再試行してください。" : undefined}
                       onClick={() => setModalEditMode(true)}
                       style={{
                         padding: "8px 16px",

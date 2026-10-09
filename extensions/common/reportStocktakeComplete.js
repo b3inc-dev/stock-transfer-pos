@@ -7,7 +7,7 @@
  * @param {Array} [opts.items] - 単一グループ時の items
  * @param {Array} [opts.completedGroups] - 複数グループ一括確定時
  * @param {boolean} [opts.retryOnly] - メタ更新のみ再試行（バックアップから復元）
- * @returns {Promise<{ ok: boolean; error?: string; needMetafieldRetry?: boolean; countId?: string; completedGroupIds?: string[] }>}
+ * @returns {Promise<{ ok: boolean; error?: string; needMetafieldRetry?: boolean; countId?: string; completedGroupIds?: string[]; status?: string; completedAt?: string }>}
  */
 export async function reportStocktakeCompleteToApi({ countId, groupId, items, completedGroups, retryOnly }) {
   const session = globalThis?.shopify?.session;
@@ -85,7 +85,12 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
         completedGroupIds: data?.completedGroupIds,
       };
     }
-    return { ok: true };
+    return {
+      ok: true,
+      status: typeof data?.status === "string" ? data.status : undefined,
+      completedAt: typeof data?.completedAt === "string" ? data.completedAt : undefined,
+      countId: data?.countId ?? countId,
+    };
   } catch (e) {
     clearTimeout(timeoutId);
     const msg = e?.message ?? String(e);
