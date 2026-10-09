@@ -69,6 +69,35 @@ const CONFIRM_INVENTORY_COUNT_MODAL_ID = "confirm-inventory-count-modal";
 /** 表示ページネーション: 1ページあたりの表示件数（STOCKTAKE_POS_LIST_PERFORMANCE_REQUIREMENTS.md） */
 // LIST_ITEMS_PER_PAGE: extensions/common/listDisplayPagination.js（E7 横断）
 
+/**
+ * 棚卸確定で apply-change が必要な行か（数値正規化後の差分のみ）。
+ * 生比較 `!==` だと型差でゼロ差分が調整対象に入り、在庫調整 toast が誤表示され得る。
+ * null/"" は Number() すると 0 になるため、未設定は調整対象にしない（旧 Number.isFinite 生値チェックと同趣旨）。
+ */
+function lineHasQuantityDelta(l) {
+  if (!l || l.isReadOnly || !l.inventoryItemId) return false;
+  if (l.currentQuantity == null || l.actualQuantity == null) return false;
+  if (l.currentQuantity === "" || l.actualQuantity === "") return false;
+  const before = Number(l.currentQuantity);
+  const after = Number(l.actualQuantity);
+  if (!Number.isFinite(before) || !Number.isFinite(after)) return false;
+  return before !== after;
+}
+
+/** apply-change 用 entries。quantityAfter === quantityBefore は除外（no-op で API/toast を避ける） */
+function buildAdjustEntries(linesToAdjust) {
+  return (linesToAdjust || [])
+    .filter(lineHasQuantityDelta)
+    .map((l) => ({
+      inventoryItemId: l.inventoryItemId,
+      variantId: l.variantId ?? undefined,
+      sku: l.sku ?? undefined,
+      quantityAfter: Number(l.actualQuantity),
+      quantityBefore: Number(l.currentQuantity),
+    }))
+    .filter((e) => e.quantityAfter !== e.quantityBefore);
+}
+
 // groupItems のキー照合（GID と数値 ID の混在で取れない不具合対策。管理画面と POS で明細数が一致するようにする）
 function getGroupItemsByKey(groupItemsMap, groupId) {
   if (!groupId || !groupItemsMap || typeof groupItemsMap !== "object") return [];
@@ -1904,12 +1933,9 @@ export function InventoryCountList({
   }, [denyEdit]);
 
   // 棚卸完了
-  // 調整対象アイテムを計算（モーダル表示用）
+  // 調整対象アイテムを計算（モーダル表示用）— 数値正規化後のゼロ差分は含めない
   const itemsToAdjust = useMemo(() => {
-    return lines
-      .filter((l) => !l.isReadOnly) // ✅ まとめて表示モードで完了済みの商品は除外
-      .filter((l) => l.inventoryItemId && Number.isFinite(l.currentQuantity) && Number.isFinite(l.actualQuantity))
-      .filter((l) => l.currentQuantity !== l.actualQuantity);
+    return lines.filter(lineHasQuantityDelta);
   }, [lines]);
 
   const buildGroupItemsEntry = useCallback(() => {
@@ -1934,10 +1960,11 @@ export function InventoryCountList({
     setMetafieldRetryCountId(countId || count?.id || null);
     pendingCompletePayloadRef.current = payload || null;
     setIsReadOnlyState(true);
-    toast(
-      message ||
-        "在庫調整は完了しています。メタ更新に失敗しました。「再試行（メタ更新のみ）」を押してください。"
-    );
+    // ゼロ差分（apply-change 未実行）では「在庫調整は完了」と誤認させない
+    const defaultMsg = quantitiesAppliedRef.current
+      ? "在庫調整は完了しています。ステータスの反映に失敗しました。「再試行」を押してください。"
+      : "ステータスの反映に失敗しました。「再試行」を押してください。";
+    toast(message || defaultMsg);
   }, [count?.id]);
 
   const handleComplete = useCallback(async () => {
@@ -1962,8 +1989,16 @@ export function InventoryCountList({
           setMetafieldRetryCountId(null);
           pendingCompletePayloadRef.current = null;
           quantitiesAppliedRef.current = false;
-          toast("棚卸を完了しました（メタ更新）");
-          onAfterConfirm?.(count);
+          const nextStatus = result.status === "completed" ? "completed" : result.status === "in_progress" ? "in_progress" : "completed";
+          const nextCount = {
+            ...count,
+            status: nextStatus,
+            ...(nextStatus === "completed"
+              ? { completedAt: result.completedAt || new Date().toISOString() }
+              : {}),
+          };
+          toast(nextStatus === "completed" ? "棚卸を完了しました" : "確定を反映しました");
+          onAfterConfirm?.(nextCount);
           clearAllInventoryCountDraftsForCount({
             countId: count.id,
             locationId: count.locationId,
@@ -1971,7 +2006,7 @@ export function InventoryCountList({
           }).catch((e) => console.error("Failed to clear inventory count draft:", e));
           return true;
         }
-        toast(result.error || "メタ更新の再試行に失敗しました");
+        toast(result.error || "再試行に失敗しました");
         return false;
       } catch (e) {
         toast(`エラー: ${e?.message ?? e}`);
@@ -1989,9 +2024,8 @@ export function InventoryCountList({
         return false;
       }
 
-      const allItemsToAdjust = editableLines
-        .filter((l) => l.inventoryItemId && Number.isFinite(l.currentQuantity) && Number.isFinite(l.actualQuantity))
-        .filter((l) => l.currentQuantity !== l.actualQuantity);
+      const allItemsToAdjust = editableLines.filter(lineHasQuantityDelta);
+      const entriesAdjust = buildAdjustEntries(allItemsToAdjust);
 
       const locallyBuilt = buildUpdatedCountFromLocalState(count, lines, {
         isMultipleMode: true,
@@ -2003,15 +2037,9 @@ export function InventoryCountList({
       setSubmitting(true);
       try {
         // 現行正本順: 差異ありは apply-change（setQuantities+履歴）→ metafield。履歴先行で webhook early-return。
-        if (allItemsToAdjust.length > 0 && !quantitiesAppliedRef.current) {
+        // ゼロ差分（entries 空）は apply-change を呼ばず、在庫調整 toast も出さない。
+        if (entriesAdjust.length > 0 && !quantitiesAppliedRef.current) {
           const appEventId = buildStableAppEventId("inventory_count", count.id, "multi");
-          const entriesAdjust = allItemsToAdjust.map((l) => ({
-            inventoryItemId: l.inventoryItemId,
-            variantId: l.variantId ?? undefined,
-            sku: l.sku ?? undefined,
-            quantityAfter: Number(l.actualQuantity ?? 0),
-            quantityBefore: Number(l.currentQuantity ?? 0),
-          }));
           try {
             const applyResult = await applyInventoryChangeToApi({
               appEventId,
@@ -2027,7 +2055,9 @@ export function InventoryCountList({
             }
             quantitiesAppliedRef.current = true;
           } catch (applyErr) {
-            const msg = String(applyErr?.message ?? applyErr);
+            const msg =
+              String(applyErr?.message ?? applyErr).trim() ||
+              "在庫APIの応答を取得できませんでした。通信状況を確認して再度確定してください。";
             toast(`在庫調整エラー: ${msg}`);
             setSubmitting(false);
             return false;
@@ -2041,14 +2071,26 @@ export function InventoryCountList({
             setSubmitting(false);
             return false;
           }
-          toast(result.error || "メタの更新に失敗しました。再読み込みしてから再度確定してください。");
+          toast(result.error || "ステータスの反映に失敗しました。再読み込みしてから再度確定してください。");
           setSubmitting(false);
           return false;
         }
         quantitiesAppliedRef.current = false;
         setNeedMetafieldRetry(false);
-        toast("棚卸を完了しました");
-        onAfterConfirm?.(locallyBuilt);
+        {
+          const serverStatus = result.status === "completed" || result.status === "in_progress" ? result.status : null;
+          const confirmed = serverStatus
+            ? {
+                ...locallyBuilt,
+                status: serverStatus,
+                ...(serverStatus === "completed"
+                  ? { completedAt: result.completedAt || locallyBuilt.completedAt || new Date().toISOString() }
+                  : {}),
+              }
+            : locallyBuilt;
+          toast(confirmed.status === "completed" ? "棚卸を完了しました" : "確定を反映しました");
+          onAfterConfirm?.(confirmed);
+        }
         clearAllInventoryCountDraftsForCount({
           countId: count.id,
           locationId: count.locationId,
@@ -2084,15 +2126,10 @@ export function InventoryCountList({
 
     setSubmitting(true);
     try {
-      if (itemsToAdjust.length > 0 && !quantitiesAppliedRef.current) {
+      const entriesSingle = buildAdjustEntries(itemsToAdjust);
+      // ゼロ差分は apply-change スキップ（在庫調整 toast 抑止）。metafield 完了フローは継続。
+      if (entriesSingle.length > 0 && !quantitiesAppliedRef.current) {
         const appEventId = buildStableAppEventId("inventory_count", count.id, currentGroupId);
-        const entriesSingle = itemsToAdjust.map((l) => ({
-          inventoryItemId: l.inventoryItemId,
-          variantId: l.variantId ?? undefined,
-          sku: l.sku ?? undefined,
-          quantityAfter: Number(l.actualQuantity ?? 0),
-          quantityBefore: Number(l.currentQuantity ?? 0),
-        }));
         try {
           const applyResult = await applyInventoryChangeToApi({
             appEventId,
@@ -2108,7 +2145,9 @@ export function InventoryCountList({
           }
           quantitiesAppliedRef.current = true;
         } catch (applyErr) {
-          const msg = String(applyErr?.message ?? applyErr);
+          const msg =
+            String(applyErr?.message ?? applyErr).trim() ||
+            "在庫APIの応答を取得できませんでした。通信状況を確認して再度確定してください。";
           toast(`在庫調整エラー: ${msg}`);
           setSubmitting(false);
           return false;
@@ -2122,14 +2161,30 @@ export function InventoryCountList({
           setSubmitting(false);
           return false;
         }
-        toast(resultResult.error || "メタの更新に失敗しました。再読み込みしてから再度確定してください。");
+        toast(resultResult.error || "ステータスの反映に失敗しました。再読み込みしてから再度確定してください。");
         setSubmitting(false);
         return false;
       }
       quantitiesAppliedRef.current = false;
       setNeedMetafieldRetry(false);
-      toast("棚卸を完了しました");
-      onAfterConfirm?.(locallyBuiltResult);
+      {
+        const serverStatus =
+          resultResult.status === "completed" || resultResult.status === "in_progress" ? resultResult.status : null;
+        const confirmed = serverStatus
+          ? {
+              ...locallyBuiltResult,
+              status: serverStatus,
+              ...(serverStatus === "completed"
+                ? {
+                    completedAt:
+                      resultResult.completedAt || locallyBuiltResult.completedAt || new Date().toISOString(),
+                  }
+                : {}),
+            }
+          : locallyBuiltResult;
+        toast(confirmed.status === "completed" ? "棚卸を完了しました" : "確定を反映しました");
+        onAfterConfirm?.(confirmed);
+      }
       clearAllInventoryCountDraftsForCount({
         countId: count.id,
         locationId: count.locationId,
@@ -2416,7 +2471,7 @@ export function InventoryCountList({
         summaryRight=""
         leftLabel="戻る"
         onLeft={onBack}
-        rightLabel={submitting ? "処理中..." : needMetafieldRetry ? "再試行（メタ更新のみ）" : "確定"}
+        rightLabel={submitting ? "処理中..." : needMetafieldRetry ? "再試行" : "確定"}
         onRight={needMetafieldRetry ? () => { handleComplete(); } : () => {
           // command="--show"とcommandForでモーダルを開くため、ここでは何もしない
         }}

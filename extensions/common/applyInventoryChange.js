@@ -91,7 +91,17 @@ export async function applyInventoryChangeToApi({
         return data;
       }
 
-      const msg = data?.error || res.statusText || "Request failed";
+      // 空 error / Unknown 固定を避け、HTTP 状況と errorCode を POS toast に載せる
+      const rawErr = typeof data?.error === "string" ? data.error.trim() : "";
+      const code = typeof data?.errorCode === "string" && data.errorCode.trim() ? data.errorCode.trim() : "";
+      let msg = rawErr;
+      if (!msg || /^unknown(\s+error)?$/i.test(msg)) {
+        msg =
+          res.statusText?.trim() ||
+          `在庫APIリクエストに失敗しました（HTTP ${res.status}${code ? ` / ${code}` : ""}）`;
+      } else if (code && !msg.includes(code)) {
+        msg = `${msg} [${code}]`;
+      }
       lastError = new Error(data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`);
 
       if (res.status === 401 && attempt < MAX_REQUEST_RETRIES) {

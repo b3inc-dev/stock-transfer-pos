@@ -256,7 +256,7 @@ export async function action({ request }: ActionFunctionArgs) {
     try {
       const result = await applyPendingCompleteFromBackup(admin, ownerId, backupPayload);
       if (!result.ok) {
-        const message = result.error || "メタ更新に失敗しました";
+        const message = result.error || "ステータスの反映に失敗しました";
         lastError = message;
         if (message.includes("棚卸が見つかりません")) {
           return jsonResponse({ ok: false, error: message, needMetafieldRetry: false, countId }, 400);
@@ -266,7 +266,7 @@ export async function action({ request }: ActionFunctionArgs) {
             {
               ok: false,
               error:
-                "棚卸データの一部（メタフィールド）が欠落しています。管理画面の棚卸一覧で「修復」を実行するか、サポートにお問い合わせください。",
+                "棚卸データの一部が欠落しています。管理画面の棚卸一覧で「修復」を実行するか、サポートにお問い合わせください。",
               needMetafieldRetry: true,
               countId,
               completedGroupIds,
@@ -314,8 +314,21 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
 
-      console.warn("STOCKTAKE_API_ORIGIN [server] response 200 ok:true (success) attempt=" + attempt);
-      return jsonResponse({ ok: true }, 200);
+      console.warn(
+        "STOCKTAKE_API_ORIGIN [server] response 200 ok:true (success) attempt=" +
+          attempt +
+          " status=" +
+          (result.status ?? "?")
+      );
+      return jsonResponse(
+        {
+          ok: true,
+          status: result.status ?? "in_progress",
+          completedAt: result.completedAt,
+          countId: result.countId,
+        },
+        200
+      );
     } catch (e: unknown) {
       lastError = e instanceof Error ? e.message : String(e);
       console.error("[api.pos-stocktake-complete] attempt failed:", lastError);
@@ -337,7 +350,7 @@ export async function action({ request }: ActionFunctionArgs) {
   return jsonResponse(
     {
       ok: false,
-      error: lastError || "メタ更新に失敗しました。再試行してください。",
+      error: lastError || "ステータスの反映に失敗しました。再試行してください。",
       needMetafieldRetry: true,
       countId,
       completedGroupIds,

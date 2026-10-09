@@ -47,6 +47,87 @@ export type EnsureResult = {
   errors: Array<{ inventoryItemId: string; message: string }>;
 };
 
+export type VerifyLevelsResult = {
+  ok: boolean;
+  /** 読取成功かつ inventoryLevel 無しと判定できた GID */
+  missingInventoryItemIds: string[];
+  /** GraphQL/通信で確認できなかった GID（欠けているとは断定しない） */
+  uncertainInventoryItemIds: string[];
+};
+
+/** activate / setQuantities 間の伝播待ち（Shopify inventoryLevel 反映） */
+const POST_ACTIVATE_SETTLE_MS = 500;
+
+/**
+ * 指定ロケーションに inventoryLevel が存在するかを一括確認する。
+ * apply-change で activate 成功後の再 ensure 対象選定に使う。
+ * GraphQL 失敗は uncertain（missing に混ぜない）— setQuantities 前のハード失敗を避ける。
+ */
+export async function verifyInventoryLevelsAtLocation(
+  admin: { graphql: AdminGraphql },
+  locationId: string,
+  inventoryItemIds: string[]
+): Promise<VerifyLevelsResult> {
+  const locationGid = toLocationGid(locationId);
+  const ids = [
+    ...new Set(
+      (inventoryItemIds ?? [])
+        .map((id) => toInventoryItemGid(id))
+        .filter((x): x is string => !!x)
+    ),
+  ];
+  if (!locationGid || ids.length === 0) {
+    return { ok: true, missingInventoryItemIds: [], uncertainInventoryItemIds: [] };
+  }
+
+  const missing: string[] = [];
+  const uncertain: string[] = [];
+  for (let i = 0; i < ids.length; i += 50) {
+    const chunk = ids.slice(i, i + 50);
+    try {
+      const result = await graphql(
+        admin,
+        `#graphql
+          query VerifyInventoryLevels($ids: [ID!]!, $locationId: ID!) {
+            nodes(ids: $ids) {
+              ... on InventoryItem {
+                id
+                inventoryLevel(locationId: $locationId) { id }
+              }
+            }
+          }`,
+        { ids: chunk, locationId: locationGid }
+      );
+      if (result?.errors?.length) {
+        uncertain.push(...chunk);
+        continue;
+      }
+      const data = result?.data as NodesQueryData | undefined;
+      const nodes: InventoryItemNode[] = Array.isArray(data?.nodes) ? data.nodes : [];
+      const present = new Set(
+        nodes
+          .filter((n) => n?.inventoryLevel?.id)
+          .map((n) => String(n.id || "").trim())
+          .filter(Boolean)
+      );
+      const seen = new Set(nodes.map((n) => String(n?.id || "").trim()).filter(Boolean));
+      for (const id of chunk) {
+        if (present.has(id)) continue;
+        // nodes に載らない（権限・削除等）は uncertain。明確に id があり level 無しだけ missing。
+        if (seen.has(id)) missing.push(id);
+        else uncertain.push(id);
+      }
+    } catch {
+      uncertain.push(...chunk);
+    }
+  }
+  return {
+    ok: missing.length === 0 && uncertain.length === 0,
+    missingInventoryItemIds: missing,
+    uncertainInventoryItemIds: uncertain,
+  };
+}
+
 /**
  * 指定ロケーションで在庫レベルがないアイテムを有効化する。
  * inventorySetQuantities は「ロケーションに在庫レベルがない」と失敗するため、確定前に実行する。
@@ -273,6 +354,15 @@ export async function ensureInventoryActivatedAtLocation(
             const nodes = (check.data as NodesQueryData)?.nodes ?? [];
             const node = nodes[0];
             if (node?.inventoryLevel?.id) {
+              // level 確認済み。追加 verify は助言のみ（uncertain/lag で failed にしない）
+              await delayMs(POST_ACTIVATE_SETTLE_MS);
+              const verify = await verifyInventoryLevelsAtLocation(admin, locationId, [inventoryItemId]);
+              if (!verify.ok) {
+                console.warn(
+                  `[ensureInventoryActivatedAtLocation] already-activated soft verify lag/uncertain for ${inventoryItemId}`,
+                  { missing: verify.missingInventoryItemIds, uncertain: verify.uncertainInventoryItemIds }
+                );
+              }
               succeeded = true;
               break;
             }
@@ -286,6 +376,15 @@ export async function ensureInventoryActivatedAtLocation(
           break;
         }
         if (payload?.inventoryLevel?.id) {
+          // activate 応答に level があれば成功扱い。再読取 lag は soft（setQuantities 側の 1 回再試行に委ねる）
+          await delayMs(POST_ACTIVATE_SETTLE_MS);
+          const verify = await verifyInventoryLevelsAtLocation(admin, locationId, [inventoryItemId]);
+          if (!verify.ok) {
+            console.warn(
+              `[ensureInventoryActivatedAtLocation] post-activate soft verify lag/uncertain for ${inventoryItemId}`,
+              { missing: verify.missingInventoryItemIds, uncertain: verify.uncertainInventoryItemIds }
+            );
+          }
           succeeded = true;
         } else {
           lastError = "inventoryLevel が返されませんでした";

@@ -10,6 +10,7 @@ import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone
 import db from "../db.server";
 import type { InventoryCountLike, InventoryCountEntryLike, InputLikeEvent } from "../types";
 import type { GraphQLUserError } from "../types/graphql-responses";
+import { setInventoryQuantitiesServer } from "../utils/inventory-set-quantities-server";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -1094,69 +1095,26 @@ function toInventoryItemGidForCount(inventoryItemId: string): string | null {
   return null;
 }
 
-/** Shopify inventorySetQuantities の quantities 配列の最大件数（API 制限） */
-const INVENTORY_SET_QUANTITIES_MAX = 250;
-
-/** 管理画面から inventorySetQuantities で在庫を設定（POS の adjustInventoryToActual と同様）。250件超はチャンク分割して複数回実行。 */
+/** 管理画面から inventorySetQuantities（共有ヘルパー + post-activate 相当の live CAS）。 */
 async function adjustInventoryQuantitiesServer(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   locationId: string,
   items: Array<{ inventoryItemId: string; quantity: number }>,
   referenceDocumentUri?: string | null
 ): Promise<{ ok: boolean; invalidCount?: number; error?: string }> {
-  const locationGid = toLocationGidForCount(locationId);
-  const quantities = (items ?? [])
-    .filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.quantity)))
-    .map((x) => {
-      const gid = toInventoryItemGidForCount(x.inventoryItemId);
-      const quantity = Math.floor(Number(x.quantity) ?? 0);
-      return gid ? { valid: true as const, inventoryItemId: gid, quantity } : { valid: false as const };
-    });
-  const validQuantities = quantities.filter((q) => q.valid);
-  const invalidCount = quantities.filter((q) => !q.valid).length;
-  if (validQuantities.length === 0) {
-    return { ok: false, invalidCount, error: "有効な在庫アイテムがありません" };
-  }
-  const refUri = referenceDocumentUri
-    ? `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`
-    : undefined;
-  for (let i = 0; i < validQuantities.length; i += INVENTORY_SET_QUANTITIES_MAX) {
-    const chunk = validQuantities.slice(i, i + INVENTORY_SET_QUANTITIES_MAX);
-    const input: Record<string, unknown> = {
-      name: "available",
-      reason: "correction",
-      quantities: chunk.map((q) => ({
-        inventoryItemId: q.inventoryItemId,
-        locationId: locationGid,
-        quantity: q.quantity,
-        changeFromQuantity: null,
-      })),
-    };
-    if (refUri) input.referenceDocumentUri = refUri;
-    try {
-      const resp = await admin.graphql(
-        `#graphql
-          mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-            inventorySetQuantities(input: $input) {
-              inventoryAdjustmentGroup { id }
-              userErrors { field message }
-            }
-          }
-        `,
-        { variables: { input } }
-      );
-      const json = await resp.json();
-      const data = json?.data?.inventorySetQuantities;
-      const errs = data?.userErrors ?? [];
-      if (errs.length) {
-        return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") };
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: msg };
-    }
-  }
-  return { ok: true, invalidCount: invalidCount > 0 ? invalidCount : undefined };
+  // Admin 直経路も apply-change と同じ casFromLiveSnapshot（#19 R5）。null 絶対上書きをやめる。
+  const result = await setInventoryQuantitiesServer(
+    admin,
+    locationId,
+    items,
+    referenceDocumentUri,
+    { casFromLiveSnapshot: true }
+  );
+  return {
+    ok: result.ok,
+    invalidCount: result.invalidCount,
+    error: result.error,
+  };
 }
 
 /** 管理画面から棚卸確定・リセット時の変動ログを DB に記録（api/log-inventory-change と同様のロジック） */
@@ -2784,7 +2742,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
       const result = await applyPendingCompleteFromBackup(admin, ownerId, backup);
       if (!result.ok) {
-        return { ok: false, error: (result.error || "メタ更新の再試行に失敗しました") as const };
+        return { ok: false, error: (result.error || "再試行に失敗しました") as const };
       }
       try {
         const shopForDb = session?.shop ?? "";
@@ -2802,21 +2760,26 @@ export async function action({ request }: ActionFunctionArgs) {
               shop: shopForDb,
               countId: String(saved.id),
               countName: saved.countName ?? null,
-              status: String(saved.status || "in_progress"),
+              status: String(result.status || saved.status || "in_progress"),
               locationId: saved.locationId ?? null,
               locationName: saved.locationName ?? null,
-              payload: saved,
-              completedAt: saved.completedAt ?? null,
+              payload: { ...saved, status: result.status || saved.status },
+              completedAt: result.completedAt ?? saved.completedAt ?? null,
             });
           }
         }
       } catch (e) {
         console.warn("[inventory-count] pos_metafield_retry DB dual-write skipped:", e);
       }
-      return { ok: true, retriedCountId: result.countId } as const;
+      return {
+        ok: true,
+        retriedCountId: result.countId,
+        status: result.status,
+        completedAt: result.completedAt,
+      } as const;
     } catch (e) {
       console.error("[inventory-count] pos_metafield_retry failed:", e);
-      return { ok: false, error: "メタ更新の再試行中にエラーが発生しました。" as const };
+      return { ok: false, error: "再試行中にエラーが発生しました。" as const };
     }
   }
 
@@ -7703,7 +7666,7 @@ export default function InventoryCountPage() {
                   }}
                 >
                   <s-stack gap="small">
-                    <s-text type="strong">メタ更新の再試行が必要です</s-text>
+                    <s-text type="strong">再試行が必要です</s-text>
                     <s-text>
                       棚卸ID{" "}
                       <strong>
@@ -7713,7 +7676,7 @@ export default function InventoryCountPage() {
                             normalizeIdForMatch(c.id) === normalizeIdForMatch(pendingMetafieldRetry.countId)
                         )?.countName || pendingMetafieldRetry.countId}
                       </strong>
-                      は在庫調整済みですが、ステータス（メタフィールド）の反映に失敗しています。商品リストは編集せず、「再試行（メタ更新のみ）」を実行してください。
+                      は在庫調整済みですが、ステータスの反映に失敗しています。商品リストは編集せず、「再試行」を実行してください。
                     </s-text>
                     {pendingMetafieldRetry.completedGroupIds?.length ? (
                       <s-text color="subdued">
@@ -7727,7 +7690,7 @@ export default function InventoryCountPage() {
                       </s-text>
                     ) : null}
                     {metafieldRetryFetcher.data && (metafieldRetryFetcher.data as { ok?: boolean }).ok === true ? (
-                      <s-text tone="success">メタ更新の再試行が完了しました。</s-text>
+                      <s-text tone="success">再試行が完了しました。</s-text>
                     ) : null}
                     <div>
                       <s-button
@@ -7741,7 +7704,7 @@ export default function InventoryCountPage() {
                           metafieldRetryFetcher.submit(fd, { method: "post" });
                         }}
                       >
-                        {metafieldRetryFetcher.state !== "idle" ? "再試行中..." : "再試行（メタ更新のみ）"}
+                        {metafieldRetryFetcher.state !== "idle" ? "再試行中..." : "再試行"}
                       </s-button>
                     </div>
                   </s-stack>
@@ -9121,7 +9084,7 @@ export default function InventoryCountPage() {
                     <button
                       type="button"
                       disabled={editDisabled}
-                      title={isPendingMetafieldRetry ? "メタ更新の再試行が必要です。編集せず再試行してください。" : undefined}
+                      title={isPendingMetafieldRetry ? "再試行が必要です。編集せず再試行してください。" : undefined}
                       onClick={() => setModalEditMode(true)}
                       style={{
                         padding: "8px 16px",
