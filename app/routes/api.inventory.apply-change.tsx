@@ -707,52 +707,104 @@ export async function action({ request }: ActionFunctionArgs) {
     console.error("[api.inventory.apply-change] Error:", e);
     const message = formatCaughtError(e);
 
-    // イベント作成後の未処理例外: applying/pending のまま残すと安定 appEventId 再送が 202 で固まる
+    // イベント作成後の未処理例外: applying/pending のまま残すと安定 appEventId 再送が 202 で固まる。
+    // ただし setQuantities 成功後（completed）や partial_failed を failed に戻すと、
+    // #16 の failed クリア再試行で二重 setQuantities し得るため上書きしない。
     if (createdEventId) {
+      let existingStatus: string | null = null;
+      let appliedCount = 0;
       try {
-        await db.inventoryChangeEventLine.updateMany({
-          where: { eventId: createdEventId },
-          data: { lineStatus: "failed", errorMessage: message },
-        });
-        await db.inventoryChangeEvent.update({
+        const current = await db.inventoryChangeEvent.findUnique({
           where: { id: createdEventId },
+          select: { status: true, _count: { select: { lines: true } } },
+        });
+        existingStatus = current?.status ?? null;
+        appliedCount = current?._count?.lines ?? 0;
+        if (existingStatus === "completed") {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              eventId: createdEventId,
+              appEventId: cleanupAppEventId,
+              status: "completed",
+              appliedCount,
+              warning: `post-complete error (not rolled back): ${message}`,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+          );
+        }
+        if (existingStatus === "partial_failed") {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: message,
+              eventId: createdEventId,
+              appEventId: cleanupAppEventId,
+              status: "partial_failed",
+              partiallyApplied: true,
+            }),
+            { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+          );
+        }
+      } catch (statusErr: unknown) {
+        console.warn(
+          "[api.inventory.apply-change] status guard before failed mark:",
+          formatCaughtError(statusErr)
+        );
+      }
+
+      // pending / applying のみ failed へ（completed / partial_failed は上で return 済み）
+      let markedFailed = false;
+      try {
+        const marked = await db.inventoryChangeEvent.updateMany({
+          where: { id: createdEventId, status: { in: ["pending", "applying"] } },
           data: { status: "failed", errorSummary: message },
         });
+        markedFailed = marked.count > 0;
+        if (markedFailed) {
+          await db.inventoryChangeEventLine.updateMany({
+            where: { eventId: createdEventId },
+            data: { lineStatus: "failed", errorMessage: message },
+          });
+        }
       } catch (markErr: unknown) {
         console.warn(
           "[api.inventory.apply-change] mark failed after outer catch:",
           formatCaughtError(markErr)
         );
       }
-      if (cleanupShop && cleanupIdempotencyKeys.length > 0) {
-        try {
-          await db.inventoryChangeLog.deleteMany({
-            where: {
-              shop: cleanupShop,
-              idempotencyKey: { in: cleanupIdempotencyKeys },
-              quantityAfter: null,
-            },
-          });
-        } catch (cleanupErr: unknown) {
-          console.warn(
-            "[api.inventory.apply-change] cleanup pre-write logs (outer catch):",
-            formatCaughtError(cleanupErr)
-          );
-        }
-      } else if (cleanupShop && cleanupAppEventId) {
-        try {
-          await db.inventoryChangeLog.deleteMany({
-            where: {
-              shop: cleanupShop,
-              quantityAfter: null,
-              idempotencyKey: { startsWith: `${cleanupShop}_app_${cleanupAppEventId}_` },
-            },
-          });
-        } catch (cleanupErr: unknown) {
-          console.warn(
-            "[api.inventory.apply-change] cleanup pre-write logs by prefix (outer catch):",
-            formatCaughtError(cleanupErr)
-          );
+
+      if (markedFailed) {
+        if (cleanupShop && cleanupIdempotencyKeys.length > 0) {
+          try {
+            await db.inventoryChangeLog.deleteMany({
+              where: {
+                shop: cleanupShop,
+                idempotencyKey: { in: cleanupIdempotencyKeys },
+                quantityAfter: null,
+              },
+            });
+          } catch (cleanupErr: unknown) {
+            console.warn(
+              "[api.inventory.apply-change] cleanup pre-write logs (outer catch):",
+              formatCaughtError(cleanupErr)
+            );
+          }
+        } else if (cleanupShop && cleanupAppEventId) {
+          try {
+            await db.inventoryChangeLog.deleteMany({
+              where: {
+                shop: cleanupShop,
+                quantityAfter: null,
+                idempotencyKey: { startsWith: `${cleanupShop}_app_${cleanupAppEventId}_` },
+              },
+            });
+          } catch (cleanupErr: unknown) {
+            console.warn(
+              "[api.inventory.apply-change] cleanup pre-write logs by prefix (outer catch):",
+              formatCaughtError(cleanupErr)
+            );
+          }
         }
       }
     }
