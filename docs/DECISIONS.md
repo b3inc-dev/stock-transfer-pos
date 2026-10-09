@@ -159,6 +159,7 @@ Shopify Inventory API は `changeFromQuantity` を **2026-01 で導入**し、**
 - activate **前**に読んだ値での CAS は、`inventoryActivate` が available を書く場合に不整合（従来 D9）。**post-activate / チャンク直前スナップショット**なら安全。
 - 棚卸の業務意図として「計上実数（absolute）を正」は維持。CAS は確定 API 実行中の競合検出であり、カウント中〜確定前の売上を自動マージするわけではない。
 - **API バージョンは `2026-01` 維持**。2026-04 バンプは `@idempotent` とセットの別 PR（E2 #13 方針）。
+- **#13 調整**: E2 が apply-change に明示 `null` を入れる場合でも、`inventory_count` / `adjustment` の post-activate CAS を再 null 化しないこと（本 follow-up が優先）。
 
 ## D10. 棚卸確定順と webhook（2026-10-08）
 

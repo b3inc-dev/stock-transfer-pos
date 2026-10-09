@@ -277,15 +277,9 @@ export async function setInventoryQuantitiesServer(
         return { ok: false, error: chunkError, rolledBack: true };
       }
     }
-    beforeStates.push({
-      chunkIndex,
-      quantities: chunkItemGids
-        .filter((gid) => !failedGids.includes(gid))
-        .map((gid) => ({ inventoryItemId: gid, quantity: beforeMap.get(gid) ?? 0 })),
-      canRollback: failedGids.length === 0,
-    });
-
-    // 目標値に到達済みの行は書き込み不要（無駄な絶対上書きとレース窓を減らす）
+    // 目標値に到達済みの行は書き込み不要（無駄な絶対上書きとレース窓を減らす）。
+    // ロールバック対象にも入れない: skip 行を beforeStates に残すと、後続チャンク失敗時の
+    // null ロールバックが「書いていない SKU」の同時売上まで巻き戻してしまう。
     const writeChunk = casFromLiveSnapshot
       ? chunk.filter((q) => beforeMap.get(q.inventoryItemId) !== q.quantity)
       : chunk;
@@ -293,15 +287,82 @@ export async function setInventoryQuantitiesServer(
       continue;
     }
 
+    const writeGids = writeChunk.map((q) => q.inventoryItemId);
+    if (casFromLiveSnapshot) {
+      const missingLive = writeGids.filter((gid) => {
+        const live = beforeMap.get(gid);
+        return live == null || !Number.isFinite(live);
+      });
+      if (missingLive.length > 0) {
+        const chunkError =
+          `確定直前の在庫数を取得できませんでした（${missingLive.length}件）。` +
+          `通信状況を確認してから再度確定してください。`;
+        const appliedSnapshots = beforeStates;
+        if (appliedSnapshots.length === 0) {
+          return { ok: false, error: chunkError, rolledBack: false };
+        }
+        const nonRollbackable = appliedSnapshots.filter((s) => !s.canRollback);
+        if (nonRollbackable.length > 0) {
+          return { ok: false, error: chunkError, rolledBack: false, partiallyApplied: true };
+        }
+        let rollbackOk = true;
+        for (let ri = appliedSnapshots.length - 1; ri >= 0; ri--) {
+          const snapshot = appliedSnapshots[ri];
+          const rollbackInput: Record<string, unknown> = {
+            name: "available",
+            reason: "correction",
+            quantities: snapshot.quantities.map((q) => ({
+              inventoryItemId: q.inventoryItemId,
+              locationId: locationGid,
+              quantity: q.quantity,
+              changeFromQuantity: null,
+            })),
+          };
+          try {
+            const { response: rbResp, json: rbJson } = await graphqlWithRetry(admin, `#graphql
+                mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+                  inventorySetQuantities(input: $input) {
+                    inventoryAdjustmentGroup { id }
+                    userErrors { field message }
+                  }
+                }
+              `, { input: rollbackInput });
+            if (!rbResp.ok) {
+              rollbackOk = false;
+            } else {
+              const rbData = (rbJson as InventorySetQuantitiesJson)?.data?.inventorySetQuantities;
+              if ((rbData?.userErrors ?? []).length) rollbackOk = false;
+            }
+          } catch {
+            rollbackOk = false;
+          }
+          if (!rollbackOk) break;
+        }
+        return {
+          ok: false,
+          error: chunkError,
+          rolledBack: rollbackOk,
+          partiallyApplied: !rollbackOk,
+        };
+      }
+    }
+
+    const writeSnapshotMissing = writeGids.filter((gid) => failedGids.includes(gid));
+    beforeStates.push({
+      chunkIndex,
+      quantities: writeGids
+        .filter((gid) => !failedGids.includes(gid))
+        .map((gid) => ({ inventoryItemId: gid, quantity: beforeMap.get(gid) ?? 0 })),
+      canRollback: writeSnapshotMissing.length === 0,
+    });
+
     const input: Record<string, unknown> = {
       name: "available",
       reason: "correction",
       quantities: writeChunk.map((q) => {
         let changeFromQuantity: number | null = q.changeFromQuantity;
         if (casFromLiveSnapshot) {
-          const live = beforeMap.get(q.inventoryItemId);
-          // failedGids は上で fail-closed 済み。ここは有限数のはず。
-          changeFromQuantity = live == null || !Number.isFinite(live) ? null : Math.floor(live);
+          changeFromQuantity = Math.floor(Number(beforeMap.get(q.inventoryItemId)));
         }
         return {
           inventoryItemId: q.inventoryItemId,

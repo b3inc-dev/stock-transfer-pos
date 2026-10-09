@@ -565,7 +565,13 @@ export async function action({ request }: ActionFunctionArgs) {
     // activate 前読取での CAS は D9 どおり不整合のため使わない）。
     const casOpts = usesPostActivateCas(activity) ? { casFromLiveSnapshot: true } : undefined;
     let result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, casOpts);
-    if (!result.ok && casOpts && isChangeFromQuantityStale(result.error)) {
+    // partial_failed（一部適用＋ロールバック失敗）は同一リクエスト内でも再 set しない
+    if (
+      !result.ok &&
+      !result.partiallyApplied &&
+      casOpts &&
+      isChangeFromQuantityStale(result.error)
+    ) {
       // 再読取スナップショットで 1 回だけ再試行（同時売上の短いレース）
       await new Promise((r) => setTimeout(r, 400));
       const staleRetry = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, casOpts);
@@ -581,7 +587,7 @@ export async function action({ request }: ActionFunctionArgs) {
       } else {
         result = staleRetry;
       }
-    } else if (!result.ok && isTransientError(result.error)) {
+    } else if (!result.ok && !result.partiallyApplied && isTransientError(result.error)) {
       await new Promise((r) => setTimeout(r, 1500));
       const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, casOpts);
       if (retryResult.ok) result = retryResult;
