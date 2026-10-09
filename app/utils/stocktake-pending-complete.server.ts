@@ -8,7 +8,10 @@ import {
   normalizeIdForMatch,
   type InventoryCount,
 } from "../routes/app.inventory-count";
-import { resolveStocktakeCompleteStatus } from "./stocktake-complete-status";
+import {
+  interpretMetafieldsSetWriteResult,
+  mergePendingCompleteIntoCounts,
+} from "./stocktake-pending-complete-merge";
 
 export const STOCKTAKE_NS = "stock_transfer_pos";
 export const PENDING_COMPLETE_KEY = "pending_complete_v1";
@@ -59,25 +62,18 @@ export async function writePendingCompleteBackup(
         ],
       },
     });
-    if (!resp.ok) {
-      const msg = `HTTP ${resp.status}`;
-      console.warn("[pending-complete] write failed:", msg);
-      return { ok: false, error: msg };
-    }
     const json = (await resp.json().catch(() => ({}))) as {
       data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } };
       errors?: Array<{ message?: string }>;
     };
-    const userErrors = json?.data?.metafieldsSet?.userErrors ?? [];
-    if (json?.errors?.length) {
-      const msg = json.errors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "GraphQL errors";
-      console.warn("[pending-complete] write GraphQL errors:", msg);
-      return { ok: false, error: msg };
-    }
-    if (userErrors.length > 0) {
-      const msg = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "userErrors";
-      console.warn("[pending-complete] write userErrors:", msg);
-      return { ok: false, error: msg };
+    const interpreted = interpretMetafieldsSetWriteResult({
+      httpOk: resp.ok,
+      httpStatus: resp.status,
+      json,
+    });
+    if (!interpreted.ok) {
+      console.warn("[pending-complete] write failed:", interpreted.error);
+      return interpreted;
     }
     return { ok: true };
   } catch (e: unknown) {
@@ -147,58 +143,20 @@ export async function applyPendingCompleteFromBackup(
     return { ok: false, error: "棚卸が見つかりません", countId };
   }
 
-  const groupItemsMap: Record<string, unknown[]> =
-    (count as { groupItems?: Record<string, unknown[]> }).groupItems && typeof (count as { groupItems?: unknown }).groupItems === "object"
-      ? { ...((count as { groupItems: Record<string, unknown[]> }).groupItems) }
-      : {};
-
-  for (const { groupId: gid, items } of completedGroups) {
-    const entry = items.map((i) => ({
-      inventoryItemId: i.inventoryItemId,
-      variantId: i.variantId,
-      sku: i.sku ?? "",
-      title: i.title ?? "",
-      currentQuantity: Number(i.currentQuantity),
-      actualQuantity: Number(i.actualQuantity),
-      delta: Number(i.actualQuantity) - Number(i.currentQuantity),
-    }));
-    const key = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(gid)) ?? gid;
-    groupItemsMap[key] = entry;
+  const { updatedCounts, savedCount, status, completedAt } = mergePendingCompleteIntoCounts({
+    inventoryCounts: inventoryCounts as InventoryCount[],
+    countId,
+    completedGroups,
+  });
+  if (!savedCount) {
+    return { ok: false, error: "棚卸が見つかりません", countId };
   }
 
-  const completedGroupIds = completedGroups.map((g) => g.groupId);
-  const { status, allDone, groupIdsForCheck } = resolveStocktakeCompleteStatus({
-    productGroupIds: count.productGroupIds,
-    productGroupId: (count as { productGroupId?: string }).productGroupId,
-    cancelledGroupIds: (count as { cancelledGroupIds?: string[] }).cancelledGroupIds,
-    groupItemsMap,
-    completedGroupIds,
-  });
-  const completedAt = allDone ? new Date().toISOString() : undefined;
-  const hadProductGroupIds =
-    (Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0) ||
-    Boolean((count as { productGroupId?: string }).productGroupId);
-
-  let savedCount: InventoryCount | undefined;
-  const updatedCounts: InventoryCount[] = inventoryCounts.map((c) => {
-    if (String(c.id) !== String(countId) && normalizeIdForMatch((c as { id?: string }).id) !== normalizeIdForMatch(countId)) {
-      return c;
-    }
-    const next: InventoryCount = {
-      ...c,
-      groupItems: groupItemsMap,
-      status,
-      completedAt,
-    };
-    // 単一グループ等で productGroupIds が欠落していた場合、補完して次回読込でも allDone が正しくなるようにする
-    if (!hadProductGroupIds && groupIdsForCheck.length > 0) {
-      next.productGroupIds = groupIdsForCheck;
-    }
-    savedCount = next;
-    return next;
-  });
-
-  const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts, ownerId);
+  const { userErrors } = await writeInventoryCountsChunked(
+    admin,
+    updatedCounts as InventoryCount[],
+    ownerId
+  );
   if (userErrors.length > 0) {
     const message = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "保存に失敗しました";
     return { ok: false, error: message, countId };
@@ -209,5 +167,11 @@ export async function applyPendingCompleteFromBackup(
     // メタ本体は更新済み。バックアップ削除失敗は Admin が誤って再試行必要と見なす程度のため非致命。
     console.warn("[pending-complete] clear backup after success failed:", clearResult.error);
   }
-  return { ok: true, countId, status, completedAt, savedCount };
+  return {
+    ok: true,
+    countId,
+    status,
+    completedAt,
+    savedCount: savedCount as InventoryCount,
+  };
 }

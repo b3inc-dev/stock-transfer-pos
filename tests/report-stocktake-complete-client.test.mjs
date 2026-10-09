@@ -17,6 +17,12 @@ function installShopifySession(token = "test-token") {
   };
 }
 
+async function loadReportApi(nonce) {
+  const modPath = pathToFileURL(path.join(root, "extensions/common/reportStocktakeComplete.js")).href;
+  const { reportStocktakeCompleteToApi } = await import(`${modPath}?t=${nonce}`);
+  return reportStocktakeCompleteToApi;
+}
+
 describe("reportStocktakeCompleteToApi network messaging", () => {
   it("does not mention tunnel URL on Failed to fetch and retries fast fails", async () => {
     installShopifySession();
@@ -26,10 +32,7 @@ describe("reportStocktakeCompleteToApi network messaging", () => {
       throw new TypeError("Failed to fetch");
     };
 
-    const modPath = pathToFileURL(
-      path.join(root, "extensions/common/reportStocktakeComplete.js")
-    ).href;
-    const { reportStocktakeCompleteToApi } = await import(`${modPath}?t=${Date.now()}`);
+    const reportStocktakeCompleteToApi = await loadReportApi(Date.now());
 
     const result = await reportStocktakeCompleteToApi({
       countId: "c1",
@@ -41,8 +44,40 @@ describe("reportStocktakeCompleteToApi network messaging", () => {
     assert.equal(result.needMetafieldRetry, true);
     assert.equal(result.uncertain, true);
     assert.match(String(result.error), /再試行/);
+    assert.match(String(result.error), /サーバ側で完了している可能性/);
     assert.doesNotMatch(String(result.error), /トンネル/);
     assert.equal(calls.length, 3, `expected 3 attempts, got ${calls.length}`);
+  });
+
+  it("does not auto-retry when network fail elapsed is >= 8s", async () => {
+    installShopifySession();
+    const calls = [];
+    const reportStocktakeCompleteToApi = await loadReportApi("slow-fail");
+    let now = 1_000_000;
+    const realNow = Date.now;
+    Date.now = () => now;
+    globalThis.fetch = async () => {
+      calls.push(now);
+      now += 9000; // elapsedMs >= NETWORK_FAST_FAIL_MS
+      throw new TypeError("Failed to fetch");
+    };
+
+    try {
+      const result = await reportStocktakeCompleteToApi({
+        countId: "c1",
+        groupId: "g1",
+        items: [{ inventoryItemId: "i1", currentQuantity: 1, actualQuantity: 1 }],
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.needMetafieldRetry, true);
+      assert.equal(result.uncertain, true);
+      assert.match(String(result.error), /サーバ側で完了している可能性/);
+      assert.doesNotMatch(String(result.error), /トンネル/);
+      assert.equal(calls.length, 1, `expected 1 attempt (no auto-retry), got ${calls.length}`);
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   it("uses timeout message without tunnel wording on AbortError", async () => {
@@ -53,10 +88,7 @@ describe("reportStocktakeCompleteToApi network messaging", () => {
       throw err;
     };
 
-    const modPath = pathToFileURL(
-      path.join(root, "extensions/common/reportStocktakeComplete.js")
-    ).href;
-    const { reportStocktakeCompleteToApi } = await import(`${modPath}?t=${Date.now() + 1}`);
+    const reportStocktakeCompleteToApi = await loadReportApi(Date.now() + 1);
 
     const result = await reportStocktakeCompleteToApi({
       countId: "c1",
@@ -74,14 +106,17 @@ describe("reportStocktakeCompleteToApi network messaging", () => {
     installShopifySession();
     globalThis.fetch = async () =>
       new Response(
-        JSON.stringify({ ok: true, status: "completed", completedAt: "2026-10-09T00:00:00.000Z", countId: "c1" }),
+        JSON.stringify({
+          ok: true,
+          status: "completed",
+          completedAt: "2026-10-09T00:00:00.000Z",
+          countId: "c1",
+          backupPersisted: true,
+        }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
 
-    const modPath = pathToFileURL(
-      path.join(root, "extensions/common/reportStocktakeComplete.js")
-    ).href;
-    const { reportStocktakeCompleteToApi } = await import(`${modPath}?t=${Date.now() + 2}`);
+    const reportStocktakeCompleteToApi = await loadReportApi(Date.now() + 2);
 
     const result = await reportStocktakeCompleteToApi({
       countId: "c1",
@@ -91,5 +126,33 @@ describe("reportStocktakeCompleteToApi network messaging", () => {
     assert.equal(result.ok, true);
     assert.equal(result.status, "completed");
     assert.equal(result.completedAt, "2026-10-09T00:00:00.000Z");
+    assert.equal(result.backupPersisted, true);
+  });
+
+  it("preserves backupPersisted:false on HTTP 200 ok:false", async () => {
+    installShopifySession();
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          ok: false,
+          error: "ステータスの反映に失敗しました",
+          needMetafieldRetry: true,
+          countId: "c1",
+          backupPersisted: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+
+    const reportStocktakeCompleteToApi = await loadReportApi(Date.now() + 3);
+
+    const result = await reportStocktakeCompleteToApi({
+      countId: "c1",
+      groupId: "g1",
+      items: [{ inventoryItemId: "i1", currentQuantity: 1, actualQuantity: 1 }],
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.needMetafieldRetry, true);
+    assert.equal(result.backupPersisted, false);
   });
 });

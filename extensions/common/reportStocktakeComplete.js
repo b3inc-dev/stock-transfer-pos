@@ -31,7 +31,8 @@ function isNetworkFailureMessage(msg) {
 
 function buildNetworkUserMessage() {
   return (
-    "サーバーとの通信が途切れました。Wi‑Fiを確認し、「再試行」を押してください。" +
+    "サーバーとの通信が途切れました。サーバ側で完了している可能性があります。" +
+    "Wi‑Fiを確認し、「再試行」を押してください。" +
     "在庫調整済みの場合でも、この再試行はメタ更新のみで在庫を二重に変えません。"
   );
 }
