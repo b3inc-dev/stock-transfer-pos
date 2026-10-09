@@ -943,16 +943,34 @@ function mergeExistingNonBlank(counts, existing) {
     const exPgNames = Array.isArray(ex.productGroupNames) && ex.productGroupNames.length > 0;
     if ((!Array.isArray(out.productGroupNames) || out.productGroupNames.length === 0) && exPgNames) out.productGroupNames = ex.productGroupNames;
     const hasGroupItems = out.groupItems && typeof out.groupItems === "object" && Object.keys(out.groupItems).length > 0;
-    const exGroupItems = ex.groupItems && typeof ex.groupItems === "object" && Object.keys(ex.groupItems).length > 0;
-    if (!hasGroupItems && exGroupItems) {
+    const exHasGroupItems = ex.groupItems && typeof ex.groupItems === "object" && Object.keys(ex.groupItems).length > 0;
+    if (!hasGroupItems && exHasGroupItems) {
       out.groupItems = ex.groupItems;
-    } else if (hasGroupItems && exGroupItems) {
+    } else if (hasGroupItems && exHasGroupItems) {
       // 1グループだけ更新したときに他グループを消さない（既存をベースに payload で上書き）
-      out.groupItems = { ...exGroupItems, ...out.groupItems };
+      // ※ boolean を spread すると既存グループが消えるため、必ずオブジェクトを spread する
+      out.groupItems = { ...ex.groupItems, ...out.groupItems };
     }
     const hasItems = Array.isArray(out.items) && out.items.length > 0;
     const exItems = Array.isArray(ex.items) && ex.items.length > 0;
     if (!hasItems && exItems) out.items = ex.items;
+    // ✅ 完了・キャンセルを未処理に戻さない（Admin mergeExistingNonBlank と同等）
+    // payload に status が無いときは既存を維持。既存が completed/cancelled のとき in_progress/draft で上書きしない。
+    if (!out.status) {
+      if (ex.status) out.status = ex.status;
+      if (ex.completedAt) out.completedAt = ex.completedAt;
+    } else if ((ex.status === "completed" || ex.status === "cancelled") && !out.completedAt && ex.completedAt) {
+      out.completedAt = ex.completedAt;
+    }
+    if (ex.status === "completed" || ex.status === "cancelled") {
+      if (out.status !== "completed" && out.status !== "cancelled") {
+        // status 拒否時は古い payload の groupItems/items で完了ドキュメントを壊さない
+        out.status = ex.status;
+        out.completedAt = ex.completedAt ?? out.completedAt;
+        if (exHasGroupItems) out.groupItems = ex.groupItems;
+        if (exItems) out.items = ex.items;
+      }
+    }
     return out;
   });
 }
