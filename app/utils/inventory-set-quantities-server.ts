@@ -142,31 +142,13 @@ export type SetInventoryQuantitiesResult = {
   failedChunkIndex?: number;
 };
 
-/** userErrors 以外の失敗は Shopify 側適用済みの可能性を否定できない */
-function isAmbiguousSetQuantitiesError(
-  error: string,
-  opts?: { httpStatus?: number; hadUserErrors?: boolean }
-): boolean {
-  if (opts?.hadUserErrors) return false;
-  if (opts?.httpStatus != null && opts.httpStatus >= 500) return true;
-  if (opts?.httpStatus === 429) return true;
-  const s = (error || "").toLowerCase();
-  return (
-    s.includes("timeout") ||
-    s.includes("timed out") ||
-    s.includes("network") ||
-    s.includes("fetch") ||
-    s.includes("econnreset") ||
-    s.includes("econnrefused") ||
-    s.includes("socket") ||
-    s.includes("503") ||
-    s.includes("502") ||
-    s.includes("504") ||
-    s.includes("500") ||
-    s.includes("429") ||
-    s.includes("abort") ||
-    s.includes("unexpected")
-  );
+/**
+ * Shopify が数量を変えなかったと断言できる失敗だけ true。
+ * キーワード列挙だと "other side closed" / "write EPIPE" 等が漏れ、failed→#16 clear→再 set になるため、
+ * **userErrors（ビジネス拒否）以外はすべて成否不明（ambiguous）** とする。
+ */
+function isDefiniteUnaappliedRejection(opts?: { hadUserErrors?: boolean }): boolean {
+  return opts?.hadUserErrors === true;
 }
 
 /**
@@ -245,7 +227,6 @@ export async function setInventoryQuantitiesServer(
 
       let chunkFailed = false;
       let chunkError = "";
-      let chunkHttpStatus: number | undefined;
       let chunkHadUserErrors = false;
       try {
         const { response: resp, json } = await graphqlWithRetry(admin, `#graphql
@@ -256,13 +237,18 @@ export async function setInventoryQuantitiesServer(
               }
             }
           `, { input });
-        chunkHttpStatus = resp.status;
+        const errJson = json as InventorySetQuantitiesJson;
+        const topLevelErrors = Array.isArray(errJson?.errors) ? errJson.errors : [];
+        const data = errJson?.data?.inventorySetQuantities;
         if (!resp.ok) {
-          const errJson = json as InventorySetQuantitiesJson;
-          chunkError = errJson?.errors?.[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
+          chunkError = topLevelErrors[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
+          chunkFailed = true;
+          // HTTP エラーは適用済みの可能性を否定できない（userErrors なし）
+        } else if (topLevelErrors.length > 0 && !data) {
+          // HTTP 200 + top-level GraphQL errors / null data — 成功扱いにしない
+          chunkError = topLevelErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "GraphQL errors";
           chunkFailed = true;
         } else {
-          const data = (json as InventorySetQuantitiesJson)?.data?.inventorySetQuantities;
           const errs = data?.userErrors ?? [];
           if (errs.length) {
             chunkError = errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
@@ -276,14 +262,12 @@ export async function setInventoryQuantitiesServer(
       }
 
       if (chunkFailed) {
-        const ambiguous = isAmbiguousSetQuantitiesError(chunkError, {
-          httpStatus: chunkHttpStatus,
-          hadUserErrors: chunkHadUserErrors,
-        });
+        // userErrors 以外はすべて ambiguous（キーワード漏れで failed→再 set しない）
+        const ambiguous = !isDefiniteUnaappliedRejection({ hadUserErrors: chunkHadUserErrors });
         // チャンク N の失敗 — 適用済みチャンク（beforeStates の最後のエントリを除く）をロールバック
         const appliedSnapshots = beforeStates.slice(0, -1); // 現在のチャンクは適用されていないので除外
 
-        // 成否不明（timeout/5xx/network）: 自動再 set を避けるため partial 扱い。ロールバックもしない
+        // 成否不明: 自動再 set を避けるため partial 扱い。ロールバックもしない
         // （成功済み先行チャンクを戻すと、失敗チャンクが実は適用済みだった場合に更に壊れる）
         if (ambiguous) {
           console.error(
