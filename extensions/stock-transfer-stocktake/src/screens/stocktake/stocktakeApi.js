@@ -1025,12 +1025,16 @@ export async function writeInventoryCounts(counts, expectedVersion) {
   if (WRITE_START_DELAY_MS > 0) {
     await new Promise((r) => setTimeout(r, WRITE_START_DELAY_MS));
   }
-  // 既存読取 → マージ → DB 保存（成功時 metafield スキップ）。楽観ロックは metafield version 経路のみ。
+  // 既存読取 → マージ → DB 保存（成功時 metafield スキップ）。DB は _dbVersion 楽観ロック。
   let existing = [];
+  let existingFromDb = false;
   try {
     const { fetchInventoryCountsFromDb } = await import("../../../../common/appDocumentsApi.js");
     const fromDb = await fetchInventoryCountsFromDb();
-    if (fromDb) existing = fromDb;
+    if (fromDb) {
+      existing = fromDb;
+      existingFromDb = true;
+    }
   } catch {
     /* ignore */
   }
@@ -1061,6 +1065,19 @@ export async function writeInventoryCounts(counts, expectedVersion) {
     });
     if (missing.length > 0) merged = [...merged, ...missing];
   }
+  // DB 楽観ロック用: existing の _dbVersion をマージ結果へ継承
+  if (existingFromDb) {
+    const verById = new Map();
+    for (const e of existing) {
+      const id = String(e?.id ?? e?.countId ?? "").trim();
+      if (id && e?._dbVersion != null) verById.set(id, e._dbVersion);
+    }
+    merged = merged.map((c) => {
+      const id = String(c?.id ?? c?.countId ?? "").trim();
+      const v = id ? verById.get(id) : undefined;
+      return v != null && c._dbVersion == null ? { ...c, _dbVersion: v } : c;
+    });
+  }
   const withNames = ensureCountNamesBeforeWrite(merged);
   const arr = filterInvalidCountsBeforeWrite(withNames);
 
@@ -1069,6 +1086,9 @@ export async function writeInventoryCounts(counts, expectedVersion) {
     const ok = await saveInventoryCountsToDb(arr);
     if (ok) return;
   } catch (e) {
+    if (e?.status === 409 || String(e?.message || "").includes("更新されています")) {
+      throw new Error("他の操作でデータが更新されています。画面を再読み込みしてから再度お試しください。");
+    }
     console.warn("[stocktakeApi] inventory_counts DB write fallback to metafield:", e?.message || e);
   }
 

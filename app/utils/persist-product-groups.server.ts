@@ -58,7 +58,10 @@ export async function persistProductGroupsForShop(
   };
   const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
   if (errs.length) {
-    return { ok: false, error: errs.map((e) => e.message ?? "").join(" / ") };
+    console.warn(
+      "[persist-product-groups] metafield mirror failed after DB ok:",
+      errs.map((e) => e.message ?? "").join(" / ")
+    );
   }
   return { ok: true };
 }

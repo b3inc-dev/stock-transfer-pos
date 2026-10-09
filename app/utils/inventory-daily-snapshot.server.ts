@@ -62,25 +62,27 @@ export async function replaceDailySnapshotsForDate(
 ): Promise<{ ok: boolean; error?: string }> {
   try {
     if (!modelReady()) return { ok: false, error: "InventoryDailySnapshotRow model not available" };
-    await db.inventoryDailySnapshotRow.deleteMany({
-      where: { shop, date: dateToReplace },
-    });
-    for (const s of snapshots) {
-      if (!s?.locationId || s.date !== dateToReplace) continue;
-      await db.inventoryDailySnapshotRow.create({
-        data: {
-          shop,
-          date: s.date,
-          locationId: String(s.locationId),
-          locationName: s.locationName ?? null,
-          totalQuantity: Number(s.totalQuantity) || 0,
-          totalRetailValue: Number(s.totalRetailValue) || 0,
-          totalCompareAtPriceValue: Number(s.totalCompareAtPriceValue) || 0,
-          totalCostValue: Number(s.totalCostValue) || 0,
-          snapshotUpdatedAt: toDate(s.updatedAt ?? null),
-        },
+    await db.$transaction(async (tx) => {
+      await tx.inventoryDailySnapshotRow.deleteMany({
+        where: { shop, date: dateToReplace },
       });
-    }
+      for (const s of snapshots) {
+        if (!s?.locationId || s.date !== dateToReplace) continue;
+        await tx.inventoryDailySnapshotRow.create({
+          data: {
+            shop,
+            date: s.date,
+            locationId: String(s.locationId),
+            locationName: s.locationName ?? null,
+            totalQuantity: Number(s.totalQuantity) || 0,
+            totalRetailValue: Number(s.totalRetailValue) || 0,
+            totalCompareAtPriceValue: Number(s.totalCompareAtPriceValue) || 0,
+            totalCostValue: Number(s.totalCostValue) || 0,
+            snapshotUpdatedAt: toDate(s.updatedAt ?? null),
+          },
+        });
+      }
+    });
     return { ok: true };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

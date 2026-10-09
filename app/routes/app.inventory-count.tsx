@@ -1928,9 +1928,37 @@ const SET_CHUNK_MUTATION = `#graphql mutation SetChunk($metafields: [MetafieldsS
 const SET_NEXT_MUTATION = `#graphql mutation SetNext($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
 const SET_BACKUP_MUTATION = `#graphql mutation SetBackup($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
 
+/** NEXT カウンタのみ進める（DB SoT 時は棚卸本体 metafield を書かず番号衝突を避ける） */
+async function bumpInventoryCountNextKey(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  ownerId: string,
+  nextNum: number,
+  session?: { shop?: string; accessToken?: string } | null
+): Promise<void> {
+  const useDirect = Boolean(session?.shop && session?.accessToken);
+  const setNextVars = {
+    metafields: [
+      { ownerId, namespace: NS, key: INVENTORY_COUNT_NEXT_KEY, type: "json", value: String(nextNum) },
+    ],
+  };
+  try {
+    if (useDirect) {
+      await loaderGraphql(session!.shop as string, session!.accessToken as string, SET_NEXT_MUTATION, setNextVars);
+    } else {
+      await admin.graphql(SET_NEXT_MUTATION, { variables: setNextVars });
+    }
+  } catch (e: unknown) {
+    console.warn(
+      "[inventory-count] bumpInventoryCountNextKey failed:",
+      e instanceof Error ? e.message : String(e)
+    );
+  }
+}
+
 /**
  * チャンクを全て読まずに、新規棚卸1件だけを末尾に追加する。
  * session を渡すと direct fetch で syntax error を避ける（棚卸ID発行用）。
+ * ※ metafield ミラー ON 時のみ呼ぶ。DB SoT（mirror OFF）の発行は create 側で DB-first。
  */
 async function appendNewCountToChunked(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
@@ -2802,7 +2830,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const { shouldWriteMetafield } = await import("../utils/metafield-db-sot");
-  const { upsertInventoryCountsBulk, listInventoryCountDocumentsForShop } = await import(
+  const { replaceInventoryCountsForShop, listInventoryCountDocumentsForShop } = await import(
     "../utils/inventory-count-document.server"
   );
   const skipMetafieldWrite = !shouldWriteMetafield("inventory_counts");
@@ -2833,7 +2861,7 @@ export async function action({ request }: ActionFunctionArgs) {
       : undefined,
     persistPrepared: shopForCounts
       ? async (prepared) =>
-          upsertInventoryCountsBulk(shopForCounts, prepared as Array<{ id?: string; status?: string }>)
+          replaceInventoryCountsForShop(shopForCounts, prepared as Array<{ id?: string; status?: string }>)
       : async () => ({ ok: false, error: "棚卸の DB 保存には shop セッションが必要です" }),
   };
 
@@ -2860,33 +2888,8 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!result.ok) {
         return { ok: false, error: (result.error || "再試行に失敗しました") as const };
       }
-      try {
-        const shopForDb = session?.shop ?? "";
-        if (shopForDb) {
-          // metafield のみ読取（直後の dual-read は古い DB で上書きしうる）
-          const counts = await readInventoryCountsChunked(admin);
-          const saved = counts.find(
-            (c) =>
-              String(c.id) === String(result.countId) ||
-              normalizeIdForMatch(c.id) === normalizeIdForMatch(result.countId)
-          );
-          if (saved) {
-            const { upsertInventoryCountDocument } = await import("../utils/inventory-count-document.server");
-            await upsertInventoryCountDocument({
-              shop: shopForDb,
-              countId: String(saved.id),
-              countName: saved.countName ?? null,
-              status: String(result.status || saved.status || "in_progress"),
-              locationId: saved.locationId ?? null,
-              locationName: saved.locationName ?? null,
-              payload: { ...saved, status: result.status || saved.status },
-              completedAt: result.completedAt ?? saved.completedAt ?? null,
-            });
-          }
-        }
-      } catch (e) {
-        console.warn("[inventory-count] pos_metafield_retry DB dual-write skipped:", e);
-      }
+      // DB SoT は applyPendingCompleteFromBackup 内で永続化済み。
+      // metafield 再読取→upsert は mirror OFF 時に古い payload で DB を壊すため行わない。
       return {
         ok: true,
         retriedCountId: result.countId,
@@ -3819,8 +3822,17 @@ export async function action({ request }: ActionFunctionArgs) {
       }
 
       const loc = locations.find((l) => l.id === locationId);
-      // チャンクを読まずに次の番号を取得し、1件だけ末尾に追加する（session で direct fetch して syntax error 回避）
-      const nextNum = await getNextCountNumber(admin, session);
+      // 次番号: metafield NEXT +（DB SoT 時）既存 DB countName の max を考慮
+      let nextNum = await getNextCountNumber(admin, session);
+      if (skipMetafieldWrite && session?.shop) {
+        try {
+          const docs = await listInventoryCountDocumentsForShop(session.shop);
+          const maxDb = docs.reduce((max, d) => Math.max(max, parseCountNameNumber(d.countName)), 0);
+          if (maxDb + 1 > nextNum) nextNum = maxDb + 1;
+        } catch {
+          /* keep metafield next */
+        }
+      }
       const assignedCountName = `#C${String(nextNum).padStart(4, "0")}`;
 
       // メタフィールド値は 2MB 制限（API 2026-04 以降は 16KB の可能性あり）。大きすぎる場合は ID を保存せず POS でコレクションから読む
@@ -3844,12 +3856,12 @@ export async function action({ request }: ActionFunctionArgs) {
         createdAt: new Date().toISOString(),
       };
 
-      const { userErrors: saveErrs } = await appendNewCountToChunked(admin, newCount, ownerId, expectedVersionNum, session);
-      if (saveErrs.length) {
-        return { ok: false, error: saveErrs.map((e: { message?: string }) => e.message).join(" / ") as const };
-      }
-      // DB SoT: 発行直後に必ず DB upsert（append 経路は metafield 専用のため）
-      if (session?.shop) {
+      // DB SoT (mirror OFF): DB-first。metafield 本体は書かず NEXT のみ best-effort。
+      // mirror ON: 従来どおり append → DB upsert（ブリッジ互換）。
+      const persistNewCountToDb = async (): Promise<{ ok: boolean; error?: string }> => {
+        if (!session?.shop) {
+          return { ok: false, error: "棚卸の DB 保存には shop セッションが必要です" };
+        }
         const { upsertInventoryCountDocument } = await import("../utils/inventory-count-document.server");
         const dbRes = await upsertInventoryCountDocument({
           shop: session.shop,
@@ -3862,10 +3874,31 @@ export async function action({ request }: ActionFunctionArgs) {
           completedAt: null,
         });
         if (!dbRes.ok) {
-          return {
-            ok: false,
-            error: (dbRes.error || "棚卸の DB 保存に失敗しました") as const,
-          };
+          return { ok: false, error: dbRes.error || "棚卸の DB 保存に失敗しました" };
+        }
+        return { ok: true };
+      };
+
+      if (skipMetafieldWrite) {
+        const dbRes = await persistNewCountToDb();
+        if (!dbRes.ok) {
+          return { ok: false, error: (dbRes.error || "棚卸の DB 保存に失敗しました") as const };
+        }
+        await bumpInventoryCountNextKey(admin, ownerId, nextNum + 1, session);
+      } else {
+        const { userErrors: saveErrs } = await appendNewCountToChunked(
+          admin,
+          newCount,
+          ownerId,
+          expectedVersionNum,
+          session
+        );
+        if (saveErrs.length) {
+          return { ok: false, error: saveErrs.map((e: { message?: string }) => e.message).join(" / ") as const };
+        }
+        const dbRes = await persistNewCountToDb();
+        if (!dbRes.ok) {
+          return { ok: false, error: (dbRes.error || "棚卸の DB 保存に失敗しました") as const };
         }
       }
 

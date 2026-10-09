@@ -68,6 +68,10 @@ export async function saveInventoryCountsToDb(counts) {
     });
     return Boolean(json?.ok);
   } catch (e) {
+    // 409 / version conflict は metafield フォールバックさせない（ドリフト防止）
+    if (e?.status === 409 || String(e?.message || "").includes("更新されています")) {
+      throw e;
+    }
     console.warn("[appDocumentsApi] inventory_counts write failed:", e?.message || e);
     return false;
   }

@@ -13,12 +13,11 @@ import { isAppEntryType, type AppEntryType } from "../utils/metafield-db-sot";
 import {
   listInventoryCountDocumentsForShop,
   upsertInventoryCountDocument,
-  upsertInventoryCountsBulk,
+  replaceInventoryCountsForShop,
   readInventoryCountDocumentFromDb,
 } from "../utils/inventory-count-document.server";
 import {
   listProductGroupsFromDb,
-  replaceProductGroupsForShop,
 } from "../utils/product-group-document.server";
 import {
   listEntriesFromDb,
@@ -44,18 +43,24 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (docType === "inventory_counts") {
       if (id) {
         const one = await readInventoryCountDocumentFromDb(auth.shop, id);
-        return posJsonResponse({ ok: true, source: "db", count: one }, 200);
+        if (!one) return posJsonResponse({ ok: true, source: "db", count: null }, 200);
+        const payload =
+          one.payload && typeof one.payload === "object"
+            ? { ...(one.payload as object), id: one.countId, status: one.status, _dbVersion: one.version }
+            : { id: one.countId, status: one.status, _dbVersion: one.version };
+        return posJsonResponse({ ok: true, source: "db", count: payload }, 200);
       }
       const docs = await listInventoryCountDocumentsForShop(auth.shop);
       const counts = docs.map((d) =>
         d.payload && typeof d.payload === "object"
-          ? { ...(d.payload as object), id: d.countId, status: d.status }
+          ? { ...(d.payload as object), id: d.countId, status: d.status, _dbVersion: d.version }
           : {
               id: d.countId,
               status: d.status,
               countName: d.countName,
               locationId: d.locationId,
               locationName: d.locationName,
+              _dbVersion: d.version,
             }
       );
       return posJsonResponse({ ok: true, source: "db", counts, empty: counts.length === 0 }, 200);
@@ -146,14 +151,20 @@ export async function action({ request }: ActionFunctionArgs) {
         return posJsonResponse({ ok: res.ok, error: res.error, id: res.id }, res.ok ? 200 : 500);
       }
       const counts = Array.isArray(body.counts) ? body.counts : [];
-      const res = await upsertInventoryCountsBulk(auth.shop, counts as Array<{ id?: string; status?: string }>);
-      return posJsonResponse({ ok: res.ok, count: res.count, error: res.error }, res.ok ? 200 : 500);
+      const res = await replaceInventoryCountsForShop(
+        auth.shop,
+        counts as Array<{ id?: string; status?: string; _dbVersion?: number }>
+      );
+      const status = res.ok ? 200 : res.error?.includes("更新されています") ? 409 : 500;
+      return posJsonResponse({ ok: res.ok, count: res.count, error: res.error }, status);
     }
 
     if (docType === "product_groups") {
-      const groups = Array.isArray(body.groups) ? body.groups : [];
-      const res = await replaceProductGroupsForShop(auth.shop, groups as Array<{ id?: string; name?: string }>);
-      return posJsonResponse({ ok: res.ok, count: res.count, error: res.error }, res.ok ? 200 : 500);
+      // Cutover: POS は読取のみ（Admin persist）。書き込みを拒否。
+      return posJsonResponse(
+        { ok: false, error: "product_groups is read-only for POS; use Admin" },
+        403
+      );
     }
 
     if (docType === "entries") {

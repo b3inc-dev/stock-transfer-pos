@@ -114,7 +114,7 @@ export async function applyPendingCompleteFromBackup(
 
   const shop = opts?.shop?.trim() || "";
   const { shouldWriteMetafield } = await import("./metafield-db-sot");
-  const { upsertInventoryCountsBulk, listInventoryCountDocumentsForShop, mergeInventoryCountsWithDb } =
+  const { replaceInventoryCountsForShop, listInventoryCountDocumentsForShop, mergeInventoryCountsWithDb } =
     await import("./inventory-count-document.server");
   const skipMetafieldWrite = !shouldWriteMetafield("inventory_counts");
 
@@ -206,7 +206,7 @@ export async function applyPendingCompleteFromBackup(
         }
       : undefined,
     persistPrepared: shop
-      ? async (prepared) => upsertInventoryCountsBulk(shop, prepared as Array<{ id?: string; status?: string }>)
+      ? async (prepared) => replaceInventoryCountsForShop(shop, prepared as Array<{ id?: string; status?: string }>)
       : async () => ({ ok: false, error: "棚卸の DB 保存には shop が必要です" }),
   });
   if (userErrors.length > 0) {

@@ -83,7 +83,7 @@ export async function upsertInventoryCountDocument(
     return { ok: true, id: doc.id };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.warn("[inventory-count-document] upsert failed (metafield remains SoT):", msg);
+    console.warn("[inventory-count-document] upsert failed:", msg);
     return { ok: false, error: msg };
   }
 }
@@ -158,12 +158,18 @@ export async function listInventoryCountDocumentsForShop(shop: string): Promise<
     if (!db || typeof (db as { inventoryCountDocument?: unknown }).inventoryCountDocument === "undefined") {
       return [];
     }
+    const LIST_TAKE = 2000;
     const docs = await db.inventoryCountDocument.findMany({
       where: { shop },
       include: { chunks: { orderBy: { chunkIndex: "asc" } } },
       orderBy: { updatedAt: "desc" },
-      take: 500,
+      take: LIST_TAKE,
     });
+    if (docs.length >= LIST_TAKE) {
+      console.warn(
+        `[inventory-count-document] list truncated at ${LIST_TAKE} for shop=${shop}`
+      );
+    }
     return docs.map((doc: {
       countId: string;
       status: string;
@@ -205,6 +211,7 @@ function overlayFromDbDoc<T extends { id?: string; status?: string }>(doc: DbCou
       id: doc.countId,
       status: doc.status,
       _source: "db",
+      _dbVersion: doc.version,
     } as T;
   }
   return {
@@ -214,6 +221,7 @@ function overlayFromDbDoc<T extends { id?: string; status?: string }>(doc: DbCou
     locationId: doc.locationId,
     locationName: doc.locationName,
     _source: "db",
+    _dbVersion: doc.version,
   } as T;
 }
 
@@ -257,18 +265,47 @@ export async function mergeInventoryCountsWithDb<T extends { id?: string; status
   return merged;
 }
 
+type CountLikeForUpsert = {
+  id?: string;
+  countName?: string | null;
+  status?: string;
+  locationId?: string | null;
+  locationName?: string | null;
+  completedAt?: string | null;
+  _dbVersion?: number | null;
+  [key: string]: unknown;
+};
+
+async function assertDbVersionIfPresent(
+  shop: string,
+  countId: string,
+  expected: unknown
+): Promise<{ ok: boolean; error?: string }> {
+  if (expected == null || expected === "") return { ok: true };
+  const n = Number(expected);
+  if (!Number.isInteger(n) || n < 1) return { ok: true };
+  try {
+    const row = await db.inventoryCountDocument.findUnique({
+      where: { shop_countId: { shop, countId } },
+      select: { version: true },
+    });
+    if (!row) return { ok: true }; // 新規
+    if (row.version !== n) {
+      return {
+        ok: false,
+        error: `他の操作でデータが更新されています（${countId}: expected ${n}, got ${row.version}）`,
+      };
+    }
+    return { ok: true };
+  } catch (e: unknown) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** 棚卸一覧を DB に全件 upsert（migrate / Admin persist）。削除はしない。1件失敗で ok:false。 */
 export async function upsertInventoryCountsBulk(
   shop: string,
-  counts: Array<{
-    id?: string;
-    countName?: string | null;
-    status?: string;
-    locationId?: string | null;
-    locationName?: string | null;
-    completedAt?: string | null;
-    [key: string]: unknown;
-  }>
+  counts: CountLikeForUpsert[]
 ): Promise<{ ok: boolean; count: number; error?: string }> {
   try {
     let n = 0;
@@ -276,6 +313,11 @@ export async function upsertInventoryCountsBulk(
     for (const c of counts) {
       const countId = String(c?.id ?? "").trim();
       if (!countId) continue;
+      const verCheck = await assertDbVersionIfPresent(shop, countId, c._dbVersion);
+      if (!verCheck.ok) {
+        errors.push(verCheck.error || `${countId}: version conflict`);
+        continue;
+      }
       const res = await upsertInventoryCountDocument({
         shop,
         countId,
@@ -293,6 +335,56 @@ export async function upsertInventoryCountsBulk(
       return { ok: false, count: n, error: errors.slice(0, 5).join(" / ") };
     }
     return { ok: true, count: n };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, count: 0, error: msg };
+  }
+}
+
+/**
+ * POS/Admin の全件 replace: upsert 後、渡されなかった countId を削除。
+ * 空配列での全消しは拒否（既存がある場合）。
+ */
+export async function replaceInventoryCountsForShop(
+  shop: string,
+  counts: CountLikeForUpsert[]
+): Promise<{ ok: boolean; count: number; error?: string }> {
+  try {
+    if (!db || typeof (db as { inventoryCountDocument?: unknown }).inventoryCountDocument === "undefined") {
+      return { ok: false, count: 0, error: "InventoryCountDocument model not available" };
+    }
+    const list = Array.isArray(counts) ? counts : [];
+    const keepIds = new Set<string>();
+    for (const c of list) {
+      const id = String(c?.id ?? "").trim();
+      if (id) keepIds.add(id);
+    }
+
+    const existingCount = await db.inventoryCountDocument.count({ where: { shop } });
+    if (keepIds.size === 0 && existingCount > 0) {
+      return {
+        ok: false,
+        count: 0,
+        error: "棚卸データを空にすることはできません。既存の棚卸IDが消えるため、空配列での上書きをブロックしました。",
+      };
+    }
+
+    const upsertRes = await upsertInventoryCountsBulk(shop, list);
+    if (!upsertRes.ok) return upsertRes;
+
+    const existing = await db.inventoryCountDocument.findMany({
+      where: { shop },
+      select: { countId: true },
+    });
+    const toDelete = existing
+      .map((e: { countId: string }) => e.countId)
+      .filter((id: string) => !keepIds.has(id));
+    if (toDelete.length > 0) {
+      await db.inventoryCountDocument.deleteMany({
+        where: { shop, countId: { in: toDelete } },
+      });
+    }
+    return { ok: true, count: keepIds.size };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, count: 0, error: msg };

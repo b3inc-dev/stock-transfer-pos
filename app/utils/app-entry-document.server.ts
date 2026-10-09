@@ -45,48 +45,53 @@ export async function replaceEntriesForShop(
     if (!modelReady()) return { ok: false, count: 0, error: "AppEntryDocument model not available" };
     const list = Array.isArray(entries) ? entries : [];
     const keepIds = new Set<string>();
-
     for (const entry of list) {
       const entryId = String(entry?.id ?? "").trim();
-      if (!entryId) continue;
-      keepIds.add(entryId);
-      const payloadJson = JSON.stringify(entry);
-      await db.appEntryDocument.upsert({
-        where: { shop_entryType_entryId: { shop, entryType, entryId } },
-        create: {
-          shop,
-          entryType,
-          entryId,
-          status: entry.status != null ? String(entry.status) : null,
-          name: entryName(entry, entryType),
-          locationId: entry.locationId != null ? String(entry.locationId) : null,
-          payloadJson,
-          version: 1,
-          source: "db",
-        },
-        update: {
-          status: entry.status != null ? String(entry.status) : null,
-          name: entryName(entry, entryType),
-          locationId: entry.locationId != null ? String(entry.locationId) : null,
-          payloadJson,
-          version: { increment: 1 },
-          source: "db",
-        },
-      });
+      if (entryId) keepIds.add(entryId);
     }
 
-    const existing = await db.appEntryDocument.findMany({
-      where: { shop, entryType },
-      select: { entryId: true },
-    });
-    const toDelete = existing
-      .map((e: { entryId: string }) => e.entryId)
-      .filter((id: string) => !keepIds.has(id));
-    if (toDelete.length > 0) {
-      await db.appEntryDocument.deleteMany({
-        where: { shop, entryType, entryId: { in: toDelete } },
+    await db.$transaction(async (tx) => {
+      for (const entry of list) {
+        const entryId = String(entry?.id ?? "").trim();
+        if (!entryId) continue;
+        const payloadJson = JSON.stringify(entry);
+        await tx.appEntryDocument.upsert({
+          where: { shop_entryType_entryId: { shop, entryType, entryId } },
+          create: {
+            shop,
+            entryType,
+            entryId,
+            status: entry.status != null ? String(entry.status) : null,
+            name: entryName(entry, entryType),
+            locationId: entry.locationId != null ? String(entry.locationId) : null,
+            payloadJson,
+            version: 1,
+            source: "db",
+          },
+          update: {
+            status: entry.status != null ? String(entry.status) : null,
+            name: entryName(entry, entryType),
+            locationId: entry.locationId != null ? String(entry.locationId) : null,
+            payloadJson,
+            version: { increment: 1 },
+            source: "db",
+          },
+        });
+      }
+
+      const existing = await tx.appEntryDocument.findMany({
+        where: { shop, entryType },
+        select: { entryId: true },
       });
-    }
+      const toDelete = existing
+        .map((e: { entryId: string }) => e.entryId)
+        .filter((id: string) => !keepIds.has(id));
+      if (toDelete.length > 0) {
+        await tx.appEntryDocument.deleteMany({
+          where: { shop, entryType, entryId: { in: toDelete } },
+        });
+      }
+    });
 
     return { ok: true, count: keepIds.size };
   } catch (e: unknown) {

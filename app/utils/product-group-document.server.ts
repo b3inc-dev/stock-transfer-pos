@@ -23,41 +23,48 @@ export async function replaceProductGroupsForShop(
     if (!modelReady()) return { ok: false, count: 0, error: "ProductGroupDocument model not available" };
     const list = Array.isArray(groups) ? groups : [];
     const keepIds = new Set<string>();
-
     for (const g of list) {
       const groupId = String(g?.id ?? "").trim();
-      if (!groupId) continue;
-      keepIds.add(groupId);
-      const payloadJson = JSON.stringify(g);
-      await db.productGroupDocument.upsert({
-        where: { shop_groupId: { shop, groupId } },
-        create: {
-          shop,
-          groupId,
-          name: g?.name != null ? String(g.name) : null,
-          payloadJson,
-          version: 1,
-          source: "db",
-        },
-        update: {
-          name: g?.name != null ? String(g.name) : null,
-          payloadJson,
-          version: { increment: 1 },
-          source: "db",
-        },
-      });
+      if (groupId) keepIds.add(groupId);
     }
 
-    const existing = await db.productGroupDocument.findMany({
-      where: { shop },
-      select: { groupId: true },
-    });
-    const toDelete = existing.map((e: { groupId: string }) => e.groupId).filter((id: string) => !keepIds.has(id));
-    if (toDelete.length > 0) {
-      await db.productGroupDocument.deleteMany({
-        where: { shop, groupId: { in: toDelete } },
+    await db.$transaction(async (tx) => {
+      for (const g of list) {
+        const groupId = String(g?.id ?? "").trim();
+        if (!groupId) continue;
+        const payloadJson = JSON.stringify(g);
+        await tx.productGroupDocument.upsert({
+          where: { shop_groupId: { shop, groupId } },
+          create: {
+            shop,
+            groupId,
+            name: g?.name != null ? String(g.name) : null,
+            payloadJson,
+            version: 1,
+            source: "db",
+          },
+          update: {
+            name: g?.name != null ? String(g.name) : null,
+            payloadJson,
+            version: { increment: 1 },
+            source: "db",
+          },
+        });
+      }
+
+      const existing = await tx.productGroupDocument.findMany({
+        where: { shop },
+        select: { groupId: true },
       });
-    }
+      const toDelete = existing
+        .map((e: { groupId: string }) => e.groupId)
+        .filter((id: string) => !keepIds.has(id));
+      if (toDelete.length > 0) {
+        await tx.productGroupDocument.deleteMany({
+          where: { shop, groupId: { in: toDelete } },
+        });
+      }
+    });
 
     return { ok: true, count: keepIds.size };
   } catch (e: unknown) {

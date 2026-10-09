@@ -53,7 +53,11 @@ export async function persistEntriesForShop(
   };
   const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
   if (errs.length) {
-    return { ok: false, error: errs.map((e) => e.message ?? "").join(" / ") };
+    // DB は既に SoT。ミラー失敗は警告のみ（再試行で DB を壊さない）
+    console.warn(
+      `[persist-app-entries] metafield mirror failed after DB ok (${entryType}):`,
+      errs.map((e) => e.message ?? "").join(" / ")
+    );
   }
   return { ok: true };
 }
