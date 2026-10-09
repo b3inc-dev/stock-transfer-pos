@@ -1962,8 +1962,8 @@ export function InventoryCountList({
     setIsReadOnlyState(true);
     // ゼロ差分（apply-change 未実行）では「在庫調整は完了」と誤認させない
     const defaultMsg = quantitiesAppliedRef.current
-      ? "在庫調整は完了しています。メタ更新に失敗しました。「再試行（メタ更新のみ）」を押してください。"
-      : "メタ更新に失敗しました。「再試行（メタ更新のみ）」を押してください。";
+      ? "在庫調整は完了しています。ステータスの反映に失敗しました。「再試行」を押してください。"
+      : "ステータスの反映に失敗しました。「再試行」を押してください。";
     toast(message || defaultMsg);
   }, [count?.id]);
 
@@ -1989,7 +1989,7 @@ export function InventoryCountList({
           setMetafieldRetryCountId(null);
           pendingCompletePayloadRef.current = null;
           quantitiesAppliedRef.current = false;
-          toast("棚卸を完了しました（メタ更新）");
+          toast("棚卸を完了しました");
           onAfterConfirm?.(count);
           clearAllInventoryCountDraftsForCount({
             countId: count.id,
@@ -1998,7 +1998,7 @@ export function InventoryCountList({
           }).catch((e) => console.error("Failed to clear inventory count draft:", e));
           return true;
         }
-        toast(result.error || "メタ更新の再試行に失敗しました");
+        toast(result.error || "再試行に失敗しました");
         return false;
       } catch (e) {
         toast(`エラー: ${e?.message ?? e}`);
@@ -2431,7 +2431,7 @@ export function InventoryCountList({
         summaryRight=""
         leftLabel="戻る"
         onLeft={onBack}
-        rightLabel={submitting ? "処理中..." : needMetafieldRetry ? "再試行（メタ更新のみ）" : "確定"}
+        rightLabel={submitting ? "処理中..." : needMetafieldRetry ? "再試行" : "確定"}
         onRight={needMetafieldRetry ? () => { handleComplete(); } : () => {
           // command="--show"とcommandForでモーダルを開くため、ここでは何もしない
         }}
