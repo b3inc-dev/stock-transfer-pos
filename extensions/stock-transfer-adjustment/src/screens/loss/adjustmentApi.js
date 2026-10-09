@@ -946,7 +946,15 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     mutation Set($input: InventorySetQuantitiesInput!) {
       inventorySetQuantities(input: $input) {
         inventoryAdjustmentGroup { id }
-        userErrors { field message }
+        userErrors { field message code }
+      }
+    }`;
+  const liveQtyQuery = `#graphql
+    query AdjLiveQty($id: ID!, $loc: ID!) {
+      inventoryItem(id: $id) {
+        inventoryLevel(locationId: $loc) {
+          quantities(names: ["available"]) { name quantity }
+        }
       }
     }`;
 
@@ -955,14 +963,36 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
 
   for (let chunkStart = 0; chunkStart < quantities.length; chunkStart += INVENTORY_SET_QUANTITIES_MAX) {
     const chunk = quantities.slice(chunkStart, chunkStart + INVENTORY_SET_QUANTITIES_MAX);
+    // activate 後 live CAS（#19 R5）。主確定は apply-change。
+    const writeChunk = [];
+    for (const q of chunk) {
+      let liveQty = null;
+      try {
+        const d = await graphql(liveQtyQuery, { id: q.inventoryItemId, loc: locationGid });
+        const qty = d?.inventoryItem?.inventoryLevel?.quantities?.find((x) => x.name === "available")?.quantity;
+        liveQty = qty != null ? Math.floor(Number(qty)) : null;
+      } catch {
+        liveQty = null;
+      }
+      if (liveQty == null || !Number.isFinite(liveQty)) {
+        throw new Error(
+          "確定直前の在庫数を取得できませんでした。通信状況を確認してから再度確定してください。"
+        );
+      }
+      if (liveQty === q.quantity) continue;
+      writeChunk.push({ ...q, changeFromQuantity: liveQty });
+    }
+    if (writeChunk.length === 0) {
+      continue;
+    }
     const input = {
       name: "available",
       reason: "correction",
-      quantities: chunk.map((q) => ({
+      quantities: writeChunk.map((q) => ({
         inventoryItemId: q.inventoryItemId,
         locationId: locationGid,
         quantity: q.quantity,
-        changeFromQuantity: null,
+        changeFromQuantity: q.changeFromQuantity,
       })),
     };
     if (uri) input.referenceDocumentUri = uri;

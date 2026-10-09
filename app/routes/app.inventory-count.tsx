@@ -10,6 +10,7 @@ import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone
 import db from "../db.server";
 import type { InventoryCountLike, InventoryCountEntryLike, InputLikeEvent } from "../types";
 import type { GraphQLUserError } from "../types/graphql-responses";
+import { setInventoryQuantitiesServer } from "../utils/inventory-set-quantities-server";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -1094,69 +1095,26 @@ function toInventoryItemGidForCount(inventoryItemId: string): string | null {
   return null;
 }
 
-/** Shopify inventorySetQuantities の quantities 配列の最大件数（API 制限） */
-const INVENTORY_SET_QUANTITIES_MAX = 250;
-
-/** 管理画面から inventorySetQuantities で在庫を設定（POS の adjustInventoryToActual と同様）。250件超はチャンク分割して複数回実行。 */
+/** 管理画面から inventorySetQuantities（共有ヘルパー + post-activate 相当の live CAS）。 */
 async function adjustInventoryQuantitiesServer(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   locationId: string,
   items: Array<{ inventoryItemId: string; quantity: number }>,
   referenceDocumentUri?: string | null
 ): Promise<{ ok: boolean; invalidCount?: number; error?: string }> {
-  const locationGid = toLocationGidForCount(locationId);
-  const quantities = (items ?? [])
-    .filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.quantity)))
-    .map((x) => {
-      const gid = toInventoryItemGidForCount(x.inventoryItemId);
-      const quantity = Math.floor(Number(x.quantity) ?? 0);
-      return gid ? { valid: true as const, inventoryItemId: gid, quantity } : { valid: false as const };
-    });
-  const validQuantities = quantities.filter((q) => q.valid);
-  const invalidCount = quantities.filter((q) => !q.valid).length;
-  if (validQuantities.length === 0) {
-    return { ok: false, invalidCount, error: "有効な在庫アイテムがありません" };
-  }
-  const refUri = referenceDocumentUri
-    ? `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`
-    : undefined;
-  for (let i = 0; i < validQuantities.length; i += INVENTORY_SET_QUANTITIES_MAX) {
-    const chunk = validQuantities.slice(i, i + INVENTORY_SET_QUANTITIES_MAX);
-    const input: Record<string, unknown> = {
-      name: "available",
-      reason: "correction",
-      quantities: chunk.map((q) => ({
-        inventoryItemId: q.inventoryItemId,
-        locationId: locationGid,
-        quantity: q.quantity,
-        changeFromQuantity: null,
-      })),
-    };
-    if (refUri) input.referenceDocumentUri = refUri;
-    try {
-      const resp = await admin.graphql(
-        `#graphql
-          mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-            inventorySetQuantities(input: $input) {
-              inventoryAdjustmentGroup { id }
-              userErrors { field message }
-            }
-          }
-        `,
-        { variables: { input } }
-      );
-      const json = await resp.json();
-      const data = json?.data?.inventorySetQuantities;
-      const errs = data?.userErrors ?? [];
-      if (errs.length) {
-        return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") };
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: msg };
-    }
-  }
-  return { ok: true, invalidCount: invalidCount > 0 ? invalidCount : undefined };
+  // Admin 直経路も apply-change と同じ casFromLiveSnapshot（#19 R5）。null 絶対上書きをやめる。
+  const result = await setInventoryQuantitiesServer(
+    admin,
+    locationId,
+    items,
+    referenceDocumentUri,
+    { casFromLiveSnapshot: true }
+  );
+  return {
+    ok: result.ok,
+    invalidCount: result.invalidCount,
+    error: result.error,
+  };
 }
 
 /** 管理画面から棚卸確定・リセット時の変動ログを DB に記録（api/log-inventory-change と同様のロジック） */

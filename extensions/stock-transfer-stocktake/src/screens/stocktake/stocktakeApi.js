@@ -2030,7 +2030,8 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     })
     .filter(Boolean);
 
-  // ✅ changeFromQuantity: null で「更新前の数量チェック」をスキップ（確定エラー防止。Admin API 2026-04〜）
+  // 主確定は apply-change（サーバー CAS）。直呼び出しは activate 後 live CAS（#19 R5）。
+  // activate 前読取での CAS は使わない（D9）。
 
   if (!locationId || activationRows.length === 0) {
     if (activationRows.length === 0 && (items ?? []).length > 0) {
@@ -2087,7 +2088,7 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     mutation Set($input: InventorySetQuantitiesInput!) {
       inventorySetQuantities(input: $input) {
         inventoryAdjustmentGroup { id }
-        userErrors { field message }
+        userErrors { field message code }
       }
     }`;
 
@@ -2096,14 +2097,35 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
 
   for (let chunkStart = 0; chunkStart < quantities.length; chunkStart += INVENTORY_SET_QUANTITIES_MAX) {
     const chunk = quantities.slice(chunkStart, chunkStart + INVENTORY_SET_QUANTITIES_MAX);
+    // activate 後・チャンク直前の live available で CAS（目標一致は skip）
+    const liveMap = await getCurrentQuantitiesBulk(
+      chunk.map((q) => q.inventoryItemId),
+      locationGid,
+      { noCache: true }
+    );
+    const writeChunk = [];
+    for (const q of chunk) {
+      const live = liveMap.get(q.inventoryItemId);
+      if (live == null || !Number.isFinite(Number(live))) {
+        throw new Error(
+          "確定直前の在庫数を取得できませんでした。通信状況を確認してから再度確定してください。"
+        );
+      }
+      const liveQty = Math.floor(Number(live));
+      if (liveQty === q.quantity) continue;
+      writeChunk.push({ ...q, changeFromQuantity: liveQty });
+    }
+    if (writeChunk.length === 0) {
+      continue;
+    }
     const input = {
       name: "available",
       reason: "correction",
-      quantities: chunk.map((q) => ({
+      quantities: writeChunk.map((q) => ({
         inventoryItemId: q.inventoryItemId,
         locationId: locationGid,
         quantity: q.quantity,
-        changeFromQuantity: null,
+        changeFromQuantity: q.changeFromQuantity,
       })),
     };
     if (uri) {

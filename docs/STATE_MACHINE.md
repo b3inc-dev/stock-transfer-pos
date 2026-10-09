@@ -264,5 +264,15 @@ Admin 再試行は `pending_complete_v1` からメタのみ適用（在庫 API �
 - activate 成功後に短い settle + `inventoryLevel` 再確認。**確かな missing だけ再 ensure**。verify uncertain / lag では set 前にハード失敗しない（set + not-stocked 1 回再試行へ）。
 - setQuantities が **厳格な** `not stocked at the location` 等で失敗し `partiallyApplied` でないときだけ、再 activate→settle→set を **1 回**。
 - POS 向け `error` は `formatInventoryApiError` で空/Unknown 固定を避け、`errorCode`（`activate_failed` / `not_stocked` / `set_quantities_failed` / `partial_failed`）を付与。
-- **#19 CAS は使わない**。post-success / outer-catch は #22（旧 #20/#21）を維持し、本硬化は activate→set 窓のみ。
-- **残存**: Shopify 伝播遅延・権限・追跡無効・同時売上の絶対上書き（#19）。
+- post-success / outer-catch は #22（旧 #20/#21）を維持。
+
+### 同時売上/返品と絶対値 set（#19 CAS）
+
+- 差異あり apply-change（`inventory_count` / `adjustment`）は **activate 成功後**、チャンク直前に available を再読取し `changeFromQuantity` CAS する（`casFromLiveSnapshot`）。
+- 目標値と live が一致する行は set を skip（skip 行は rollback 対象に入れない）。
+- CAS stale は 1 回再スナップショット後、なお不一致なら明確なエラーで失敗（`partiallyApplied` 時は再 set しない）。
+- 後続チャンク失敗時のロールバックも **再読取 CAS**: 書いた数量と live が一致する行だけ戻し、同時変動行は null 上書きしない。
+- stale 検出は `userErrors.message` 部分一致 + 可能なら `code`（実ストア形は検証ノート参照。ロケール変更で壊れ得る）。
+- **製品決定（R1・inherent）**: カウント中〜確定タップ**前**の売上/返品は、棚卸「実数絶対値」セマンティクス上、確定時に上書きし得る。CAS は確定 API 実行中の緩和のみ。販売凍結や確定前ライブ差分確認 UI は製品変更（本 PR では inherent として文書化）。
+- **#13**: `inventory_count` / `adjustment` の post-activate CAS を再 null 化しない（#19 が概念上先）。
+- **残存**: TOCTOU・`partial_failed` 手動復旧・API 2026-01 のまま・ライブ stale 形未証明。

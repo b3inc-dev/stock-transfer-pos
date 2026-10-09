@@ -12,6 +12,7 @@ import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session"
 import {
   setInventoryQuantitiesServer,
   fetchCurrentQuantityServer,
+  isChangeFromQuantityStaleError,
 } from "../utils/inventory-set-quantities-server";
 import {
   ensureInventoryActivatedAtLocation,
@@ -39,8 +40,19 @@ function isTransientError(errorSummary: string | undefined): boolean {
   );
 }
 
-/** activate 成功後〜setQuantities 直前の短い settle（伝播レース緩和。CAS #19 は取り込まない） */
+/** activate 成功後〜setQuantities 直前の短い settle（伝播レース緩和） */
 const POST_ACTIVATE_SETTLE_BEFORE_SET_MS = 600;
+
+/** 棚卸・調整の絶対値 set: activate 後スナップショット CAS（D9 / #19） */
+function usesPostActivateCas(activity: string): boolean {
+  return activity === "inventory_count" || activity === "adjustment";
+}
+
+function isChangeFromQuantityStale(
+  result: { error?: string; userErrors?: Array<{ message?: string; code?: string | null }> }
+): boolean {
+  return isChangeFromQuantityStaleError(result.error, result.userErrors);
+}
 
 const API_VERSION = "2026-01";
 const CORS_HEADERS = {
@@ -589,9 +601,13 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const refUri = referenceDocumentUriForActivity(activity, referenceDocumentUri);
+    // 棚卸・調整: activate 後に live available を読んで CAS（#13 の null オプトアウトを補完。
+    // activate 前読取での CAS は D9 どおり不整合のため使わない）。
+    // #13 が inventory_count/adjustment を再 null 化しないこと（D9 / PR #19 優先）。
+    const casOpts = usesPostActivateCas(activity) ? { casFromLiveSnapshot: true } : undefined;
     let result: Awaited<ReturnType<typeof setInventoryQuantitiesServer>>;
     try {
-      result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+      result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, casOpts);
     } catch (setErr: unknown) {
       // ヘルパー外への例外は成否不明（再 set 禁止）— #22 post-success
       result = {
@@ -602,6 +618,44 @@ export async function action({ request }: ActionFunctionArgs) {
         appliedInventoryItemIds: [],
       };
     }
+    // CAS stale: 再スナップショット 1 回（partiallyApplied では再 set しない）
+    if (
+      !result.ok &&
+      !result.partiallyApplied &&
+      casOpts &&
+      isChangeFromQuantityStale(result)
+    ) {
+      await new Promise((r) => setTimeout(r, 400));
+      try {
+        const staleRetry = await setInventoryQuantitiesServer(
+          admin,
+          locationId,
+          shopifyItems,
+          refUri,
+          casOpts
+        );
+        if (staleRetry.ok) {
+          result = staleRetry;
+        } else if (isChangeFromQuantityStale(staleRetry)) {
+          result = {
+            ...staleRetry,
+            error:
+              "確定処理中に在庫数が変更されました（売上・返品など）。" +
+              "画面を再読み込みし、在庫数を確認してから再度確定してください。",
+          };
+        } else {
+          result = staleRetry;
+        }
+      } catch (staleErr: unknown) {
+        result = {
+          ok: false,
+          error: formatCaughtError(staleErr),
+          partiallyApplied: true,
+          applicationUncertain: true,
+          appliedInventoryItemIds: result.appliedInventoryItemIds ?? [],
+        };
+      }
+    }
     // not stocked: 厳格マッチのみ。再 activate + settle 後に 1 回だけ再 set（partial は再実行しない）
     if (!result.ok && !result.partiallyApplied && isNotStockedRetryableError(result.error)) {
       console.warn(
@@ -610,7 +664,13 @@ export async function action({ request }: ActionFunctionArgs) {
       await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems);
       await new Promise((r) => setTimeout(r, POST_ACTIVATE_SETTLE_BEFORE_SET_MS));
       try {
-        const stockedRetry = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+        const stockedRetry = await setInventoryQuantitiesServer(
+          admin,
+          locationId,
+          shopifyItems,
+          refUri,
+          casOpts
+        );
         result = stockedRetry;
       } catch (stockedErr: unknown) {
         result = {
@@ -626,7 +686,13 @@ export async function action({ request }: ActionFunctionArgs) {
       // partial 適用済みを再 set すると二重になるため、完全失敗（または rollback 済み）のみリトライ
       await new Promise((r) => setTimeout(r, 1500));
       try {
-        const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+        const retryResult = await setInventoryQuantitiesServer(
+          admin,
+          locationId,
+          shopifyItems,
+          refUri,
+          casOpts
+        );
         if (retryResult.ok || retryResult.partiallyApplied) result = retryResult;
       } catch (retryErr: unknown) {
         result = {
