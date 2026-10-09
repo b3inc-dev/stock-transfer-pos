@@ -48,8 +48,10 @@ function usesPostActivateCas(activity: string): boolean {
   return activity === "inventory_count" || activity === "adjustment";
 }
 
-function isChangeFromQuantityStale(errorSummary: string | undefined): boolean {
-  return isChangeFromQuantityStaleError(errorSummary);
+function isChangeFromQuantityStale(
+  result: { error?: string; userErrors?: Array<{ message?: string; code?: string | null }> }
+): boolean {
+  return isChangeFromQuantityStaleError(result.error, result.userErrors);
 }
 
 const API_VERSION = "2026-01";
@@ -621,7 +623,7 @@ export async function action({ request }: ActionFunctionArgs) {
       !result.ok &&
       !result.partiallyApplied &&
       casOpts &&
-      isChangeFromQuantityStale(result.error)
+      isChangeFromQuantityStale(result)
     ) {
       await new Promise((r) => setTimeout(r, 400));
       try {
@@ -634,7 +636,7 @@ export async function action({ request }: ActionFunctionArgs) {
         );
         if (staleRetry.ok) {
           result = staleRetry;
-        } else if (isChangeFromQuantityStale(staleRetry.error)) {
+        } else if (isChangeFromQuantityStale(staleRetry)) {
           result = {
             ...staleRetry,
             error:

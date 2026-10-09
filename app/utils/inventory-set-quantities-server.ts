@@ -129,12 +129,9 @@ export function isChangeFromQuantityStaleError(
 ): boolean {
   if (Array.isArray(userErrors)) {
     for (const e of userErrors) {
+      // code は CHANGE_FROM_QUANTITY* のみ（裸 STALE / COMPARE は誤検知しやすい）
       const code = String(e?.code ?? "").toUpperCase();
-      if (
-        code.includes("CHANGE_FROM_QUANTITY") ||
-        code === "STALE" ||
-        code.includes("COMPARE")
-      ) {
+      if (code.includes("CHANGE_FROM_QUANTITY")) {
         return true;
       }
       const m = String(e?.message ?? "").toLowerCase();
@@ -172,6 +169,8 @@ export type SetInventoryQuantitiesResult = {
   appliedInventoryItemIds?: string[];
   /** 失敗したチャンク index（0-based）。部分失敗時のみ */
   failedChunkIndex?: number;
+  /** 直近 mutation の userErrors（stale code 判定用。無い場合あり） */
+  userErrors?: Array<{ message?: string; code?: string | null }>;
 };
 
 export type SetInventoryQuantityItem = {
@@ -395,16 +394,22 @@ export async function setInventoryQuantitiesServer(
   async function rollbackOrPartial(
     chunkError: string,
     appliedSnapshots: BeforeSnapshot[],
-    failedChunkIndex?: number
+    failedChunkIndex?: number,
+    chunkUserErrors?: Array<{ message?: string; code?: string | null }>
   ): Promise<SetInventoryQuantitiesResult> {
+    const withErrors = (
+      base: SetInventoryQuantitiesResult
+    ): SetInventoryQuantitiesResult =>
+      chunkUserErrors?.length ? { ...base, userErrors: chunkUserErrors } : base;
+
     if (appliedSnapshots.length === 0) {
-      return {
+      return withErrors({
         ok: false,
         error: chunkError,
         rolledBack: false,
         appliedInventoryItemIds: [],
         failedChunkIndex,
-      };
+      });
     }
     const nonRollbackable = appliedSnapshots.filter((s) => !s.canRollback);
     if (nonRollbackable.length > 0) {
@@ -414,14 +419,14 @@ export async function setInventoryQuantitiesServer(
           ` 元のエラー: ${chunkError}。` +
           ` スナップショット: ${JSON.stringify(appliedSnapshots)}`
       );
-      return {
+      return withErrors({
         ok: false,
         error: chunkError,
         rolledBack: false,
         partiallyApplied: true,
         appliedInventoryItemIds: [...appliedInventoryItemIds],
         failedChunkIndex,
-      };
+      });
     }
     const rb = await rollbackAppliedSnapshots(admin, locationGid, appliedSnapshots, casFromLiveSnapshot);
     if (!rb.ok) {
@@ -430,27 +435,37 @@ export async function setInventoryQuantitiesServer(
           ` 元のエラー: ${chunkError}。ロールバックエラー: ${rb.errorMsg}。` +
           ` スナップショット: ${JSON.stringify(appliedSnapshots)}`
       );
-      return {
+      return withErrors({
         ok: false,
         error: chunkError,
         rolledBack: false,
         partiallyApplied: true,
         appliedInventoryItemIds: [...appliedInventoryItemIds],
         failedChunkIndex,
-      };
+      });
     }
     if (rb.skippedConcurrent > 0) {
+      // 同時変動行を意図的に残した → 完全ロールバックではない。
+      // partiallyApplied にして apply-change の stale/transient 再 set を止める（再上書き防止）。
       console.warn(
-        `[inventory-set-quantities-server] rollback completed with ${rb.skippedConcurrent} concurrent skip(s)`
+        `[inventory-set-quantities-server] rollback completed with ${rb.skippedConcurrent} concurrent skip(s); mark partiallyApplied`
       );
+      return withErrors({
+        ok: false,
+        error: chunkError,
+        rolledBack: true,
+        partiallyApplied: true,
+        appliedInventoryItemIds: [...appliedInventoryItemIds],
+        failedChunkIndex,
+      });
     }
-    return {
+    return withErrors({
       ok: false,
       error: chunkError,
       rolledBack: true,
       appliedInventoryItemIds: [],
       failedChunkIndex,
-    };
+    });
   }
 
   try {
@@ -540,10 +555,16 @@ export async function setInventoryQuantitiesServer(
             applicationUncertain: true,
             appliedInventoryItemIds: [...appliedInventoryItemIds],
             failedChunkIndex: chunkIndex,
+            userErrors: mut.userErrors?.length ? mut.userErrors : undefined,
           };
         }
 
-        return await rollbackOrPartial(mut.error, appliedSnapshots, chunkIndex);
+        return await rollbackOrPartial(
+          mut.error,
+          appliedSnapshots,
+          chunkIndex,
+          mut.userErrors
+        );
       }
 
       for (const gid of writeGids) appliedInventoryItemIds.push(gid);

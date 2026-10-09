@@ -14,11 +14,7 @@ function isChangeFromQuantityStaleError(errorSummary, userErrors) {
   if (Array.isArray(userErrors)) {
     for (const e of userErrors) {
       const code = String(e?.code ?? "").toUpperCase();
-      if (
-        code.includes("CHANGE_FROM_QUANTITY") ||
-        code === "STALE" ||
-        code.includes("COMPARE")
-      ) {
+      if (code.includes("CHANGE_FROM_QUANTITY")) {
         return true;
       }
       const m = String(e?.message ?? "").toLowerCase();
@@ -55,6 +51,14 @@ assert.equal(
   true
 );
 assert.equal(
+  isChangeFromQuantityStaleError("other", [{ code: "STALE", message: "x" }]),
+  false
+);
+assert.equal(
+  isChangeFromQuantityStaleError("other", [{ code: "COMPARE_QUANTITY", message: "x" }]),
+  false
+);
+assert.equal(
   isChangeFromQuantityStaleError("other", [{ code: "NOT_STOCKED", message: "not stocked" }]),
   false
 );
@@ -64,6 +68,10 @@ assert.match(src, /export function isChangeFromQuantityStaleError/);
 assert.match(src, /userErrors \{ field message code \}/);
 assert.match(src, /casFromLiveSnapshot/);
 assert.match(src, /rollbackAppliedSnapshots/);
-assert.match(src, /skippedConcurrent/);
+assert.match(src, /skippedConcurrent > 0[\s\S]*partiallyApplied: true/);
+assert.match(
+  fs.readFileSync(path.join(root, "app/routes/api.inventory.apply-change.tsx"), "utf8"),
+  /isChangeFromQuantityStale\(result\)/
+);
 
 console.log("change-from-quantity-stale.test.mjs: ok");
