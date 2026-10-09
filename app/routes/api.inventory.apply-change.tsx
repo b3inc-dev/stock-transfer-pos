@@ -14,6 +14,7 @@ import {
   fetchCurrentQuantityServer,
 } from "../utils/inventory-set-quantities-server";
 import { ensureInventoryActivatedAtLocation } from "../utils/ensure-inventory-activated-server";
+import { decideOuterCatchAction } from "../utils/apply-change-outer-catch-guard";
 
 /** 一時的な障害とみなしてリトライするか（429/5xx/ネットワーク系） */
 function isTransientError(errorSummary: string | undefined): boolean {
@@ -129,6 +130,11 @@ export async function action({ request }: ActionFunctionArgs) {
   let cleanupShop: string | null = null;
   let cleanupAppEventId: string | null = null;
   let cleanupIdempotencyKeys: string[] = [];
+  /**
+   * Shopify setQuantities が在庫を動かした後は failed に戻さない（#16 outer catch → failed クリア再試行で再 set するのを防ぐ）。
+   * full = 全件適用 / partial = チャンク一部適用で rollback 不可
+   */
+  let inventoryApplied: "full" | "partial" | null = null;
 
   try {
     if (request.method !== "POST") {
@@ -545,11 +551,63 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const refUri = referenceDocumentUriForActivity(activity, referenceDocumentUri);
-    let result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
-    if (!result.ok && isTransientError(result.error)) {
+    let result: Awaited<ReturnType<typeof setInventoryQuantitiesServer>>;
+    try {
+      result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+    } catch (setErr: unknown) {
+      // ヘルパー外への例外は成否不明（再 set 禁止）
+      result = {
+        ok: false,
+        error: formatCaughtError(setErr),
+        partiallyApplied: true,
+        applicationUncertain: true,
+        appliedInventoryItemIds: [],
+      };
+    }
+    if (!result.ok && isTransientError(result.error) && !result.partiallyApplied) {
+      // partial 適用済みを再 set すると二重になるため、完全失敗（または rollback 済み）のみリトライ
       await new Promise((r) => setTimeout(r, 1500));
-      const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
-      if (retryResult.ok) result = retryResult;
+      try {
+        const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+        if (retryResult.ok || retryResult.partiallyApplied) result = retryResult;
+      } catch (retryErr: unknown) {
+        result = {
+          ok: false,
+          error: formatCaughtError(retryErr),
+          partiallyApplied: true,
+          applicationUncertain: true,
+          appliedInventoryItemIds: result.appliedInventoryItemIds ?? [],
+        };
+      }
+    }
+
+    // Shopify が在庫を動かした / 動かした可能性がある瞬間を先に記録（以降の DB/履歴失敗で failed に戻さない）
+    // terminal status も可能な限り早く書き、プロセス死亡で applying 固着→手動復旧の窓を縮める。
+    if (result.ok) {
+      inventoryApplied = "full";
+      await db.inventoryChangeEvent.update({
+        where: { id: event.id },
+        data: {
+          status: "completed",
+          errorSummary: result.invalidCount ? `invalidCount: ${result.invalidCount}` : null,
+        },
+      });
+    } else if (result.partiallyApplied) {
+      inventoryApplied = "partial";
+      await db.inventoryChangeEvent.update({
+        where: { id: event.id },
+        data: {
+          status: "partial_failed",
+          errorSummary: [
+            result.error || "Shopify API error",
+            result.applicationUncertain ? "application_uncertain" : null,
+            result.failedChunkIndex != null ? `failedChunk=${result.failedChunkIndex}` : null,
+          ]
+            .filter(Boolean)
+            .join(" | ")
+            .slice(0, 500),
+        },
+      });
     }
 
     const rawLocId = toRawId(locationId);
@@ -558,89 +616,136 @@ export async function action({ request }: ActionFunctionArgs) {
     const shopTimezone = await getShopTimezone(admin).catch(() => "UTC");
     const shopDate = getDateInShopTimezone(requestedAt, shopTimezone);
 
-    if (result.ok) {
-      for (const l of lineRecords) {
-        await db.inventoryChangeEventLine.update({
-          where: { id: l.id },
-          data: { lineStatus: "applied", quantityAfterActual: l.quantityAfter, appliedAt: new Date() },
-        });
-      }
-      await db.inventoryChangeEvent.update({
-        where: { id: event.id },
-        data: { status: "completed", errorSummary: result.invalidCount ? `invalidCount: ${result.invalidCount}` : null },
-      });
+    const appliedRawIds = new Set(
+      (result.appliedInventoryItemIds ?? []).map((id) => toRawId(id)).filter(Boolean)
+    );
 
+    /** 履歴 finalize + admin_webhook coalesce（失敗しても Shopify 適用結果は崩さない） */
+    const finalizeHistoryForLines = async (
+      lines: typeof lineRecords,
+      opts?: { noteSuffix?: string }
+    ): Promise<{ ok: boolean; error?: string }> => {
       const idempotencyKeyBase = `${shop}_app_${appEventId}`;
-      for (const l of lineRecords) {
-        const rawItemId = toRawId(l.inventoryItemId);
-        const idempotencyKey = `${idempotencyKeyBase}_${rawItemId}_${rawLocId}`;
-        await db.inventoryChangeLog.upsert({
-          where: { shop_idempotencyKey: { shop, idempotencyKey } },
-          create: {
-            shop,
-            timestamp: requestedAt,
-            date: shopDate,
-            inventoryItemId: rawItemId,
-            variantId: l.variantId,
-            sku: l.sku,
-            locationId: rawLocId,
-            locationName: resolvedLocationName,
-            activity,
-            delta: l.delta,
-            quantityAfter: l.quantityAfter,
-            sourceType: activity,
-            sourceId,
-            idempotencyKey,
-            note: `appEventId:${appEventId}`,
-          },
-          update: {
-            delta: l.delta,
-            quantityAfter: l.quantityAfter,
-            locationName: resolvedLocationName,
-            sourceId,
-            note: `appEventId:${appEventId}`,
-          },
-        });
-
-        // R-HIST: 同一物理変動の admin_webhook 行を業務 activity に上書き（二重行防止）。
-        // 売上/返品救済を壊さないため、quantityAfter が null または今回値と一致する行のみ、短い窓で合流。
-        try {
-          const itemCands = [rawItemId, `gid://shopify/InventoryItem/${rawItemId}`];
-          const locCands = [rawLocId, `gid://shopify/Location/${rawLocId}`];
-          const searchFrom = new Date(requestedAt.getTime() - 10 * 60 * 1000);
-          const searchTo = new Date(requestedAt.getTime() + 2 * 60 * 1000);
-          const recentAdmin = await db.inventoryChangeLog.findFirst({
-            where: {
+      const noteSuffix = opts?.noteSuffix ? `;${opts.noteSuffix}` : "";
+      try {
+        for (const l of lines) {
+          const rawItemId = toRawId(l.inventoryItemId);
+          const idempotencyKey = `${idempotencyKeyBase}_${rawItemId}_${rawLocId}`;
+          await db.inventoryChangeLog.upsert({
+            where: { shop_idempotencyKey: { shop, idempotencyKey } },
+            create: {
               shop,
-              inventoryItemId: { in: itemCands },
-              locationId: { in: locCands },
-              activity: "admin_webhook",
-              timestamp: { gte: searchFrom, lte: searchTo },
-              NOT: { idempotencyKey },
-              OR: [{ quantityAfter: null }, { quantityAfter: l.quantityAfter }],
+              timestamp: requestedAt,
+              date: shopDate,
+              inventoryItemId: rawItemId,
+              variantId: l.variantId,
+              sku: l.sku,
+              locationId: rawLocId,
+              locationName: resolvedLocationName,
+              activity,
+              delta: l.delta,
+              quantityAfter: l.quantityAfter,
+              sourceType: activity,
+              sourceId,
+              idempotencyKey,
+              note: `appEventId:${appEventId}${noteSuffix}`,
             },
-            orderBy: { timestamp: "desc" },
+            update: {
+              delta: l.delta,
+              quantityAfter: l.quantityAfter,
+              locationName: resolvedLocationName,
+              sourceId,
+              note: `appEventId:${appEventId}${noteSuffix}`,
+            },
           });
-          if (recentAdmin) {
-            await db.inventoryChangeLog.update({
-              where: { id: recentAdmin.id },
-              data: {
-                activity,
-                sourceType: activity,
-                sourceId,
-                delta: l.delta,
-                quantityAfter: l.quantityAfter,
-                locationName: resolvedLocationName,
-                note: `coalesced_from_admin_webhook;appEventId:${appEventId}`,
+
+          // R-HIST: 同一物理変動の admin_webhook 行を業務 activity に上書き（二重行防止）。
+          // 売上/返品救済を壊さないため、quantityAfter が null または今回値と一致する行のみ、短い窓で合流。
+          try {
+            const itemCands = [rawItemId, `gid://shopify/InventoryItem/${rawItemId}`];
+            const locCands = [rawLocId, `gid://shopify/Location/${rawLocId}`];
+            const searchFrom = new Date(requestedAt.getTime() - 10 * 60 * 1000);
+            const searchTo = new Date(requestedAt.getTime() + 2 * 60 * 1000);
+            const recentAdmin = await db.inventoryChangeLog.findFirst({
+              where: {
+                shop,
+                inventoryItemId: { in: itemCands },
+                locationId: { in: locCands },
+                activity: "admin_webhook",
+                timestamp: { gte: searchFrom, lte: searchTo },
+                NOT: { idempotencyKey },
+                OR: [{ quantityAfter: null }, { quantityAfter: l.quantityAfter }],
               },
+              orderBy: { timestamp: "desc" },
             });
+            if (recentAdmin) {
+              await db.inventoryChangeLog.update({
+                where: { id: recentAdmin.id },
+                data: {
+                  activity,
+                  sourceType: activity,
+                  sourceId,
+                  delta: l.delta,
+                  quantityAfter: l.quantityAfter,
+                  locationName: resolvedLocationName,
+                  note: `coalesced_from_admin_webhook;appEventId:${appEventId}${noteSuffix}`,
+                },
+              });
+            }
+          } catch (e: unknown) {
+            console.warn(
+              "[api.inventory.apply-change] admin_webhook coalesce skipped:",
+              e instanceof Error ? e.message : String(e)
+            );
           }
-        } catch (e: unknown) {
-          console.warn(
-            "[api.inventory.apply-change] admin_webhook coalesce skipped:",
-            e instanceof Error ? e.message : String(e)
-          );
         }
+        return { ok: true };
+      } catch (histErr: unknown) {
+        const histMsg = formatCaughtError(histErr);
+        console.warn("[api.inventory.apply-change] history finalize failed (Shopify already applied):", histMsg);
+        return { ok: false, error: histMsg };
+      }
+    };
+
+    if (result.ok) {
+      // event=completed は setQuantities 直後に確定済み。行・履歴はベストエフォート（失敗しても再 set しない）。
+      let historyIncomplete = false;
+      let historyError: string | undefined;
+      try {
+        for (const l of lineRecords) {
+          await db.inventoryChangeEventLine.update({
+            where: { id: l.id },
+            data: { lineStatus: "applied", quantityAfterActual: l.quantityAfter, appliedAt: new Date() },
+          });
+        }
+        const hist = await finalizeHistoryForLines(lineRecords);
+        if (!hist.ok) {
+          historyIncomplete = true;
+          historyError = hist.error;
+          await db.inventoryChangeEvent
+            .update({
+              where: { id: event.id },
+              data: {
+                errorSummary: `history_incomplete: ${hist.error ?? "unknown"}`.slice(0, 500),
+              },
+            })
+            .catch(() => null);
+        }
+      } catch (postErr: unknown) {
+        historyIncomplete = true;
+        historyError = formatCaughtError(postErr);
+        console.warn(
+          "[api.inventory.apply-change] post-completed line/history update failed:",
+          historyError
+        );
+        await db.inventoryChangeEvent
+          .update({
+            where: { id: event.id },
+            data: {
+              errorSummary: `history_incomplete: ${historyError}`.slice(0, 500),
+            },
+          })
+          .catch(() => null);
       }
 
       return new Response(
@@ -651,14 +756,109 @@ export async function action({ request }: ActionFunctionArgs) {
           status: "completed",
           appliedCount: lineRecords.length,
           invalidCount: result.invalidCount,
+          ...(historyIncomplete
+            ? { historyIncomplete: true, historyError: historyError ?? "history finalize failed" }
+            : {}),
         }),
         { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
 
     const errorSummary = result.error || "Shopify API error";
-    // partiallyApplied: チャンク分割時にロールバック失敗→一部の在庫が変更済みの状態
-    const finalStatus = result.partiallyApplied ? "partial_failed" : "failed";
+
+    // partiallyApplied: チャンク分割で一部適用 / 成否不明。自動再 set 禁止（sticky partial_failed）
+    // status=partial_failed は setQuantities 直後に確定済み。ここでは行状態と errorSummary を精緻化。
+    if (result.partiallyApplied) {
+      const knownAppliedLines = lineRecords.filter((l) => appliedRawIds.has(toRawId(l.inventoryItemId)));
+      const otherLines = lineRecords.filter((l) => !appliedRawIds.has(toRawId(l.inventoryItemId)));
+      // appliedIds が空 + uncertain: 全行を pending のまま（誤って failed にしない）
+      const uncertainAll = result.applicationUncertain === true && knownAppliedLines.length === 0;
+
+      await db.inventoryChangeEvent.update({
+        where: { id: event.id },
+        data: {
+          status: "partial_failed",
+          errorSummary: [
+            errorSummary,
+            result.applicationUncertain ? "application_uncertain" : null,
+            result.failedChunkIndex != null ? `failedChunk=${result.failedChunkIndex}` : null,
+            uncertainAll
+              ? `applied=unknown/${lineRecords.length}`
+              : `applied=${knownAppliedLines.length}/${lineRecords.length}`,
+          ]
+            .filter(Boolean)
+            .join(" | ")
+            .slice(0, 500),
+        },
+      });
+
+      if (uncertainAll) {
+        for (const l of lineRecords) {
+          await db.inventoryChangeEventLine.update({
+            where: { id: l.id },
+            data: {
+              lineStatus: "pending",
+              errorMessage: `application_uncertain: ${errorSummary}`.slice(0, 500),
+            },
+          });
+        }
+      } else {
+        for (const l of knownAppliedLines) {
+          await db.inventoryChangeEventLine.update({
+            where: { id: l.id },
+            data: {
+              lineStatus: "applied",
+              quantityAfterActual: l.quantityAfter,
+              appliedAt: new Date(),
+              errorMessage: null,
+            },
+          });
+        }
+        for (const l of otherLines) {
+          // 失敗チャンクが uncertain のときは failed ではなく pending（再 set しないが行は未確定）
+          const lineStatus = result.applicationUncertain ? "pending" : "failed";
+          await db.inventoryChangeEventLine.update({
+            where: { id: l.id },
+            data: {
+              lineStatus,
+              errorMessage: (
+                result.applicationUncertain
+                  ? `application_uncertain: ${errorSummary}`
+                  : errorSummary
+              ).slice(0, 500),
+            },
+          });
+        }
+        // 適用確定分だけ履歴を確定。未適用/不明の null 先行行は残す
+        if (knownAppliedLines.length > 0) {
+          await finalizeHistoryForLines(knownAppliedLines, { noteSuffix: "partial_applied" });
+        }
+      }
+
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: errorSummary,
+          eventId: event.id,
+          appEventId,
+          status: "partial_failed",
+          partiallyApplied: true,
+          applicationUncertain: result.applicationUncertain === true,
+          appliedCount: knownAppliedLines.length,
+          failedCount: uncertainAll || result.applicationUncertain ? 0 : otherLines.length,
+          uncertainCount: uncertainAll
+            ? lineRecords.length
+            : result.applicationUncertain
+              ? otherLines.length
+              : 0,
+          failedChunkIndex: result.failedChunkIndex,
+          appliedInventoryItemIds: result.appliedInventoryItemIds ?? [],
+        }),
+        { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+
+    // 完全失敗（未適用 or ロールバック成功）
     for (const l of lineRecords) {
       await db.inventoryChangeEventLine.update({
         where: { id: l.id },
@@ -667,29 +867,26 @@ export async function action({ request }: ActionFunctionArgs) {
     }
     await db.inventoryChangeEvent.update({
       where: { id: event.id },
-      data: { status: finalStatus, errorSummary },
+      data: { status: "failed", errorSummary },
     });
 
-    // 完全失敗時のみ先行履歴を削除（partial_failed は在庫が一部変わっている可能性があるため残す）
-    if (!result.partiallyApplied) {
-      try {
-        await db.inventoryChangeLog.deleteMany({
-          where: {
-            shop,
-            idempotencyKey: {
-              in: lineRecords.map(
-                (l) => `${idempotencyKeyBaseEarly}_${toRawId(l.inventoryItemId)}_${rawLocIdEarly}`
-              ),
-            },
-            quantityAfter: null,
+    try {
+      await db.inventoryChangeLog.deleteMany({
+        where: {
+          shop,
+          idempotencyKey: {
+            in: lineRecords.map(
+              (l) => `${idempotencyKeyBaseEarly}_${toRawId(l.inventoryItemId)}_${rawLocIdEarly}`
+            ),
           },
-        });
-      } catch (e: unknown) {
-        console.warn(
-          "[api.inventory.apply-change] cleanup pre-write logs (setQuantities fail):",
-          e instanceof Error ? e.message : String(e)
-        );
-      }
+          quantityAfter: null,
+        },
+      });
+    } catch (e: unknown) {
+      console.warn(
+        "[api.inventory.apply-change] cleanup pre-write logs (setQuantities fail):",
+        e instanceof Error ? e.message : String(e)
+      );
     }
 
     return new Response(
@@ -698,8 +895,9 @@ export async function action({ request }: ActionFunctionArgs) {
         error: errorSummary,
         eventId: event.id,
         appEventId,
-        status: finalStatus,
-        partiallyApplied: result.partiallyApplied ?? false,
+        status: "failed",
+        partiallyApplied: false,
+        rolledBack: result.rolledBack ?? false,
       }),
       { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
@@ -707,61 +905,166 @@ export async function action({ request }: ActionFunctionArgs) {
     console.error("[api.inventory.apply-change] Error:", e);
     const message = formatCaughtError(e);
 
-    // イベント作成後の未処理例外: applying/pending のまま残すと安定 appEventId 再送が 202 で固まる
+    // イベント作成後の未処理例外:
+    // - Shopify 適用後（inventoryApplied / completed / partial_failed）は failed に戻さない
+    //   → #16 failed-clear → 再 setQuantities（二重適用）を防ぐ
+    // - 真の未適用例外のみ pending/applying を CAS で failed 化（#20）
     if (createdEventId) {
+      let existingStatus: string | null = null;
       try {
-        await db.inventoryChangeEventLine.updateMany({
-          where: { eventId: createdEventId },
-          data: { lineStatus: "failed", errorMessage: message },
-        });
-        await db.inventoryChangeEvent.update({
+        const existing = await db.inventoryChangeEvent.findUnique({
           where: { id: createdEventId },
+          select: { status: true },
+        });
+        existingStatus = existing?.status ?? null;
+      } catch (statusErr: unknown) {
+        existingStatus = null;
+        console.warn(
+          "[api.inventory.apply-change] status guard before outer-catch resolve:",
+          formatCaughtError(statusErr)
+        );
+      }
+
+      const catchDecision = decideOuterCatchAction({ inventoryApplied, existingStatus });
+
+      if (catchDecision.action === "preserve") {
+        // applying/pending のまま残っていても、成功後は failed にせず terminal へ heal
+        const ensureStatus = catchDecision.ensureStatus;
+        try {
+          if (existingStatus !== "completed" && existingStatus !== "partial_failed") {
+            await db.inventoryChangeEvent.updateMany({
+              where: {
+                id: createdEventId,
+                status: { in: ["pending", "applying"] },
+              },
+              data: {
+                status: ensureStatus,
+                errorSummary: `post_process_error_after_shopify: ${message}`.slice(0, 500),
+              },
+            });
+          } else {
+            await db.inventoryChangeEvent.update({
+              where: { id: createdEventId },
+              data: {
+                errorSummary: `post_process_error_after_${existingStatus}: ${message}`.slice(0, 500),
+              },
+            });
+          }
+        } catch (markErr: unknown) {
+          console.warn(
+            "[api.inventory.apply-change] preserve applied status after outer catch:",
+            formatCaughtError(markErr)
+          );
+        }
+        // 先行履歴の null 行は消さない（適用済みの可能性）
+        if (ensureStatus === "completed") {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              error: message,
+              eventId: createdEventId,
+              status: "completed",
+              historyIncomplete: true,
+              ...(cleanupAppEventId ? { appEventId: cleanupAppEventId } : {}),
+            }),
+            { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: message,
+            eventId: createdEventId,
+            status: "partial_failed",
+            partiallyApplied: true,
+            ...(cleanupAppEventId ? { appEventId: cleanupAppEventId } : {}),
+          }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+
+      // 未適用のみ: pending/applying を CAS で failed（completed/partial_failed を上書きしない）
+      let markedFailed = false;
+      try {
+        const marked = await db.inventoryChangeEvent.updateMany({
+          where: { id: createdEventId, status: { in: ["pending", "applying"] } },
           data: { status: "failed", errorSummary: message },
         });
+        markedFailed = marked.count > 0;
+        if (markedFailed) {
+          await db.inventoryChangeEventLine.updateMany({
+            where: { eventId: createdEventId },
+            data: { lineStatus: "failed", errorMessage: message },
+          });
+        }
       } catch (markErr: unknown) {
         console.warn(
           "[api.inventory.apply-change] mark failed after outer catch:",
           formatCaughtError(markErr)
         );
       }
-      if (cleanupShop && cleanupIdempotencyKeys.length > 0) {
-        try {
-          await db.inventoryChangeLog.deleteMany({
-            where: {
-              shop: cleanupShop,
-              idempotencyKey: { in: cleanupIdempotencyKeys },
-              quantityAfter: null,
-            },
-          });
-        } catch (cleanupErr: unknown) {
-          console.warn(
-            "[api.inventory.apply-change] cleanup pre-write logs (outer catch):",
-            formatCaughtError(cleanupErr)
-          );
+
+      if (markedFailed) {
+        if (cleanupShop && cleanupIdempotencyKeys.length > 0) {
+          try {
+            await db.inventoryChangeLog.deleteMany({
+              where: {
+                shop: cleanupShop,
+                idempotencyKey: { in: cleanupIdempotencyKeys },
+                quantityAfter: null,
+              },
+            });
+          } catch (cleanupErr: unknown) {
+            console.warn(
+              "[api.inventory.apply-change] cleanup pre-write logs (outer catch):",
+              formatCaughtError(cleanupErr)
+            );
+          }
+        } else if (cleanupShop && cleanupAppEventId) {
+          try {
+            await db.inventoryChangeLog.deleteMany({
+              where: {
+                shop: cleanupShop,
+                quantityAfter: null,
+                idempotencyKey: { startsWith: `${cleanupShop}_app_${cleanupAppEventId}_` },
+              },
+            });
+          } catch (cleanupErr: unknown) {
+            console.warn(
+              "[api.inventory.apply-change] cleanup pre-write logs by prefix (outer catch):",
+              formatCaughtError(cleanupErr)
+            );
+          }
         }
-      } else if (cleanupShop && cleanupAppEventId) {
-        try {
-          await db.inventoryChangeLog.deleteMany({
-            where: {
-              shop: cleanupShop,
-              quantityAfter: null,
-              idempotencyKey: { startsWith: `${cleanupShop}_app_${cleanupAppEventId}_` },
-            },
-          });
-        } catch (cleanupErr: unknown) {
-          console.warn(
-            "[api.inventory.apply-change] cleanup pre-write logs by prefix (outer catch):",
-            formatCaughtError(cleanupErr)
-          );
-        }
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: message,
+            eventId: createdEventId,
+            status: "failed",
+            ...(cleanupAppEventId ? { appEventId: cleanupAppEventId } : {}),
+          }),
+          { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
       }
+
+      // CAS 非 match: 別経路で terminal 化した可能性。failed と名乗らない（再 set 誘導を避ける）
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: message,
+          eventId: createdEventId,
+          status: existingStatus ?? "applying",
+          ...(cleanupAppEventId ? { appEventId: cleanupAppEventId } : {}),
+        }),
+        { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
     }
 
     return new Response(
       JSON.stringify({
         ok: false,
         error: message,
-        ...(createdEventId ? { eventId: createdEventId, status: "failed" } : {}),
         ...(cleanupAppEventId ? { appEventId: cleanupAppEventId } : {}),
       }),
       { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
