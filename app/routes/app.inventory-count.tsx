@@ -2784,7 +2784,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
       const result = await applyPendingCompleteFromBackup(admin, ownerId, backup);
       if (!result.ok) {
-        return { ok: false, error: (result.error || "メタ更新の再試行に失敗しました") as const };
+        return { ok: false, error: (result.error || "再試行に失敗しました") as const };
       }
       try {
         const shopForDb = session?.shop ?? "";
@@ -2802,21 +2802,26 @@ export async function action({ request }: ActionFunctionArgs) {
               shop: shopForDb,
               countId: String(saved.id),
               countName: saved.countName ?? null,
-              status: String(saved.status || "in_progress"),
+              status: String(result.status || saved.status || "in_progress"),
               locationId: saved.locationId ?? null,
               locationName: saved.locationName ?? null,
-              payload: saved,
-              completedAt: saved.completedAt ?? null,
+              payload: { ...saved, status: result.status || saved.status },
+              completedAt: result.completedAt ?? saved.completedAt ?? null,
             });
           }
         }
       } catch (e) {
         console.warn("[inventory-count] pos_metafield_retry DB dual-write skipped:", e);
       }
-      return { ok: true, retriedCountId: result.countId } as const;
+      return {
+        ok: true,
+        retriedCountId: result.countId,
+        status: result.status,
+        completedAt: result.completedAt,
+      } as const;
     } catch (e) {
       console.error("[inventory-count] pos_metafield_retry failed:", e);
-      return { ok: false, error: "メタ更新の再試行中にエラーが発生しました。" as const };
+      return { ok: false, error: "再試行中にエラーが発生しました。" as const };
     }
   }
 
@@ -7703,7 +7708,7 @@ export default function InventoryCountPage() {
                   }}
                 >
                   <s-stack gap="small">
-                    <s-text type="strong">メタ更新の再試行が必要です</s-text>
+                    <s-text type="strong">再試行が必要です</s-text>
                     <s-text>
                       棚卸ID{" "}
                       <strong>
@@ -7713,7 +7718,7 @@ export default function InventoryCountPage() {
                             normalizeIdForMatch(c.id) === normalizeIdForMatch(pendingMetafieldRetry.countId)
                         )?.countName || pendingMetafieldRetry.countId}
                       </strong>
-                      は在庫調整済みですが、ステータス（メタフィールド）の反映に失敗しています。商品リストは編集せず、「再試行（メタ更新のみ）」を実行してください。
+                      は在庫調整済みですが、ステータスの反映に失敗しています。商品リストは編集せず、「再試行」を実行してください。
                     </s-text>
                     {pendingMetafieldRetry.completedGroupIds?.length ? (
                       <s-text color="subdued">
@@ -7727,7 +7732,7 @@ export default function InventoryCountPage() {
                       </s-text>
                     ) : null}
                     {metafieldRetryFetcher.data && (metafieldRetryFetcher.data as { ok?: boolean }).ok === true ? (
-                      <s-text tone="success">メタ更新の再試行が完了しました。</s-text>
+                      <s-text tone="success">再試行が完了しました。</s-text>
                     ) : null}
                     <div>
                       <s-button
@@ -7741,7 +7746,7 @@ export default function InventoryCountPage() {
                           metafieldRetryFetcher.submit(fd, { method: "post" });
                         }}
                       >
-                        {metafieldRetryFetcher.state !== "idle" ? "再試行中..." : "再試行（メタ更新のみ）"}
+                        {metafieldRetryFetcher.state !== "idle" ? "再試行中..." : "再試行"}
                       </s-button>
                     </div>
                   </s-stack>
@@ -9121,7 +9126,7 @@ export default function InventoryCountPage() {
                     <button
                       type="button"
                       disabled={editDisabled}
-                      title={isPendingMetafieldRetry ? "メタ更新の再試行が必要です。編集せず再試行してください。" : undefined}
+                      title={isPendingMetafieldRetry ? "再試行が必要です。編集せず再試行してください。" : undefined}
                       onClick={() => setModalEditMode(true)}
                       style={{
                         padding: "8px 16px",
