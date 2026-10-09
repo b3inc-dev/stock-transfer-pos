@@ -161,4 +161,12 @@
 - 共有: `app/utils/stocktake-pending-complete.server.ts`（POS API / Admin 共用）
 - Admin: 履歴タブに再試行バナー + action `pos_metafield_retry`（メタ更新のみ・setQuantities なし）
 
+**タイムアウト / 再送（2026-10-09 追記・残リスク低減）**:
+- apply-change POS クライアント: 1 fetch Abort 90s・全体 150s。HTTP 202（pending/applying）と Abort/ネットワークは **同一 `appEventId` で再 POST**（sticky 202 回避・サーバ冪等で二重 set なし）。
+- sticky applying TTL: サーバは `updatedAt` **180s** 超の pending/applying を解除（applied lines → heal / なし → failed クリア再試行）。
+- pos-stocktake-complete POS クライアント: Abort **120s**（サーバ META_RETRY 間隔 1.5s×最大3）。Abort 時は `needMetafieldRetry` + `uncertain`。
+- `pending_complete_v1` 書込は `backupPersisted` で返す。metafield 失敗時は **DB（InventoryCountDocument `pending_complete:{countId}`）へフォールバック**し、セッション喪失後の Admin `retryOnly` を可能にする。
+- apply-change outer catch: #22 の `decideOuterCatchAction` を維持しつつ、line `applied` / status 読取失敗→202 を追加。重複 outer-catch 実装は載せない。
+- **残リスク**: 実機 POS 未検証、TTL 未満のプロセス死亡窓、大容量 metafield chunk write 失敗そのもの。
+
 §6 の旧「メタ成功後に在庫調整」記述は歴史的経緯。現行コード・§8 を優先。

@@ -2067,7 +2067,15 @@ export function InventoryCountList({
         const result = await reportStocktakeCompleteToApi(payload);
         if (!result.ok) {
           if (result.needMetafieldRetry || quantitiesAppliedRef.current) {
-            enterMetafieldRetryState(count.id, payload, result.error);
+            const backupHint =
+              result.backupPersisted === false
+                ? "（再試行用バックアップ未保存。この画面の「再試行」でフル送信してください。管理画面の再試行は使えない可能性があります）"
+                : "";
+            enterMetafieldRetryState(
+              count.id,
+              payload,
+              (result.error || "ステータスの反映に失敗しました") + backupHint
+            );
             setSubmitting(false);
             return false;
           }
@@ -2157,7 +2165,15 @@ export function InventoryCountList({
       const resultResult = await reportStocktakeCompleteToApi(payloadResult);
       if (!resultResult.ok) {
         if (resultResult.needMetafieldRetry || quantitiesAppliedRef.current) {
-          enterMetafieldRetryState(count.id, payloadResult, resultResult.error);
+          const backupHint =
+            resultResult.backupPersisted === false
+              ? "（再試行用バックアップ未保存。この画面の「再試行」でフル送信してください。管理画面の再試行は使えない可能性があります）"
+              : "";
+          enterMetafieldRetryState(
+            count.id,
+            payloadResult,
+            (resultResult.error || "ステータスの反映に失敗しました") + backupHint
+          );
           setSubmitting(false);
           return false;
         }

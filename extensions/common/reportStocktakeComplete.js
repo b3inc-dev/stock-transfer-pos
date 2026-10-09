@@ -7,8 +7,12 @@
  * @param {Array} [opts.items] - 単一グループ時の items
  * @param {Array} [opts.completedGroups] - 複数グループ一括確定時
  * @param {boolean} [opts.retryOnly] - メタ更新のみ再試行（バックアップから復元）
- * @returns {Promise<{ ok: boolean; error?: string; needMetafieldRetry?: boolean; countId?: string; completedGroupIds?: string[]; status?: string; completedAt?: string }>}
+ * @returns {Promise<{ ok: boolean; error?: string; needMetafieldRetry?: boolean; countId?: string; completedGroupIds?: string[]; status?: string; completedAt?: string; uncertain?: boolean; timedOut?: boolean; backupPersisted?: boolean }>}
  */
+
+/** サーバ META_RETRY（最大3回・間隔1.5s×）＋ chunked write を収めるため 90s→120s */
+const STOCKTAKE_COMPLETE_TIMEOUT_MS = 120000;
+
 export async function reportStocktakeCompleteToApi({ countId, groupId, items, completedGroups, retryOnly }) {
   const session = globalThis?.shopify?.session;
   if (!session?.getSessionToken) {
@@ -50,7 +54,6 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
     return { ok: false, error: "countId と groupId/items または completedGroups が必要です" };
   }
 
-  const STOCKTAKE_COMPLETE_TIMEOUT_MS = 90000;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), STOCKTAKE_COMPLETE_TIMEOUT_MS);
 
@@ -72,6 +75,7 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
         needMetafieldRetry: Boolean(data?.needMetafieldRetry),
         countId: data?.countId,
         completedGroupIds: data?.completedGroupIds,
+        backupPersisted: data?.backupPersisted,
       };
     }
     if (data?.ok === false) {
@@ -83,6 +87,7 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
         needMetafieldRetry: Boolean(data?.needMetafieldRetry),
         countId: data?.countId ?? countId,
         completedGroupIds: data?.completedGroupIds,
+        backupPersisted: data?.backupPersisted,
       };
     }
     return {
@@ -90,6 +95,7 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
       status: typeof data?.status === "string" ? data.status : undefined,
       completedAt: typeof data?.completedAt === "string" ? data.completedAt : undefined,
       countId: data?.countId ?? countId,
+      backupPersisted: data?.backupPersisted,
     };
   } catch (e) {
     clearTimeout(timeoutId);
@@ -100,17 +106,27 @@ export async function reportStocktakeCompleteToApi({ countId, groupId, items, co
     console.error("[reportStocktakeCompleteToApi] Request failed:", msg);
     console.error("STOCKTAKE_API_ORIGIN [client] fetch threw:", { message: msg, name, cause: cause || "(none)", isAbort });
     if (isAbort) {
+      // サーバ側リトライがクライアント Abort 後に成功し得る → uncertain。再試行は冪等マージ。
       return {
         ok: false,
-        error: "応答が返ってくるまでに時間がかかりすぎました（90秒）。棚卸データが大きい場合があります。しばらくしてから再度確定してください。",
+        error:
+          "ステータス反映の応答がタイムアウトしました（120秒）。サーバ側で完了している可能性があります。「再試行」で確認してください。",
         needMetafieldRetry: true,
         countId,
+        uncertain: true,
+        timedOut: true,
       };
     }
     const isNetworkFailure = /load failed|failed to fetch|network error|connection refused|net::/i.test(String(msg));
     const userMessage = isNetworkFailure
-      ? "サーバーに接続できませんでした。ネットワークとアプリURL（開発時はトンネルURL）を確認してください。"
+      ? "サーバーに接続できませんでした。ネットワークとアプリURL（開発時はトンネルURL）を確認してください。ステータス未反映の可能性があるため「再試行」を利用できます。"
       : msg;
-    return { ok: false, error: userMessage, needMetafieldRetry: true, countId };
+    return {
+      ok: false,
+      error: userMessage,
+      needMetafieldRetry: true,
+      countId,
+      uncertain: true,
+    };
   }
 }

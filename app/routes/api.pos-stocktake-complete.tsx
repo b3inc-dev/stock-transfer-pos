@@ -21,8 +21,9 @@ import {
 } from "../utils/stocktake-pending-complete.server";
 
 const API_VERSION = "2026-01";
+/** POS client Abort は 120s。サーバ自動リトライ合計がそれを超えないよう間隔を抑える */
 const META_RETRY_MAX = 3;
-const META_RETRY_DELAY_MS = 2500;
+const META_RETRY_DELAY_MS = 1500;
 
 function shopFromDest(dest: string): string {
   try {
@@ -218,7 +219,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const completedGroupsRaw = typeof body === "object" && body !== null && "completedGroups" in body ? (body as { completedGroups: unknown }).completedGroups : undefined;
 
   if (retryOnly) {
-    const backup = await readPendingCompleteBackup(admin);
+    const backup = await readPendingCompleteBackup(admin, { shop, countId });
     if (!backup || normalizeIdForMatch(backup.countId) !== normalizeIdForMatch(countId)) {
       return jsonResponse(
         { ok: false, error: "再試行用バックアップが見つかりません。棚卸を開き直してから確定してください。", needMetafieldRetry: true, countId },
@@ -249,12 +250,21 @@ export async function action({ request }: ActionFunctionArgs) {
     completedGroups,
     savedAt: new Date().toISOString(),
   };
-  await writePendingCompleteBackup(admin, ownerId, backupPayload);
+  // バックアップ失敗でも POS はフルペイロード再送できるためメタ更新は続行する。
+  // metafield 失敗時は DB フォールバック（セッション喪失後の Admin retryOnly 用）。
+  const backupWrite = await writePendingCompleteBackup(admin, ownerId, backupPayload, { shop });
+  const backupPersisted = backupWrite.ok;
+  if (!backupPersisted) {
+    console.warn(
+      "[api.pos-stocktake-complete] pending_complete backup write failed (continuing apply):",
+      backupWrite.error
+    );
+  }
 
   let lastError = "";
   for (let attempt = 1; attempt <= META_RETRY_MAX; attempt++) {
     try {
-      const result = await applyPendingCompleteFromBackup(admin, ownerId, backupPayload);
+      const result = await applyPendingCompleteFromBackup(admin, ownerId, backupPayload, { shop });
       if (!result.ok) {
         const message = result.error || "ステータスの反映に失敗しました";
         lastError = message;
@@ -270,6 +280,7 @@ export async function action({ request }: ActionFunctionArgs) {
               needMetafieldRetry: true,
               countId,
               completedGroupIds,
+              backupPersisted,
             },
             200
           );
@@ -280,7 +291,14 @@ export async function action({ request }: ActionFunctionArgs) {
         }
         console.warn("STOCKTAKE_API_ORIGIN [server] response 200 ok:false needMetafieldRetry:", message);
         return jsonResponse(
-          { ok: false, error: message, needMetafieldRetry: true, countId, completedGroupIds },
+          {
+            ok: false,
+            error: message,
+            needMetafieldRetry: true,
+            countId,
+            completedGroupIds,
+            backupPersisted,
+          },
           200
         );
       }
@@ -334,7 +352,14 @@ export async function action({ request }: ActionFunctionArgs) {
       console.error("[api.pos-stocktake-complete] attempt failed:", lastError);
       if (isChunkCorruptionError(lastError)) {
         return jsonResponse(
-          { ok: false, error: lastError, needMetafieldRetry: true, countId, completedGroupIds },
+          {
+            ok: false,
+            error: lastError,
+            needMetafieldRetry: true,
+            countId,
+            completedGroupIds,
+            backupPersisted,
+          },
           200
         );
       }
@@ -354,6 +379,7 @@ export async function action({ request }: ActionFunctionArgs) {
       needMetafieldRetry: true,
       countId,
       completedGroupIds,
+      backupPersisted,
     },
     200
   );
