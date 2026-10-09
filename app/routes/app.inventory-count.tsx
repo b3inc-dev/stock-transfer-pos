@@ -2775,14 +2775,20 @@ export async function action({ request }: ActionFunctionArgs) {
       const { readPendingCompleteBackup, applyPendingCompleteFromBackup } = await import(
         "../utils/stocktake-pending-complete.server"
       );
-      const backup = await readPendingCompleteBackup(admin);
+      const shopForBackup = session?.shop ?? "";
+      const backup = await readPendingCompleteBackup(admin, {
+        shop: shopForBackup || undefined,
+        countId,
+      });
       if (!backup || normalizeIdForMatch(backup.countId) !== normalizeIdForMatch(countId)) {
         return {
           ok: false,
           error: "再試行用バックアップが見つかりません。既に完了しているか、別の棚卸の失敗です。",
         } as const;
       }
-      const result = await applyPendingCompleteFromBackup(admin, ownerId, backup);
+      const result = await applyPendingCompleteFromBackup(admin, ownerId, backup, {
+        shop: shopForBackup || undefined,
+      });
       if (!result.ok) {
         return { ok: false, error: (result.error || "再試行に失敗しました") as const };
       }

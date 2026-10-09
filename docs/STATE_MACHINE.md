@@ -153,8 +153,8 @@ pending → applying → completed
 ```
 
 - 同一 `appEventId` が `completed` → 即 OK 返却（冪等）
-- `pending` / `applying` → 202（処理中）
-- サーバー GraphQL は 429/503 を `withGraphQLRetry`（最大 3 回、指数バックオフ）
+- `pending` / `applying` → 202（処理中）。`updatedAt` が 180s 超なら TTL で heal または failed クリア再試行
+- サーバー GraphQL は 429/503 を `withGraphQLRetry`（最大 3 回、指数バックオフ）。POS クライアントは 90s/fetch・150s 全体で同一 ID 再送
 
 ---
 
@@ -257,7 +257,13 @@ userErrors（ビジネス）はリトライしても同じ結果になりやす�
 | `completed` | メタ反映済み | なし |
 
 二重 setQuantities 防止: `quantitiesAppliedRef` + `InventoryChangeEvent.appEventId` 冪等。  
-Admin 再試行は `pending_complete_v1` からメタのみ適用（在庫 API を叩かない）。
+Admin 再試行は `pending_complete_v1`（または DB フォールバック）からメタのみ適用（在庫 API を叩かない）。
+
+**クライアント ↔ サーバ時間軸（timeout/retry）**:
+- apply-change: POS は in-flight（202）/ Abort 後も同一 `appEventId` を再送（1 fetch Abort 90s・全体 150s）。サーバ outer catch は Shopify 適用済みを failed 上書きしない。status 不明は 202。
+- sticky `pending`/`applying`: `updatedAt` が **180s** 超なら TTL 解除（line applied → heal / 未適用 → failed クリア再試行）。
+- metafield complete: POS Abort **120s**（サーバ META_RETRY 間隔 1.5s×最大3）。Abort 時は `needMetafieldRetry`（uncertain）。バックアップは metafield + DB フォールバック。
+- **残リスク**: 実機未検証、TTL 未満のワーカー死亡窓、大容量 metafield chunk 失敗そのもの。
 
 ### 差異あり apply-change: activate 伝播と setQuantities 失敗（2026-10-09）
 

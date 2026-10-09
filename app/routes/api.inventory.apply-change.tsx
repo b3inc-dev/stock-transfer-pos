@@ -17,7 +17,11 @@ import {
   ensureInventoryActivatedAtLocation,
   verifyInventoryLevelsAtLocation,
 } from "../utils/ensure-inventory-activated-server";
-import { decideOuterCatchAction } from "../utils/apply-change-outer-catch-guard";
+import {
+  APPLYING_STALE_MS,
+  decideOuterCatchAction,
+  decideStaleApplyingAction,
+} from "../utils/apply-change-outer-catch-guard";
 import {
   formatInventoryApiError,
   isNotStockedRetryableError,
@@ -301,16 +305,155 @@ export async function action({ request }: ActionFunctionArgs) {
       }
       const isProcessing = existingEvent.status === "pending" || existingEvent.status === "applying";
       if (isProcessing) {
-        return new Response(
-          JSON.stringify({
-            ok: false,
-            error: existingEvent.errorSummary || "Event already exists with status: " + existingEvent.status,
-            eventId: existingEvent.id,
-            appEventId,
-            status: existingEvent.status,
-          }),
-          { status: 202, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
+        const ageMs = Date.now() - new Date(existingEvent.updatedAt).getTime();
+        const appliedLineCount = existingEvent.lines.filter((l) => l.lineStatus === "applied").length;
+        const staleDecision = decideStaleApplyingAction({
+          ageMs,
+          staleAfterMs: APPLYING_STALE_MS,
+          appliedLineCount,
+          totalLineCount: existingEvent.lines.length,
+        });
+
+        if (staleDecision.action === "heal") {
+          try {
+            await db.inventoryChangeEvent.updateMany({
+              where: {
+                id: existingEvent.id,
+                status: { in: ["pending", "applying"] },
+              },
+              data: {
+                status: staleDecision.status,
+                errorSummary: `stale_${existingEvent.status}_healed_after_${ageMs}ms`,
+              },
+            });
+          } catch (healErr: unknown) {
+            console.warn(
+              "[api.inventory.apply-change] stale applying heal failed:",
+              formatCaughtError(healErr)
+            );
+          }
+          if (staleDecision.status === "completed") {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                eventId: existingEvent.id,
+                appEventId,
+                status: "completed",
+                appliedCount: appliedLineCount,
+                healedFromStale: true,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error:
+                existingEvent.errorSummary ||
+                "Event already exists with status: partial_failed（一部適用済み。手動確認が必要です）",
+              eventId: existingEvent.id,
+              appEventId,
+              status: "partial_failed",
+              partiallyApplied: true,
+              healedFromStale: true,
+            }),
+            { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+          );
+        }
+
+        if (staleDecision.action === "mark_failed_for_retry") {
+          // 適用痕跡なしの sticky applying → failed 化して下の failed クリア経路へ（二重 set より再試行を優先）
+          console.warn(
+            `[api.inventory.apply-change] stale ${existingEvent.status} (>${APPLYING_STALE_MS}ms, no applied lines) → mark failed for retry: appEventId=${appEventId}`
+          );
+          let markedStaleFailed = false;
+          try {
+            const marked = await db.inventoryChangeEvent.updateMany({
+              where: {
+                id: existingEvent.id,
+                status: { in: ["pending", "applying"] },
+              },
+              data: {
+                status: "failed",
+                errorSummary: `stale_${existingEvent.status}_timeout_${ageMs}ms`,
+              },
+            });
+            markedStaleFailed = marked.count > 0;
+          } catch (staleErr: unknown) {
+            console.warn(
+              "[api.inventory.apply-change] stale mark-failed failed:",
+              formatCaughtError(staleErr)
+            );
+          }
+          if (!markedStaleFailed) {
+            // 別経路で terminal 化した可能性 → 再読して返す（failed クリアで completed を消さない）
+            const refreshed = await db.inventoryChangeEvent
+              .findUnique({
+                where: { id: existingEvent.id },
+                include: { lines: true },
+              })
+              .catch(() => null);
+            if (refreshed?.status === "completed") {
+              return new Response(
+                JSON.stringify({
+                  ok: true,
+                  eventId: refreshed.id,
+                  appEventId,
+                  status: "completed",
+                  appliedCount: refreshed.lines.length,
+                }),
+                { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+              );
+            }
+            if (refreshed?.status === "partial_failed") {
+              return new Response(
+                JSON.stringify({
+                  ok: false,
+                  error:
+                    refreshed.errorSummary ||
+                    "Event already exists with status: partial_failed（一部適用済み。手動確認が必要です）",
+                  eventId: refreshed.id,
+                  appEventId,
+                  status: "partial_failed",
+                  partiallyApplied: true,
+                }),
+                { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+              );
+            }
+            if (refreshed?.status === "failed") {
+              markedStaleFailed = true;
+            } else {
+              return new Response(
+                JSON.stringify({
+                  ok: false,
+                  error: existingEvent.errorSummary || "Event already exists with status: " + existingEvent.status,
+                  eventId: existingEvent.id,
+                  appEventId,
+                  status: refreshed?.status ?? existingEvent.status,
+                  staleApplying: true,
+                  retryable: true,
+                }),
+                { status: 202, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+              );
+            }
+          }
+          // mark 成功 → 下の failed クリア経路へ
+          (existingEvent as { status: string; errorSummary: string | null }).status = "failed";
+          (existingEvent as { status: string; errorSummary: string | null }).errorSummary =
+            `stale_applying_timeout_${ageMs}ms`;
+        } else {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: existingEvent.errorSummary || "Event already exists with status: " + existingEvent.status,
+              eventId: existingEvent.id,
+              appEventId,
+              status: existingEvent.status,
+              retryable: true,
+            }),
+            { status: 202, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+          );
+        }
       }
       // partial_failed: 在庫が一部変わっている可能性があるため自動再実行しない
       if (existingEvent.status === "partial_failed") {
@@ -969,18 +1112,27 @@ export async function action({ request }: ActionFunctionArgs) {
     const message = formatCaughtError(e);
 
     // イベント作成後の未処理例外:
-    // - Shopify 適用後（inventoryApplied / completed / partial_failed）は failed に戻さない
-    //   → #16 failed-clear → 再 setQuantities（二重適用）を防ぐ
-    // - 真の未適用例外のみ pending/applying を CAS で failed 化（#20）
+    // - Shopify 適用後（inventoryApplied / completed / partial_failed / line applied）は failed に戻さない
+    //   → #16 failed-clear → 再 setQuantities（二重適用）を防ぐ（#22 ガードを維持）
+    // - status 読取失敗かつ適用痕跡なし → failed 化せず 202（退行回避）
+    // - 真の未適用例外のみ pending/applying を CAS で failed 化
     if (createdEventId) {
       let existingStatus: string | null = null;
+      let appliedLineCount = 0;
+      let statusLookupFailed = false;
       try {
         const existing = await db.inventoryChangeEvent.findUnique({
           where: { id: createdEventId },
-          select: { status: true },
+          select: {
+            status: true,
+            lines: { select: { lineStatus: true } },
+          },
         });
         existingStatus = existing?.status ?? null;
+        appliedLineCount =
+          existing?.lines?.filter((l) => l.lineStatus === "applied").length ?? 0;
       } catch (statusErr: unknown) {
+        statusLookupFailed = true;
         existingStatus = null;
         console.warn(
           "[api.inventory.apply-change] status guard before outer-catch resolve:",
@@ -988,7 +1140,26 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
 
-      const catchDecision = decideOuterCatchAction({ inventoryApplied, existingStatus });
+      const catchDecision = decideOuterCatchAction({
+        inventoryApplied,
+        existingStatus,
+        appliedLineCount,
+        statusLookupFailed,
+      });
+
+      if (catchDecision.action === "return_inflight") {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: message,
+            eventId: createdEventId,
+            status: "applying",
+            retryable: true,
+            ...(cleanupAppEventId ? { appEventId: cleanupAppEventId } : {}),
+          }),
+          { status: 202, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
 
       if (catchDecision.action === "preserve") {
         // applying/pending のまま残っていても、成功後は failed にせず terminal へ heal
