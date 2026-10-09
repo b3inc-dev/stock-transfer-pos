@@ -10,6 +10,7 @@ import type {
   InventoryAdjustQuantitiesJson,
   QuantityNameValue,
 } from "../types/graphql-responses";
+import { isDefiniteUnaappliedRejection } from "./apply-change-outer-catch-guard";
 
 const INVENTORY_SET_QUANTITIES_MAX = 250;
 
@@ -141,15 +142,6 @@ export type SetInventoryQuantitiesResult = {
   /** 失敗したチャンク index（0-based）。部分失敗時のみ */
   failedChunkIndex?: number;
 };
-
-/**
- * Shopify が数量を変えなかったと断言できる失敗だけ true。
- * キーワード列挙だと "other side closed" / "write EPIPE" 等が漏れ、failed→#16 clear→再 set になるため、
- * **userErrors（ビジネス拒否）以外はすべて成否不明（ambiguous）** とする。
- */
-function isDefiniteUnaappliedRejection(opts?: { hadUserErrors?: boolean }): boolean {
-  return opts?.hadUserErrors === true;
-}
 
 /**
  * 在庫数を指定値に設定（inventorySetQuantities）。250件超はチャンク分割。
