@@ -7718,7 +7718,7 @@ export default function InventoryCountPage() {
                             normalizeIdForMatch(c.id) === normalizeIdForMatch(pendingMetafieldRetry.countId)
                         )?.countName || pendingMetafieldRetry.countId}
                       </strong>
-                      は在庫調整済みですが、ステータス反映に失敗しています。商品リストは編集せず、「再試行」を実行してください。
+                      は在庫調整済みですが、ステータスの反映に失敗しています。商品リストは編集せず、「再試行」を実行してください。
                     </s-text>
                     {pendingMetafieldRetry.completedGroupIds?.length ? (
                       <s-text color="subdued">

@@ -1962,8 +1962,8 @@ export function InventoryCountList({
     setIsReadOnlyState(true);
     // ゼロ差分（apply-change 未実行）では「在庫調整は完了」と誤認させない
     const defaultMsg = quantitiesAppliedRef.current
-      ? "在庫調整は完了しています。ステータス反映に失敗しました。「再試行」を押してください。"
-      : "ステータス反映に失敗しました。「再試行」を押してください。";
+      ? "在庫調整は完了しています。ステータスの反映に失敗しました。「再試行」を押してください。"
+      : "ステータスの反映に失敗しました。「再試行」を押してください。";
     toast(message || defaultMsg);
   }, [count?.id]);
 
@@ -2069,7 +2069,7 @@ export function InventoryCountList({
             setSubmitting(false);
             return false;
           }
-          toast(result.error || "ステータス反映に失敗しました。再読み込みしてから再度確定してください。");
+          toast(result.error || "ステータスの反映に失敗しました。再読み込みしてから再度確定してください。");
           setSubmitting(false);
           return false;
         }
@@ -2157,7 +2157,7 @@ export function InventoryCountList({
           setSubmitting(false);
           return false;
         }
-        toast(resultResult.error || "ステータス反映に失敗しました。再読み込みしてから再度確定してください。");
+        toast(resultResult.error || "ステータスの反映に失敗しました。再読み込みしてから再度確定してください。");
         setSubmitting(false);
         return false;
       }
