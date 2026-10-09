@@ -32,11 +32,15 @@ type AdminGraphql = {
   graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response>;
 };
 
+/**
+ * pending_complete_v1 を書く。成功/失敗を呼び出し元が判定できるようにする
+ * （失敗を握りつぶすと Admin retryOnly が 404 になるギャップがあった）。
+ */
 export async function writePendingCompleteBackup(
   admin: AdminGraphql,
   ownerId: string,
   backup: PendingCompleteBackup | null
-): Promise<void> {
+): Promise<{ ok: boolean; error?: string }> {
   const value = backup ? JSON.stringify(backup) : "{}";
   const mutation = `#graphql mutation SetPendingComplete($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) { userErrors { message } }
@@ -55,15 +59,31 @@ export async function writePendingCompleteBackup(
         ],
       },
     });
+    if (!resp.ok) {
+      const msg = `HTTP ${resp.status}`;
+      console.warn("[pending-complete] write failed:", msg);
+      return { ok: false, error: msg };
+    }
     const json = (await resp.json().catch(() => ({}))) as {
       data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } };
-      errors?: unknown[];
+      errors?: Array<{ message?: string }>;
     };
-    if (json?.errors?.length || (json?.data?.metafieldsSet?.userErrors?.length ?? 0) > 0) {
-      console.warn("[pending-complete] write warnings:", json?.errors || json?.data?.metafieldsSet?.userErrors);
+    const userErrors = json?.data?.metafieldsSet?.userErrors ?? [];
+    if (json?.errors?.length) {
+      const msg = json.errors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "GraphQL errors";
+      console.warn("[pending-complete] write GraphQL errors:", msg);
+      return { ok: false, error: msg };
     }
+    if (userErrors.length > 0) {
+      const msg = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "userErrors";
+      console.warn("[pending-complete] write userErrors:", msg);
+      return { ok: false, error: msg };
+    }
+    return { ok: true };
   } catch (e: unknown) {
-    console.warn("[pending-complete] write failed:", e instanceof Error ? e.message : String(e));
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[pending-complete] write failed:", msg);
+    return { ok: false, error: msg };
   }
 }
 
@@ -103,6 +123,8 @@ export async function applyPendingCompleteFromBackup(
   countId: string;
   status?: "completed" | "in_progress";
   completedAt?: string;
+  /** dual-write 用。成功時は再 readInventoryCountsChunked 不要 */
+  savedCount?: InventoryCount;
 }> {
   const countId = backup.countId;
   const completedGroups = backup.completedGroups;
@@ -157,6 +179,7 @@ export async function applyPendingCompleteFromBackup(
     (Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0) ||
     Boolean((count as { productGroupId?: string }).productGroupId);
 
+  let savedCount: InventoryCount | undefined;
   const updatedCounts: InventoryCount[] = inventoryCounts.map((c) => {
     if (String(c.id) !== String(countId) && normalizeIdForMatch((c as { id?: string }).id) !== normalizeIdForMatch(countId)) {
       return c;
@@ -171,6 +194,7 @@ export async function applyPendingCompleteFromBackup(
     if (!hadProductGroupIds && groupIdsForCheck.length > 0) {
       next.productGroupIds = groupIdsForCheck;
     }
+    savedCount = next;
     return next;
   });
 
@@ -180,6 +204,10 @@ export async function applyPendingCompleteFromBackup(
     return { ok: false, error: message, countId };
   }
 
-  await writePendingCompleteBackup(admin, ownerId, null);
-  return { ok: true, countId, status, completedAt };
+  const clearResult = await writePendingCompleteBackup(admin, ownerId, null);
+  if (!clearResult.ok) {
+    // メタ本体は更新済み。バックアップ削除失敗は Admin が誤って再試行必要と見なす程度のため非致命。
+    console.warn("[pending-complete] clear backup after success failed:", clearResult.error);
+  }
+  return { ok: true, countId, status, completedAt, savedCount };
 }
