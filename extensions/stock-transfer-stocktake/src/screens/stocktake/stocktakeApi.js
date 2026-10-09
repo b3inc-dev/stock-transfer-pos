@@ -2030,7 +2030,8 @@ export async function adjustInventoryToActual({ locationId, items, referenceDocu
     })
     .filter(Boolean);
 
-  // ✅ changeFromQuantity: null で「更新前の数量チェック」をスキップ（確定エラー防止。Admin API 2026-04〜）
+  // ✅ changeFromQuantity: null = 意図的オプトアウト（棚卸は計上実数を正とする。UI current は古くなり得る。D9）
+  // apply-change 経由の live CAS は Draft #19。直呼び出し経路は null のまま。
 
   if (!locationId || activationRows.length === 0) {
     if (activationRows.length === 0 && (items ?? []).length > 0) {
