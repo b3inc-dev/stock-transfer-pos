@@ -4,6 +4,7 @@ import {
   readInventoryCountById,
   readInventoryCounts,
   writeInventoryCounts,
+  getInventoryCountsVersion,
   fetchProductsByGroups,
   getCurrentQuantitiesBulk,
   normalizeIdForMatch,
@@ -103,7 +104,9 @@ export function InventoryCountProductGroupSelection({
             const updated = (Array.isArray(allCounts) ? allCounts : []).map((c) =>
               String(c?.id ?? "") === countIdStr ? { ...c, status: "in_progress" } : c
             );
-            await writeInventoryCounts(updated);
+            // InventoryCountList と同様に楽観ロック（他端末の completed 上書きレース緩和）
+            const version = await getInventoryCountsVersion();
+            await writeInventoryCounts(updated, version);
             fetched = { ...fetched, status: "in_progress" };
           } catch (e) {
             console.error("Failed to update count status:", e);

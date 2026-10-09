@@ -2145,12 +2145,13 @@ function mergeExistingNonBlank(counts: InventoryCount[], existing: InventoryCoun
     const exPgNames = Array.isArray(ex.productGroupNames) && ex.productGroupNames.length > 0;
     if ((!Array.isArray(out.productGroupNames) || out.productGroupNames.length === 0) && exPgNames) out.productGroupNames = ex.productGroupNames;
     const hasGroupItems = out.groupItems && typeof out.groupItems === "object" && Object.keys(out.groupItems).length > 0;
-    const exGroupItems = ex.groupItems && typeof ex.groupItems === "object" && Object.keys(ex.groupItems).length > 0;
-    if (!hasGroupItems && exGroupItems) {
+    const exHasGroupItems = ex.groupItems && typeof ex.groupItems === "object" && Object.keys(ex.groupItems).length > 0;
+    if (!hasGroupItems && exHasGroupItems) {
       out.groupItems = ex.groupItems;
-    } else if (hasGroupItems && exGroupItems) {
+    } else if (hasGroupItems && exHasGroupItems) {
       // ✅ 1グループだけ更新したときに他グループを消さない（既存をベースに payload で上書き）
-      out.groupItems = { ...exGroupItems, ...out.groupItems };
+      // ※ boolean を spread すると既存グループが消えるため、必ずオブジェクトを spread する
+      out.groupItems = { ...ex.groupItems, ...out.groupItems };
     }
     const hasItems = Array.isArray(out.items) && out.items.length > 0;
     const exItems = Array.isArray(ex.items) && ex.items.length > 0;
