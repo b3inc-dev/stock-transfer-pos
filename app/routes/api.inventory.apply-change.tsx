@@ -82,6 +82,31 @@ function referenceDocumentUriForActivity(activity: string, refId: string | null)
   return `gid://stock-transfer-pos/InventoryCount/${id}`;
 }
 
+/** POS に返す例外メッセージ。Response / 非 Error を "Unknown error" に潰さない */
+function formatCaughtError(e: unknown): string {
+  if (e instanceof Error) {
+    const msg = (e.message || e.name || "").trim();
+    return msg || "Error";
+  }
+  if (typeof Response !== "undefined" && e instanceof Response) {
+    return `HTTP ${e.status}${e.statusText ? ` ${e.statusText}` : ""}`.trim();
+  }
+  if (typeof e === "string" && e.trim()) return e.trim();
+  if (e && typeof e === "object") {
+    const msg = (e as { message?: unknown }).message;
+    if (typeof msg === "string" && msg.trim()) return msg.trim();
+    try {
+      const s = JSON.stringify(e);
+      if (s && s !== "{}") return s.slice(0, 300);
+    } catch {
+      /* ignore */
+    }
+  }
+  if (e == null) return "Unknown error";
+  const s = String(e).trim();
+  return s || "Unknown error";
+}
+
 export async function loader({ request }: LoaderFunctionArgs) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -99,6 +124,12 @@ type ApplyChangeEntry = {
 };
 
 export async function action({ request }: ActionFunctionArgs) {
+  // outer catch 用: イベント作成後に例外が飛んだとき failed 化・先行履歴掃除に使う
+  let createdEventId: string | null = null;
+  let cleanupShop: string | null = null;
+  let cleanupAppEventId: string | null = null;
+  let cleanupIdempotencyKeys: string[] = [];
+
   try {
     if (request.method !== "POST") {
       return new Response(JSON.stringify({ ok: false, error: "Method not allowed" }), {
@@ -118,8 +149,29 @@ export async function action({ request }: ActionFunctionArgs) {
 
     let sessionToken: { dest?: string } | null = await decodePOSToken(token);
     if (!sessionToken?.dest) {
-      const auth = await authenticate.pos(request);
-      sessionToken = auth.sessionToken;
+      try {
+        const auth = await authenticate.pos(request);
+        sessionToken = auth.sessionToken;
+      } catch (err: unknown) {
+        const is401 =
+          (err as { status?: number })?.status === 401 ||
+          (typeof Response !== "undefined" && err instanceof Response && err.status === 401);
+        const errMsg = formatCaughtError(err);
+        console.warn(
+          "[api.inventory.apply-change] POS auth failed:",
+          is401 ? "Invalid session token" : errMsg
+        );
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: is401 ? "Invalid session token" : errMsg,
+          }),
+          {
+            status: is401 ? 401 : 500,
+            headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+          }
+        );
+      }
     }
     const dest = sessionToken?.dest;
     if (!dest) {
@@ -232,16 +284,81 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
       const isProcessing = existingEvent.status === "pending" || existingEvent.status === "applying";
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          error: existingEvent.errorSummary || "Event already exists with status: " + existingEvent.status,
-          eventId: existingEvent.id,
-          appEventId,
-          status: existingEvent.status,
-        }),
-        { status: isProcessing ? 202 : 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-      );
+      if (isProcessing) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: existingEvent.errorSummary || "Event already exists with status: " + existingEvent.status,
+            eventId: existingEvent.id,
+            appEventId,
+            status: existingEvent.status,
+          }),
+          { status: 202, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+      // partial_failed: 在庫が一部変わっている可能性があるため自動再実行しない
+      if (existingEvent.status === "partial_failed") {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error:
+              existingEvent.errorSummary ||
+              "Event already exists with status: partial_failed（一部適用済み。手動確認が必要です）",
+            eventId: existingEvent.id,
+            appEventId,
+            status: existingEvent.status,
+            partiallyApplied: true,
+          }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+      // failed: 安定 appEventId での再確定を許可するため、失敗イベントを削除して続行
+      // （以前は errorSummary「Unknown error」等が sticky になり、棚卸確定が永久に失敗していた）
+      if (existingEvent.status === "failed") {
+        console.warn(
+          `[api.inventory.apply-change] clearing failed event for retry: appEventId=${appEventId} prevError=${existingEvent.errorSummary ?? "(none)"}`
+        );
+        try {
+          await db.inventoryChangeEventLine.deleteMany({ where: { eventId: existingEvent.id } });
+          await db.inventoryChangeEvent.delete({ where: { id: existingEvent.id } });
+          await db.inventoryChangeLog.deleteMany({
+            where: {
+              shop,
+              quantityAfter: null,
+              idempotencyKey: { startsWith: `${shop}_app_${appEventId}_` },
+            },
+          });
+        } catch (clearErr: unknown) {
+          console.warn(
+            "[api.inventory.apply-change] failed-event cleanup error:",
+            formatCaughtError(clearErr)
+          );
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error:
+                existingEvent.errorSummary ||
+                "Event already exists with status: failed（再試行用のクリアに失敗しました）",
+              eventId: existingEvent.id,
+              appEventId,
+              status: existingEvent.status,
+            }),
+            { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+          );
+        }
+        // fall through: 新規イベント作成へ
+      } else {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: existingEvent.errorSummary || "Event already exists with status: " + existingEvent.status,
+            eventId: existingEvent.id,
+            appEventId,
+            status: existingEvent.status,
+          }),
+          { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
     }
 
     // delta のみのエントリは現在値を取得して quantityAfter に正規化（ロス・仕入用）
@@ -282,6 +399,9 @@ export async function action({ request }: ActionFunctionArgs) {
         status: "pending",
       },
     });
+    createdEventId = event.id;
+    cleanupShop = shop;
+    cleanupAppEventId = appEventId;
 
     const lineRecords: { id: string; inventoryItemId: string; quantityAfter: number; delta: number | null; quantityBefore: number | null; variantId: string | null; sku: string }[] = [];
 
@@ -323,6 +443,9 @@ export async function action({ request }: ActionFunctionArgs) {
     const shopTimezoneEarly = await getShopTimezone(admin).catch(() => "UTC");
     const shopDateEarly = getDateInShopTimezone(requestedAt, shopTimezoneEarly);
     const idempotencyKeyBaseEarly = `${shop}_app_${appEventId}`;
+    cleanupIdempotencyKeys = lineRecords.map(
+      (l) => `${idempotencyKeyBaseEarly}_${toRawId(l.inventoryItemId)}_${rawLocIdEarly}`
+    );
 
     // R-HIST / Phase F: setQuantities 前に InventoryChangeLog を先行書き込み（quantityAfter=null）。
     // webhook が同一 appEventId 軸の業務行を見つけて early-return できるようにし、admin_webhook 二重行を減らす。
@@ -582,9 +705,65 @@ export async function action({ request }: ActionFunctionArgs) {
     );
   } catch (e: unknown) {
     console.error("[api.inventory.apply-change] Error:", e);
-    const message = e instanceof Error ? e.message : "Unknown error";
+    const message = formatCaughtError(e);
+
+    // イベント作成後の未処理例外: applying/pending のまま残すと安定 appEventId 再送が 202 で固まる
+    if (createdEventId) {
+      try {
+        await db.inventoryChangeEventLine.updateMany({
+          where: { eventId: createdEventId },
+          data: { lineStatus: "failed", errorMessage: message },
+        });
+        await db.inventoryChangeEvent.update({
+          where: { id: createdEventId },
+          data: { status: "failed", errorSummary: message },
+        });
+      } catch (markErr: unknown) {
+        console.warn(
+          "[api.inventory.apply-change] mark failed after outer catch:",
+          formatCaughtError(markErr)
+        );
+      }
+      if (cleanupShop && cleanupIdempotencyKeys.length > 0) {
+        try {
+          await db.inventoryChangeLog.deleteMany({
+            where: {
+              shop: cleanupShop,
+              idempotencyKey: { in: cleanupIdempotencyKeys },
+              quantityAfter: null,
+            },
+          });
+        } catch (cleanupErr: unknown) {
+          console.warn(
+            "[api.inventory.apply-change] cleanup pre-write logs (outer catch):",
+            formatCaughtError(cleanupErr)
+          );
+        }
+      } else if (cleanupShop && cleanupAppEventId) {
+        try {
+          await db.inventoryChangeLog.deleteMany({
+            where: {
+              shop: cleanupShop,
+              quantityAfter: null,
+              idempotencyKey: { startsWith: `${cleanupShop}_app_${cleanupAppEventId}_` },
+            },
+          });
+        } catch (cleanupErr: unknown) {
+          console.warn(
+            "[api.inventory.apply-change] cleanup pre-write logs by prefix (outer catch):",
+            formatCaughtError(cleanupErr)
+          );
+        }
+      }
+    }
+
     return new Response(
-      JSON.stringify({ ok: false, error: message }),
+      JSON.stringify({
+        ok: false,
+        error: message,
+        ...(createdEventId ? { eventId: createdEventId, status: "failed" } : {}),
+        ...(cleanupAppEventId ? { appEventId: cleanupAppEventId } : {}),
+      }),
       { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
