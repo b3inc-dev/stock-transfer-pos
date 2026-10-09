@@ -72,9 +72,12 @@ const CONFIRM_INVENTORY_COUNT_MODAL_ID = "confirm-inventory-count-modal";
 /**
  * 棚卸確定で apply-change が必要な行か（数値正規化後の差分のみ）。
  * 生比較 `!==` だと型差でゼロ差分が調整対象に入り、在庫調整 toast が誤表示され得る。
+ * null/"" は Number() すると 0 になるため、未設定は調整対象にしない（旧 Number.isFinite 生値チェックと同趣旨）。
  */
 function lineHasQuantityDelta(l) {
   if (!l || l.isReadOnly || !l.inventoryItemId) return false;
+  if (l.currentQuantity == null || l.actualQuantity == null) return false;
+  if (l.currentQuantity === "" || l.actualQuantity === "") return false;
   const before = Number(l.currentQuantity);
   const after = Number(l.actualQuantity);
   if (!Number.isFinite(before) || !Number.isFinite(after)) return false;
@@ -84,20 +87,15 @@ function lineHasQuantityDelta(l) {
 /** apply-change 用 entries。quantityAfter === quantityBefore は除外（no-op で API/toast を避ける） */
 function buildAdjustEntries(linesToAdjust) {
   return (linesToAdjust || [])
+    .filter(lineHasQuantityDelta)
     .map((l) => ({
       inventoryItemId: l.inventoryItemId,
       variantId: l.variantId ?? undefined,
       sku: l.sku ?? undefined,
-      quantityAfter: Number(l.actualQuantity ?? 0),
-      quantityBefore: Number(l.currentQuantity ?? 0),
+      quantityAfter: Number(l.actualQuantity),
+      quantityBefore: Number(l.currentQuantity),
     }))
-    .filter(
-      (e) =>
-        e.inventoryItemId &&
-        Number.isFinite(e.quantityAfter) &&
-        Number.isFinite(e.quantityBefore) &&
-        e.quantityAfter !== e.quantityBefore
-    );
+    .filter((e) => e.quantityAfter !== e.quantityBefore);
 }
 
 // groupItems のキー照合（GID と数値 ID の混在で取れない不具合対策。管理画面と POS で明細数が一致するようにする）
