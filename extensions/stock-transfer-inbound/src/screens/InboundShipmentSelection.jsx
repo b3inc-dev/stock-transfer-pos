@@ -152,19 +152,19 @@ export function InboundShipmentSelection({
     setHeader?.(
       <s-box padding="base">
         <s-stack gap="base">
-          <s-text emphasis="bold">配送を選択</s-text>
+          <s-text type="strong">配送を選択</s-text>
           {transfer ? (
             <s-stack gap="none">
-              <s-text tone="subdued" size="small">
+              <s-text type="small" color="subdued">
                 {transferName || String(transfer?.name || "").trim() || "入庫ID"}
               </s-text>
-              <s-text tone="subdued" size="small">
+              <s-text type="small" color="subdued">
                 出庫元: {String(transfer?.originName || "").trim() || "-"}
               </s-text>
-              <s-text tone="subdued" size="small">
+              <s-text type="small" color="subdued">
                 宛先: {String(transfer?.destinationName || "").trim() || "-"}
               </s-text>
-              <s-text tone="subdued" size="small">
+              <s-text type="small" color="subdued">
                 配送数: {shipments.length}
               </s-text>
             </s-stack>
@@ -193,7 +193,7 @@ export function InboundShipmentSelection({
   if (loading) {
     return (
       <s-box padding="base">
-        <s-text tone="subdued">読み込み中...</s-text>
+        <s-text color="subdued">読み込み中...</s-text>
       </s-box>
     );
   }
@@ -209,7 +209,7 @@ export function InboundShipmentSelection({
   if (!transfer || shipments.length === 0) {
     return (
       <s-box padding="base">
-        <s-text tone="subdued">配送が見つかりません</s-text>
+        <s-text color="subdued">配送が見つかりません</s-text>
       </s-box>
     );
   }
@@ -252,7 +252,7 @@ export function InboundShipmentSelection({
                     <s-stack direction="inline" justifyContent="space-between" alignItems="flex-end" gap="small">
                       <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
                         <s-stack gap="none">
-                          <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          <s-text type="strong" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                             {shipmentLabel}
                           </s-text>
                           <s-stack direction="inline" gap="small" alignItems="center">
@@ -261,13 +261,13 @@ export function InboundShipmentSelection({
                         </s-stack>
                       </s-box>
                       <s-box style={{ flex: "0 0 auto" }}>
-                        <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
+                        <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap" }}>
                           {qtyText}
                         </s-text>
                       </s-box>
                     </s-stack>
                     {shipment?.tracking?.trackingNumber ? (
-                      <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         追跡番号: {String(shipment.tracking.trackingNumber).trim()}
                       </s-text>
                     ) : null}
