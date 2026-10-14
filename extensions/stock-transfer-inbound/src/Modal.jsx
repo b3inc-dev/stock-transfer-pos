@@ -1,6 +1,6 @@
 import { render, Component } from "preact";
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
-import { getStateSlice, setStateSlice, toUserMessage, getStatusBadgeTone, readValue, setChromeRender, renderChrome } from "./inboundHelpers.js";
+import { getStateSlice, setStateSlice, toUserMessage, getStatusBadgeTone, readValue } from "./inboundHelpers.js";
 import { useSessionLocationId, useOriginLocationGid, useLocationsIndex, getLocationName_ } from "./inboundHooks.js";
 import {
   fetchTransfersForDestinationAll,
@@ -12,7 +12,6 @@ import {
   mergeInboundOverIntoTransfers_,
 } from "./inboundApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
-import { useInboundQtyEditorController, useInboundConfirmReceiveController } from "./InboundModalHost.jsx";
 import { InboundShipmentSelection } from "./screens/InboundShipmentSelection.jsx";
 import { InboundListScreen } from "./screens/InboundListScreen.jsx";
 
@@ -317,8 +316,6 @@ function InboundConditions({
       const readOnly = isCompleted(t);
       setStateSlice(setAppState, "inbound", {
         selectedShipmentId: shipmentId,
-        selectedShipmentIds: [],
-        shipmentMode: "single",
         selectedTransferId: String(t?.id || ""),
         selectedTransferName: String(t?.name || ""),
         selectedOriginName: String(t?.originName || ""),
@@ -341,9 +338,6 @@ function InboundConditions({
     const shipments = Array.isArray(t?.shipments) ? t.shipments : [];
     if (shipments.length === 0) { toast("配送が見つかりません"); pendingTransferForModalRef.current = null; setPendingTransferForModal(null); return; }
     setStateSlice(setAppState, "inbound", {
-      selectedShipmentId: "",
-      selectedShipmentIds: [],
-      shipmentMode: "single",
       selectedTransferId: String(t?.id || ""),
       selectedTransferName: String(t?.name || ""),
       selectedOriginName: String(t?.originName || ""),
@@ -362,10 +356,8 @@ function InboundConditions({
   const handleShowAllShipments = useCallback(() => {
     const t = pendingTransferForModal || pendingTransferForModalRef.current;
     if (!t) { pendingTransferForModalRef.current = null; setPendingTransferForModal(null); return; }
-    const shipmentIds = (Array.isArray(t?.shipments) ? t.shipments : []).map((s) => String(s?.id || "").trim()).filter(Boolean);
     setStateSlice(setAppState, "inbound", {
-      selectedShipmentId: shipmentIds[0] || "",
-      selectedShipmentIds: shipmentIds,
+      selectedShipmentIds: (Array.isArray(t?.shipments) ? t.shipments : []).map((s) => String(s?.id || "").trim()).filter(Boolean),
       shipmentMode: "multiple",
       selectedTransferId: String(t?.id || ""),
       selectedTransferName: String(t?.name || ""),
@@ -375,7 +367,6 @@ function InboundConditions({
       selectedTransferStatus: String(t?.status || ""),
       selectedTransferTotalQuantity: Number(t?.totalQuantity ?? 0),
       selectedTransferReceivedQuantity: Number(t?.receivedQuantityDisplay ?? t?.receivedQuantity ?? 0),
-      selectedReadOnly: false,
     });
     pendingTransferForModalRef.current = null;
     setPendingTransferForModal(null);
@@ -383,7 +374,7 @@ function InboundConditions({
   }, [pendingTransferForModal, setAppState, onNext]);
 
   useEffect(() => {
-    setChromeRender(setHeader, () => (
+    setHeader?.(
       <s-box padding="base">
         <s-stack gap="base">
           <s-stack direction="inline" gap="none" inlineSize="100%">
@@ -406,12 +397,12 @@ function InboundConditions({
           ) : null}
         </s-stack>
       </s-box>
-    ));
-    return () => setChromeRender(setHeader, null);
+    );
+    return () => setHeader?.(null);
   }, [setHeader, viewMode, pendingTransfersAll.length, receivedTransfersAll.length, transfersPageInfo?.hasNextPage, loadingMore, loadMoreTransfers_]);
 
   useEffect(() => {
-    setChromeRender(setFooter, () => (
+    setFooter?.(
       <FixedFooterNavBar
         summaryLeft={`入庫先: ${displayLocationName}`}
         summaryRight={viewMode === "received" ? `入庫済み ${listToShow.length}件` : `未入庫 ${listToShow.length}件`}
@@ -422,13 +413,10 @@ function InboundConditions({
         onRight={refresh}
         rightDisabled={loading || !locationGid}
       />
-    ));
-    return () => setChromeRender(setFooter, null);
+    );
+    return () => setFooter?.(null);
   }, [setFooter, displayLocationName, viewMode, listToShow.length, liteMode, onToggleLiteMode, refresh, loading, locationGid]);
 
-  // 処理方法 / Location の s-modal は InboundConditions 内の安定兄弟として常設する（pre-#30 / ea2080f^ 同型）。
-  // #30 の pageOverlay + effect(pendingTransfer) は「リスト」の command="--show" と同時に modal を
-  // cleanup→再生成し、remote-dom が e.nodeType で落ちた。中身だけ state 更新し modal ノードは維持する。
   return (
     <>
       <s-box padding="base">
@@ -490,7 +478,7 @@ function InboundConditions({
                             </s-stack>
                           </s-box>
                         </s-clickable>
-
+                        
                         {/* 右端：「リスト」ボタン（右固定・縮まない） */}
                         <s-box style={{ flex: "0 0 auto", flexShrink: 0 }}>
                           <s-button
@@ -605,8 +593,6 @@ function Extension() {
   const [footer, setFooter] = useState(null);
   const [settings, setSettings] = useState(null);
   const [cameraScannerVisible, setCameraScannerVisible] = useState(false);
-  const { openQtyEditor, QtyEditorProvider, qtyEditorHost } = useInboundQtyEditorController();
-  const { setConfirmReceive, confirmReceiveHost } = useInboundConfirmReceiveController();
   const sessionLocationGid = useOriginLocationGid();
   const locationGid = sessionLocationGid;
   const defaultLocationSetRef = useRef(false);
@@ -667,12 +653,7 @@ function Extension() {
         if (alive) setSettings(s);
       } catch (e) {
         console.warn("[Inbound Modal] fetchSettings failed:", e);
-        if (alive) setSettings({
-          version: 1,
-          inbound: { listInitialLimit: 100, allowOverReceive: true, allowExtraReceive: true },
-          productList: { initialLimit: 250 },
-          searchList: { initialLimit: 50 },
-        });
+        if (alive) setSettings({ version: 1, inbound: { listInitialLimit: 100 }, productList: { initialLimit: 250 }, searchList: { initialLimit: 50 } });
       }
     })();
     return () => { alive = false; };
@@ -693,14 +674,9 @@ function Extension() {
     else nav.pop();
   }, [nav.stack.length, dismissModal, nav.pop]);
 
-  const clearBars = useCallback(() => {
-    setHeader(null);
-    setFooter(null);
-    setConfirmReceive(null);
-  }, [setConfirmReceive]);
-  const goInboundList = useCallback(() => { clearBars(); nav.push(SCREENS.INBOUND_LIST, {}); }, [nav.push, clearBars]);
-  const goInboundShipmentSelection = useCallback(() => { clearBars(); nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION, {}); }, [nav.push, clearBars]);
-  const goBack = useCallback(() => { clearBars(); nav.pop(); }, [nav.pop, clearBars]);
+  const goInboundList = useCallback(() => { setHeader(null); setFooter(null); nav.push(SCREENS.INBOUND_LIST, {}); }, [nav.push]);
+  const goInboundShipmentSelection = useCallback(() => { setHeader(null); setFooter(null); nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION, {}); }, [nav.push]);
+  const goBack = useCallback(() => { setHeader(null); setFooter(null); nav.pop(); }, [nav.pop]);
 
   // REFERENCE 5.2 #3: 確定後に Transfer の完了状態で INBOUND_COND / INBOUND_SHIPMENT_SELECTION へ振り分け
   const onAfterReceiveInboundList = useCallback(
@@ -739,7 +715,8 @@ function Extension() {
             selectedReadOnly: false,
             selectedOriginLocationId: "",
           });
-          clearBars();
+          setHeader(null);
+          setFooter(null);
           nav.push(SCREENS.INBOUND_COND);
         } else {
           setStateSlice(setAppState, "inbound", (prev) => ({
@@ -748,14 +725,15 @@ function Extension() {
             selectedShipmentIds: [],
             shipmentMode: "single",
           }));
-          clearBars();
+          setHeader(null);
+          setFooter(null);
           nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION);
         }
       } catch (e) {
         goBack();
       }
     },
-    [locationGid, appState?.outbound?.settings?.inbound?.listInitialLimit, settings?.inbound?.listInitialLimit, setAppState, nav.push, goBack, clearBars]
+    [locationGid, appState?.outbound?.settings?.inbound?.listInitialLimit, settings?.inbound?.listInitialLimit, setAppState, nav.push, goBack]
   );
 
   const toggleLiteMode = useCallback(() => setPrefs((prev) => ({ ...(prev && typeof prev === "object" ? prev : {}), liteMode: !prev?.liteMode })), [setPrefs]);
@@ -804,7 +782,6 @@ function Extension() {
         onAfterReceive={onAfterReceiveInboundList}
         setHeader={setHeader}
         setFooter={setFooter}
-        setConfirmReceive={setConfirmReceive}
         onToggleLiteMode={toggleLiteMode}
       />
     );
@@ -826,37 +803,19 @@ function Extension() {
       }
     }
   };
-  // 出庫と同型: Fragment 直下に s-page、その兄弟として Host（Provider で page を包まない）
-  // pageOverlay + setChromeRender remount は使わない（リスト/--show と明細ロードで e.nodeType）
   return (
-    <>
-      <QtyEditorProvider value={openQtyEditor}>
-        <s-page heading="入庫">
-          <s-button slot="secondary-actions" kind="secondary" onClick={handleCameraScanToggle}>
-            {cameraScannerVisible ? "カメラを閉じる" : "カメラスキャン"}
-          </s-button>
-          <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
-            {header ? (
-              <>
-                <s-box padding="none">{renderChrome(header)}</s-box>
-                <s-divider />
-              </>
-            ) : null}
-            <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0">
-              <s-box padding="none">{body}</s-box>
-            </s-scroll-box>
-            {footer ? (
-              <>
-                <s-divider />
-                <s-box padding="none">{renderChrome(footer)}</s-box>
-              </>
-            ) : null}
-          </s-stack>
-        </s-page>
-      </QtyEditorProvider>
-      {qtyEditorHost}
-      {confirmReceiveHost}
-    </>
+    <s-page heading="入庫">
+      <s-button slot="secondary-actions" kind="secondary" onClick={handleCameraScanToggle}>
+        {cameraScannerVisible ? "カメラを閉じる" : "カメラスキャン"}
+      </s-button>
+      <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
+        {header ? (<><s-box padding="none">{header}</s-box><s-divider /></>) : null}
+        <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0">
+          <s-box padding="none">{body}</s-box>
+        </s-scroll-box>
+        {footer ? (<><s-divider /><s-box padding="none">{footer}</s-box></>) : null}
+      </s-stack>
+    </s-page>
   );
 }
 
