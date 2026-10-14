@@ -12,6 +12,7 @@ import {
   mergeInboundOverIntoTransfers_,
 } from "./inboundApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
+import { InboundQtyEditorProvider } from "./InboundModalHost.jsx";
 import { InboundShipmentSelection } from "./screens/InboundShipmentSelection.jsx";
 import { InboundListScreen } from "./screens/InboundListScreen.jsx";
 
@@ -599,6 +600,8 @@ function Extension() {
   const [prefs, setPrefs] = useUiPrefs();
   const [header, setHeader] = useState(null);
   const [footer, setFooter] = useState(null);
+  /** s-page 外に出すオーバーレイ（確定モーダル等）。scroll-box 内ネストを避ける */
+  const [pageOverlay, setPageOverlay] = useState(null);
   const [settings, setSettings] = useState(null);
   const [cameraScannerVisible, setCameraScannerVisible] = useState(false);
   const sessionLocationGid = useOriginLocationGid();
@@ -687,9 +690,14 @@ function Extension() {
     else nav.pop();
   }, [nav.stack.length, dismissModal, nav.pop]);
 
-  const goInboundList = useCallback(() => { setHeader(null); setFooter(null); nav.push(SCREENS.INBOUND_LIST, {}); }, [nav.push]);
-  const goInboundShipmentSelection = useCallback(() => { setHeader(null); setFooter(null); nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION, {}); }, [nav.push]);
-  const goBack = useCallback(() => { setHeader(null); setFooter(null); nav.pop(); }, [nav.pop]);
+  const clearBars = useCallback(() => {
+    setHeader(null);
+    setFooter(null);
+    setPageOverlay(null);
+  }, []);
+  const goInboundList = useCallback(() => { clearBars(); nav.push(SCREENS.INBOUND_LIST, {}); }, [nav.push, clearBars]);
+  const goInboundShipmentSelection = useCallback(() => { clearBars(); nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION, {}); }, [nav.push, clearBars]);
+  const goBack = useCallback(() => { clearBars(); nav.pop(); }, [nav.pop, clearBars]);
 
   // REFERENCE 5.2 #3: 確定後に Transfer の完了状態で INBOUND_COND / INBOUND_SHIPMENT_SELECTION へ振り分け
   const onAfterReceiveInboundList = useCallback(
@@ -728,8 +736,7 @@ function Extension() {
             selectedReadOnly: false,
             selectedOriginLocationId: "",
           });
-          setHeader(null);
-          setFooter(null);
+          clearBars();
           nav.push(SCREENS.INBOUND_COND);
         } else {
           setStateSlice(setAppState, "inbound", (prev) => ({
@@ -738,15 +745,14 @@ function Extension() {
             selectedShipmentIds: [],
             shipmentMode: "single",
           }));
-          setHeader(null);
-          setFooter(null);
+          clearBars();
           nav.push(SCREENS.INBOUND_SHIPMENT_SELECTION);
         }
       } catch (e) {
         goBack();
       }
     },
-    [locationGid, appState?.outbound?.settings?.inbound?.listInitialLimit, settings?.inbound?.listInitialLimit, setAppState, nav.push, goBack]
+    [locationGid, appState?.outbound?.settings?.inbound?.listInitialLimit, settings?.inbound?.listInitialLimit, setAppState, nav.push, goBack, clearBars]
   );
 
   const toggleLiteMode = useCallback(() => setPrefs((prev) => ({ ...(prev && typeof prev === "object" ? prev : {}), liteMode: !prev?.liteMode })), [setPrefs]);
@@ -795,6 +801,7 @@ function Extension() {
         onAfterReceive={onAfterReceiveInboundList}
         setHeader={setHeader}
         setFooter={setFooter}
+        setPageOverlay={setPageOverlay}
         onToggleLiteMode={toggleLiteMode}
       />
     );
@@ -816,19 +823,23 @@ function Extension() {
       }
     }
   };
+  // 出庫 DialogHost と同様: s-page の外にオーバーレイ／共有数量モーダルを置く
   return (
-    <s-page heading="入庫">
-      <s-button slot="secondary-actions" kind="secondary" onClick={handleCameraScanToggle}>
-        {cameraScannerVisible ? "カメラを閉じる" : "カメラスキャン"}
-      </s-button>
-      <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
-        {header ? (<><s-box padding="none">{header}</s-box><s-divider /></>) : null}
-        <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0">
-          <s-box padding="none">{body}</s-box>
-        </s-scroll-box>
-        {footer ? (<><s-divider /><s-box padding="none">{footer}</s-box></>) : null}
-      </s-stack>
-    </s-page>
+    <InboundQtyEditorProvider>
+      <s-page heading="入庫">
+        <s-button slot="secondary-actions" kind="secondary" onClick={handleCameraScanToggle}>
+          {cameraScannerVisible ? "カメラを閉じる" : "カメラスキャン"}
+        </s-button>
+        <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
+          {header ? (<><s-box padding="none">{header}</s-box><s-divider /></>) : null}
+          <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0">
+            <s-box padding="none">{body}</s-box>
+          </s-scroll-box>
+          {footer ? (<><s-divider /><s-box padding="none">{footer}</s-box></>) : null}
+        </s-stack>
+      </s-page>
+      {pageOverlay}
+    </InboundQtyEditorProvider>
   );
 }
 

@@ -114,6 +114,12 @@ function formatShipmentLabelLocal(transferName, index) {
   return `#${numPart}-${index + 1}`;
 }
 
+const CONFIRM_MODAL_ONE_LINE_STYLE = {
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
 // TDZ 対策（Jt エラー）: コンポーネント内の incRow/setRowQty/setExtraQty/incExtra が minify で Jt 等になり参照順でエラーになるためモジュールレベルに配置
 function incRow_(readOnlyRef, toastReadOnlyOnceRef, toastFn, rowsRef, setRows, key, delta, allowOverReceive = true) {
   if (readOnlyRef?.current) return denyEdit_(toastReadOnlyOnceRef, toastFn);
@@ -219,6 +225,7 @@ export function InboundListScreen({
   onAfterReceive,
   setHeader,
   setFooter,
+  setPageOverlay,
 }) {
   const mountedRef = useRef(true);
   const locationGid = useOriginLocationGid() || String(appState?.originLocationIdManual || "").trim() || null;
@@ -250,11 +257,6 @@ export function InboundListScreen({
     { id: "other", label: "その他" },
   ];
   const DIFF_PREVIEW_LIMIT = 1;
-  const oneLineStyle = {
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  };
 
   const [shipmentLoading, setShipmentLoading] = useState(false);
   const [shipmentError, setShipmentError] = useState("");
@@ -2216,6 +2218,83 @@ export function InboundListScreen({
     return () => setFooter?.(null);
   }, [setFooter, onBack, footerLine1, footerLine2, hasWarning, canOpenConfirm, receiveSubmitting, shipmentLoading, shipmentError, liteMode, footerStatusLabel, footerStatusTone, readOnly, draftSavedAt]);
 
+  // 確定モーダルは s-scroll-box 内ではなく親の pageOverlay（s-page 外）へ載せる
+  const confirmModalNode = useMemo(() => {
+    if (!shipment?.id) return null;
+    return (
+      <s-modal id={CONFIRM_RECEIVE_MODAL_ID} heading="入庫を確定しますか？">
+        <s-box padding="none" style={{ paddingInline: 8, paddingBlockStart: 8, paddingBlockEnd: 0, maxHeight: "60vh", overflowY: "auto" }}>
+          <s-stack gap="small">
+            <s-stack gap="extra-tight">
+              <s-text size="small" tone="subdued">予定 {plannedTotal} / 入庫 {receiveTotal}</s-text>
+              <s-text size="small" tone="subdued">予定外 {extrasQtyTotal} / 超過 {overQtyTotal} / 不足 {shortageQtyTotal}</s-text>
+              {hasWarning ? <s-text size="small" tone="critical">※ 予定外/超過/不足 があります。</s-text> : null}
+            </s-stack>
+            {shortageRows.length > 0 ? (
+              <s-stack gap="extra-tight">
+                <s-text size="small" tone="critical">不足（{shortageRows.length}件）</s-text>
+                {shortageRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：-{Number(x.shortageQty || 0)}</s-text>)}
+                {shortageRows.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {shortageRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
+              </s-stack>
+            ) : null}
+            {extras.length > 0 ? (
+              <s-stack gap="extra-tight">
+                <s-text size="small" tone="critical">予定外（{extras.length}件）</s-text>
+                {extras.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.key} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：{Number(x.receiveQty || 0)}</s-text>)}
+                {extras.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {extras.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
+              </s-stack>
+            ) : null}
+            {overRows.length > 0 ? (
+              <s-stack gap="extra-tight">
+                <s-text size="small" tone="critical">超過（{overRows.length}件）</s-text>
+                {overRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：+{Number(x.overQty || 0)}</s-text>)}
+                {overRows.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {overRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
+              </s-stack>
+            ) : null}
+            {hasWarning ? (
+              <>
+                <s-divider />
+                <s-stack gap="small">
+                  <s-text size="small" tone="critical">予定外/超過/不足があります。「確認しました」を押してから確定してください。</s-text>
+                  <s-button kind="secondary" size="small" onClick={() => setAckWarning(true)} disabled={ackWarning}>{ackWarning ? "確認済み" : "確認しました"}</s-button>
+                </s-stack>
+              </>
+            ) : null}
+            <s-divider />
+            <s-box>
+              <s-button command="--hide" commandFor={CONFIRM_RECEIVE_MODAL_ID}>戻る</s-button>
+            </s-box>
+          </s-stack>
+        </s-box>
+        <s-button slot="secondary-actions" kind="secondary" tone="critical" disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }} onPress={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }}>一部入庫（一時保存）</s-button>
+        <s-button slot="primary-action" tone={hasWarning ? "critical" : "success"} disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }} onPress={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }}>確定する</s-button>
+      </s-modal>
+    );
+  }, [
+    shipment?.id,
+    plannedTotal,
+    receiveTotal,
+    extrasQtyTotal,
+    overQtyTotal,
+    shortageQtyTotal,
+    hasWarning,
+    shortageRows,
+    extras,
+    overRows,
+    ackWarning,
+    canConfirm,
+    warningReady,
+    receiveSubmitting,
+    receiveConfirm,
+    onBack,
+  ]);
+
+  useEffect(() => {
+    if (!setPageOverlay) return undefined;
+    setPageOverlay(confirmModalNode);
+    return () => setPageOverlay(null);
+  }, [setPageOverlay, confirmModalNode]);
+
   if (shipmentLoading) {
     return (
       <s-box padding="base">
@@ -2267,13 +2346,6 @@ export function InboundListScreen({
       </s-box>
     );
   }
-
-  const warningAreaNode = !hasWarning ? null : (
-    <s-stack gap="small">
-      <s-text size="small" tone="critical">予定外/超過/不足があります。「確認しました」を押してから確定してください。</s-text>
-      <s-button kind="secondary" size="small" onClick={() => setAckWarning(true)} disabled={ackWarning}>{ackWarning ? "確認済み" : "確認しました"}</s-button>
-    </s-stack>
-  );
 
   return (
     <s-stack gap="base">
@@ -2397,51 +2469,7 @@ export function InboundListScreen({
         </s-box>
       )}
 
-      {/* 3. 確定モーダル（REFERENCE: 入庫リストの後・予定外入荷の前） */}
-      <s-modal id={CONFIRM_RECEIVE_MODAL_ID} heading="入庫を確定しますか？">
-          <s-box padding="none" style={{ paddingInline: 8, paddingBlockStart: 8, paddingBlockEnd: 0, maxHeight: "60vh", overflowY: "auto" }}>
-            <s-stack gap="small">
-              <s-stack gap="extra-tight">
-                <s-text size="small" tone="subdued">予定 {plannedTotal} / 入庫 {receiveTotal}</s-text>
-                <s-text size="small" tone="subdued">予定外 {extrasQtyTotal} / 超過 {overQtyTotal} / 不足 {shortageQtyTotal}</s-text>
-                {hasWarning ? <s-text size="small" tone="critical">※ 予定外/超過/不足 があります。</s-text> : null}
-              </s-stack>
-              {shortageRows.length > 0 ? (
-                <s-stack gap="extra-tight">
-                  <s-text size="small" tone="critical">不足（{shortageRows.length}件）</s-text>
-                  {shortageRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={oneLineStyle}>・{x.title}：-{Number(x.shortageQty || 0)}</s-text>)}
-                  {shortageRows.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {shortageRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-                </s-stack>
-              ) : null}
-              {extras.length > 0 ? (
-                <s-stack gap="extra-tight">
-                  <s-text size="small" tone="critical">予定外（{extras.length}件）</s-text>
-                  {extras.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.key} size="small" tone="subdued" style={oneLineStyle}>・{x.title}：{Number(x.receiveQty || 0)}</s-text>)}
-                  {extras.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {extras.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-                </s-stack>
-              ) : null}
-              {overRows.length > 0 ? (
-                <s-stack gap="extra-tight">
-                  <s-text size="small" tone="critical">超過（{overRows.length}件）</s-text>
-                  {overRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={oneLineStyle}>・{x.title}：+{Number(x.overQty || 0)}</s-text>)}
-                  {overRows.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {overRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-                </s-stack>
-              ) : null}
-              {hasWarning ? (
-                <>
-                  <s-divider />
-                  {warningAreaNode}
-                </>
-              ) : null}
-              <s-divider />
-              <s-box>
-                <s-button command="--hide" commandFor={CONFIRM_RECEIVE_MODAL_ID}>戻る</s-button>
-              </s-box>
-            </s-stack>
-          </s-box>
-          <s-button slot="secondary-actions" kind="secondary" tone="critical" disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }} onPress={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }}>一部入庫（一時保存）</s-button>
-          <s-button slot="primary-action" tone={hasWarning ? "critical" : "success"} disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }} onPress={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }}>確定する</s-button>
-        </s-modal>
+      {/* 3. 確定モーダルは setPageOverlay 経由で s-page 外（InboundModalHost 側）へ */}
 
       {/* 4. 予定外入荷エリア（shipment がある場合のみ・REFERENCE と同じ） */}
       {shipment ? (
