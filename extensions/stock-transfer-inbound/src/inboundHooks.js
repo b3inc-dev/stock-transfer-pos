@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "preact/hooks";
-import { setStateSlice, adminGraphql, toUserMessage } from "./inboundHelpers.js";
+import { getStateSlice, setStateSlice, adminGraphql, toUserMessage } from "./inboundHelpers.js";
 
 const SHOPIFY = globalThis?.shopify;
 
@@ -40,28 +40,21 @@ export function useOriginLocationGid() {
   }, [raw]);
 }
 
-/** Stable empties — inline `[]` / `{}` each render breaks callers that treat list identity as a dep. */
-const EMPTY_LOCATION_LIST = Object.freeze([]);
-const EMPTY_LOCATION_BY_ID = Object.freeze({});
-
 export function useLocationsIndex(appState, setAppState) {
-  const cacheRaw = appState?.locations_cache_v1;
-  const cache = cacheRaw && typeof cacheRaw === "object" ? cacheRaw : null;
-  const loaded = !!cache?.loaded;
-  const loading = !!cache?.loading;
+  const cache = getStateSlice(appState, "locations_cache_v1", {
+    loaded: false,
+    loading: false,
+    error: "",
+    list: [],
+    byId: {},
+  });
+  const loaded = !!cache.loaded;
+  const loading = !!cache.loading;
   useEffect(() => {
     let mounted = true;
     async function load() {
       if (loaded || loading) return;
-      // Keep list/byId keys present so callers never fall back to a fresh [] each render.
-      setStateSlice(setAppState, "locations_cache_v1", (prev) => ({
-        list: Array.isArray(prev?.list) ? prev.list : [],
-        byId: prev?.byId && typeof prev.byId === "object" ? prev.byId : {},
-        loaded: false,
-        ...prev,
-        loading: true,
-        error: "",
-      }));
+      setStateSlice(setAppState, "locations_cache_v1", (prev) => ({ ...prev, loading: true, error: "" }));
       try {
         const data = await adminGraphql(
           `#graphql
@@ -77,14 +70,7 @@ export function useLocationsIndex(appState, setAppState) {
         setStateSlice(setAppState, "locations_cache_v1", { loaded: true, loading: false, error: "", list, byId });
       } catch (e) {
         if (!mounted) return;
-        setStateSlice(setAppState, "locations_cache_v1", (prev) => ({
-          list: Array.isArray(prev?.list) ? prev.list : [],
-          byId: prev?.byId && typeof prev.byId === "object" ? prev.byId : {},
-          ...prev,
-          loaded: false,
-          loading: false,
-          error: toUserMessage(e),
-        }));
+        setStateSlice(setAppState, "locations_cache_v1", (prev) => ({ ...prev, loaded: false, loading: false, error: toUserMessage(e) }));
       }
     }
     load();
@@ -93,9 +79,9 @@ export function useLocationsIndex(appState, setAppState) {
   return {
     loaded,
     loading,
-    error: String(cache?.error || ""),
-    list: Array.isArray(cache?.list) ? cache.list : EMPTY_LOCATION_LIST,
-    byId: cache?.byId && typeof cache.byId === "object" ? cache.byId : EMPTY_LOCATION_BY_ID,
+    error: String(cache.error || ""),
+    list: Array.isArray(cache.list) ? cache.list : [],
+    byId: cache.byId && typeof cache.byId === "object" ? cache.byId : {},
   };
 }
 

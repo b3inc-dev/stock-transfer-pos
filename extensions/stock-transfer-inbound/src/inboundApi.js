@@ -18,11 +18,7 @@ function safeParseSettings(raw, defaultVal) {
 
 const DEFAULT_SETTINGS = {
   version: 1,
-  inbound: {
-    listInitialLimit: 100,
-    allowOverReceive: true,
-    allowExtraReceive: true,
-  },
+  inbound: { listInitialLimit: 100 },
   productList: { initialLimit: 250 },
   searchList: { initialLimit: 50 },
 };
