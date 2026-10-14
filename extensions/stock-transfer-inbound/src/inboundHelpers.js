@@ -1,6 +1,7 @@
 /**
- * header/footer/pageOverlay 用: VNode を state に保持せず、毎描画で新しいツリーを返す render fn を保持する。
+ * header/footer 用: VNode を state に保持せず、毎描画で新しいツリーを返す render fn を保持する。
  * （親再描画時の stale VNode 再利用 → remote-dom `e.nodeType` を避ける）
+ * ※ s-modal を pageOverlay 経由で effect remount しないこと（リスト/--show と競合する）。
  */
 export function setChromeRender(setter, renderFn) {
   if (typeof setter !== "function") return;

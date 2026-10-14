@@ -40,7 +40,7 @@ export function useOriginLocationGid() {
   }, [raw]);
 }
 
-/** Stable empties — inline `[]` / `{}` each render breaks effect deps (e.g. pageOverlay). */
+/** Stable empties — inline `[]` / `{}` each render breaks callers that treat list identity as a dep. */
 const EMPTY_LOCATION_LIST = Object.freeze([]);
 const EMPTY_LOCATION_BY_ID = Object.freeze({});
 
