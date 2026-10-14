@@ -427,8 +427,24 @@ function InboundConditions({
     return () => setChromeRender(setFooter, null);
   }, [setFooter, displayLocationName, viewMode, listToShow.length, liteMode, onToggleLiteMode, refresh, loading, locationGid]);
 
+  // Location list / handlers via refs so renderChrome always sees fresh data without
+  // re-running this effect on unstable `locIndex.list` identity (inline [] each render
+  // before cache hydrate → setPageOverlay loop → list screen stuck on loading, no ErrorBoundary).
+  const locListRef = useRef(locIndex.list);
+  locListRef.current = locIndex.list;
+  const locationGidRef = useRef(locationGid);
+  locationGidRef.current = locationGid;
+  const setAppStateRef = useRef(setAppState);
+  setAppStateRef.current = setAppState;
+  const handleSelectSingleShipmentRef = useRef(handleSelectSingleShipment);
+  handleSelectSingleShipmentRef.current = handleSelectSingleShipment;
+  const handleShowAllShipmentsRef = useRef(handleShowAllShipments);
+  handleShowAllShipmentsRef.current = handleShowAllShipments;
+
   // コンディション用 s-modal は s-scroll-box 内ではなく page 外（出庫 DialogHost 相当）
+  // pendingTransferForModal だけ effect 依存に残す（親 pageOverlay state を更新して Extension 再描画させる）
   useEffect(() => {
+    if (!setPageOverlay) return undefined;
     setChromeRender(setPageOverlay, () => (
       <s-stack gap="none">
         <s-modal id={SHIPMENT_MODE_SELECTION_MODAL_ID} heading="処理方法を選択">
@@ -457,22 +473,22 @@ function InboundConditions({
               </s-stack>
             </s-box>
           ) : null}
-          <s-button slot="secondary-actions" command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={handleSelectSingleShipment}>配送ごとに選択</s-button>
-          <s-button slot="primary-action" tone="success" command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={handleShowAllShipments}>まとめて表示</s-button>
+          <s-button slot="secondary-actions" command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={() => handleSelectSingleShipmentRef.current?.()}>配送ごとに選択</s-button>
+          <s-button slot="primary-action" tone="success" command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={() => handleShowAllShipmentsRef.current?.()}>まとめて表示</s-button>
         </s-modal>
         <LocationSelectModal
           id={INBOUND_LOCATION_MODAL_ID}
           title="入庫先ロケーションを選択"
-          locations={locIndex.list}
-          selectedId={locationGid}
+          locations={locListRef.current}
+          selectedId={locationGidRef.current}
           onSelect={(id, name) => {
-            setAppState((prev) => ({ ...(prev || {}), originLocationIdManual: id || "", originLocationNameManual: name || "" }));
+            setAppStateRef.current((prev) => ({ ...(prev || {}), originLocationIdManual: id || "", originLocationNameManual: name || "" }));
           }}
         />
       </s-stack>
     ));
     return () => setChromeRender(setPageOverlay, null);
-  }, [setPageOverlay, pendingTransferForModal, locIndex.list, locationGid, setAppState, handleSelectSingleShipment, handleShowAllShipments]);
+  }, [setPageOverlay, pendingTransferForModal]);
 
   // 一覧本体のみ。s-modal は Extension 側（s-page 外）へ持ち上げる
   return (
@@ -615,7 +631,7 @@ function Extension() {
   const [pageOverlay, setPageOverlay] = useState(null);
   const [settings, setSettings] = useState(null);
   const [cameraScannerVisible, setCameraScannerVisible] = useState(false);
-  const { openQtyEditor, QtyEditorProvider, QtyEditorHost } = useInboundQtyEditorController();
+  const { openQtyEditor, QtyEditorProvider, qtyEditorHost } = useInboundQtyEditorController();
   const sessionLocationGid = useOriginLocationGid();
   const locationGid = sessionLocationGid;
   const defaultLocationSetRef = useRef(false);
@@ -864,7 +880,7 @@ function Extension() {
         </s-page>
       </QtyEditorProvider>
       {renderChrome(pageOverlay)}
-      <QtyEditorHost />
+      {qtyEditorHost}
     </>
   );
 }

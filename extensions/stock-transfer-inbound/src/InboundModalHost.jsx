@@ -2,8 +2,9 @@
  * 入庫の共有ダイアログホスト（出庫 modalDialog.jsx / DialogHost と同型）
  *
  * 重要:
- * - Host は <s-page> の兄弟として置く（Provider で s-page を包んで末尾に modal を足さない）
- * - Context は open 関数のみを配り、Host 自身は Extension 直下に置く
+ * - Host 要素は <s-page> の兄弟として置く（Provider で s-page を包んで末尾に modal を足さない）
+ * - Context は open 関数のみを配り、qtyEditorHost を Extension 直下に置く
+ * - Host は毎描画の新規 function component にしない（remote-dom が毎回 remount する）
  *
  * Project E7 以降、明細オープン時に header/footer/pageOverlay の親再描画が重なり、
  * 行内 s-modal や stale VNode と合わさって remote-dom が
@@ -34,8 +35,8 @@ export function useInboundQtyEditor() {
 }
 
 /**
- * 出庫の useUnifiedDialog 相当。state + Host を返し、Extension が
- * `<> <Provider><s-page/></Provider> <Host/> </>` で組み立てる。
+ * 出庫の useUnifiedDialog 相当。state + host 要素を返し、Extension が
+ * `<> <Provider><s-page/></Provider> {qtyEditorHost} </>` で組み立てる。
  */
 export function useInboundQtyEditorController() {
   const [editor, setEditor] = useState(/** @type {QtyEditorRequest | null} */ (null));
@@ -95,7 +96,8 @@ export function useInboundQtyEditorController() {
     return Math.min(max, Math.max(min, Math.floor(Number(n || min))));
   };
 
-  const Host = () => (
+  // Element (not a fresh function component each render) so remote-dom keeps one stable modal node.
+  const qtyEditorHost = (
     <s-modal ref={modalRef} id={INBOUND_SHARED_QTY_MODAL_ID} heading={editor?.title || "数量"}>
       <s-box padding="base" paddingBlockEnd="none">
         <s-stack gap="base">
@@ -152,6 +154,6 @@ export function useInboundQtyEditorController() {
   return {
     openQtyEditor,
     QtyEditorProvider: InboundQtyEditorContext.Provider,
-    QtyEditorHost: Host,
+    qtyEditorHost,
   };
 }
