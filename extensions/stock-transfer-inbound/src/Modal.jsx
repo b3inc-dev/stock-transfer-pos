@@ -129,7 +129,7 @@ function LocationSelectModal({ id, title, locations, selectedId, onSelect }) {
           <s-scroll-view style={{ maxBlockSize: "60vh" }}>
             <s-stack gap="small">
               {list.length === 0 ? (
-                <s-text color="subdued">該当するロケーションがありません</s-text>
+                <s-text tone="subdued">該当するロケーションがありません</s-text>
               ) : (
                 list.map((l) => (
                   <s-button
@@ -396,7 +396,7 @@ function InboundConditions({
           {transfersPageInfo?.hasNextPage ? (
             <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-                <s-text type="small" color="subdued">未読み込み一覧リストがあります。（過去分）</s-text>
+                <s-text tone="subdued" size="small">未読み込み一覧リストがあります。（過去分）</s-text>
                 <s-button kind="secondary" onClick={loadMoreTransfers_} onPress={loadMoreTransfers_} disabled={loadingMore}>
                   {loadingMore ? "読込中..." : "読込"}
                 </s-button>
@@ -426,12 +426,12 @@ function InboundConditions({
   }, [setFooter, displayLocationName, viewMode, listToShow.length, liteMode, onToggleLiteMode, refresh, loading, locationGid]);
 
   return (
-    <s-stack gap="none">
+    <>
       <s-box padding="base">
         <s-stack gap="base">
           {error ? <s-box padding="none"><s-text tone="critical">入庫ID一覧の取得に失敗しました: {error}</s-text></s-box> : null}
           {listToShow.length === 0 ? (
-            <s-text type="small" color="subdued">{loading ? "読み込み中..." : "表示できる入庫IDがありません"}</s-text>
+            <s-text tone="subdued" size="small">{loading ? "読み込み中..." : "表示できる入庫IDがありません"}</s-text>
           ) : (
             <s-stack gap="base">
               {listToShow.map((t) => {
@@ -456,30 +456,30 @@ function InboundConditions({
                       <s-stack direction="inline" gap="base" alignItems="center" justifyContent="space-between" style={{ width: "100%" }}>
                         <s-clickable onClick={() => onTapTransfer(t)} style={{ flex: "1 1 0", minWidth: 0 }}>
                           <s-box padding="small" style={{ width: "100%" }}>
-                            <s-stack gap="small" style={{ width: "100%" }}>
+                            <s-stack gap="tight" style={{ width: "100%" }}>
                               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small" style={{ width: "100%" }}>
-                                <s-text type="strong" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                   {head}
                                 </s-text>
-                                <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap" }}>
+                                <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
                                   {date}
                                 </s-text>
                               </s-stack>
-                              <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                 出庫元: {origin}
                               </s-text>
-                              <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                 入庫先: {dest}
                               </s-text>
-                              <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap" }}>
+                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
                                 配送数: {shipmentCount}
                               </s-text>
                               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small" style={{ width: "100%" }}>
                                 <s-stack direction="inline" gap="small" alignItems="center">
                                   <s-badge tone={statusBadgeTone}>{statusJa}</s-badge>
-                                  {statusSuffix ? <s-text type="small" tone={(isPartial || isOver) ? "critical" : "auto"} color={(isPartial || isOver) ? "base" : "subdued"}>{statusSuffix}</s-text> : null}
+                                  {statusSuffix ? <s-text tone={(isPartial || isOver) ? "critical" : "subdued"} size="small">{statusSuffix}</s-text> : null}
                                 </s-stack>
-                                <s-text type="small" tone={(isPartial || isOver) ? "critical" : "auto"} color={(isPartial || isOver) ? "base" : "subdued"} style={{ whiteSpace: "nowrap" }}>
+                                <s-text tone={(isPartial || isOver) ? "critical" : "subdued"} size="small" style={{ whiteSpace: "nowrap" }}>
                                   {received}/{total}
                                 </s-text>
                               </s-stack>
@@ -490,7 +490,8 @@ function InboundConditions({
                         {/* 右端：「リスト」ボタン（右固定・縮まない） */}
                         <s-box style={{ flex: "0 0 auto", flexShrink: 0 }}>
                           <s-button
-                            variant="secondary"
+                            kind="secondary"
+                            size="small"
                             command="--show"
                             commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID}
                             onClick={() => {
@@ -506,27 +507,27 @@ function InboundConditions({
                       // シップメントが1つの場合：元のレイアウト（全体がクリック可能、右上に日付、右下に数量）
                       <s-clickable onClick={() => onTapTransfer(t)}>
                         <s-box padding="small">
-                          <s-stack gap="small">
+                          <s-stack gap="tight">
                             <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
-                              <s-text type="strong" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              <s-text emphasis="bold" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                                 {head}
                               </s-text>
-                              <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap" }}>
+                              <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>
                                 {date}
                               </s-text>
                             </s-stack>
-                            <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                               出庫元: {origin}
                             </s-text>
-                            <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                               入庫先: {dest}
                             </s-text>
                             <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="small">
                               <s-stack direction="inline" gap="small" alignItems="center">
                                 <s-badge tone={statusBadgeTone}>{statusJa}</s-badge>
-                                {statusSuffix ? <s-text type="small" tone={(isPartial || isOver) ? "critical" : "auto"} color={(isPartial || isOver) ? "base" : "subdued"}>{statusSuffix}</s-text> : null}
+                                {statusSuffix ? <s-text tone={(isPartial || isOver) ? "critical" : "subdued"} size="small">{statusSuffix}</s-text> : null}
                               </s-stack>
-                              <s-text type="small" tone={(isPartial || isOver) ? "critical" : "auto"} color={(isPartial || isOver) ? "base" : "subdued"} style={{ whiteSpace: "nowrap" }}>
+                              <s-text tone={(isPartial || isOver) ? "critical" : "subdued"} size="small" style={{ whiteSpace: "nowrap" }}>
                                 {received}/{total}
                               </s-text>
                             </s-stack>
@@ -547,18 +548,18 @@ function InboundConditions({
           <s-box padding="base" paddingBlockEnd="none">
             <s-stack gap="base">
               <s-stack gap="none">
-                <s-text type="small" color="subdued">{String((pendingTransferForModal || pendingTransferForModalRef.current)?.name || "").trim() || "入庫ID"}</s-text>
-                <s-text type="small" color="subdued">出庫元: {String((pendingTransferForModal || pendingTransferForModalRef.current)?.originName || "").trim() || "-"}</s-text>
-                <s-text type="small" color="subdued">宛先: {String((pendingTransferForModal || pendingTransferForModalRef.current)?.destinationName || "").trim() || "-"}</s-text>
-                <s-text type="small" color="subdued">配送数: {Array.isArray((pendingTransferForModal || pendingTransferForModalRef.current)?.shipments) ? (pendingTransferForModal || pendingTransferForModalRef.current).shipments.length : 0}</s-text>
+                <s-text tone="subdued" size="small">{String((pendingTransferForModal || pendingTransferForModalRef.current)?.name || "").trim() || "入庫ID"}</s-text>
+                <s-text tone="subdued" size="small">出庫元: {String((pendingTransferForModal || pendingTransferForModalRef.current)?.originName || "").trim() || "-"}</s-text>
+                <s-text tone="subdued" size="small">宛先: {String((pendingTransferForModal || pendingTransferForModalRef.current)?.destinationName || "").trim() || "-"}</s-text>
+                <s-text tone="subdued" size="small">配送数: {Array.isArray((pendingTransferForModal || pendingTransferForModalRef.current)?.shipments) ? (pendingTransferForModal || pendingTransferForModalRef.current).shipments.length : 0}</s-text>
               </s-stack>
               <s-divider />
               <s-stack gap="none">
                 <s-box padding="none" style={{ border: "1px solid var(--s-color-border)", borderRadius: 4 }}>
-                  <s-text type="small" color="subdued">配送ごとに選択：1つの配送を選択して処理します</s-text>
+                  <s-text tone="subdued" size="small">配送ごとに選択：1つの配送を選択して処理します</s-text>
                 </s-box>
                 <s-box padding="none" style={{ border: "1px solid var(--s-color-border)", borderRadius: 4 }}>
-                  <s-text type="small" color="subdued">まとめて表示：全配送を1画面で表示して処理します</s-text>
+                  <s-text tone="subdued" size="small">まとめて表示：全配送を1画面で表示して処理します</s-text>
                 </s-box>
               </s-stack>
               <s-divider />
@@ -580,7 +581,7 @@ function InboundConditions({
           setAppState((prev) => ({ ...(prev || {}), originLocationIdManual: id || "", originLocationNameManual: name || "" }));
         }}
       />
-    </s-stack>
+    </>
   );
 }
 
@@ -821,21 +822,11 @@ function Extension() {
         {cameraScannerVisible ? "カメラを閉じる" : "カメラスキャン"}
       </s-button>
       <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
-        {header ? (
-          <s-stack gap="none">
-            <s-box padding="none">{header}</s-box>
-            <s-divider />
-          </s-stack>
-        ) : null}
+        {header ? (<><s-box padding="none">{header}</s-box><s-divider /></>) : null}
         <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0">
           <s-box padding="none">{body}</s-box>
         </s-scroll-box>
-        {footer ? (
-          <s-stack gap="none">
-            <s-divider />
-            <s-box padding="none">{footer}</s-box>
-          </s-stack>
-        ) : null}
+        {footer ? (<><s-divider /><s-box padding="none">{footer}</s-box></>) : null}
       </s-stack>
     </s-page>
   );

@@ -82,12 +82,11 @@ export function ItemLeftCompact({ showImages, imageUrl, productTitle, variantTit
   const optText = String(optionsLine || "").trim();
   const line3Text = String(line3 || "").trim();
 
-  // POS UI 2025-10+/2026-01: s-text は emphasis/size ではなく type/color を使う。
-  // 旧 props を渡すとホスト側の remote-dom / Preact 橋で nodeType 参照例外になり得る。
   const Line = ({ children, strong = false, subdued = false }) => (
     <s-text
-      type={strong ? "strong" : subdued ? "small" : "generic"}
-      color={subdued ? "subdued" : "base"}
+      emphasis={strong ? "bold" : undefined}
+      size={subdued ? "small" : undefined}
+      tone={subdued ? "subdued" : undefined}
       style={{
         display: "block",
         whiteSpace: "normal",
@@ -107,7 +106,7 @@ export function ItemLeftCompact({ showImages, imageUrl, productTitle, variantTit
         </s-box>
       ) : null}
       <s-box minInlineSize="0">
-        <s-stack gap="small-200">
+        <s-stack gap="extra-tight">
           <Line strong>{p}</Line>
           {optText ? <Line subdued>{optText}</Line> : null}
           {line3Text ? <Line subdued>{line3Text}</Line> : null}
@@ -151,27 +150,30 @@ export function QtyControlCompact_3Buttons({
   const valueWidth = qtyValueWidthByDigits_(digits);
   const subduedTone = disabled ? "subdued" : undefined;
 
-  // Fragment(<>) は POS remote-dom 差分で nodeType 例外の温床になることがあるため、実ノードで包む。
-  const canRemove = typeof onRemove === "function";
-  const isRemoveMode = canRemove && v <= min;
   return (
-    <s-box padding="none">
+    <>
       <s-stack
         direction="inline"
-        gap="small-200"
+        gap="extra-tight"
         alignItems="center"
         justifyContent="end"
         style={{ flexWrap: "nowrap" }}
       >
         <s-box inlineSize="44px">
-          <s-button
-            tone={disabled ? subduedTone : (isRemoveMode ? "critical" : undefined)}
-            onClick={() => (isRemoveMode ? onRemove?.() : onDec?.())}
-            disabled={disabled || (!isRemoveMode && v <= min)}
-            style={{ width: "100%" }}
-          >
-            {isRemoveMode ? "×" : "−"}
-          </s-button>
+          {(() => {
+            const canRemove = typeof onRemove === "function";
+            const isRemoveMode = canRemove && v <= min;
+            return (
+              <s-button
+                tone={disabled ? subduedTone : (isRemoveMode ? "critical" : undefined)}
+                onClick={() => (isRemoveMode ? onRemove?.() : onDec?.())}
+                disabled={disabled || (!isRemoveMode && v <= min)}
+                style={{ width: "100%" }}
+              >
+                {isRemoveMode ? "×" : "−"}
+              </s-button>
+            );
+          })()}
         </s-box>
         <s-box inlineSize={`${valueWidth}px`}>
           <s-button command="--show" commandFor={id} disabled={disabled} tone={subduedTone} style={{ width: "100%" }}>
@@ -188,7 +190,7 @@ export function QtyControlCompact_3Buttons({
       <s-modal id={id} heading={title}>
         <s-box padding="base" paddingBlockEnd="none">
           <s-stack gap="base">
-            <s-text type="small" color="subdued">
+            <s-text size="small" tone="subdued">
               数量を入力してください（{min}〜{max}）
             </s-text>
             <s-text-field
@@ -199,7 +201,7 @@ export function QtyControlCompact_3Buttons({
               onChange={(e) => setText(String(e?.target?.value ?? e ?? ""))}
             />
             {onRemove ? (
-              <s-stack gap="base">
+              <>
                 <s-divider />
                 <s-box padding="none">
                   <s-button tone="critical" command="--hide" commandFor={id} onClick={() => onRemove?.()}>
@@ -207,7 +209,7 @@ export function QtyControlCompact_3Buttons({
                   </s-button>
                 </s-box>
                 <s-divider />
-              </s-stack>
+              </>
             ) : null}
             <s-box padding="none">
               <s-button command="--hide" commandFor={id} onClick={() => {}}>
@@ -218,7 +220,7 @@ export function QtyControlCompact_3Buttons({
         </s-box>
         <s-button
           slot="primary-action"
-          tone="auto"
+          tone="success"
           command="--hide"
           commandFor={id}
           onClick={() => {
@@ -230,7 +232,7 @@ export function QtyControlCompact_3Buttons({
           OK
         </s-button>
       </s-modal>
-    </s-box>
+    </>
   );
 }
 
@@ -270,7 +272,7 @@ export function InboundAddedLineRow({
   return (
     <s-box padding="none">
       <StockyRowShell>
-        <s-stack gap="small-200" inlineSize="100%">
+        <s-stack gap="extra-tight" inlineSize="100%">
           <s-box inlineSize="100%">
             <ItemLeftCompact
               showImages={showImages}
@@ -290,9 +292,8 @@ export function InboundAddedLineRow({
             >
               <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
                 <s-text
-                  type="small"
-                  tone={bottomLeftTone === "critical" ? "critical" : "auto"}
-                  color={bottomLeftTone === "critical" ? "base" : "subdued"}
+                  tone={bottomLeftTone === "critical" ? "critical" : "subdued"}
+                  size="small"
                   style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
                 >
                   {String(bottomLeft || "").trim() || " "}
@@ -385,7 +386,7 @@ export function InboundCandidateRow({
   return (
     <s-box padding="none">
       <StockyRowShell key={vid}>
-        <s-stack gap="small-200">
+        <s-stack gap="extra-tight">
           <s-box style={{ width: "100%" }}>
             <ItemLeftCompact
               showImages={showImages && !liteMode}
@@ -398,10 +399,10 @@ export function InboundCandidateRow({
           <s-box inlineSize="100%">
             <s-stack direction="inline" gap="base" justifyContent="space-between" alignItems="center" style={{ width: "100%", flexWrap: "nowrap" }}>
               <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
-                <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap" }}>{stockText}</s-text>
+                <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>{stockText}</s-text>
               </s-box>
               <s-box style={{ flex: "0 0 auto" }}>
-                <s-stack direction="inline" gap="small-200" alignItems="center" justifyContent="end" style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
+                <s-stack direction="inline" gap="extra-tight" alignItems="center" justifyContent="end" style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
                   <s-box inlineSize={`${calcQtyWidthPx_(shownQty)}px`}>
                     <s-button command="--show" commandFor={modalId} onClick={() => setText(String(shownQty > 0 ? shownQty : 1))} disabled={readOnly} tone={readOnly ? "subdued" : undefined} style={{ width: "100%", whiteSpace: "nowrap" }}>
                       {shownQty}
@@ -418,7 +419,7 @@ export function InboundCandidateRow({
         <s-modal id={modalId} heading="数量を指定して追加">
           <s-box padding="base" paddingBlockEnd="none">
             <s-stack gap="base">
-              <s-text type="small" color="subdued">数量を入力して「追加」を押してください（1〜999999）</s-text>
+              <s-text tone="subdued" size="small">数量を入力して「追加」を押してください（1〜999999）</s-text>
               <s-text-field label="数量" value={text} inputMode="numeric" placeholder="例: 20" onInput={(e) => setText(String(e?.target?.value ?? e ?? ""))} onChange={(e) => setText(String(e?.target?.value ?? e ?? ""))} />
               <s-divider />
               <s-box>
@@ -444,7 +445,7 @@ function InboundExtrasList({ extras, extrasHistory, showImages, dialog, setExtra
 
   if (!Array.isArray(extras) || extras.length === 0) {
     if (hasExtrasHistory) return null;
-    return <s-text type="small" color="subdued">予定外追加はありません</s-text>;
+    return <s-text tone="subdued" size="small">予定外追加はありません</s-text>;
   }
   return (
     <s-stack gap="small">
@@ -487,7 +488,7 @@ export function renderExtras_(props) {
 
 // ----- renderExtrasHistory_（予定外入荷履歴） -----
 export function renderExtrasHistory_({ extrasHistory, extrasHistoryLoading, showImages, dialog }) {
-  if (extrasHistoryLoading) return <s-text type="small" color="subdued">読み込み中...</s-text>;
+  if (extrasHistoryLoading) return <s-text tone="subdued" size="small">読み込み中...</s-text>;
   if (!Array.isArray(extrasHistory) || extrasHistory.length === 0) return null;
   return (
     <s-stack gap="none">
@@ -530,8 +531,8 @@ export function renderConfirmMemo_({ extrasHistoryLoading, confirmMemo }) {
   if (extrasHistoryLoading || !confirmMemo) return null;
   return (
     <s-stack gap="small">
-      <s-text type="strong">確定時メモ</s-text>
-      <s-text type="small" color="subdued" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{confirmMemo}</s-text>
+      <s-text emphasis="bold" size="small">確定時メモ</s-text>
+      <s-text tone="subdued" size="small" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{confirmMemo}</s-text>
     </s-stack>
   );
 }
@@ -583,15 +584,15 @@ function InboundShipmentItems({ rows, showImages, dialog, setRowQty, readOnly = 
   }, [pageInfo.currentPage, listPage]);
 
   if (!Array.isArray(rows) || rows.length === 0) {
-    return <s-text color="subdued">lineItems がありません</s-text>;
+    return <s-text tone="subdued">lineItems がありません</s-text>;
   }
   return (
     <s-stack gap="small">
       <ListPageControls pageInfo={pageInfo} onPageChange={setListPage} />
       <s-stack gap="none">
-        {pageInfo.displayed.map((r, idx) => (
+        {pageInfo.displayed.map((r) => (
           <InboundAddedLineRowMemo
-            key={String(r?.key || r?.shipmentLineItemId || idx)}
+            key={r.key}
             row={r}
             setRowQty={setRowQty}
             showImages={showImages}
