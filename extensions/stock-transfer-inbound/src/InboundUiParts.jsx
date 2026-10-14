@@ -6,6 +6,8 @@
  */
 import { memo } from "preact/compat";
 import { useState, useEffect, useMemo } from "preact/hooks";
+import { getListPageSlice } from "../../common/listDisplayPagination.js";
+import { ListPageControls } from "../../common/ListPageControls.jsx";
 
 // ----- ユーティリティ（REFERENCE 互換） -----
 export function toSafeId(s) {
@@ -432,16 +434,25 @@ export function InboundCandidateRow({
   );
 }
 
-// ----- renderExtras_（予定外入荷リスト） -----
-export function renderExtras_({ extras, extrasHistory, showImages, dialog, setExtraQty }) {
+// ----- renderExtras_（予定外入荷リスト・表示ページネーション） -----
+// 出庫/ロスと同型: ListPageControls と行を同一 s-stack の兄弟にする（入れ子 s-stack / Host / pageOverlay 禁止）
+function InboundExtrasList({ extras, extrasHistory, showImages, dialog, setExtraQty }) {
   const hasExtrasHistory = Array.isArray(extrasHistory) && extrasHistory.length > 0;
+  const [listPage, setListPage] = useState(1);
+  const pageInfo = useMemo(() => getListPageSlice(extras, listPage), [extras, listPage]);
+  useEffect(() => {
+    if (listPage !== pageInfo.currentPage) setListPage(pageInfo.currentPage);
+  }, [pageInfo.currentPage, listPage]);
+
   if (!Array.isArray(extras) || extras.length === 0) {
     if (hasExtrasHistory) return null;
     return <s-text tone="subdued" size="small">予定外追加はありません</s-text>;
   }
   return (
     <s-stack gap="none">
-      {extras.map((x) => {
+      <ListPageControls pageInfo={pageInfo} onPageChange={setListPage} />
+      {pageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
+      {pageInfo.displayed.map((x) => {
         const received = Number(x?.receiveQty || 0);
         const sku = String(x?.sku || "").trim();
         const barcode = String(x?.barcode || "").trim();
@@ -469,6 +480,10 @@ export function renderExtras_({ extras, extrasHistory, showImages, dialog, setEx
       })}
     </s-stack>
   );
+}
+
+export function renderExtras_(props) {
+  return <InboundExtrasList {...props} />;
 }
 
 // ----- renderExtrasHistory_（予定外入荷履歴） -----
@@ -560,14 +575,24 @@ const InboundAddedLineRowMemo = memo(function InboundAddedLineRowMemo({
   );
 });
 
-// ----- renderInboundShipmentItems_ -----
-export function renderInboundShipmentItems_({ rows, showImages, dialog, setRowQty, readOnly = false }) {
+// ----- renderInboundShipmentItems_（表示ページネーション付き） -----
+// 出庫/ロスと同型: ListPageControls と行を同一 s-stack の兄弟にする（入れ子 s-stack / Host / pageOverlay 禁止）
+// 注意: ここは表示 slice のみ。スキャン照合は InboundListScreen の rowsRef（全件）を使う
+function InboundShipmentItems({ rows, showImages, dialog, setRowQty, readOnly = false }) {
+  const [listPage, setListPage] = useState(1);
+  const pageInfo = useMemo(() => getListPageSlice(rows, listPage), [rows, listPage]);
+  useEffect(() => {
+    if (listPage !== pageInfo.currentPage) setListPage(pageInfo.currentPage);
+  }, [pageInfo.currentPage, listPage]);
+
   if (!Array.isArray(rows) || rows.length === 0) {
     return <s-text tone="subdued">lineItems がありません</s-text>;
   }
   return (
     <s-stack gap="none">
-      {rows.map((r) => (
+      <ListPageControls pageInfo={pageInfo} onPageChange={setListPage} />
+      {pageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
+      {pageInfo.displayed.map((r) => (
         <InboundAddedLineRowMemo
           key={r.key}
           row={r}
@@ -579,4 +604,8 @@ export function renderInboundShipmentItems_({ rows, showImages, dialog, setRowQt
       ))}
     </s-stack>
   );
+}
+
+export function renderInboundShipmentItems_(props) {
+  return <InboundShipmentItems {...props} />;
 }
