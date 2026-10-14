@@ -1,10 +1,14 @@
 /**
- * 入庫モーダルの単一ホスト（POS remote-ui 安全側）
+ * 入庫の共有ダイアログホスト（出庫 modalDialog.jsx / DialogHost と同型）
  *
- * 行ごとに s-modal をネストすると、明細オープン時に数十〜数百の remote ノードが
- * s-scroll-box 配下へ同時マウントされ、Preact/remote-dom 差分で
- * `undefined is not an object (evaluating 'e.nodeType')` を起こしうる。
- * 出庫の DialogHost 同様、s-page の外に 1 つだけ数量モーダルを置く。
+ * 重要:
+ * - Host は <s-page> の兄弟として置く（Provider で s-page を包んで末尾に modal を足さない）
+ * - Context は open 関数のみを配り、Host 自身は Extension 直下に置く
+ *
+ * Project E7 以降、明細オープン時に header/footer/pageOverlay の親再描画が重なり、
+ * 行内 s-modal や stale VNode と合わさって remote-dom が
+ * `undefined is not an object (evaluating 'e.nodeType')` になり得た。
+ * 数量モーダルは常に1つ・page 外に固定する。
  */
 import { createContext } from "preact";
 import { useCallback, useContext, useEffect, useRef, useState } from "preact/hooks";
@@ -29,7 +33,11 @@ export function useInboundQtyEditor() {
   return useContext(InboundQtyEditorContext);
 }
 
-export function InboundQtyEditorProvider({ children }) {
+/**
+ * 出庫の useUnifiedDialog 相当。state + Host を返し、Extension が
+ * `<> <Provider><s-page/></Provider> <Host/> </>` で組み立てる。
+ */
+export function useInboundQtyEditorController() {
   const [editor, setEditor] = useState(/** @type {QtyEditorRequest | null} */ (null));
   const [text, setText] = useState("1");
   const modalRef = useRef(null);
@@ -87,12 +95,8 @@ export function InboundQtyEditorProvider({ children }) {
     return Math.min(max, Math.max(min, Math.floor(Number(n || min))));
   };
 
-  const host = (
-    <s-modal
-      ref={modalRef}
-      id={INBOUND_SHARED_QTY_MODAL_ID}
-      heading={editor?.title || "数量"}
-    >
+  const Host = () => (
+    <s-modal ref={modalRef} id={INBOUND_SHARED_QTY_MODAL_ID} heading={editor?.title || "数量"}>
       <s-box padding="base" paddingBlockEnd="none">
         <s-stack gap="base">
           <s-text size="small" tone="subdued">
@@ -145,10 +149,9 @@ export function InboundQtyEditorProvider({ children }) {
     </s-modal>
   );
 
-  return (
-    <InboundQtyEditorContext.Provider value={openQtyEditor}>
-      {children}
-      {host}
-    </InboundQtyEditorContext.Provider>
-  );
+  return {
+    openQtyEditor,
+    QtyEditorProvider: InboundQtyEditorContext.Provider,
+    QtyEditorHost: Host,
+  };
 }
