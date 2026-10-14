@@ -531,10 +531,12 @@ export async function adjustInventoryAtLocation({ locationId, deltas, referenceD
     const input = {
       reason: "correction",
       name: "available",
+      // changeFromQuantity: null = 意図的オプトアウト（Admin API 2026-04 実質必須）
       changes: changes.map((c) => ({
         inventoryItemId: c.inventoryItemId,
         locationId: locationGid,
         delta: c.delta,
+        changeFromQuantity: null,
       })),
     };
     

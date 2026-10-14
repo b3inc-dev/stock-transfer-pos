@@ -12,6 +12,7 @@ import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session"
 import {
   setInventoryQuantitiesServer,
   fetchCurrentQuantityServer,
+  fetchCurrentQuantityServerStrict,
 } from "../utils/inventory-set-quantities-server";
 import {
   ensureInventoryActivatedAtLocation,
@@ -39,8 +40,13 @@ function isTransientError(errorSummary: string | undefined): boolean {
   );
 }
 
-/** activate 成功後〜setQuantities 直前の短い settle（伝播レース緩和。CAS #19 は取り込まない） */
+/** activate 成功後〜setQuantities 直前の短い settle（伝播レース緩和） */
 const POST_ACTIVATE_SETTLE_BEFORE_SET_MS = 600;
+
+/** 棚卸・調整の live CAS は Draft #19。本 PR では再 null 化しない */
+function isStocktakeOrAdjustmentActivity(activity: string): boolean {
+  return activity === "inventory_count" || activity === "adjustment";
+}
 
 const API_VERSION = "2026-01";
 const CORS_HEADERS = {
@@ -379,20 +385,26 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // delta のみのエントリは現在値を取得して quantityAfter に正規化（ロス・仕入用）
     // 冪等性チェック通過後にのみ実行することで、リトライ時の無駄な API 呼び出しを防ぐ。
-    const entries: ApplyChangeEntry[] = [];
+    // setQuantities の CAS: activate 前読取は不安全 → 下記 post-activate 再読取で delta 経路のみ補強（D9）。
+    // inventory_count / adjustment の live CAS は #19。ここでは再 null 強制しない。
+    type NormalizedEntry = ApplyChangeEntry & { fromDelta: boolean };
+    const entries: NormalizedEntry[] = [];
     for (const e of entriesParsed) {
       let qtyAfter = e.quantityAfter;
       let qtyBefore = e.quantityBefore ?? null;
+      let fromDelta = false;
       if (qtyAfter == null && e.delta != null) {
         const cur = await fetchCurrentQuantityServer(admin, locationId, e.inventoryItemId);
         qtyBefore = cur;
         qtyAfter = cur + e.delta;
+        fromDelta = true;
       }
       if (qtyAfter == null) continue;
       entries.push({
         ...e,
         quantityAfter: qtyAfter,
         quantityBefore: qtyBefore ?? undefined,
+        fromDelta,
       });
     }
     if (entries.length === 0) {
@@ -419,7 +431,17 @@ export async function action({ request }: ActionFunctionArgs) {
     cleanupShop = shop;
     cleanupAppEventId = appEventId;
 
-    const lineRecords: { id: string; inventoryItemId: string; quantityAfter: number; delta: number | null; quantityBefore: number | null; variantId: string | null; sku: string }[] = [];
+    const lineRecords: {
+      id: string;
+      inventoryItemId: string;
+      quantityAfter: number;
+      delta: number | null;
+      quantityBefore: number | null;
+      variantId: string | null;
+      sku: string;
+      fromDelta: boolean;
+      changeFromQuantity: number | null;
+    }[] = [];
 
     for (const e of entries) {
       // e.quantityAfter はこのループに入る前に null チェック済み（null の場合は continue で除外）
@@ -446,6 +468,9 @@ export async function action({ request }: ActionFunctionArgs) {
         quantityBefore: e.quantityBefore ?? null,
         variantId: e.variantId ?? null,
         sku: e.sku ?? "",
+        fromDelta: e.fromDelta,
+        // post-activate 再読取で delta 行のみ有限値へ。初期は未設定（null）。
+        changeFromQuantity: null as number | null,
       });
     }
 
@@ -504,7 +529,15 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
 
-    const shopifyItems = lineRecords.map((l) => ({ inventoryItemId: l.inventoryItemId, quantity: l.quantityAfter }));
+    // activate 用は数量のみ（changeFromQuantity は post-activate 再読取後に決定）
+    let shopifyItems: Array<{
+      inventoryItemId: string;
+      quantity: number;
+      changeFromQuantity?: number | null;
+    }> = lineRecords.map((l) => ({
+      inventoryItemId: l.inventoryItemId,
+      quantity: l.quantityAfter,
+    }));
     const toItemGid = (id: string) =>
       /^\d+$/.test(String(id).trim()) ? `gid://shopify/InventoryItem/${String(id).trim()}` : String(id).trim();
 
@@ -587,6 +620,62 @@ export async function action({ request }: ActionFunctionArgs) {
         `[api.inventory.apply-change] post-activate verify uncertain (${levelVerify.uncertainInventoryItemIds.length}); proceed to setQuantities`
       );
     }
+
+    // R2 緩和: delta→絶対値正規化は activate 前読取だと activate/並行変動を吸収しない。
+    // activate+settle 後に再読取し、quantityAfter=live+delta / changeFromQuantity=live（読取失敗は null オプトアウト）。
+    // inventory_count / adjustment は絶対値意図のためここでは触らず、#19 の live CAS に委譲。
+    if (!isStocktakeOrAdjustmentActivity(activity)) {
+      for (const l of lineRecords) {
+        if (!l.fromDelta || l.delta == null) {
+          l.changeFromQuantity = null;
+          continue;
+        }
+        const live = await fetchCurrentQuantityServerStrict(admin, locationId, l.inventoryItemId);
+        if (live == null) {
+          console.warn(
+            `[api.inventory.apply-change] post-activate re-read failed for ${l.inventoryItemId}; delta CAS opt-out`
+          );
+          l.changeFromQuantity = null;
+          continue;
+        }
+        const nextAfter = live + l.delta;
+        l.quantityBefore = live;
+        l.quantityAfter = nextAfter;
+        l.changeFromQuantity = live;
+        try {
+          await db.inventoryChangeEventLine.update({
+            where: { id: l.id },
+            data: {
+              quantityBefore: live,
+              quantityAfterExpected: nextAfter,
+              delta: l.delta,
+            },
+          });
+        } catch (e: unknown) {
+          console.warn(
+            "[api.inventory.apply-change] post-activate line update failed:",
+            e instanceof Error ? e.message : String(e)
+          );
+        }
+      }
+    }
+
+    shopifyItems = lineRecords.map((l) => {
+      const base: {
+        inventoryItemId: string;
+        quantity: number;
+        changeFromQuantity?: number | null;
+      } = {
+        inventoryItemId: l.inventoryItemId,
+        quantity: l.quantityAfter,
+      };
+      if (isStocktakeOrAdjustmentActivity(activity)) {
+        // #19 が casFromLiveSnapshot を載せるまでサーバ default null。明示 null で上書きしない。
+        return base;
+      }
+      base.changeFromQuantity = l.changeFromQuantity;
+      return base;
+    });
 
     const refUri = referenceDocumentUriForActivity(activity, referenceDocumentUri);
     let result: Awaited<ReturnType<typeof setInventoryQuantitiesServer>>;
