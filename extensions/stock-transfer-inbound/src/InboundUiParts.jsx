@@ -8,10 +8,17 @@ import { memo } from "preact/compat";
 import { useState, useEffect, useMemo } from "preact/hooks";
 import { getListPageSlice } from "../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../common/ListPageControls.jsx";
+import { useInboundQtyEditor } from "./InboundModalHost.jsx";
 
 // ----- ユーティリティ（REFERENCE 互換） -----
+/**
+ * DOM id / commandFor 用。先頭60文字切り捨てだと
+ * `shipmentGid-lineGid` が衝突するため、長い場合は末尾を優先する。
+ */
 export function toSafeId(s) {
-  return String(s || "x").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60);
+  const sanitized = String(s || "x").replace(/[^a-zA-Z0-9_-]/g, "_");
+  if (sanitized.length <= 60) return sanitized;
+  return sanitized.slice(-60);
 }
 
 function normalizeVariantTitleForDisplay_(productTitle, variantTitle) {
@@ -82,12 +89,11 @@ export function ItemLeftCompact({ showImages, imageUrl, productTitle, variantTit
   const optText = String(optionsLine || "").trim();
   const line3Text = String(line3 || "").trim();
 
-  // POS UI 2025-10+/2026-01: s-text は emphasis/size ではなく type/color を使う。
-  // 旧 props を渡すとホスト側の remote-dom / Preact 橋で nodeType 参照例外になり得る。
   const Line = ({ children, strong = false, subdued = false }) => (
     <s-text
-      type={strong ? "strong" : subdued ? "small" : "generic"}
-      color={subdued ? "subdued" : "base"}
+      emphasis={strong ? "bold" : undefined}
+      size={subdued ? "small" : undefined}
+      tone={subdued ? "subdued" : undefined}
       style={{
         display: "block",
         whiteSpace: "normal",
@@ -107,7 +113,7 @@ export function ItemLeftCompact({ showImages, imageUrl, productTitle, variantTit
         </s-box>
       ) : null}
       <s-box minInlineSize="0">
-        <s-stack gap="small-200">
+        <s-stack gap="extra-tight">
           <Line strong>{p}</Line>
           {optText ? <Line subdued>{optText}</Line> : null}
           {line3Text ? <Line subdued>{line3Text}</Line> : null}
@@ -132,7 +138,7 @@ export function QtyControlCompact_3Buttons({
   min = 1,
   max = 999999,
   title = "数量",
-  modalId,
+  modalId: _modalId,
   onDec,
   onInc,
   onSetQty,
@@ -140,97 +146,55 @@ export function QtyControlCompact_3Buttons({
   step = 1,
   disabled = false,
 }) {
+  const openQtyEditor = useInboundQtyEditor();
   const v = Number.isFinite(Number(value)) ? Number(value) : min;
-  const id = useMemo(() => String(modalId), [modalId]);
-  const [text, setText] = useState(String(v));
-
-  useEffect(() => setText(String(v)), [v]);
-
-  const clamp = (n) => Math.min(max, Math.max(min, Math.floor(Number(n || min))));
   const digits = String(v).length;
   const valueWidth = qtyValueWidthByDigits_(digits);
   const subduedTone = disabled ? "subdued" : undefined;
-
-  // Fragment(<>) は POS remote-dom 差分で nodeType 例外の温床になることがあるため、実ノードで包む。
   const canRemove = typeof onRemove === "function";
   const isRemoveMode = canRemove && v <= min;
-  return (
-    <s-box padding="none">
-      <s-stack
-        direction="inline"
-        gap="small-200"
-        alignItems="center"
-        justifyContent="end"
-        style={{ flexWrap: "nowrap" }}
-      >
-        <s-box inlineSize="44px">
-          <s-button
-            tone={disabled ? subduedTone : (isRemoveMode ? "critical" : undefined)}
-            onClick={() => (isRemoveMode ? onRemove?.() : onDec?.())}
-            disabled={disabled || (!isRemoveMode && v <= min)}
-            style={{ width: "100%" }}
-          >
-            {isRemoveMode ? "×" : "−"}
-          </s-button>
-        </s-box>
-        <s-box inlineSize={`${valueWidth}px`}>
-          <s-button command="--show" commandFor={id} disabled={disabled} tone={subduedTone} style={{ width: "100%" }}>
-            {v}
-          </s-button>
-        </s-box>
-        <s-box inlineSize="44px">
-          <s-button onClick={() => onInc?.()} disabled={disabled || v >= max} tone={subduedTone} style={{ width: "100%" }}>
-            +
-          </s-button>
-        </s-box>
-      </s-stack>
 
-      <s-modal id={id} heading={title}>
-        <s-box padding="base" paddingBlockEnd="none">
-          <s-stack gap="base">
-            <s-text type="small" color="subdued">
-              数量を入力してください（{min}〜{max}）
-            </s-text>
-            <s-text-field
-              label="数量"
-              value={text}
-              inputMode="numeric"
-              onInput={(e) => setText(String(e?.target?.value ?? e ?? ""))}
-              onChange={(e) => setText(String(e?.target?.value ?? e ?? ""))}
-            />
-            {onRemove ? (
-              <s-stack gap="base">
-                <s-divider />
-                <s-box padding="none">
-                  <s-button tone="critical" command="--hide" commandFor={id} onClick={() => onRemove?.()}>
-                    削除
-                  </s-button>
-                </s-box>
-                <s-divider />
-              </s-stack>
-            ) : null}
-            <s-box padding="none">
-              <s-button command="--hide" commandFor={id} onClick={() => {}}>
-                戻る
-              </s-button>
-            </s-box>
-          </s-stack>
-        </s-box>
+  const openEditor = () => {
+    if (disabled || typeof openQtyEditor !== "function") return;
+    openQtyEditor({
+      title,
+      value: v,
+      min,
+      max,
+      onSetQty,
+      onRemove: canRemove ? onRemove : null,
+    });
+  };
+
+  return (
+    <s-stack
+      direction="inline"
+      gap="extra-tight"
+      alignItems="center"
+      justifyContent="end"
+      style={{ flexWrap: "nowrap" }}
+    >
+      <s-box inlineSize="44px">
         <s-button
-          slot="primary-action"
-          tone="auto"
-          command="--hide"
-          commandFor={id}
-          onClick={() => {
-            const raw = String(text ?? "").trim();
-            const n = clamp(raw === "" ? min : raw);
-            onSetQty?.(Number.isFinite(n) ? n : min);
-          }}
+          tone={disabled ? subduedTone : (isRemoveMode ? "critical" : undefined)}
+          onClick={() => (isRemoveMode ? onRemove?.() : onDec?.())}
+          disabled={disabled || (!isRemoveMode && v <= min)}
+          style={{ width: "100%" }}
         >
-          OK
+          {isRemoveMode ? "×" : "−"}
         </s-button>
-      </s-modal>
-    </s-box>
+      </s-box>
+      <s-box inlineSize={`${valueWidth}px`}>
+        <s-button disabled={disabled} tone={subduedTone} style={{ width: "100%" }} onClick={openEditor} onPress={openEditor}>
+          {v}
+        </s-button>
+      </s-box>
+      <s-box inlineSize="44px">
+        <s-button onClick={() => onInc?.()} disabled={disabled || v >= max} tone={subduedTone} style={{ width: "100%" }}>
+          +
+        </s-button>
+      </s-box>
+    </s-stack>
   );
 }
 
@@ -270,7 +234,7 @@ export function InboundAddedLineRow({
   return (
     <s-box padding="none">
       <StockyRowShell>
-        <s-stack gap="small-200" inlineSize="100%">
+        <s-stack gap="extra-tight" inlineSize="100%">
           <s-box inlineSize="100%">
             <ItemLeftCompact
               showImages={showImages}
@@ -290,9 +254,8 @@ export function InboundAddedLineRow({
             >
               <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
                 <s-text
-                  type="small"
-                  tone={bottomLeftTone === "critical" ? "critical" : "auto"}
-                  color={bottomLeftTone === "critical" ? "base" : "subdued"}
+                  tone={bottomLeftTone === "critical" ? "critical" : "subdued"}
+                  size="small"
                   style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
                 >
                   {String(bottomLeft || "").trim() || " "}
@@ -343,8 +306,6 @@ export function InboundCandidateRow({
   const barcode = String(c?.barcode || "").trim();
   const skuLine = `${sku ? `SKU: ${sku}` : ""}${barcode ? `${sku ? " / " : ""}JAN: ${barcode}` : ""}`.trim();
   const shownQty = Math.max(0, Number(addQtyById[vid] || 0));
-  const [text, setText] = useState(String(shownQty > 0 ? shownQty : 1));
-  useEffect(() => setText(String(shownQty > 0 ? shownQty : 1)), [shownQty]);
   useEffect(() => {
     void inbCandidateStockVersion;
     ensureInbCandidateStock(vid, vid);
@@ -352,7 +313,7 @@ export function InboundCandidateRow({
   const stock = getInbCandidateStock(vid);
   const stockText =
     stock?.loading ? "在庫: …" : `在庫: ${Number.isFinite(Number(stock?.available)) ? Number(stock.available) : "—"}`;
-  const modalId = toSafeId(`INB_CAND_QTY_${vid}`);
+  const openQtyEditor = useInboundQtyEditor();
   const clampAdd = (s) => {
     const x = Number(String(s || "").replace(/[^\d]/g, ""));
     if (!Number.isFinite(x)) return 1;
@@ -367,8 +328,8 @@ export function InboundCandidateRow({
     barcode,
     imageUrl: c?.imageUrl || "",
   };
-  const commitAddByQty = () => {
-    const next = clampAdd(text);
+  const commitAddByQty = (raw) => {
+    const next = clampAdd(raw);
     addOrIncrementByResolved(resolved, next, { toastOnExtra: true });
     setAddQtyById((prev) => {
       const cur = Number(prev?.[vid] || 0);
@@ -382,10 +343,23 @@ export function InboundCandidateRow({
       return { ...prev, [vid]: cur + 1 };
     });
   };
+  const openAddEditor = () => {
+    if (readOnly || typeof openQtyEditor !== "function") return;
+    const initial = 1;
+    openQtyEditor({
+      title: "数量を指定して追加",
+      value: initial,
+      min: 1,
+      max: 999999,
+      primaryLabel: "追加",
+      onSetQty: (n) => commitAddByQty(n),
+      onRemove: null,
+    });
+  };
   return (
     <s-box padding="none">
       <StockyRowShell key={vid}>
-        <s-stack gap="small-200">
+        <s-stack gap="extra-tight">
           <s-box style={{ width: "100%" }}>
             <ItemLeftCompact
               showImages={showImages && !liteMode}
@@ -398,12 +372,12 @@ export function InboundCandidateRow({
           <s-box inlineSize="100%">
             <s-stack direction="inline" gap="base" justifyContent="space-between" alignItems="center" style={{ width: "100%", flexWrap: "nowrap" }}>
               <s-box style={{ flex: "1 1 auto", minWidth: 0 }}>
-                <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap" }}>{stockText}</s-text>
+                <s-text tone="subdued" size="small" style={{ whiteSpace: "nowrap" }}>{stockText}</s-text>
               </s-box>
               <s-box style={{ flex: "0 0 auto" }}>
-                <s-stack direction="inline" gap="small-200" alignItems="center" justifyContent="end" style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
+                <s-stack direction="inline" gap="extra-tight" alignItems="center" justifyContent="end" style={{ flexWrap: "nowrap", whiteSpace: "nowrap" }}>
                   <s-box inlineSize={`${calcQtyWidthPx_(shownQty)}px`}>
-                    <s-button command="--show" commandFor={modalId} onClick={() => setText(String(shownQty > 0 ? shownQty : 1))} disabled={readOnly} tone={readOnly ? "subdued" : undefined} style={{ width: "100%", whiteSpace: "nowrap" }}>
+                    <s-button onClick={openAddEditor} onPress={openAddEditor} disabled={readOnly} tone={readOnly ? "subdued" : undefined} style={{ width: "100%", whiteSpace: "nowrap" }}>
                       {shownQty}
                     </s-button>
                   </s-box>
@@ -415,19 +389,6 @@ export function InboundCandidateRow({
             </s-stack>
           </s-box>
         </s-stack>
-        <s-modal id={modalId} heading="数量を指定して追加">
-          <s-box padding="base" paddingBlockEnd="none">
-            <s-stack gap="base">
-              <s-text type="small" color="subdued">数量を入力して「追加」を押してください（1〜999999）</s-text>
-              <s-text-field label="数量" value={text} inputMode="numeric" placeholder="例: 20" onInput={(e) => setText(String(e?.target?.value ?? e ?? ""))} onChange={(e) => setText(String(e?.target?.value ?? e ?? ""))} />
-              <s-divider />
-              <s-box>
-                <s-button command="--hide" commandFor={modalId} onClick={() => {}}>戻る</s-button>
-              </s-box>
-            </s-stack>
-          </s-box>
-          <s-button slot="primary-action" tone={readOnly ? "subdued" : "success"} disabled={readOnly} command="--hide" commandFor={modalId} onClick={commitAddByQty} onPress={commitAddByQty}>追加</s-button>
-        </s-modal>
       </StockyRowShell>
     </s-box>
   );
@@ -444,7 +405,7 @@ function InboundExtrasList({ extras, extrasHistory, showImages, dialog, setExtra
 
   if (!Array.isArray(extras) || extras.length === 0) {
     if (hasExtrasHistory) return null;
-    return <s-text type="small" color="subdued">予定外追加はありません</s-text>;
+    return <s-text tone="subdued" size="small">予定外追加はありません</s-text>;
   }
   return (
     <s-stack gap="small">
@@ -487,7 +448,7 @@ export function renderExtras_(props) {
 
 // ----- renderExtrasHistory_（予定外入荷履歴） -----
 export function renderExtrasHistory_({ extrasHistory, extrasHistoryLoading, showImages, dialog }) {
-  if (extrasHistoryLoading) return <s-text type="small" color="subdued">読み込み中...</s-text>;
+  if (extrasHistoryLoading) return <s-text tone="subdued" size="small">読み込み中...</s-text>;
   if (!Array.isArray(extrasHistory) || extrasHistory.length === 0) return null;
   return (
     <s-stack gap="none">
@@ -530,8 +491,8 @@ export function renderConfirmMemo_({ extrasHistoryLoading, confirmMemo }) {
   if (extrasHistoryLoading || !confirmMemo) return null;
   return (
     <s-stack gap="small">
-      <s-text type="strong">確定時メモ</s-text>
-      <s-text type="small" color="subdued" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{confirmMemo}</s-text>
+      <s-text emphasis="bold" size="small">確定時メモ</s-text>
+      <s-text tone="subdued" size="small" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{confirmMemo}</s-text>
     </s-stack>
   );
 }
@@ -583,15 +544,15 @@ function InboundShipmentItems({ rows, showImages, dialog, setRowQty, readOnly = 
   }, [pageInfo.currentPage, listPage]);
 
   if (!Array.isArray(rows) || rows.length === 0) {
-    return <s-text color="subdued">lineItems がありません</s-text>;
+    return <s-text tone="subdued">lineItems がありません</s-text>;
   }
   return (
     <s-stack gap="small">
       <ListPageControls pageInfo={pageInfo} onPageChange={setListPage} />
       <s-stack gap="none">
-        {pageInfo.displayed.map((r, idx) => (
+        {pageInfo.displayed.map((r) => (
           <InboundAddedLineRowMemo
-            key={String(r?.key || r?.shipmentLineItemId || idx)}
+            key={r.key}
             row={r}
             setRowQty={setRowQty}
             showImages={showImages}

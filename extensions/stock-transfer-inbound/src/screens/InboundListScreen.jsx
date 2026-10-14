@@ -114,6 +114,12 @@ function formatShipmentLabelLocal(transferName, index) {
   return `#${numPart}-${index + 1}`;
 }
 
+const CONFIRM_MODAL_ONE_LINE_STYLE = {
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
 // TDZ 対策（Jt エラー）: コンポーネント内の incRow/setRowQty/setExtraQty/incExtra が minify で Jt 等になり参照順でエラーになるためモジュールレベルに配置
 function incRow_(readOnlyRef, toastReadOnlyOnceRef, toastFn, rowsRef, setRows, key, delta, allowOverReceive = true) {
   if (readOnlyRef?.current) return denyEdit_(toastReadOnlyOnceRef, toastFn);
@@ -219,6 +225,7 @@ export function InboundListScreen({
   onAfterReceive,
   setHeader,
   setFooter,
+  setPageOverlay,
 }) {
   const mountedRef = useRef(true);
   const locationGid = useOriginLocationGid() || String(appState?.originLocationIdManual || "").trim() || null;
@@ -250,11 +257,6 @@ export function InboundListScreen({
     { id: "other", label: "その他" },
   ];
   const DIFF_PREVIEW_LIMIT = 1;
-  const oneLineStyle = {
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-  };
 
   const [shipmentLoading, setShipmentLoading] = useState(false);
   const [shipmentError, setShipmentError] = useState("");
@@ -2004,7 +2006,7 @@ export function InboundListScreen({
     const showResults = q.trim().length >= 1;
     return (
       <s-box padding="small">
-        <s-stack gap="small">
+        <s-stack gap="tight">
           <s-stack
             direction="inline"
             justifyContent="space-between"
@@ -2016,35 +2018,35 @@ export function InboundListScreen({
             <s-stack gap="none" style={{ minWidth: 0, flex: "1 1 auto" }}>
               {/* 1行目：#T0000（太字） */}
               <s-text
-                type="strong"
+                emphasis="bold"
                 style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
               >
                 {headNo}
               </s-text>
               {/* 2行目：出庫元（省略表示） */}
               <s-text
-                type="small"
-                color="subdued"
+                size="small"
+                tone="subdued"
                 style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
               >
                 出庫元：{originName}
               </s-text>
               {/* 3行目：入庫先（省略表示） */}
               <s-text
-                type="small"
-                color="subdued"
+                size="small"
+                tone="subdued"
                 style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
               >
                 入庫先：{inboundTo}
               </s-text>
               {/* REFERENCE 同様：配送情報は常に3行表示（値は空可） */}
-              <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 配送業者: {String(shipment?.tracking?.company ?? "").trim() || ""}
               </s-text>
-              <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 配送番号: {String(shipment?.tracking?.trackingNumber ?? "").trim() || ""}
               </s-text>
-              <s-text type="small" color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 予定日: {shipment?.tracking?.arrivesAt ? String(shipment.tracking.arrivesAt).trim().slice(0, 10) : ""}
               </s-text>
             </s-stack>
@@ -2104,11 +2106,11 @@ export function InboundListScreen({
             </s-box>
           ) : null}
           {allowExtraReceive && showResults ? (
-            <s-text type="small" color="subdued">
+            <s-text tone="subdued" size="small">
               検索結果：{addLoading ? "…" : addCandidates.length}件
             </s-text>
           ) : null}
-          {allowExtraReceive && addLoading ? <s-text type="small" color="subdued">読み込み中...</s-text> : null}
+          {allowExtraReceive && addLoading ? <s-text tone="subdued" size="small">読み込み中...</s-text> : null}
         </s-stack>
       </s-box>
     );
@@ -2158,7 +2160,7 @@ export function InboundListScreen({
           zIndex: 10,
         }}
       >
-        <s-stack gap="small-200">
+        <s-stack gap="extra-tight">
           <s-stack
             direction="inline"
             gap="base"
@@ -2176,21 +2178,21 @@ export function InboundListScreen({
               <s-stack direction="inline" gap="base" alignItems="center" justifyContent="center">
                 <s-badge tone={footerStatusTone}>{footerStatusLabel}</s-badge>
                 <s-stack gap="none" alignItems="center">
-                  <s-text type="small" color="subdued">
+                  <s-text alignment="center" size="small" tone="subdued">
                     {footerLine1}
                   </s-text>
                   {footerLine2 ? (
-                    <s-text type="small" tone={hasWarning ? "critical" : "auto"} color={hasWarning ? "base" : "subdued"}>
+                    <s-text alignment="center" size="small" tone={hasWarning ? "critical" : "subdued"}>
                       {footerLine2}
                     </s-text>
                   ) : null}
                   {footerLine3Extras ? (
-                    <s-text type="small" tone="critical">
+                    <s-text alignment="center" size="small" tone="critical">
                       {footerLine3Extras}
                     </s-text>
                   ) : null}
                   {liteMode ? (
-                    <s-text type="small" color="subdued">
+                    <s-text alignment="center" size="small" tone="subdued">
                       画像ON
                     </s-text>
                   ) : null}
@@ -2199,7 +2201,7 @@ export function InboundListScreen({
             </s-box>
             <s-box style={{ flex: "0 0 auto" }}>
               <s-button
-                tone={hasWarning ? "critical" : "auto"}
+                tone={hasWarning ? "critical" : "success"}
                 command="--show"
                 commandFor={CONFIRM_RECEIVE_MODAL_ID}
                 disabled={!canOpenConfirm}
@@ -2208,18 +2210,95 @@ export function InboundListScreen({
               </s-button>
             </s-box>
           </s-stack>
-          {shipmentLoading ? <s-text type="small" color="subdued">読み込み中...</s-text> : null}
-          {shipmentError ? <s-text type="small" tone="critical">{shipmentError}</s-text> : null}
+          {shipmentLoading ? <s-text size="small" tone="subdued">読み込み中...</s-text> : null}
+          {shipmentError ? <s-text size="small" tone="critical">{shipmentError}</s-text> : null}
         </s-stack>
       </s-box>
     );
     return () => setFooter?.(null);
   }, [setFooter, onBack, footerLine1, footerLine2, hasWarning, canOpenConfirm, receiveSubmitting, shipmentLoading, shipmentError, liteMode, footerStatusLabel, footerStatusTone, readOnly, draftSavedAt]);
 
+  // 確定モーダルは s-scroll-box 内ではなく親の pageOverlay（s-page 外）へ載せる
+  const confirmModalNode = useMemo(() => {
+    if (!shipment?.id) return null;
+    return (
+      <s-modal id={CONFIRM_RECEIVE_MODAL_ID} heading="入庫を確定しますか？">
+        <s-box padding="none" style={{ paddingInline: 8, paddingBlockStart: 8, paddingBlockEnd: 0, maxHeight: "60vh", overflowY: "auto" }}>
+          <s-stack gap="small">
+            <s-stack gap="extra-tight">
+              <s-text size="small" tone="subdued">予定 {plannedTotal} / 入庫 {receiveTotal}</s-text>
+              <s-text size="small" tone="subdued">予定外 {extrasQtyTotal} / 超過 {overQtyTotal} / 不足 {shortageQtyTotal}</s-text>
+              {hasWarning ? <s-text size="small" tone="critical">※ 予定外/超過/不足 があります。</s-text> : null}
+            </s-stack>
+            {shortageRows.length > 0 ? (
+              <s-stack gap="extra-tight">
+                <s-text size="small" tone="critical">不足（{shortageRows.length}件）</s-text>
+                {shortageRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：-{Number(x.shortageQty || 0)}</s-text>)}
+                {shortageRows.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {shortageRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
+              </s-stack>
+            ) : null}
+            {extras.length > 0 ? (
+              <s-stack gap="extra-tight">
+                <s-text size="small" tone="critical">予定外（{extras.length}件）</s-text>
+                {extras.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.key} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：{Number(x.receiveQty || 0)}</s-text>)}
+                {extras.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {extras.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
+              </s-stack>
+            ) : null}
+            {overRows.length > 0 ? (
+              <s-stack gap="extra-tight">
+                <s-text size="small" tone="critical">超過（{overRows.length}件）</s-text>
+                {overRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：+{Number(x.overQty || 0)}</s-text>)}
+                {overRows.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {overRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
+              </s-stack>
+            ) : null}
+            {hasWarning ? (
+              <>
+                <s-divider />
+                <s-stack gap="small">
+                  <s-text size="small" tone="critical">予定外/超過/不足があります。「確認しました」を押してから確定してください。</s-text>
+                  <s-button kind="secondary" size="small" onClick={() => setAckWarning(true)} disabled={ackWarning}>{ackWarning ? "確認済み" : "確認しました"}</s-button>
+                </s-stack>
+              </>
+            ) : null}
+            <s-divider />
+            <s-box>
+              <s-button command="--hide" commandFor={CONFIRM_RECEIVE_MODAL_ID}>戻る</s-button>
+            </s-box>
+          </s-stack>
+        </s-box>
+        <s-button slot="secondary-actions" kind="secondary" tone="critical" disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }} onPress={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }}>一部入庫（一時保存）</s-button>
+        <s-button slot="primary-action" tone={hasWarning ? "critical" : "success"} disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }} onPress={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }}>確定する</s-button>
+      </s-modal>
+    );
+  }, [
+    shipment?.id,
+    plannedTotal,
+    receiveTotal,
+    extrasQtyTotal,
+    overQtyTotal,
+    shortageQtyTotal,
+    hasWarning,
+    shortageRows,
+    extras,
+    overRows,
+    ackWarning,
+    canConfirm,
+    warningReady,
+    receiveSubmitting,
+    receiveConfirm,
+    onBack,
+  ]);
+
+  useEffect(() => {
+    if (!setPageOverlay) return undefined;
+    setPageOverlay(confirmModalNode);
+    return () => setPageOverlay(null);
+  }, [setPageOverlay, confirmModalNode]);
+
   if (shipmentLoading) {
     return (
       <s-box padding="base">
-        <s-text color="subdued">読み込み中...</s-text>
+        <s-text tone="subdued">読み込み中...</s-text>
       </s-box>
     );
   }
@@ -2237,21 +2316,21 @@ export function InboundListScreen({
     return (
       <s-box padding="base">
         <s-stack gap="base">
-          <s-text color="subdued">配送が未選択です。前の画面で選択してください。</s-text>
+          <s-text tone="subdued">配送が未選択です。前の画面で選択してください。</s-text>
           <s-divider />
           <s-button onClick={refreshPending} disabled={pendingLoading}>
             {pendingLoading ? "読込中..." : "入庫予定一覧を更新（任意）"}
           </s-button>
           {pendingTransfers.length > 0 ? (
             <s-stack gap="base">
-              <s-text type="strong">入庫予定（Transfer）</s-text>
+              <s-text emphasis="bold">入庫予定（Transfer）</s-text>
               {pendingTransfers.slice(0, 8).map((t) => (
-                <s-text key={t.id} type="small" color="subdued">
+                <s-text key={t.id} tone="subdued" size="small">
                   ・{t.name ? `${t.name} / ` : ""}{String(t.id).slice(-12)}（{t.status ?? "-"}）
                 </s-text>
               ))}
               {pendingTransfers.length > 8 ? (
-                <s-text type="small" color="subdued">…他 {pendingTransfers.length - 8} 件</s-text>
+                <s-text tone="subdued" size="small">…他 {pendingTransfers.length - 8} 件</s-text>
               ) : null}
             </s-stack>
           ) : null}
@@ -2263,27 +2342,20 @@ export function InboundListScreen({
   if (!shipment || rows.length === 0) {
     return (
       <s-box padding="base">
-        <s-text color="subdued">配送を読み込むと、ここに明細が出ます</s-text>
+        <s-text tone="subdued">配送を読み込むと、ここに明細が出ます</s-text>
       </s-box>
     );
   }
-
-  const warningAreaNode = !hasWarning ? null : (
-    <s-stack gap="small">
-      <s-text type="small" tone="critical">予定外/超過/不足があります。「確認しました」を押してから確定してください。</s-text>
-      <s-button variant="secondary" onClick={() => setAckWarning(true)} disabled={ackWarning}>{ackWarning ? "確認済み" : "確認しました"}</s-button>
-    </s-stack>
-  );
 
   return (
     <s-stack gap="base">
       {/* 1. 検索結果ブロック（最上部・REFERENCE と同じ条件）※予定外不許可時は非表示・処理済み時はグレーアウト */}
       {allowExtraReceive && String(addQuery || "").trim().length >= 1 ? (
         <s-box padding="base" style={readOnly ? { opacity: 0.6 } : undefined}>
-          <s-stack gap="small-200">
+          <s-stack gap="extra-tight">
             <s-text>検索リスト 候補： {addLoading ? "..." : addCandidates.length}件</s-text>
             {addCandidates.length > 0 ? (
-              <s-stack gap="none">
+              <>
                 {addCandidates.slice(0, addCandidatesDisplayLimit).map((c, idx) => (
                   <InboundCandidateRow
                     key={c.variantId || idx}
@@ -2302,19 +2374,19 @@ export function InboundListScreen({
                 ))}
                 {addCandidates.length > addCandidatesDisplayLimit ? (
                   <s-box padding="small">
-                    <s-button variant="secondary" onClick={() => handleShowMoreAddCandidates_(setAddCandidatesDisplayLimit)} onPress={() => handleShowMoreAddCandidates_(setAddCandidatesDisplayLimit)}>
+                    <s-button kind="secondary" onClick={() => handleShowMoreAddCandidates_(setAddCandidatesDisplayLimit)} onPress={() => handleShowMoreAddCandidates_(setAddCandidatesDisplayLimit)}>
                       さらに表示（残り {addCandidates.length - addCandidatesDisplayLimit}件）
                     </s-button>
                   </s-box>
                 ) : null}
                 {addSearchPageInfo?.hasNextPage ? (
                   <s-box padding="small">
-                    <s-button variant="secondary" disabled={loadingMoreAddSearch} onClick={handleLoadMoreAddSearch} onPress={handleLoadMoreAddSearch}>
+                    <s-button kind="secondary" disabled={loadingMoreAddSearch} onClick={handleLoadMoreAddSearch} onPress={handleLoadMoreAddSearch}>
                       {loadingMoreAddSearch ? "読込中..." : "さらに読み込む"}
                     </s-button>
                   </s-box>
                 ) : null}
-              </s-stack>
+              </>
             ) : addLoading ? (
               <s-text>読み込み中...</s-text>
             ) : (
@@ -2328,7 +2400,7 @@ export function InboundListScreen({
       {shipment ? (
         <s-box key="shipment_list" padding="small">
           <s-stack gap="small">
-            <s-text type="strong">入庫リスト</s-text>
+            <s-text emphasis="bold">入庫リスト</s-text>
             {lineItemsPageInfo?.hasNextPage ? (
               <s-box padding="base">
                 <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
@@ -2361,13 +2433,13 @@ export function InboundListScreen({
                       const statusTone = isGroupReadOnly ? "success" : "subdued";
                       return (
                         <s-box key={group.shipmentId || index}>
-                          <s-stack gap="small">
+                          <s-stack gap="tight">
                             <s-box padding="small" style={{ backgroundColor: "var(--s-color-bg-surface-secondary)", borderRadius: 4 }}>
                               <s-stack direction="inline" gap="base" justifyContent="space-between" alignItems="center" style={{ width: "100%" }}>
-                                <s-text type="strong">{group.shipmentLabel || `配送${index + 1}`}</s-text>
+                                <s-text emphasis="bold" size="small">{group.shipmentLabel || `配送${index + 1}`}</s-text>
                                 <s-stack direction="inline" gap="small" alignItems="center">
                                   <s-badge tone={statusTone}>{statusLabel}</s-badge>
-                                  <s-text type="small" color="subdued">{group.rows.length}件</s-text>
+                                  <s-text tone="subdued" size="small">{group.rows.length}件</s-text>
                                 </s-stack>
                               </s-stack>
                             </s-box>
@@ -2397,59 +2469,15 @@ export function InboundListScreen({
         </s-box>
       )}
 
-      {/* 3. 確定モーダル（REFERENCE: 入庫リストの後・予定外入荷の前） */}
-      <s-modal id={CONFIRM_RECEIVE_MODAL_ID} heading="入庫を確定しますか？">
-          <s-box padding="none" style={{ paddingInline: 8, paddingBlockStart: 8, paddingBlockEnd: 0, maxHeight: "60vh", overflowY: "auto" }}>
-            <s-stack gap="small">
-              <s-stack gap="small-200">
-                <s-text type="small" color="subdued">予定 {plannedTotal} / 入庫 {receiveTotal}</s-text>
-                <s-text type="small" color="subdued">予定外 {extrasQtyTotal} / 超過 {overQtyTotal} / 不足 {shortageQtyTotal}</s-text>
-                {hasWarning ? <s-text type="small" tone="critical">※ 予定外/超過/不足 があります。</s-text> : null}
-              </s-stack>
-              {shortageRows.length > 0 ? (
-                <s-stack gap="small-200">
-                  <s-text type="small" tone="critical">不足（{shortageRows.length}件）</s-text>
-                  {shortageRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} type="small" color="subdued" style={oneLineStyle}>・{x.title}：-{Number(x.shortageQty || 0)}</s-text>)}
-                  {shortageRows.length > DIFF_PREVIEW_LIMIT ? <s-text type="small" color="subdued">…他 {shortageRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-                </s-stack>
-              ) : null}
-              {extras.length > 0 ? (
-                <s-stack gap="small-200">
-                  <s-text type="small" tone="critical">予定外（{extras.length}件）</s-text>
-                  {extras.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.key} type="small" color="subdued" style={oneLineStyle}>・{x.title}：{Number(x.receiveQty || 0)}</s-text>)}
-                  {extras.length > DIFF_PREVIEW_LIMIT ? <s-text type="small" color="subdued">…他 {extras.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-                </s-stack>
-              ) : null}
-              {overRows.length > 0 ? (
-                <s-stack gap="small-200">
-                  <s-text type="small" tone="critical">超過（{overRows.length}件）</s-text>
-                  {overRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} type="small" color="subdued" style={oneLineStyle}>・{x.title}：+{Number(x.overQty || 0)}</s-text>)}
-                  {overRows.length > DIFF_PREVIEW_LIMIT ? <s-text type="small" color="subdued">…他 {overRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-                </s-stack>
-              ) : null}
-              {hasWarning ? (
-                <s-stack gap="small">
-                  <s-divider />
-                  {warningAreaNode}
-                </s-stack>
-              ) : null}
-              <s-divider />
-              <s-box>
-                <s-button command="--hide" commandFor={CONFIRM_RECEIVE_MODAL_ID}>戻る</s-button>
-              </s-box>
-            </s-stack>
-          </s-box>
-          <s-button slot="secondary-actions" kind="secondary" tone="critical" disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }} onPress={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }}>一部入庫（一時保存）</s-button>
-          <s-button slot="primary-action" tone={hasWarning ? "critical" : "auto"} disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }} onPress={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }}>確定する</s-button>
-        </s-modal>
+      {/* 3. 確定モーダルは setPageOverlay 経由で s-page 外（InboundModalHost 側）へ */}
 
       {/* 4. 予定外入荷エリア（shipment がある場合のみ・REFERENCE と同じ） */}
       {shipment ? (
         <s-box key="extras_area" padding="small">
           <s-stack gap="small">
-            <s-text type="strong">予定外入荷（リストにない商品）</s-text>
+            <s-text emphasis="bold">予定外入荷（リストにない商品）</s-text>
             {!allowExtraReceive ? (
-              <s-text type="small" color="subdued">設定により予定外入庫は許可されていません。</s-text>
+              <s-text tone="subdued" size="small">設定により予定外入庫は許可されていません。</s-text>
             ) : (
               renderExtras_({ extras, extrasHistory, showImages, dialog, setExtraQty: (key, value) => setExtraQty_(readOnlyRef, toastReadOnlyOnceRef, toast, extrasRef, setExtras, key, value) })
             )}
