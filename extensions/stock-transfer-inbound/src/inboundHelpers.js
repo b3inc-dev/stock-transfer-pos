@@ -1,3 +1,22 @@
+/**
+ * header/footer/pageOverlay 用: VNode を state に保持せず、毎描画で新しいツリーを返す render fn を保持する。
+ * （親再描画時の stale VNode 再利用 → remote-dom `e.nodeType` を避ける）
+ */
+export function setChromeRender(setter, renderFn) {
+  if (typeof setter !== "function") return;
+  if (renderFn == null) {
+    setter(null);
+    return;
+  }
+  // setState(updater) と区別するため二重関数
+  setter(() => renderFn);
+}
+
+export function renderChrome(slot) {
+  if (slot == null) return null;
+  return typeof slot === "function" ? slot() : slot;
+}
+
 export const readValue = (eOrValue) => {
   if (typeof eOrValue === "string" || typeof eOrValue === "number") return String(eOrValue);
   return String(

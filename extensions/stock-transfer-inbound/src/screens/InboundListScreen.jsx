@@ -3,7 +3,7 @@
  * - 明細・予定外入荷(extras)・超過/不足・下書き・検索・スキャン・確定モーダル・一部入庫まで対応
  */
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
-import { getStateSlice, readValue, toUserMessage, getStatusBadgeTone } from "../inboundHelpers.js";
+import { getStateSlice, readValue, toUserMessage, getStatusBadgeTone, setChromeRender } from "../inboundHelpers.js";
 import { useOriginLocationGid, useDebounce } from "../inboundHooks.js";
 import {
   fetchInventoryShipmentEnriched,
@@ -1997,14 +1997,13 @@ export function InboundListScreen({
     return "-";
   }, [transferForShipment?.destinationName, inbound?.selectedDestinationName]);
 
-  const headerNode = useMemo(() => {
-    if (!setHeader) return null;
+  useEffect(() => {
+    if (!setHeader) return undefined;
     const originName = headerOriginName;
-    const destName = headerInboundTo;
-    const inboundTo = destName;
+    const inboundTo = headerInboundTo;
     const q = String(addQuery || "");
     const showResults = q.trim().length >= 1;
-    return (
+    setChromeRender(setHeader, () => (
       <s-box padding="small">
         <s-stack gap="tight">
           <s-stack
@@ -2014,16 +2013,13 @@ export function InboundListScreen({
             gap="small"
             style={{ width: "100%", flexWrap: "nowrap" }}
           >
-            {/* 左：縮められる（minWidth:0 + flex が重要） */}
             <s-stack gap="none" style={{ minWidth: 0, flex: "1 1 auto" }}>
-              {/* 1行目：#T0000（太字） */}
               <s-text
                 emphasis="bold"
                 style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
               >
                 {headNo}
               </s-text>
-              {/* 2行目：出庫元（省略表示） */}
               <s-text
                 size="small"
                 tone="subdued"
@@ -2031,7 +2027,6 @@ export function InboundListScreen({
               >
                 出庫元：{originName}
               </s-text>
-              {/* 3行目：入庫先（省略表示） */}
               <s-text
                 size="small"
                 tone="subdued"
@@ -2039,7 +2034,6 @@ export function InboundListScreen({
               >
                 入庫先：{inboundTo}
               </s-text>
-              {/* REFERENCE 同様：配送情報は常に3行表示（値は空可） */}
               <s-text size="small" tone="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 配送業者: {String(shipment?.tracking?.company ?? "").trim() || ""}
               </s-text>
@@ -2050,7 +2044,6 @@ export function InboundListScreen({
                 予定日: {shipment?.tracking?.arrivesAt ? String(shipment.tracking.arrivesAt).trim().slice(0, 10) : ""}
               </s-text>
             </s-stack>
-            {/* 右：絶対に折り返さない */}
             <s-stack
               direction="inline"
               gap="small"
@@ -2085,7 +2078,6 @@ export function InboundListScreen({
               </s-button>
             </s-stack>
           </s-stack>
-          {/* リスト外追加（検索）※予定外入庫不許可時は非表示・処理済み時はグレーアウト */}
           {allowExtraReceive ? (
             <s-box inlineSize="100%" paddingBlockStart="small-200" style={readOnly ? { opacity: 0.6 } : undefined}>
               <s-text-field
@@ -2113,14 +2105,9 @@ export function InboundListScreen({
           {allowExtraReceive && addLoading ? <s-text tone="subdued" size="small">読み込み中...</s-text> : null}
         </s-stack>
       </s-box>
-    );
+    ));
+    return () => setChromeRender(setHeader, null);
   }, [setHeader, headNo, headerOriginName, headerInboundTo, addQuery, addLoading, addCandidates, inbound, liteMode, onToggleLiteMode, shipment && shipment.id, shipment && shipment.tracking, readOnly, allowExtraReceive]);
-
-  useEffect(() => {
-    if (!setHeader) return;
-    setHeader(headerNode);
-    return () => setHeader?.(null);
-  }, [setHeader, headerNode]);
 
   // 下部固定フッター（戻る + 中央3行 + 確定）
   const footerLine1 = shipment?.id
@@ -2149,7 +2136,7 @@ export function InboundListScreen({
   const footerStatusTone = getStatusBadgeTone(footerStatusLabel);
 
   useEffect(() => {
-    setFooter?.(
+    setChromeRender(setFooter, () => (
       <s-box
         padding="base"
         border="base"
@@ -2173,7 +2160,6 @@ export function InboundListScreen({
                 戻る
               </s-button>
             </s-box>
-            {/* ✅ 中央：ステータスバッジ（一覧表示と合わせる） + 2行（予定/受領 + 状態） */}
             <s-box style={{ flex: "1 1 auto", minWidth: 0, paddingInline: 8 }}>
               <s-stack direction="inline" gap="base" alignItems="center" justifyContent="center">
                 <s-badge tone={footerStatusTone}>{footerStatusLabel}</s-badge>
@@ -2214,14 +2200,18 @@ export function InboundListScreen({
           {shipmentError ? <s-text size="small" tone="critical">{shipmentError}</s-text> : null}
         </s-stack>
       </s-box>
-    );
-    return () => setFooter?.(null);
-  }, [setFooter, onBack, footerLine1, footerLine2, hasWarning, canOpenConfirm, receiveSubmitting, shipmentLoading, shipmentError, liteMode, footerStatusLabel, footerStatusTone, readOnly, draftSavedAt]);
+    ));
+    return () => setChromeRender(setFooter, null);
+  }, [setFooter, onBack, footerLine1, footerLine2, footerLine3Extras, hasWarning, canOpenConfirm, receiveSubmitting, shipmentLoading, shipmentError, liteMode, footerStatusLabel, footerStatusTone, readOnly, draftSavedAt]);
 
   // 確定モーダルは s-scroll-box 内ではなく親の pageOverlay（s-page 外）へ載せる
-  const confirmModalNode = useMemo(() => {
-    if (!shipment?.id) return null;
-    return (
+  useEffect(() => {
+    if (!setPageOverlay) return undefined;
+    if (!shipment?.id) {
+      setChromeRender(setPageOverlay, null);
+      return () => setChromeRender(setPageOverlay, null);
+    }
+    setChromeRender(setPageOverlay, () => (
       <s-modal id={CONFIRM_RECEIVE_MODAL_ID} heading="入庫を確定しますか？">
         <s-box padding="none" style={{ paddingInline: 8, paddingBlockStart: 8, paddingBlockEnd: 0, maxHeight: "60vh", overflowY: "auto" }}>
           <s-stack gap="small">
@@ -2269,8 +2259,10 @@ export function InboundListScreen({
         <s-button slot="secondary-actions" kind="secondary" tone="critical" disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }} onPress={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }}>一部入庫（一時保存）</s-button>
         <s-button slot="primary-action" tone={hasWarning ? "critical" : "success"} disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }} onPress={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }}>確定する</s-button>
       </s-modal>
-    );
+    ));
+    return () => setChromeRender(setPageOverlay, null);
   }, [
+    setPageOverlay,
     shipment?.id,
     plannedTotal,
     receiveTotal,
@@ -2288,12 +2280,6 @@ export function InboundListScreen({
     receiveConfirm,
     onBack,
   ]);
-
-  useEffect(() => {
-    if (!setPageOverlay) return undefined;
-    setPageOverlay(confirmModalNode);
-    return () => setPageOverlay(null);
-  }, [setPageOverlay, confirmModalNode]);
 
   if (shipmentLoading) {
     return (

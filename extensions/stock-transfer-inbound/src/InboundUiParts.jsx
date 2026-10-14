@@ -298,7 +298,14 @@ export function InboundCandidateRow({
   inbCandidateStockVersion,
   readOnly = false,
 }) {
+  // hooks は early return より前（Rules of Hooks / remote-dom 安定）
   const vid = String(c?.variantId || "").trim();
+  const openQtyEditor = useInboundQtyEditor();
+  useEffect(() => {
+    if (!vid) return;
+    void inbCandidateStockVersion;
+    ensureInbCandidateStock(vid, vid);
+  }, [vid, ensureInbCandidateStock, inbCandidateStockVersion]);
   if (!vid) return null;
   const productTitle = String(c?.productTitle || "").trim();
   const variantTitle = String(c?.variantTitle || "").trim();
@@ -306,14 +313,9 @@ export function InboundCandidateRow({
   const barcode = String(c?.barcode || "").trim();
   const skuLine = `${sku ? `SKU: ${sku}` : ""}${barcode ? `${sku ? " / " : ""}JAN: ${barcode}` : ""}`.trim();
   const shownQty = Math.max(0, Number(addQtyById[vid] || 0));
-  useEffect(() => {
-    void inbCandidateStockVersion;
-    ensureInbCandidateStock(vid, vid);
-  }, [vid, ensureInbCandidateStock, inbCandidateStockVersion]);
   const stock = getInbCandidateStock(vid);
   const stockText =
     stock?.loading ? "在庫: …" : `在庫: ${Number.isFinite(Number(stock?.available)) ? Number(stock.available) : "—"}`;
-  const openQtyEditor = useInboundQtyEditor();
   const clampAdd = (s) => {
     const x = Number(String(s || "").replace(/[^\d]/g, ""));
     if (!Number.isFinite(x)) return 1;
@@ -407,37 +409,37 @@ function InboundExtrasList({ extras, extrasHistory, showImages, dialog, setExtra
     if (hasExtrasHistory) return null;
     return <s-text tone="subdued" size="small">予定外追加はありません</s-text>;
   }
+  // 出庫/ロスと同型: ListPageControls と行を同一 s-stack の兄弟にする（入れ子 s-stack にしない）
   return (
-    <s-stack gap="small">
+    <s-stack gap="none">
       <ListPageControls pageInfo={pageInfo} onPageChange={setListPage} />
-      <s-stack gap="none">
-        {pageInfo.displayed.map((x) => {
-          const received = Number(x?.receiveQty || 0);
-          const sku = String(x?.sku || "").trim();
-          const barcode = String(x?.barcode || "").trim();
-          const skuLine = sku ? `SKU:${sku}${barcode ? ` / JAN:${barcode}` : ""}` : barcode ? `JAN:${barcode}` : "";
-          const bottomLeft = `予定外 / 入庫 ${received}`;
-          const bottomLeftTone = received > 0 ? "critical" : "subdued";
-          return (
-            <InboundAddedLineRow
-              key={x.key}
-              row={{ title: x.title || x.sku || x.inventoryItemId || "(unknown)", imageUrl: x.imageUrl || "" }}
-              showImages={showImages}
-              dialog={dialog}
-              qty={received}
-              modalKey={x.key}
-              skuLine={skuLine}
-              bottomLeft={bottomLeft}
-              bottomLeftTone={bottomLeftTone}
-              onDec={() => setExtraQty(x.key, Math.max(0, received - 1))}
-              onInc={() => setExtraQty(x.key, received + 1)}
-              onSetQty={(n) => setExtraQty(x.key, n)}
-              minQty={1}
-              onRemove={() => setExtraQty(x.key, 0)}
-            />
-          );
-        })}
-      </s-stack>
+      {pageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
+      {pageInfo.displayed.map((x) => {
+        const received = Number(x?.receiveQty || 0);
+        const sku = String(x?.sku || "").trim();
+        const barcode = String(x?.barcode || "").trim();
+        const skuLine = sku ? `SKU:${sku}${barcode ? ` / JAN:${barcode}` : ""}` : barcode ? `JAN:${barcode}` : "";
+        const bottomLeft = `予定外 / 入庫 ${received}`;
+        const bottomLeftTone = received > 0 ? "critical" : "subdued";
+        return (
+          <InboundAddedLineRow
+            key={x.key}
+            row={{ title: x.title || x.sku || x.inventoryItemId || "(unknown)", imageUrl: x.imageUrl || "" }}
+            showImages={showImages}
+            dialog={dialog}
+            qty={received}
+            modalKey={x.key}
+            skuLine={skuLine}
+            bottomLeft={bottomLeft}
+            bottomLeftTone={bottomLeftTone}
+            onDec={() => setExtraQty(x.key, Math.max(0, received - 1))}
+            onInc={() => setExtraQty(x.key, received + 1)}
+            onSetQty={(n) => setExtraQty(x.key, n)}
+            minQty={1}
+            onRemove={() => setExtraQty(x.key, 0)}
+          />
+        );
+      })}
     </s-stack>
   );
 }
@@ -546,21 +548,21 @@ function InboundShipmentItems({ rows, showImages, dialog, setRowQty, readOnly = 
   if (!Array.isArray(rows) || rows.length === 0) {
     return <s-text tone="subdued">lineItems がありません</s-text>;
   }
+  // 出庫/ロスと同型: ListPageControls と行を同一 s-stack の兄弟にする
   return (
-    <s-stack gap="small">
+    <s-stack gap="none">
       <ListPageControls pageInfo={pageInfo} onPageChange={setListPage} />
-      <s-stack gap="none">
-        {pageInfo.displayed.map((r) => (
-          <InboundAddedLineRowMemo
-            key={r.key}
-            row={r}
-            setRowQty={setRowQty}
-            showImages={showImages}
-            dialog={dialog}
-            readOnly={readOnly}
-          />
-        ))}
-      </s-stack>
+      {pageInfo.showPagination ? <s-box style={{ blockSize: "8px" }} /> : null}
+      {pageInfo.displayed.map((r) => (
+        <InboundAddedLineRowMemo
+          key={r.key}
+          row={r}
+          setRowQty={setRowQty}
+          showImages={showImages}
+          dialog={dialog}
+          readOnly={readOnly}
+        />
+      ))}
     </s-stack>
   );
 }

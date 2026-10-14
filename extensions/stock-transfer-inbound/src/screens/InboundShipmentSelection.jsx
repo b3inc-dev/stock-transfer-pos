@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "preact/hooks";
-import { getStateSlice, setStateSlice, toUserMessage, getStatusBadgeTone } from "../inboundHelpers.js";
+import { getStateSlice, setStateSlice, toUserMessage, getStatusBadgeTone, setChromeRender } from "../inboundHelpers.js";
 import { useOriginLocationGid } from "../inboundHooks.js";
 import {
   fetchTransfersForDestinationAll,
@@ -149,7 +149,7 @@ export function InboundShipmentSelection({
   }, [transfer, shipments, setAppState, onNext, isShipmentReceived]);
 
   useEffect(() => {
-    setHeader?.(
+    setChromeRender(setHeader, () => (
       <s-box padding="base">
         <s-stack gap="base">
           <s-text emphasis="bold">配送を選択</s-text>
@@ -171,12 +171,12 @@ export function InboundShipmentSelection({
           ) : null}
         </s-stack>
       </s-box>
-    );
-    return () => setHeader?.(null);
+    ));
+    return () => setChromeRender(setHeader, null);
   }, [setHeader, transfer, transferName, shipments.length]);
 
   useEffect(() => {
-    setFooter?.(
+    setChromeRender(setFooter, () => (
       <FixedFooterNavBar
         summaryLeft={`${transferName || "-"}`}
         summaryRight={`${shipments.length}件`}
@@ -186,8 +186,8 @@ export function InboundShipmentSelection({
         onRight={() => loadTransfer(true)}
         rightTone="default"
       />
-    );
-    return () => setFooter?.(null);
+    ));
+    return () => setChromeRender(setFooter, null);
   }, [setFooter, transferName, shipments.length, onBack, loadTransfer]);
 
   if (loading) {

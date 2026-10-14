@@ -1,6 +1,6 @@
 import { render, Component } from "preact";
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
-import { getStateSlice, setStateSlice, toUserMessage, getStatusBadgeTone, readValue } from "./inboundHelpers.js";
+import { getStateSlice, setStateSlice, toUserMessage, getStatusBadgeTone, readValue, setChromeRender, renderChrome } from "./inboundHelpers.js";
 import { useSessionLocationId, useOriginLocationGid, useLocationsIndex, getLocationName_ } from "./inboundHooks.js";
 import {
   fetchTransfersForDestinationAll,
@@ -12,7 +12,7 @@ import {
   mergeInboundOverIntoTransfers_,
 } from "./inboundApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
-import { InboundQtyEditorProvider } from "./InboundModalHost.jsx";
+import { useInboundQtyEditorController } from "./InboundModalHost.jsx";
 import { InboundShipmentSelection } from "./screens/InboundShipmentSelection.jsx";
 import { InboundListScreen } from "./screens/InboundListScreen.jsx";
 
@@ -161,6 +161,7 @@ function InboundConditions({
   onOpenShipmentSelection,
   setHeader,
   setFooter,
+  setPageOverlay,
   showImages,
   liteMode,
   onToggleLiteMode,
@@ -383,7 +384,7 @@ function InboundConditions({
   }, [pendingTransferForModal, setAppState, onNext]);
 
   useEffect(() => {
-    setHeader?.(
+    setChromeRender(setHeader, () => (
       <s-box padding="base">
         <s-stack gap="base">
           <s-stack direction="inline" gap="none" inlineSize="100%">
@@ -406,12 +407,12 @@ function InboundConditions({
           ) : null}
         </s-stack>
       </s-box>
-    );
-    return () => setHeader?.(null);
+    ));
+    return () => setChromeRender(setHeader, null);
   }, [setHeader, viewMode, pendingTransfersAll.length, receivedTransfersAll.length, transfersPageInfo?.hasNextPage, loadingMore, loadMoreTransfers_]);
 
   useEffect(() => {
-    setFooter?.(
+    setChromeRender(setFooter, () => (
       <FixedFooterNavBar
         summaryLeft={`入庫先: ${displayLocationName}`}
         summaryRight={viewMode === "received" ? `入庫済み ${listToShow.length}件` : `未入庫 ${listToShow.length}件`}
@@ -422,12 +423,60 @@ function InboundConditions({
         onRight={refresh}
         rightDisabled={loading || !locationGid}
       />
-    );
-    return () => setFooter?.(null);
+    ));
+    return () => setChromeRender(setFooter, null);
   }, [setFooter, displayLocationName, viewMode, listToShow.length, liteMode, onToggleLiteMode, refresh, loading, locationGid]);
 
+  // コンディション用 s-modal は s-scroll-box 内ではなく page 外（出庫 DialogHost 相当）
+  useEffect(() => {
+    setChromeRender(setPageOverlay, () => (
+      <s-stack gap="none">
+        <s-modal id={SHIPMENT_MODE_SELECTION_MODAL_ID} heading="処理方法を選択">
+          {(pendingTransferForModal || pendingTransferForModalRef.current) ? (
+            <s-box padding="base" paddingBlockEnd="none">
+              <s-stack gap="base">
+                <s-stack gap="none">
+                  <s-text tone="subdued" size="small">{String((pendingTransferForModal || pendingTransferForModalRef.current)?.name || "").trim() || "入庫ID"}</s-text>
+                  <s-text tone="subdued" size="small">出庫元: {String((pendingTransferForModal || pendingTransferForModalRef.current)?.originName || "").trim() || "-"}</s-text>
+                  <s-text tone="subdued" size="small">宛先: {String((pendingTransferForModal || pendingTransferForModalRef.current)?.destinationName || "").trim() || "-"}</s-text>
+                  <s-text tone="subdued" size="small">配送数: {Array.isArray((pendingTransferForModal || pendingTransferForModalRef.current)?.shipments) ? (pendingTransferForModal || pendingTransferForModalRef.current).shipments.length : 0}</s-text>
+                </s-stack>
+                <s-divider />
+                <s-stack gap="none">
+                  <s-box padding="none" style={{ border: "1px solid var(--s-color-border)", borderRadius: 4 }}>
+                    <s-text tone="subdued" size="small">配送ごとに選択：1つの配送を選択して処理します</s-text>
+                  </s-box>
+                  <s-box padding="none" style={{ border: "1px solid var(--s-color-border)", borderRadius: 4 }}>
+                    <s-text tone="subdued" size="small">まとめて表示：全配送を1画面で表示して処理します</s-text>
+                  </s-box>
+                </s-stack>
+                <s-divider />
+                <s-box>
+                  <s-button command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={() => { pendingTransferForModalRef.current = null; setPendingTransferForModal(null); }}>戻る</s-button>
+                </s-box>
+              </s-stack>
+            </s-box>
+          ) : null}
+          <s-button slot="secondary-actions" command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={handleSelectSingleShipment}>配送ごとに選択</s-button>
+          <s-button slot="primary-action" tone="success" command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={handleShowAllShipments}>まとめて表示</s-button>
+        </s-modal>
+        <LocationSelectModal
+          id={INBOUND_LOCATION_MODAL_ID}
+          title="入庫先ロケーションを選択"
+          locations={locIndex.list}
+          selectedId={locationGid}
+          onSelect={(id, name) => {
+            setAppState((prev) => ({ ...(prev || {}), originLocationIdManual: id || "", originLocationNameManual: name || "" }));
+          }}
+        />
+      </s-stack>
+    ));
+    return () => setChromeRender(setPageOverlay, null);
+  }, [setPageOverlay, pendingTransferForModal, locIndex.list, locationGid, setAppState, handleSelectSingleShipment, handleShowAllShipments]);
+
+  // 一覧本体のみ。s-modal は Extension 側（s-page 外）へ持ち上げる
   return (
-    <>
+    <s-stack gap="none">
       <s-box padding="base">
         <s-stack gap="base">
           {error ? <s-box padding="none"><s-text tone="critical">入庫ID一覧の取得に失敗しました: {error}</s-text></s-box> : null}
@@ -544,45 +593,7 @@ function InboundConditions({
           )}
         </s-stack>
       </s-box>
-      <s-modal id={SHIPMENT_MODE_SELECTION_MODAL_ID} heading="処理方法を選択">
-        {(pendingTransferForModal || pendingTransferForModalRef.current) ? (
-          <s-box padding="base" paddingBlockEnd="none">
-            <s-stack gap="base">
-              <s-stack gap="none">
-                <s-text tone="subdued" size="small">{String((pendingTransferForModal || pendingTransferForModalRef.current)?.name || "").trim() || "入庫ID"}</s-text>
-                <s-text tone="subdued" size="small">出庫元: {String((pendingTransferForModal || pendingTransferForModalRef.current)?.originName || "").trim() || "-"}</s-text>
-                <s-text tone="subdued" size="small">宛先: {String((pendingTransferForModal || pendingTransferForModalRef.current)?.destinationName || "").trim() || "-"}</s-text>
-                <s-text tone="subdued" size="small">配送数: {Array.isArray((pendingTransferForModal || pendingTransferForModalRef.current)?.shipments) ? (pendingTransferForModal || pendingTransferForModalRef.current).shipments.length : 0}</s-text>
-              </s-stack>
-              <s-divider />
-              <s-stack gap="none">
-                <s-box padding="none" style={{ border: "1px solid var(--s-color-border)", borderRadius: 4 }}>
-                  <s-text tone="subdued" size="small">配送ごとに選択：1つの配送を選択して処理します</s-text>
-                </s-box>
-                <s-box padding="none" style={{ border: "1px solid var(--s-color-border)", borderRadius: 4 }}>
-                  <s-text tone="subdued" size="small">まとめて表示：全配送を1画面で表示して処理します</s-text>
-                </s-box>
-              </s-stack>
-              <s-divider />
-              <s-box>
-                <s-button command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={() => { pendingTransferForModalRef.current = null; setPendingTransferForModal(null); }}>戻る</s-button>
-              </s-box>
-            </s-stack>
-          </s-box>
-        ) : null}
-        <s-button slot="secondary-actions" command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={handleSelectSingleShipment}>配送ごとに選択</s-button>
-        <s-button slot="primary-action" tone="success" command="--hide" commandFor={SHIPMENT_MODE_SELECTION_MODAL_ID} onClick={handleShowAllShipments}>まとめて表示</s-button>
-      </s-modal>
-      <LocationSelectModal
-        id={INBOUND_LOCATION_MODAL_ID}
-        title="入庫先ロケーションを選択"
-        locations={locIndex.list}
-        selectedId={locationGid}
-        onSelect={(id, name) => {
-          setAppState((prev) => ({ ...(prev || {}), originLocationIdManual: id || "", originLocationNameManual: name || "" }));
-        }}
-      />
-    </>
+    </s-stack>
   );
 }
 
@@ -604,6 +615,7 @@ function Extension() {
   const [pageOverlay, setPageOverlay] = useState(null);
   const [settings, setSettings] = useState(null);
   const [cameraScannerVisible, setCameraScannerVisible] = useState(false);
+  const { openQtyEditor, QtyEditorProvider, QtyEditorHost } = useInboundQtyEditorController();
   const sessionLocationGid = useOriginLocationGid();
   const locationGid = sessionLocationGid;
   const defaultLocationSetRef = useRef(false);
@@ -769,6 +781,7 @@ function Extension() {
         onOpenShipmentSelection={goInboundShipmentSelection}
         setHeader={setHeader}
         setFooter={setFooter}
+        setPageOverlay={setPageOverlay}
         showImages={showImages}
         liteMode={liteMode}
         onToggleLiteMode={toggleLiteMode}
@@ -823,23 +836,36 @@ function Extension() {
       }
     }
   };
-  // 出庫 DialogHost と同様: s-page の外にオーバーレイ／共有数量モーダルを置く
+  // 出庫と同型: Fragment 直下に s-page、その兄弟として Host / overlay（Provider で page を包まない）
   return (
-    <InboundQtyEditorProvider>
-      <s-page heading="入庫">
-        <s-button slot="secondary-actions" kind="secondary" onClick={handleCameraScanToggle}>
-          {cameraScannerVisible ? "カメラを閉じる" : "カメラスキャン"}
-        </s-button>
-        <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
-          {header ? (<><s-box padding="none">{header}</s-box><s-divider /></>) : null}
-          <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0">
-            <s-box padding="none">{body}</s-box>
-          </s-scroll-box>
-          {footer ? (<><s-divider /><s-box padding="none">{footer}</s-box></>) : null}
-        </s-stack>
-      </s-page>
-      {pageOverlay}
-    </InboundQtyEditorProvider>
+    <>
+      <QtyEditorProvider value={openQtyEditor}>
+        <s-page heading="入庫">
+          <s-button slot="secondary-actions" kind="secondary" onClick={handleCameraScanToggle}>
+            {cameraScannerVisible ? "カメラを閉じる" : "カメラスキャン"}
+          </s-button>
+          <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
+            {header ? (
+              <>
+                <s-box padding="none">{renderChrome(header)}</s-box>
+                <s-divider />
+              </>
+            ) : null}
+            <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0">
+              <s-box padding="none">{body}</s-box>
+            </s-scroll-box>
+            {footer ? (
+              <>
+                <s-divider />
+                <s-box padding="none">{renderChrome(footer)}</s-box>
+              </>
+            ) : null}
+          </s-stack>
+        </s-page>
+      </QtyEditorProvider>
+      {renderChrome(pageOverlay)}
+      <QtyEditorHost />
+    </>
   );
 }
 
