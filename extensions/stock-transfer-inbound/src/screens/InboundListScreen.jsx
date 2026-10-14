@@ -4,6 +4,7 @@
  */
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
 import { getStateSlice, readValue, toUserMessage, getStatusBadgeTone, setChromeRender } from "../inboundHelpers.js";
+import { CONFIRM_RECEIVE_MODAL_ID } from "../InboundModalHost.jsx";
 import { useOriginLocationGid, useDebounce } from "../inboundHooks.js";
 import {
   fetchInventoryShipmentEnriched,
@@ -114,12 +115,6 @@ function formatShipmentLabelLocal(transferName, index) {
   return `#${numPart}-${index + 1}`;
 }
 
-const CONFIRM_MODAL_ONE_LINE_STYLE = {
-  whiteSpace: "nowrap",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-};
-
 // TDZ 対策（Jt エラー）: コンポーネント内の incRow/setRowQty/setExtraQty/incExtra が minify で Jt 等になり参照順でエラーになるためモジュールレベルに配置
 function incRow_(readOnlyRef, toastReadOnlyOnceRef, toastFn, rowsRef, setRows, key, delta, allowOverReceive = true) {
   if (readOnlyRef?.current) return denyEdit_(toastReadOnlyOnceRef, toastFn);
@@ -225,7 +220,7 @@ export function InboundListScreen({
   onAfterReceive,
   setHeader,
   setFooter,
-  setPageOverlay,
+  setConfirmReceive,
 }) {
   const mountedRef = useRef(true);
   const locationGid = useOriginLocationGid() || String(appState?.originLocationIdManual || "").trim() || null;
@@ -249,7 +244,6 @@ export function InboundListScreen({
   const isMultipleMode = inbound.shipmentMode === "multiple" && ids.length > 1;
 
   // REFERENCE 8304-8320: 定数はコンポーネント内で定義（そのままコピー）
-  const CONFIRM_RECEIVE_MODAL_ID = "CONFIRM_RECEIVE_MODAL_ID";
   const WARNING_REASONS = [
     { id: "over_received", label: "予定超過" },
     { id: "unplanned", label: "予定外入荷" },
@@ -2204,65 +2198,37 @@ export function InboundListScreen({
     return () => setChromeRender(setFooter, null);
   }, [setFooter, onBack, footerLine1, footerLine2, footerLine3Extras, hasWarning, canOpenConfirm, receiveSubmitting, shipmentLoading, shipmentError, liteMode, footerStatusLabel, footerStatusTone, readOnly, draftSavedAt]);
 
-  // 確定モーダルは s-scroll-box 内ではなく親の pageOverlay（s-page 外）へ載せる
+  // 確定モーダルは Extension 直下の常設 Host（s-page 外）。model だけ更新し modal ノードは破棄しない。
+  // #29/#30 の setPageOverlay + effect cleanup は明細ロードのたびに remount → e.nodeType の残存経路だった。
   useEffect(() => {
-    if (!setPageOverlay) return undefined;
+    if (!setConfirmReceive) return undefined;
     if (!shipment?.id) {
-      setChromeRender(setPageOverlay, null);
-      return () => setChromeRender(setPageOverlay, null);
+      setConfirmReceive(null);
+      return () => setConfirmReceive(null);
     }
-    setChromeRender(setPageOverlay, () => (
-      <s-modal id={CONFIRM_RECEIVE_MODAL_ID} heading="入庫を確定しますか？">
-        <s-box padding="none" style={{ paddingInline: 8, paddingBlockStart: 8, paddingBlockEnd: 0, maxHeight: "60vh", overflowY: "auto" }}>
-          <s-stack gap="small">
-            <s-stack gap="extra-tight">
-              <s-text size="small" tone="subdued">予定 {plannedTotal} / 入庫 {receiveTotal}</s-text>
-              <s-text size="small" tone="subdued">予定外 {extrasQtyTotal} / 超過 {overQtyTotal} / 不足 {shortageQtyTotal}</s-text>
-              {hasWarning ? <s-text size="small" tone="critical">※ 予定外/超過/不足 があります。</s-text> : null}
-            </s-stack>
-            {shortageRows.length > 0 ? (
-              <s-stack gap="extra-tight">
-                <s-text size="small" tone="critical">不足（{shortageRows.length}件）</s-text>
-                {shortageRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：-{Number(x.shortageQty || 0)}</s-text>)}
-                {shortageRows.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {shortageRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-              </s-stack>
-            ) : null}
-            {extras.length > 0 ? (
-              <s-stack gap="extra-tight">
-                <s-text size="small" tone="critical">予定外（{extras.length}件）</s-text>
-                {extras.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.key} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：{Number(x.receiveQty || 0)}</s-text>)}
-                {extras.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {extras.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-              </s-stack>
-            ) : null}
-            {overRows.length > 0 ? (
-              <s-stack gap="extra-tight">
-                <s-text size="small" tone="critical">超過（{overRows.length}件）</s-text>
-                {overRows.slice(0, DIFF_PREVIEW_LIMIT).map((x) => <s-text key={x.shipmentLineItemId} size="small" tone="subdued" style={CONFIRM_MODAL_ONE_LINE_STYLE}>・{x.title}：+{Number(x.overQty || 0)}</s-text>)}
-                {overRows.length > DIFF_PREVIEW_LIMIT ? <s-text size="small" tone="subdued">…他 {overRows.length - DIFF_PREVIEW_LIMIT} 件</s-text> : null}
-              </s-stack>
-            ) : null}
-            {hasWarning ? (
-              <>
-                <s-divider />
-                <s-stack gap="small">
-                  <s-text size="small" tone="critical">予定外/超過/不足があります。「確認しました」を押してから確定してください。</s-text>
-                  <s-button kind="secondary" size="small" onClick={() => setAckWarning(true)} disabled={ackWarning}>{ackWarning ? "確認済み" : "確認しました"}</s-button>
-                </s-stack>
-              </>
-            ) : null}
-            <s-divider />
-            <s-box>
-              <s-button command="--hide" commandFor={CONFIRM_RECEIVE_MODAL_ID}>戻る</s-button>
-            </s-box>
-          </s-stack>
-        </s-box>
-        <s-button slot="secondary-actions" kind="secondary" tone="critical" disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }} onPress={async () => { const ok = await receiveConfirm({ finalize: false }); if (ok) document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); }}>一部入庫（一時保存）</s-button>
-        <s-button slot="primary-action" tone={hasWarning ? "critical" : "success"} disabled={!canConfirm || !warningReady || receiveSubmitting} onClick={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }} onPress={async () => { const ok = await receiveConfirm({ finalize: true }); if (ok) { document.querySelector(`#${CONFIRM_RECEIVE_MODAL_ID}`)?.hide?.(); onBack?.(); } }}>確定する</s-button>
-      </s-modal>
-    ));
-    return () => setChromeRender(setPageOverlay, null);
+    setConfirmReceive({
+      active: true,
+      plannedTotal,
+      receiveTotal,
+      extrasQtyTotal,
+      overQtyTotal,
+      shortageQtyTotal,
+      hasWarning,
+      shortageRows,
+      extras,
+      overRows,
+      ackWarning,
+      setAckWarning,
+      canConfirm,
+      warningReady,
+      receiveSubmitting,
+      receiveConfirm,
+      onBack,
+      diffPreviewLimit: DIFF_PREVIEW_LIMIT,
+    });
+    return () => setConfirmReceive(null);
   }, [
-    setPageOverlay,
+    setConfirmReceive,
     shipment?.id,
     plannedTotal,
     receiveTotal,
@@ -2455,7 +2421,7 @@ export function InboundListScreen({
         </s-box>
       )}
 
-      {/* 3. 確定モーダルは setPageOverlay 経由で s-page 外（InboundModalHost 側）へ */}
+      {/* 3. 確定モーダルは confirmReceiveHost（s-page 兄弟・常設）へ */}
 
       {/* 4. 予定外入荷エリア（shipment がある場合のみ・REFERENCE と同じ） */}
       {shipment ? (
