@@ -9,12 +9,11 @@ export function ListPageControls({ pageInfo, onPageChange }) {
   const goNext = () => onPageChange?.(Math.min(totalPages, currentPage + 1));
   return (
     <s-stack direction="inline" gap="small" alignItems="center">
-      <s-text tone="subdued" size="small">
+      <s-text type="small" color="subdued">
         {rangeStart}–{rangeEnd} / 全{total}件
       </s-text>
       <s-button
-        kind="secondary"
-        size="slim"
+        variant="secondary"
         disabled={currentPage <= 1}
         onClick={goPrev}
         onPress={goPrev}
@@ -22,8 +21,7 @@ export function ListPageControls({ pageInfo, onPageChange }) {
         前へ
       </s-button>
       <s-button
-        kind="secondary"
-        size="slim"
+        variant="secondary"
         disabled={currentPage >= totalPages}
         onClick={goNext}
         onPress={goNext}
