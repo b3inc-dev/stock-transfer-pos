@@ -48,7 +48,7 @@ Prisma の `InventoryChangeEvent` は **在庫数量の set/adjust（apply-chang
 
 | Shopify | アプリでの使い方 |
 |---------|------------------|
-| **Location** | 出庫元＝POS 現在地、宛先＝ユーザー選択。activate / レベル待ちはロケ単位 |
+| **Location** | 出庫元＝基本はPOSセッション（manualOrigin経路の優先順位は要確認）、宛先＝ユーザー選択。activate / レベル待ちはロケ単位 |
 | **InventoryItem** | 明細のキー。追跡未設定時は `inventoryActivate` |
 | **InventoryLevel** | 出庫前に origin/dest でレベル存在をポーリング（最大約 30s） |
 | **InventoryTransfer** | 出庫の正。250 明細上限のため分割時は **Transfer 複数** |
@@ -94,3 +94,7 @@ POS は Shopify のネイティブ在庫移動 UI と並行して動く。アプ
 - [`SHOPIFY.md`](./SHOPIFY.md)
 - [`DECISIONS.md`](./DECISIONS.md)
 - ルート [`AGENTS.md`](../AGENTS.md)
+
+## 継続開発の手順と課題管理
+
+[開発・mock検証・障害調査手順](DEVELOPMENT.md) と [BACKLOG](BACKLOG.md) を参照する。通常ownerはCodex、GitHubが唯一の正本。Backlogは未実装候補で、依頼範囲外には着手しない。本番反映の承認条件は [DEPLOY.md](DEPLOY.md) に従う。

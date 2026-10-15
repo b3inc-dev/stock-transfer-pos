@@ -168,3 +168,7 @@ API バージョンバンプとセットで別 PR。
 - [`HISTORY_WEBHOOK_METAFIELD_REQUIREMENTS.md`](./HISTORY_WEBHOOK_METAFIELD_REQUIREMENTS.md)
 - [`STOCKTAKE_PHASE_E_WORKSTREAMS.md`](./STOCKTAKE_PHASE_E_WORKSTREAMS.md)
 - [`../AGENTS.md`](../AGENTS.md)
+
+## D7. Codex単独継続とmock検証（2026-10-04）
+
+通常ownerをCodexとし、GitHubを唯一の正本、確認先を依頼元チャットにする。専用branchで調査からPRまで自律実行し、本番操作は明示承認まで停止する。既存他tool所有branchはhandoffなしに編集しない。既存状態遷移を変更せず、通信mockの検証入口を設ける。server/DB排他や実mutationの安全性は未検証である。実装候補と完了条件は [BACKLOG.md](BACKLOG.md)、作業手順は [DEVELOPMENT.md](DEVELOPMENT.md) を正本とし、調査記録は [CODEX_INVENTORY_AUDIT.md](CODEX_INVENTORY_AUDIT.md) に分離する。
