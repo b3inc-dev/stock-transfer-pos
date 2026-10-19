@@ -2343,7 +2343,8 @@ async function getInventoryItemIdsForGroup(
   group: ProductGroup
 ): Promise<string[]> {
   if (group.inventoryItemIds && group.inventoryItemIds.length > 0) {
-    return [...group.inventoryItemIds];
+    // スナップショット（inventoryItemIdsByGroup）に同一 ID を重複させない（POS の追加読み込み・件数表示がずれるため）
+    return [...new Set(group.inventoryItemIds)];
   }
   const ids: string[] = [];
   const collectionIds = group.collectionIds ?? [];

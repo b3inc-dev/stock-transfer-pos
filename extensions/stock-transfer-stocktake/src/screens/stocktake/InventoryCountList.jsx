@@ -23,6 +23,14 @@ import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChan
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 import { reportStocktakeCompleteToApi } from "../../../../common/reportStocktakeComplete.js";
 import { LIST_ITEMS_PER_PAGE } from "../../../../common/listDisplayPagination.js";
+import {
+  dedupeLinesByIdentity,
+  dedupeAdjustEntries,
+  appendUniqueLines,
+  collectInventoryItemIdSet,
+  toNormalizedIdSet,
+  hasPendingSnapshotIds,
+} from "./stocktakeLineIdentity.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -84,9 +92,14 @@ function lineHasQuantityDelta(l) {
   return before !== after;
 }
 
-/** apply-change 用 entries。quantityAfter === quantityBefore は除外（no-op で API/toast を避ける） */
+/**
+ * apply-change 用 entries。quantityAfter === quantityBefore は除外（no-op で API/toast を避ける）
+ * 同一 inventoryItemId の行は差分判定の前に1行へまとめる（実数 max。下書き正規化と同じ規則）。
+ */
 function buildAdjustEntries(linesToAdjust) {
-  return (linesToAdjust || [])
+  const editable = (linesToAdjust || []).filter((l) => l && !l.isReadOnly && l.inventoryItemId);
+  const { lines: uniqueLines, mergedCount } = dedupeLinesByIdentity(editable);
+  const mapped = uniqueLines
     .filter(lineHasQuantityDelta)
     .map((l) => ({
       inventoryItemId: l.inventoryItemId,
@@ -94,8 +107,12 @@ function buildAdjustEntries(linesToAdjust) {
       sku: l.sku ?? undefined,
       quantityAfter: Number(l.actualQuantity),
       quantityBefore: Number(l.currentQuantity),
-    }))
-    .filter((e) => e.quantityAfter !== e.quantityBefore);
+    }));
+  const { entries, duplicateCount } = dedupeAdjustEntries(mapped);
+  if (mergedCount > 0 || duplicateCount > 0) {
+    console.warn("[InventoryCountList] buildAdjustEntries merged duplicate inventoryItemId rows", { mergedCount, duplicateCount });
+  }
+  return entries.filter((e) => e.quantityAfter !== e.quantityBefore);
 }
 
 // groupItems のキー照合（GID と数値 ID の混在で取れない不具合対策。管理画面と POS で明細数が一致するようにする）
@@ -223,8 +240,10 @@ function mergeCountWithStorage(fromStorage, locallyBuilt) {
  * 戻り値は write 用の full counts 配列には使わず、当該 count の更新後オブジェクトとして onAfterConfirm と merge に使用する。
  * 整合性: ...count で id, locationId, productGroupIds, cancelledGroupIds 等を維持。バックグラウンドで read → merge(id 一致で差し替え) → write するため他棚卸は上書きされない。
  */
-function buildUpdatedCountFromLocalState(count, lines, opts) {
+function buildUpdatedCountFromLocalState(count, linesInput, opts) {
   const { isMultipleMode, targetProductGroupIds, productGroupId } = opts || {};
+  // 完了明細（groupItems）に同一商品が2行残らないようにする。まとめて表示は別グループの同一商品を残す
+  const lines = dedupeLinesByIdentity(linesInput, { scopeByGroup: !!isMultipleMode }).lines;
   const parentGroupItems = count?.groupItems && typeof count.groupItems === "object" ? count.groupItems : {};
   const groupItems = { ...parentGroupItems };
   const currentGroupId = productGroupId || (Array.isArray(targetProductGroupIds) && targetProductGroupIds[0]) || null;
@@ -261,7 +280,8 @@ function buildUpdatedCountFromLocalState(count, lines, opts) {
       if (!linesByGroup.has(gid)) linesByGroup.set(gid, []);
       linesByGroup.get(gid).push(l);
     }
-    for (const [groupId, groupLines] of linesByGroup.entries()) {
+    for (const [groupId, groupLinesRaw] of linesByGroup.entries()) {
+      const groupLines = dedupeLinesByIdentity(groupLinesRaw).lines;
       const entry = groupLines.map((l) => ({
         inventoryItemId: l.inventoryItemId,
         variantId: l.variantId,
@@ -529,6 +549,18 @@ export function InventoryCountList({
   const collectionPageInfoRef = useRef(null); // ✅ コレクション経路の「さらに読み込む」用（前回の pageInfo を after で渡す）
   const backgroundInventoryLoadIdRef = useRef(0); // ✅ リスト表示後の在庫バックグラウンド読込で、同一ロードかどうか判定（画面遷移・再読込時は更新しない）
   const loadCompletedRef = useRef(false); // ✅ 初回ロード完了まで「商品がありません」を出さない（コレクション→CSV の順で0件になる瞬間のチラつき防止）
+  // ✅ 追加読み込みの「消費済み」ID（正規化済み）。解決不能（削除済み等）は下書きに保存、取得失敗はこの画面を開いている間だけ
+  const unavailableInventoryItemIdsRef = useRef(new Set());
+  const failedInventoryItemIdsRef = useRef(new Set());
+  const rememberUnavailableIds = (ids) => {
+    for (const n of toNormalizedIdSet(ids)) unavailableInventoryItemIdsRef.current.add(n);
+  };
+  const buildLoadedOrConsumedIdSet = (currentLines) => {
+    const set = collectInventoryItemIdSet(currentLines);
+    for (const n of unavailableInventoryItemIdsRef.current) set.add(n);
+    for (const n of failedInventoryItemIdsRef.current) set.add(n);
+    return set;
+  };
   // ✅ 表示ページネーション（STOCKTAKE_POS_LIST_PERFORMANCE_REQUIREMENTS.md）：1画面あたり LIST_ITEMS_PER_PAGE 件に制限
   const [listPage, setListPage] = useState(1);
   const [groupListPages, setGroupListPages] = useState({});
@@ -788,7 +820,9 @@ export function InventoryCountList({
       lastDraftCountIdRef.current = currentCountId;
       lastDraftLocationIdRef.current = currentLocationId;
       if (!isMultipleMode) lastDraftProductGroupIdRef.current = currentGroupId;
+      unavailableInventoryItemIdsRef.current = new Set();
     }
+    failedInventoryItemIdsRef.current = new Set();
     const groupItemsMap = c?.groupItems && typeof c.groupItems === "object" ? c.groupItems : {};
     // ✅ 完了判定：groupItemsMap[currentGroupId]が存在し、かつ配列の長さが0より大きい場合に完了と判定
     // ✅ キー照合は getGroupItemsByKey で正規化（GID と数値の混在で取れない不具合対策）
@@ -992,7 +1026,8 @@ export function InventoryCountList({
                 const locMatch = savedLocationId === currentLocationId || norm(savedLocationId) === norm(currentLocationId);
                 if (!countMatch || !locMatch) return [];
                 const lines = Array.isArray(raw.lines) ? raw.lines : [];
-                return lines.map((l, i) => ({
+                rememberUnavailableIds(raw.unavailableInventoryItemIds);
+                const restored = lines.map((l, i) => ({
                   id: String(l?.id ?? `${Date.now()}-${i}-${groupId}`),
                   variantId: l?.variantId ?? null,
                   inventoryItemId: l?.inventoryItemId ?? null,
@@ -1007,6 +1042,11 @@ export function InventoryCountList({
                   isExtra: Boolean(l?.isExtra),
                   productGroupId: groupId,
                 })).filter((l) => l.variantId || l.inventoryItemId);
+                const { lines: normalized, mergedCount } = dedupeLinesByIdentity(restored);
+                if (mergedCount > 0) {
+                  console.warn("[InventoryCountList] Draft normalized: merged duplicate rows", { groupId, mergedCount });
+                }
+                return normalized;
               })
             );
             draftLines = allGroupDrafts.flat();
@@ -1155,6 +1195,12 @@ export function InventoryCountList({
                     productGroupId: currentGroupId,
                   }))
                   .filter((l) => l.variantId || l.inventoryItemId);
+                const { lines: normalizedDraft, mergedCount } = dedupeLinesByIdentity(draftLines);
+                if (mergedCount > 0) {
+                  console.warn("[InventoryCountList] Draft normalized: merged duplicate rows", { groupId: currentGroupId, mergedCount });
+                }
+                draftLines = normalizedDraft;
+                rememberUnavailableIds(raw.unavailableInventoryItemIds);
                 if (draftLines.length > 0) {
                   draftLoadedRef.current = true;
                   lastDraftProductGroupIdRef.current = currentGroupId;
@@ -1180,19 +1226,15 @@ export function InventoryCountList({
         initialInventoryItemIdsRef.current = new Set(
           linesToSet.filter((l) => !l.isExtra).map((l) => normalizeInventoryItemIdForExtra(l.inventoryItemId)).filter(Boolean)
         );
-        // ✅ 下書き復元時：「未読込」「さらに読み込む」は「読み込み失敗時」または「全リスト読込前に保存した部分下書きを復元した時」のみ表示
-        // ＝ inventoryItemIdsByGroup があり且つ 総ID数 > 復元行数 のときだけ hasMore を true にする（それ以外は非表示）
-        const idsByGroup = c?.inventoryItemIdsByGroup;
-        let hasMoreRestored = false;
-        if (idsByGroup && typeof idsByGroup === "object") {
-          const groupIds = currentGroupId ? [currentGroupId] : targetProductGroupIds;
-          let totalIds = 0;
-          for (const gid of groupIds) {
-            const key = Object.keys(idsByGroup).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(gid));
-            if (key && Array.isArray(idsByGroup[key])) totalIds += idsByGroup[key].length;
-          }
-          hasMoreRestored = totalIds > linesToSet.length;
-        }
+        // ✅ 下書き復元時：「未読込」「さらに読み込む」は「全リスト読込前に保存した部分下書きを復元した時」のみ表示
+        // ＝ スナップショットの一意 ID − (表示済み ID ∪ 解決不能 ID) が1件以上あるときだけ hasMore を true にする
+        // （件数比較だと削除済み商品・重複 ID・予定外行で誤判定し、追加読み込みで重複行が作られる）
+        const groupIdsForPending = currentGroupId ? [currentGroupId] : targetProductGroupIds;
+        const hasMoreRestored = hasPendingSnapshotIds(
+          c?.inventoryItemIdsByGroup,
+          groupIdsForPending,
+          buildLoadedOrConsumedIdSet(linesToSet)
+        );
         setHasMoreProducts(hasMoreRestored);
         hasMoreProductsRef.current = hasMoreRestored;
         loadCompletedRef.current = true; // ✅ 下書き復元完了後は「商品がありません」を表示してよい
@@ -1295,7 +1337,9 @@ export function InventoryCountList({
         offset: 0,
       });
       const products = Array.isArray(rawProducts) ? rawProducts : (rawProducts?.products ?? []);
-      const hasMore = rawProducts?.hasMore ?? false;
+      rememberUnavailableIds(rawProducts?.unavailableInventoryItemIds);
+      // ✅ 50件バッチの取得失敗は「要読込」で再試行できるよう未読込のまま残す
+      const hasMore = (rawProducts?.hasMore ?? false) || (rawProducts?.failedInventoryItemIds?.length ?? 0) > 0;
       setHasMoreProducts(hasMore);
       collectionPageInfoRef.current = rawProducts?.collectionPageInfo ?? null; // ✅ コレクション経路のさらに読み込む用
       console.log("[InventoryCountList] fetchProductsByGroups result", { productCount: products.length, hasMore });
@@ -1378,22 +1422,31 @@ export function InventoryCountList({
     try {
       const productFirst = Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit ?? 250)));
       // ✅ 追加読み込みも在庫クエリなしで高速に。在庫数は「在庫更新」で一括取得可能
+      // ✅ 件数 offset ではなく「未読込 ID（スナップショット − 表示済み − 解決不能/失敗）」を取得する
+      const failedBefore = failedInventoryItemIdsRef.current.size;
       const raw = await fetchProductsByGroups(targetProductGroupIds, count.locationId, {
         productFirst,
         filterByInventoryLevel: false,
         includeImages: true,
         inventoryItemIdsByGroup: count?.inventoryItemIdsByGroup || null,
         collectionPageInfo: collectionPageInfoRef.current || undefined,
-        offset: lines.length,
+        excludeInventoryItemIds: buildLoadedOrConsumedIdSet(linesRef.current),
         limit: LOAD_PAGE_SIZE,
         timeoutMs: 90000,
       });
       const products = Array.isArray(raw) ? raw : (raw?.products ?? []);
+      rememberUnavailableIds(raw?.unavailableInventoryItemIds);
+      for (const n of toNormalizedIdSet(raw?.failedInventoryItemIds)) failedInventoryItemIdsRef.current.add(n);
+      const failedAdded = failedInventoryItemIdsRef.current.size - failedBefore;
+      if (failedAdded > 0) {
+        toast(`${failedAdded}件の商品を読み込めませんでした。画面を開き直すと再試行します`);
+      }
       const hasMore = raw?.hasMore ?? false;
       setHasMoreProducts(hasMore);
+      hasMoreProductsRef.current = hasMore;
       if (raw?.collectionPageInfo != null) collectionPageInfoRef.current = raw.collectionPageInfo;
       const currentGroupIdForSingle = !isMultipleMode && targetProductGroupIds?.length > 0 ? targetProductGroupIds[0] : null;
-      const newLines = products.map((p, idx) => ({
+      const fetchedLines = products.map((p, idx) => ({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${idx}`,
         variantId: p.variantId,
         inventoryItemId: p.inventoryItemId,
@@ -1408,7 +1461,12 @@ export function InventoryCountList({
         stockLoading: true,
         stockError: null,
       }));
-      setLines((prev) => [...prev, ...newLines]);
+      // ✅ 取得中にスキャン等で追加された行とも重ならないよう、最新の lines に対して重複除去して追加する
+      const { added: newLines, skippedCount } = appendUniqueLines(linesRef.current, fetchedLines);
+      if (skippedCount > 0) {
+        console.warn("[InventoryCountList] loadMore skipped already-loaded rows", { skippedCount });
+      }
+      setLines((prev) => appendUniqueLines(prev, newLines).lines);
       // ✅ 追加した行の在庫もバックグラウンドで一括取得（50件/リクエスト）
       if (count.locationId && newLines.length > 0) {
         const thisLoadId = ++backgroundInventoryLoadIdRef.current;
@@ -1450,7 +1508,7 @@ export function InventoryCountList({
       setLoadingMore(false);
       loadingMoreRef.current = false;
     }
-  }, [count, targetProductGroupIds, lines.length, loadingMore, isMultipleMode, settings?.productList?.initialLimit]);
+  }, [count, targetProductGroupIds, loadingMore, isMultipleMode, settings?.productList?.initialLimit]);
 
   // ✅ まとめて表示：グループごと「読込」ボタンでそのグループの商品だけ読み込む（STOCKTAKE_39GROUPS_UX_IMPROVEMENTS.md）
   const loadGroupProducts = useCallback(async (groupId) => {
@@ -1681,6 +1739,7 @@ export function InventoryCountList({
           countId: count.id,
           locationId: count.locationId,
           lines: minimized,
+          unavailableInventoryItemIds: [...unavailableInventoryItemIdsRef.current],
         };
 
         // ✅ 棚卸IDが複数グループを持つ場合のみグループごとキーで保存（商品グループごと表示・まとめて表示の両方で連動）
@@ -1698,7 +1757,7 @@ export function InventoryCountList({
               locationId: count.locationId,
               productGroupId: groupId,
             });
-            await SHOPIFY.storage.set(key, { ...payload, lines: groupLines });
+            await SHOPIFY.storage.set(key, { ...payload, lines: dedupeLinesByIdentity(groupLines).lines });
           }
         } else {
           // 単一グループの棚卸ID：count 単位のキーで保存（複数棚卸で LEGACY_KEY が上書きされ復元されない不具合対策）
@@ -1707,7 +1766,7 @@ export function InventoryCountList({
             locationId: count.locationId,
             productGroupId: count?.productGroupIds?.[0] ?? count?.productGroupId ?? "_single",
           });
-          await SHOPIFY.storage.set(singleKey, payload);
+          await SHOPIFY.storage.set(singleKey, { ...payload, lines: dedupeLinesByIdentity(minimized).lines });
         }
       } catch (e) {
         console.error("Failed to save inventory count draft:", e);
@@ -2028,8 +2087,7 @@ export function InventoryCountList({
         return false;
       }
 
-      const allItemsToAdjust = editableLines.filter(lineHasQuantityDelta);
-      const entriesAdjust = buildAdjustEntries(allItemsToAdjust);
+      const entriesAdjust = buildAdjustEntries(editableLines);
 
       const locallyBuilt = buildUpdatedCountFromLocalState(count, lines, {
         isMultipleMode: true,
@@ -2130,7 +2188,7 @@ export function InventoryCountList({
 
     setSubmitting(true);
     try {
-      const entriesSingle = buildAdjustEntries(itemsToAdjust);
+      const entriesSingle = buildAdjustEntries(lines);
       // ゼロ差分は apply-change スキップ（在庫調整 toast 抑止）。metafield 完了フローは継続。
       if (entriesSingle.length > 0 && !quantitiesAppliedRef.current) {
         const appEventId = buildStableAppEventId("inventory_count", count.id, currentGroupId);
