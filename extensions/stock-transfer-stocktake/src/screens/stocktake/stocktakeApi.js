@@ -1,4 +1,5 @@
 import { ensureInventoryActivatedWithSkuBarcodeRetry } from "../../../../common/inventoryActivateRetry.js";
+import { normalizeStocktakeId, pendingSnapshotIds, toNormalizedIdSet } from "./stocktakeLineIdentity.js";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -1379,11 +1380,17 @@ function findInventoryItemIdsByGroupKey(inventoryItemIdsByGroup, groupId) {
 // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用して商品をフィルタリング（生成時の状態を保持）
 // ✅ cachedProductGroups を渡すと readProductGroups() をスキップし、まとめて表示で全グループが同じスナップショットを参照して安定表示
 export async function fetchProductsByGroups(productGroupIds, locationId, opts = {}) {
-  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null, offset: optsOffset = 0, limit: optsLimit, collectionPageInfo: optsCollectionPageInfo = null, timeoutMs: optsTimeoutMs } = opts;
+  const { filterByInventoryLevel = true, includeImages = false, inventoryItemIdsByGroup = null, cachedProductGroups = null, offset: optsOffset = 0, limit: optsLimit, collectionPageInfo: optsCollectionPageInfo = null, timeoutMs: optsTimeoutMs, excludeInventoryItemIds: optsExclude = null } = opts;
   const offset = Math.max(0, Number(optsOffset) || 0);
   const limit = optsLimit != null && optsLimit > 0 ? Math.max(1, Math.min(Number(optsLimit), 2000)) : null;
+  /**
+   * 追加読み込み（ID 集合ベース）：表示済み・解決不能・取得失敗の ID を渡すと、スナップショット経路は「未読込 ID」だけを取得し、
+   * コレクション経路は cursor の次ページから exclude に無いものだけを返す。offset > 0（旧方式）も追加読み込みとして扱う。
+   */
+  const excludeSet = optsExclude != null ? toNormalizedIdSet(optsExclude) : null;
+  const isLoadMore = offset > 0 || excludeSet != null;
   /** タイムアウト：初回60秒・追加読み込み90秒（39グループ・約5600SKU等で20秒だと切れるため） */
-  const timeoutMs = Number.isFinite(Number(optsTimeoutMs)) ? Number(optsTimeoutMs) : (offset > 0 ? 90000 : 60000);
+  const timeoutMs = Number.isFinite(Number(optsTimeoutMs)) ? Number(optsTimeoutMs) : (isLoadMore ? 90000 : 60000);
   /** コレクション経路の「さらに読み込む」用。前回レスポンスの pageInfo を渡すと after で次ページを取得する */
   const collectionPageInfo = optsCollectionPageInfo && typeof optsCollectionPageInfo === "object" ? optsCollectionPageInfo : null;
   const rawGroups = (Array.isArray(cachedProductGroups) && cachedProductGroups.length > 0)
@@ -1404,6 +1411,9 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
   /** コレクション経路用：各コレクションの pageInfo（さらに読み込むでクライアントに返し、次回 after で渡す） */
   let collectionPageInfoResult = {};
   const allVariants = [];
+  /** スナップショット経路で variant を解決できなかった ID / 50件バッチの取得に失敗した ID */
+  const unavailableSavedIds = [];
+  const failedSavedIds = [];
   for (const group of targetGroups) {
     // ✅ inventoryItemIdsByGroupが指定されている場合は、それを使用（生成時の状態を保持）
     // ✅ キー照合を正規化して行い、管理画面とPOSでID形式が違っても取得できるようにする
@@ -1415,11 +1425,14 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
     if (idsToUse && Array.isArray(idsToUse) && idsToUse.length > 0) {
       // ✅ 表示件数：limit が明示されていればその範囲まで取得（単一グループ全件用）。未指定時は effectiveFirst でまとめて表示の負荷を抑える
       // ✅ 初回は limit 指定時は limit まで、未指定は effectiveFirst 件まで。さらに読み込むは offset + limit で続きを取得
-      const pageSize = offset === 0
+      const pageSize = !isLoadMore
         ? (limit != null && limit > 0 ? Math.min(limit, 2000) : effectiveFirst)
         : (limit ?? effectiveFirst);
-      const idsToFetch = idsToUse.slice(offset, offset + pageSize);
-      if (idsToUse.length > offset + idsToFetch.length) hasMoreFromSavedIds = true;
+      // ✅ スナップショット内の重複 ID は1件として扱う。exclude 指定時は未読込 ID だけを先頭から取得
+      const pendingIds = pendingSnapshotIds(idsToUse, excludeSet ?? new Set());
+      const startIdx = excludeSet != null ? 0 : offset;
+      const idsToFetch = pendingIds.slice(startIdx, startIdx + pageSize);
+      if (pendingIds.length > startIdx + idsToFetch.length) hasMoreFromSavedIds = true;
       usedSavedIdsPath = true;
       const batchSize = 50;
       const groupVariants = []; // このグループ分だけ貯め、skus順（idsToFetch順）でソートしてから allVariants に追加
@@ -1465,8 +1478,10 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
         try {
           const data = await graphql(gql, { ids: batch }, { timeoutMs });
           const nodes = data?.nodes ?? [];
+          const resolvedInBatch = new Set();
           for (const node of nodes) {
             if (node?.variant && node.id) {
+              resolvedInBatch.add(normalizeStocktakeId(node.id));
               const v = node.variant;
               const p = v.product || {};
               groupVariants.push({
@@ -1480,9 +1495,13 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
               });
             }
           }
+          // ✅ variant が null（削除・アーカイブ等）の ID は解決不能として返し、クライアントで「消費済み」にする
+          for (const id of batch) {
+            if (!resolvedInBatch.has(normalizeStocktakeId(id))) unavailableSavedIds.push(id);
+          }
         } catch (e) {
           console.error(`InventoryItems fetch error for group ${group.id} (batch ${i}-${i + batch.length}):`, e);
-          // エラー時は通常の処理にフォールバック（コレクションから取得）
+          failedSavedIds.push(...batch);
         }
       }
       // ✅ 表示は常に skus の並び（idsToFetch＝inventoryItemIdsByGroup の順）に合わせる
@@ -1497,7 +1516,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
     const productFirst = Math.max(1, Math.min(250, Number(opts?.productFirst ?? opts?.initialLimit ?? 250)));
     for (const collectionId of group.collectionIds) {
       // ✅ さらに読み込む時：このコレクションに cursor がある場合のみ次ページを取得
-      if (offset > 0 && collectionPageInfo) {
+      if (isLoadMore && collectionPageInfo) {
         const pageInfo = collectionPageInfo[collectionId];
         if (!pageInfo?.hasNextPage || !pageInfo?.endCursor) continue;
         const gqlWithPageInfo = includeImages
@@ -1573,7 +1592,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
         }
         continue;
       }
-      if (offset > 0) continue; // ✅ さらに読み込む時でこのコレクションに cursor がない場合はスキップ（初回取得で重複させない）
+      if (isLoadMore) continue; // ✅ さらに読み込む時でこのコレクションに cursor がない場合はスキップ（初回取得で重複させない）
 
       // ✅ 初回取得：pageInfo を取得して返し、さらに読み込むで after に渡す
       const collectionConfig = group.collectionConfigs?.find((c) => c.collectionId === collectionId);
@@ -1652,15 +1671,17 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
 
   // 重複除去
   const seen = new Set();
+  // ✅ 呼び出し間の重複（前ページで表示済み）も exclude で除く。キーは GID/数値を同一視して正規化
   let uniqueVariants = allVariants.filter((v) => {
-    const key = v.inventoryItemId;
+    const key = normalizeStocktakeId(v.inventoryItemId) || v.inventoryItemId;
     if (seen.has(key)) return false;
     seen.add(key);
+    if (excludeSet != null && excludeSet.has(key)) return false;
     return true;
   });
 
   // ✅ コレクション経路で「さらに読み込む」時は allVariants が「次ページ分だけ」なので offset でスライスしない
-  const usedCollectionCursorPath = offset > 0 && collectionPageInfo && Object.keys(collectionPageInfoResult).length > 0;
+  const usedCollectionCursorPath = isLoadMore && collectionPageInfo && Object.keys(collectionPageInfoResult).length > 0;
   const hasMoreFromCollection = Object.values(collectionPageInfoResult).some((p) => p.hasNextPage);
   const variantsToProcess = usedSavedIdsPath
     ? uniqueVariants
@@ -1668,10 +1689,11 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
       ? (limit != null ? uniqueVariants.slice(0, limit) : uniqueVariants)
       : (limit != null ? uniqueVariants.slice(offset, offset + limit) : uniqueVariants);
   // ✅ 初回(offset=0)で「1ページ分(effectiveFirst)以上」返している場合は hasMore を true にし、上限数以上あるのにさらに読み込みが出ない事態を防ぐ
+  // ✅ スナップショット経路の hasMore は ID 集合差（hasMoreFromSavedIds）で決まるため、件数による補正はコレクション経路の初回のみ
   let hasMore = limit != null
     ? (uniqueVariants.length > offset + limit || hasMoreFromSavedIds || hasMoreFromCollection)
     : false;
-  if (limit != null && offset === 0 && uniqueVariants.length >= effectiveFirst && !hasMore) {
+  if (limit != null && !isLoadMore && !usedSavedIdsPath && uniqueVariants.length >= effectiveFirst && !hasMore) {
     hasMore = true;
   }
   const mergedCollectionPageInfo = collectionPageInfo
@@ -1690,7 +1712,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
       })
       .filter((r) => r != null);
     if (limit != null) {
-      const out = { products: variantsWithInventory, hasMore };
+      const out = { products: variantsWithInventory, hasMore, unavailableInventoryItemIds: unavailableSavedIds, failedInventoryItemIds: failedSavedIds };
       if (Object.keys(mergedCollectionPageInfo).length > 0) out.collectionPageInfo = mergedCollectionPageInfo;
       return out;
     }
@@ -1698,7 +1720,7 @@ export async function fetchProductsByGroups(productGroupIds, locationId, opts = 
   }
 
   if (limit != null) {
-    const out = { products: variantsToProcess, hasMore };
+    const out = { products: variantsToProcess, hasMore, unavailableInventoryItemIds: unavailableSavedIds, failedInventoryItemIds: failedSavedIds };
     if (Object.keys(mergedCollectionPageInfo).length > 0) out.collectionPageInfo = mergedCollectionPageInfo;
     return out;
   }
