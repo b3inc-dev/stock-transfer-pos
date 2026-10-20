@@ -155,12 +155,14 @@ model InventoryCountDocument {
   locationName  String?
   payloadJson   String?  // 小規模時の全文 JSON（大きい場合は chunks へ）
   version       Int      @default(1)
-  source        String   @default("db") // db | metafield_mirror
+  source        String   @default("db") // db | metafield_mirror | db_v2（payloadJson は groupItems を除いた本文、グループ結果は InventoryCountGroupResult）
+  listJson      String?  // 一覧用の軽量 JSON（db_v2 のみ）
   completedAt   DateTime?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  chunks InventoryCountDocumentChunk[]
+  chunks       InventoryCountDocumentChunk[]
+  groupResults InventoryCountGroupResult[]
 
   @@unique([shop, countId])
   @@index([shop, status])
@@ -178,4 +180,48 @@ model InventoryCountDocumentChunk {
 
   @@unique([documentId, chunkIndex])
   @@index([documentId])
+}
+
+// 棚卸 1 件 × 商品グループ 1 件の確定結果（db_v2）。groupKey は数値部分に正規化した ID
+model InventoryCountGroupResult {
+  id         String   @id @default(cuid())
+  documentId String
+  document   InventoryCountDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  shop       String
+  countId    String
+  groupId    String
+  groupKey   String
+  itemsJson  String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([documentId, groupKey])
+  @@index([shop, countId])
+}
+
+// 確定の再試行用バックアップ（棚卸ごと）。ショップ 1 キーだった pending_complete_v1 の置き換え
+model StocktakePendingComplete {
+  id          String   @id @default(cuid())
+  shop        String
+  countId     String
+  payloadJson String
+  savedAt     DateTime @default(now())
+
+  @@unique([shop, countId])
+  @@index([shop, savedAt])
+}
+
+// 棚卸保存先の移行状態（ショップごと）
+model StocktakeStorageState {
+  shop                  String    @id
+  modeOverride          String?   // legacy | dual | db（null は環境変数 STOCKTAKE_STORAGE_MODE）
+  backfilledAt          DateTime?
+  backfillLegacyVersion Int?
+  mirrorDirty           Boolean   @default(false)
+  mirrorSeq             Int       @default(0)
+  mirroredAt            DateTime?
+  mirroredLegacyVersion Int?
+  lastLegacyIngestAt    DateTime?
+  lastError             String?
+  updatedAt             DateTime  @updatedAt
 }
