@@ -5,16 +5,20 @@
 import {
   readInventoryCountsChunked,
   writeInventoryCountsChunked,
+  getInventoryCountsVersion,
   normalizeIdForMatch,
   type InventoryCount,
 } from "../routes/app.inventory-count";
 import {
   interpretMetafieldsSetWriteResult,
   mergePendingCompleteIntoCounts,
+  isInventoryCountsVersionConflict,
 } from "./stocktake-pending-complete-merge";
 
 export const STOCKTAKE_NS = "stock_transfer_pos";
 export const PENDING_COMPLETE_KEY = "pending_complete_v1";
+/** 完了書込の楽観ロック競合時に読み直す最大回数（同時刻に複数店舗が確定するケース） */
+const COMPLETE_CAS_MAX_ATTEMPTS = 3;
 
 export type PendingCompleteItemEntry = {
   inventoryItemId: string;
@@ -128,38 +132,56 @@ export async function applyPendingCompleteFromBackup(
     return { ok: false, error: "バックアップが不正です", countId: countId || "" };
   }
 
-  let inventoryCounts: InventoryCount[];
-  try {
-    // shop は呼び出し側で dual-read したい場合に別途渡す。ここでは metafield 正本＋バックアップ適用。
-    inventoryCounts = await readInventoryCountsChunked(admin);
-  } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e), countId };
-  }
+  let status: "completed" | "in_progress" | undefined;
+  let completedAt: string | undefined;
+  let savedCount: InventoryCount | undefined;
+  // write 内のフル再読込（全チャンク）を省くため、直前の read を existingCounts として渡す。
+  // 代わりに read 前のバージョンで楽観ロックし、他端末の書込と競合したら読み直してマージし直す。
+  for (let casAttempt = 1; casAttempt <= COMPLETE_CAS_MAX_ATTEMPTS; casAttempt++) {
+    const expectedVersion = await getInventoryCountsVersion(admin);
+    let inventoryCounts: InventoryCount[];
+    try {
+      // shop は呼び出し側で dual-read したい場合に別途渡す。ここでは metafield 正本＋バックアップ適用。
+      inventoryCounts = await readInventoryCountsChunked(admin);
+    } catch (e: unknown) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e), countId };
+    }
 
-  const count = inventoryCounts.find(
-    (c) => String(c.id) === String(countId) || normalizeIdForMatch((c as { id?: string }).id) === normalizeIdForMatch(countId)
-  );
-  if (!count) {
-    return { ok: false, error: "棚卸が見つかりません", countId };
-  }
+    const count = inventoryCounts.find(
+      (c) => String(c.id) === String(countId) || normalizeIdForMatch((c as { id?: string }).id) === normalizeIdForMatch(countId)
+    );
+    if (!count) {
+      return { ok: false, error: "棚卸が見つかりません", countId };
+    }
 
-  const { updatedCounts, savedCount, status, completedAt } = mergePendingCompleteIntoCounts({
-    inventoryCounts: inventoryCounts as InventoryCount[],
-    countId,
-    completedGroups,
-  });
-  if (!savedCount) {
-    return { ok: false, error: "棚卸が見つかりません", countId };
-  }
+    const merged = mergePendingCompleteIntoCounts({
+      inventoryCounts: inventoryCounts as InventoryCount[],
+      countId,
+      completedGroups,
+    });
+    if (!merged.savedCount) {
+      return { ok: false, error: "棚卸が見つかりません", countId };
+    }
 
-  const { userErrors } = await writeInventoryCountsChunked(
-    admin,
-    updatedCounts as InventoryCount[],
-    ownerId
-  );
-  if (userErrors.length > 0) {
-    const message = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "保存に失敗しました";
-    return { ok: false, error: message, countId };
+    const { userErrors } = await writeInventoryCountsChunked(
+      admin,
+      merged.updatedCounts as InventoryCount[],
+      ownerId,
+      expectedVersion,
+      { existingCounts: inventoryCounts as InventoryCount[] }
+    );
+    if (userErrors.length > 0) {
+      const message = userErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "保存に失敗しました";
+      if (isInventoryCountsVersionConflict(message) && casAttempt < COMPLETE_CAS_MAX_ATTEMPTS) {
+        console.warn(`[pending-complete] version conflict, re-reading (attempt ${casAttempt}/${COMPLETE_CAS_MAX_ATTEMPTS})`);
+        continue;
+      }
+      return { ok: false, error: message, countId };
+    }
+    status = merged.status;
+    completedAt = merged.completedAt;
+    savedCount = merged.savedCount as InventoryCount;
+    break;
   }
 
   const clearResult = await writePendingCompleteBackup(admin, ownerId, null);
@@ -172,6 +194,6 @@ export async function applyPendingCompleteFromBackup(
     countId,
     status,
     completedAt,
-    savedCount: savedCount as InventoryCount,
+    savedCount,
   };
 }

@@ -1862,7 +1862,7 @@ async function readListMainKeyOnly(
 const VERSION_QUERY_INTERNAL = `#graphql query Version { currentAppInstallation { metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_VERSION_KEY}") { value } } }`;
 
 /** 楽観ロック用。棚卸一覧のバージョン（保存のたびに +1）を取得。無ければ 1。session を渡すと direct fetch で syntax error を避ける（修復用） */
-async function getInventoryCountsVersion(
+export async function getInventoryCountsVersion(
   admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
   session?: { shop?: string; accessToken?: string } | null
 ): Promise<number> {

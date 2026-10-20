@@ -96,3 +96,12 @@ describe("mergePendingCompleteIntoCounts savedCount", () => {
     assert.equal(r.savedCount.status, "in_progress");
   });
 });
+
+describe("isInventoryCountsVersionConflict", () => {
+  it("detects writeInventoryCountsChunked expectedVersion mismatch", async () => {
+    const { isInventoryCountsVersionConflict } = await import("../app/utils/stocktake-pending-complete-merge.ts");
+    assert.equal(isInventoryCountsVersionConflict("他の操作でデータが更新されています。画面を再読み込みしてから再度お試しください。"), true);
+    assert.equal(isInventoryCountsVersionConflict("保存に失敗しました"), false);
+    assert.equal(isInventoryCountsVersionConflict(undefined), false);
+  });
+});
