@@ -31,6 +31,12 @@ import {
   toNormalizedIdSet,
   hasPendingSnapshotIds,
 } from "./stocktakeLineIdentity.js";
+import {
+  confirmedGroupIdsForConfirm,
+  planDraftClear,
+  areGroupsCompletedInCount,
+  COMPLETE_VERIFY_DELAYS_MS,
+} from "./stocktakeConfirmRecovery.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -391,25 +397,20 @@ function inventoryCountDraftKey({ countId, locationId, productGroupId }) {
   return `${INVENTORY_COUNT_DRAFT_PREFIX}:${c}:${l}:${g}`;
 }
 
-async function clearAllInventoryCountDraftsForCount({ countId, locationId, productGroupIds }) {
-  const ids = Array.isArray(productGroupIds) ? productGroupIds : [];
+/** 確定に成功したグループの下書きだけを削除する（同じ棚卸の入力途中の他グループは残す） */
+async function clearConfirmedInventoryCountDrafts({ countId, locationId, countProductGroupIds, confirmedGroupIds }) {
   const c = String(countId || "").trim();
   const l = String(locationId || "").trim();
   try {
-    if (!SHOPIFY?.storage?.delete) return;
-    if (c && l && ids.length > 1) {
-      const keys = ids.map((gid) => inventoryCountDraftKey({ countId: c, locationId: l, productGroupId: gid }));
-      for (const key of keys) {
-        await SHOPIFY.storage.delete(key);
+    if (!SHOPIFY?.storage?.delete || !c || !l) return;
+    const plan = planDraftClear({ countProductGroupIds, confirmedGroupIds });
+    if (plan.mode === "perGroup") {
+      for (const gid of plan.groupIds) {
+        await SHOPIFY.storage.delete(inventoryCountDraftKey({ countId: c, locationId: l, productGroupId: gid }));
       }
-    } else if (c && l && ids.length <= 1) {
+    } else {
       // 単一グループ：この棚卸ID用の count 単位キーと LEGACY_KEY（後方互換）を削除
-      const singleKey = inventoryCountDraftKeySingleGroup({
-        countId: c,
-        locationId: l,
-        productGroupId: ids[0] ?? "_single",
-      });
-      await SHOPIFY.storage.delete(singleKey);
+      await SHOPIFY.storage.delete(inventoryCountDraftKeySingleGroup({ countId: c, locationId: l, productGroupId: plan.groupId }));
       await SHOPIFY.storage.delete(INVENTORY_COUNT_DRAFT_LEGACY_KEY);
     }
   } catch (e) {
@@ -2030,6 +2031,32 @@ export function InventoryCountList({
     toast((message || defaultMsg) + backupHint);
   }, [count?.id]);
 
+  // 完了報告の応答が届かなかった（uncertain）ときは、サーバ正本を読み直して確定済みなら成功として扱う
+  const reportCompleteVerified = useCallback(async (payload, confirmedGroupIds) => {
+    const result = await reportStocktakeCompleteToApi(payload);
+    const verifyCountId = payload?.countId || count?.id;
+    if (result.ok || !result.uncertain || !verifyCountId || !confirmedGroupIds?.length) return result;
+    for (const waitMs of COMPLETE_VERIFY_DELAYS_MS) {
+      await new Promise((r) => setTimeout(r, waitMs));
+      try {
+        const fresh = await readInventoryCountById(verifyCountId);
+        if (areGroupsCompletedInCount(fresh, confirmedGroupIds)) {
+          console.warn("[InventoryCountList] complete verified after uncertain response", { countId: verifyCountId, confirmedGroupIds });
+          return {
+            ok: true,
+            status: fresh?.status === "completed" ? "completed" : "in_progress",
+            completedAt: fresh?.completedAt,
+            countId: verifyCountId,
+            verifiedAfterUncertain: true,
+          };
+        }
+      } catch (e) {
+        console.warn("[InventoryCountList] complete verify read failed:", e?.message ?? e);
+      }
+    }
+    return result;
+  }, [count?.id]);
+
   const handleComplete = useCallback(async () => {
     if (submitLockRef.current) return false;
     submitLockRef.current = true;
@@ -2044,8 +2071,14 @@ export function InventoryCountList({
       setSubmitting(true);
       try {
         const payload = pendingCompletePayloadRef.current;
+        const retryConfirmedGroupIds = confirmedGroupIdsForConfirm({
+          isMultipleMode,
+          currentGroupId: productGroupId || (targetProductGroupIds && targetProductGroupIds[0]) || null,
+          targetProductGroupIds,
+          payload,
+        });
         const result = payload
-          ? await reportStocktakeCompleteToApi(payload)
+          ? await reportCompleteVerified(payload, retryConfirmedGroupIds)
           : await reportStocktakeCompleteToApi({ countId: metafieldRetryCountId || count.id, retryOnly: true });
         if (result.ok) {
           setNeedMetafieldRetry(false);
@@ -2062,10 +2095,11 @@ export function InventoryCountList({
           };
           toast(nextStatus === "completed" ? "棚卸を完了しました" : "確定を反映しました");
           onAfterConfirm?.(nextCount);
-          clearAllInventoryCountDraftsForCount({
+          clearConfirmedInventoryCountDrafts({
             countId: count.id,
             locationId: count.locationId,
-            productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+            countProductGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+            confirmedGroupIds: retryConfirmedGroupIds,
           }).catch((e) => console.error("Failed to clear inventory count draft:", e));
           return true;
         }
@@ -2095,6 +2129,12 @@ export function InventoryCountList({
         productGroupId,
       });
       const payload = buildCompletedGroupsPayload(count, locallyBuilt);
+      const multiConfirmedGroupIds = confirmedGroupIdsForConfirm({
+        isMultipleMode: true,
+        currentGroupId: null,
+        targetProductGroupIds,
+        payload,
+      });
 
       setSubmitting(true);
       try {
@@ -2111,6 +2151,7 @@ export function InventoryCountList({
               sourceId: count.id,
               referenceDocumentUri: count.id,
               entries: entriesAdjust,
+              recoverUncertain: true,
             });
             if (applyResult?.invalidCount > 0) {
               toast(`⚠️ ${applyResult.invalidCount}件の商品が不正なIDのため除外されました`);
@@ -2126,7 +2167,7 @@ export function InventoryCountList({
           }
         }
 
-        const result = await reportStocktakeCompleteToApi(payload);
+        const result = await reportCompleteVerified(payload, multiConfirmedGroupIds);
         if (!result.ok) {
           if (result.needMetafieldRetry || quantitiesAppliedRef.current) {
             enterMetafieldRetryState(count.id, payload, result.error, result.backupPersisted);
@@ -2153,10 +2194,11 @@ export function InventoryCountList({
           toast(confirmed.status === "completed" ? "棚卸を完了しました" : "確定を反映しました");
           onAfterConfirm?.(confirmed);
         }
-        clearAllInventoryCountDraftsForCount({
+        clearConfirmedInventoryCountDrafts({
           countId: count.id,
           locationId: count.locationId,
-          productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+          countProductGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+          confirmedGroupIds: multiConfirmedGroupIds,
         }).catch((e) => console.error("Failed to clear inventory count draft:", e));
         setSubmitting(false);
         return true;
@@ -2201,6 +2243,7 @@ export function InventoryCountList({
             sourceId: count.id,
             referenceDocumentUri: count.id,
             entries: entriesSingle,
+            recoverUncertain: true,
           });
           if (applyResult?.invalidCount > 0) {
             toast(`⚠️ ${applyResult.invalidCount}件の商品が不正なIDのため除外されました`);
@@ -2216,7 +2259,7 @@ export function InventoryCountList({
         }
       }
 
-      const resultResult = await reportStocktakeCompleteToApi(payloadResult);
+      const resultResult = await reportCompleteVerified(payloadResult, [currentGroupId]);
       if (!resultResult.ok) {
         if (resultResult.needMetafieldRetry || quantitiesAppliedRef.current) {
           enterMetafieldRetryState(count.id, payloadResult, resultResult.error, resultResult.backupPersisted);
@@ -2247,10 +2290,11 @@ export function InventoryCountList({
         toast(confirmed.status === "completed" ? "棚卸を完了しました" : "確定を反映しました");
         onAfterConfirm?.(confirmed);
       }
-      clearAllInventoryCountDraftsForCount({
+      clearConfirmedInventoryCountDrafts({
         countId: count.id,
         locationId: count.locationId,
-        productGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+        countProductGroupIds: count?.productGroupIds || targetProductGroupIds || [],
+        confirmedGroupIds: [currentGroupId],
       }).catch((e) => console.error("Failed to clear inventory count draft:", e));
       setSubmitting(false);
       return true;
@@ -2278,6 +2322,7 @@ export function InventoryCountList({
     needMetafieldRetry,
     metafieldRetryCountId,
     enterMetafieldRetryState,
+    reportCompleteVerified,
     isMultipleMode,
     locationName,
   ]);
