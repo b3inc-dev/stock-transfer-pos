@@ -5,11 +5,8 @@ import {
   getCurrentQuantity,
   getCurrentQuantitiesBulk,
   searchVariants,
-  readInventoryCounts,
-  readInventoryCountsRaw,
+  startInventoryCount,
   readInventoryCountById,
-  writeInventoryCounts,
-  getInventoryCountsVersion,
   getLocationName,
   getProductGroupName,
   readProductGroups,
@@ -650,13 +647,7 @@ export function InventoryCountList({
         }
         if (fetched.status === "draft") {
           try {
-            const allCounts = await readInventoryCounts();
-            const countIdStr = String(count?.id ?? "");
-            const updated = (Array.isArray(allCounts) ? allCounts : []).map((c) =>
-              String(c?.id ?? "") === countIdStr ? { ...c, status: "in_progress" } : c
-            );
-            const version = await getInventoryCountsVersion();
-            await writeInventoryCounts(updated, version);
+            await startInventoryCount(count?.id);
             fetched = { ...fetched, status: "in_progress" };
           } catch (e) {
             console.error("Failed to update count status:", e);
