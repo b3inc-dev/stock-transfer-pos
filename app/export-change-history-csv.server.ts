@@ -32,6 +32,7 @@ const ACTIVITY_LABELS: Record<string, string> = {
   outbound_transfer: "出庫",
   loss_entry: "ロス",
   inventory_count: "棚卸",
+  adjustment: "調整",
   purchase_entry: "仕入",
   purchase_cancel: "仕入",
   sale: "売上",
