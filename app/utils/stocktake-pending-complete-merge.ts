@@ -145,3 +145,8 @@ export function mergePendingCompleteIntoCounts(args: {
 
   return { updatedCounts, savedCount, status, completedAt };
 }
+
+/** writeInventoryCountsChunked の楽観ロック競合（expectedVersion 不一致）エラーか */
+export function isInventoryCountsVersionConflict(message: string | null | undefined): boolean {
+  return /他の操作でデータが更新されています/.test(String(message ?? ""));
+}

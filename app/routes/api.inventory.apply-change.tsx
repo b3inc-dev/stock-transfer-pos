@@ -207,6 +207,38 @@ export async function action({ request }: ActionFunctionArgs) {
     const referenceDocumentUri = body.referenceDocumentUri != null ? String(body.referenceDocumentUri).trim() : null;
     const entriesRaw = Array.isArray(body.entries) ? body.entries : [];
 
+    // 状態照会のみ（POS が応答不明時に同一 appEventId の結果を確認する）。在庫・DB は変更しない。
+    if (body.statusOnly === true) {
+      if (!appEventId) {
+        return new Response(JSON.stringify({ ok: false, error: "Missing appEventId" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        });
+      }
+      const ev = await db.inventoryChangeEvent.findUnique({
+        where: { appEventId },
+        select: { id: true, shop: true, status: true, errorSummary: true, updatedAt: true, _count: { select: { lines: true } } },
+      });
+      const found = Boolean(ev && ev.shop === shop);
+      return new Response(
+        JSON.stringify(
+          found && ev
+            ? {
+                ok: true,
+                found: true,
+                appEventId,
+                eventId: ev.id,
+                status: ev.status,
+                errorSummary: ev.errorSummary,
+                updatedAt: ev.updatedAt,
+                lineCount: ev._count.lines,
+              }
+            : { ok: true, found: false, appEventId }
+        ),
+        { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+
     if (!appEventId || !activity || !locationId) {
       return new Response(
         JSON.stringify({ ok: false, error: "Missing appEventId, activity, or locationId" }),
