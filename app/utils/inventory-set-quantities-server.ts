@@ -97,7 +97,6 @@ async function fetchChunkQuantities(
 ): Promise<{ quantities: Map<string, number>; failedGids: string[] }> {
   const quantities = new Map<string, number>();
   const failedGids: string[] = [];
-  // 1件ずつ取得（既存の fetchCurrentQuantityServer と同じ方式）
   for (const itemGid of inventoryItemGids) {
     try {
       const { json } = await graphqlWithRetry(admin, `#graphql
@@ -114,15 +113,44 @@ async function fetchChunkQuantities(
       if (q?.quantity != null) {
         quantities.set(itemGid, Number(q.quantity));
       } else {
-        // inventoryLevel が未設定のアイテム（ロケーションに紐付いていない）は 0 として扱う
         quantities.set(itemGid, 0);
       }
     } catch {
-      // ネットワーク障害等で取得不能な場合はロールバック不可として扱う
       failedGids.push(itemGid);
     }
   }
   return { quantities, failedGids };
+}
+
+/** Shopify changeFromQuantity CAS 不一致（同時売上/返品等）。message + code を見る。 */
+export function isChangeFromQuantityStaleError(
+  errorSummary: string | undefined,
+  userErrors?: Array<{ message?: string; code?: string | null }>
+): boolean {
+  if (Array.isArray(userErrors)) {
+    for (const e of userErrors) {
+      // code は CHANGE_FROM_QUANTITY* のみ（裸 STALE / COMPARE は誤検知しやすい）
+      const code = String(e?.code ?? "").toUpperCase();
+      if (code.includes("CHANGE_FROM_QUANTITY")) {
+        return true;
+      }
+      const m = String(e?.message ?? "").toLowerCase();
+      if (
+        m.includes("changefromquantity") ||
+        m.includes("change_from_quantity") ||
+        m.includes("change from quantity")
+      ) {
+        return true;
+      }
+    }
+  }
+  if (!errorSummary) return false;
+  const s = errorSummary.toLowerCase();
+  return (
+    s.includes("changefromquantity") ||
+    s.includes("change_from_quantity") ||
+    s.includes("change from quantity")
+  );
 }
 
 export type SetInventoryQuantitiesResult = {
@@ -141,25 +169,208 @@ export type SetInventoryQuantitiesResult = {
   appliedInventoryItemIds?: string[];
   /** 失敗したチャンク index（0-based）。部分失敗時のみ */
   failedChunkIndex?: number;
+  /** 直近 mutation の userErrors（stale code 判定用。無い場合あり） */
+  userErrors?: Array<{ message?: string; code?: string | null }>;
 };
+
+export type SetInventoryQuantityItem = {
+  inventoryItemId: string;
+  quantity: number;
+  /**
+   * Shopify concurrency CAS（Admin API 2026-01+）。
+   * - number: 期待する更新前 available
+   * - null / 省略: 意図的オプトアウト（比較スキップ）
+   * `options.casFromLiveSnapshot` 時はチャンク直前の再読取値で上書きする
+   */
+  changeFromQuantity?: number | null;
+};
+
+export type SetInventoryQuantitiesOptions = {
+  /**
+   * activate 後の絶対値 set（棚卸・調整）向け。
+   * チャンク適用直前に読んだ available を changeFromQuantity に使い、
+   * すでに目標値と一致する行は mutation から除外する。
+   * スナップショット取得失敗時は null オプトアウトへ落とさず fail-closed。
+   * ロールバックも再読取 CAS（書いた数量と live が一致する行のみ戻す）。
+   */
+  casFromLiveSnapshot?: boolean;
+};
+
+type BeforeSnapshot = {
+  chunkIndex: number;
+  /** 実際に書いた行のみ。quantity=適用前, writtenQuantity=適用した目標値 */
+  quantities: Array<{ inventoryItemId: string; quantity: number; writtenQuantity: number }>;
+  canRollback: boolean;
+};
+
+const SET_MUTATION = `#graphql
+  mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+    inventorySetQuantities(input: $input) {
+      inventoryAdjustmentGroup { id }
+      userErrors { field message code }
+    }
+  }
+`;
+
+async function mutateSetQuantities(
+  admin: { graphql: AdminGraphql },
+  input: Record<string, unknown>
+): Promise<{ ok: boolean; error: string; userErrors: GraphQLUserError[]; hadUserErrors: boolean }> {
+  try {
+    const { response: resp, json } = await graphqlWithRetry(admin, SET_MUTATION, { input });
+    const errJson = json as InventorySetQuantitiesJson;
+    const topLevelErrors = Array.isArray(errJson?.errors) ? errJson.errors : [];
+    const data = errJson?.data?.inventorySetQuantities;
+    if (!resp.ok) {
+      return {
+        ok: false,
+        error: topLevelErrors[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`,
+        userErrors: [],
+        hadUserErrors: false,
+      };
+    }
+    if (topLevelErrors.length > 0 && !data) {
+      return {
+        ok: false,
+        error: topLevelErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "GraphQL errors",
+        userErrors: [],
+        hadUserErrors: false,
+      };
+    }
+    const errs = (data?.userErrors ?? []) as GraphQLUserError[];
+    if (errs.length) {
+      return {
+        ok: false,
+        error: errs.map((e) => e.message ?? "").join(" / "),
+        userErrors: errs,
+        hadUserErrors: true,
+      };
+    }
+    return { ok: true, error: "", userErrors: [], hadUserErrors: false };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      userErrors: [],
+      hadUserErrors: false,
+    };
+  }
+}
+
+/**
+ * 適用済みスナップショットを逆順ロールバック。
+ * casMode: 再読取し、live===writtenQuantity の行だけ changeFromQuantity=live で戻す。
+ * 同時変動で live がずれた行はスキップ（null 上書きで売上を消さない）。
+ */
+async function rollbackAppliedSnapshots(
+  admin: { graphql: AdminGraphql },
+  locationGid: string,
+  appliedSnapshots: BeforeSnapshot[],
+  casMode: boolean
+): Promise<{ ok: boolean; errorMsg: string; skippedConcurrent: number }> {
+  let skippedConcurrent = 0;
+  for (let ri = appliedSnapshots.length - 1; ri >= 0; ri--) {
+    const snapshot = appliedSnapshots[ri];
+    let rollbackRows: Array<{ inventoryItemId: string; quantity: number; changeFromQuantity: number | null }> = [];
+
+    if (!casMode) {
+      rollbackRows = snapshot.quantities.map((q) => ({
+        inventoryItemId: q.inventoryItemId,
+        quantity: q.quantity,
+        changeFromQuantity: null,
+      }));
+    } else {
+      const gids = snapshot.quantities.map((q) => q.inventoryItemId);
+      const { quantities: liveMap, failedGids } = await fetchChunkQuantities(admin, locationGid, gids);
+      if (failedGids.length > 0) {
+        return {
+          ok: false,
+          errorMsg: `rollback live read failed (${failedGids.length})`,
+          skippedConcurrent,
+        };
+      }
+      for (const q of snapshot.quantities) {
+        const live = liveMap.get(q.inventoryItemId);
+        if (live == null || !Number.isFinite(live)) {
+          return { ok: false, errorMsg: `rollback live missing for ${q.inventoryItemId}`, skippedConcurrent };
+        }
+        if (live === q.quantity) {
+          // 既に適用前へ戻っている／一致 → 触らない
+          continue;
+        }
+        if (live !== q.writtenQuantity) {
+          // 書いた後に同時変動あり → 巻き戻しで上書きしない
+          skippedConcurrent += 1;
+          console.warn(
+            `[inventory-set-quantities-server] CAS rollback skip concurrent ` +
+              `${q.inventoryItemId}: live=${live} written=${q.writtenQuantity} before=${q.quantity}`
+          );
+          continue;
+        }
+        rollbackRows.push({
+          inventoryItemId: q.inventoryItemId,
+          quantity: q.quantity,
+          changeFromQuantity: Math.floor(live),
+        });
+      }
+    }
+
+    if (rollbackRows.length === 0) continue;
+
+    const rollbackInput: Record<string, unknown> = {
+      name: "available",
+      reason: "correction",
+      quantities: rollbackRows.map((q) => ({
+        inventoryItemId: q.inventoryItemId,
+        locationId: locationGid,
+        quantity: q.quantity,
+        changeFromQuantity: q.changeFromQuantity,
+      })),
+    };
+    const rb = await mutateSetQuantities(admin, rollbackInput);
+    if (!rb.ok) {
+      // CAS stale on rollback: concurrent moved between our live read and mutate — skip force
+      if (casMode && isChangeFromQuantityStaleError(rb.error, rb.userErrors)) {
+        skippedConcurrent += rollbackRows.length;
+        console.warn(
+          `[inventory-set-quantities-server] CAS rollback stale; skip force overwrite: ${rb.error}`
+        );
+        continue;
+      }
+      return { ok: false, errorMsg: rb.error, skippedConcurrent };
+    }
+  }
+  return { ok: true, errorMsg: "", skippedConcurrent };
+}
 
 /**
  * 在庫数を指定値に設定（inventorySetQuantities）。250件超はチャンク分割。
  * チャンク N が失敗した場合、適用済みチャンク 1..N-1 を元の数量に戻すロールバックを試みる。
+ *
+ * changeFromQuantity: number=CAS / null・省略=意図的オプトアウト。
+ * casFromLiveSnapshot 時のロールバックは再読取 CAS（書いた行のみ・同時変動行はスキップ）。
  */
 export async function setInventoryQuantitiesServer(
   admin: { graphql: AdminGraphql },
   locationId: string,
-  items: Array<{ inventoryItemId: string; quantity: number }>,
-  referenceDocumentUri?: string | null
+  items: Array<SetInventoryQuantityItem>,
+  referenceDocumentUri?: string | null,
+  options?: SetInventoryQuantitiesOptions
 ): Promise<SetInventoryQuantitiesResult> {
+  const casFromLiveSnapshot = options?.casFromLiveSnapshot === true;
   const locationGid = toLocationGid(locationId);
   const quantities = (items ?? [])
     .filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.quantity)))
     .map((x) => {
       const gid = toInventoryItemGid(x.inventoryItemId);
       const quantity = Math.floor(Number(x.quantity) ?? 0);
-      return gid ? { valid: true as const, inventoryItemId: gid, quantity } : { valid: false as const };
+      const changeFromQuantity =
+        x.changeFromQuantity == null || !Number.isFinite(Number(x.changeFromQuantity))
+          ? null
+          : Math.floor(Number(x.changeFromQuantity));
+      return gid
+        ? { valid: true as const, inventoryItemId: gid, quantity, changeFromQuantity }
+        : { valid: false as const };
     });
   const validQuantities = quantities.filter((q) => q.valid);
   const invalidCount = quantities.filter((q) => !q.valid).length;
@@ -173,209 +384,190 @@ export async function setInventoryQuantitiesServer(
         ? referenceDocumentUri.trim()
         : `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`;
 
-  // チャンクごとの適用前スナップショット（ロールバック用）
-  // canRollback: false のチャンクが存在する場合はロールバックを中断し、呼び出し元に通知する
-  const beforeStates: Array<{
-    chunkIndex: number;
-    quantities: Array<{ inventoryItemId: string; quantity: number }>;
-    canRollback: boolean;
-  }> = [];
-  /** 成功確定したチャンクの inventoryItem GID（rollback 前まで蓄積） */
+  const beforeStates: BeforeSnapshot[] = [];
   const appliedInventoryItemIds: string[] = [];
+
+  const failClosedReadError = (failedCount: number) =>
+    `確定直前の在庫数を取得できませんでした（${failedCount}件）。` +
+    `通信状況を確認してから再度確定してください。`;
+
+  async function rollbackOrPartial(
+    chunkError: string,
+    appliedSnapshots: BeforeSnapshot[],
+    failedChunkIndex?: number,
+    chunkUserErrors?: Array<{ message?: string; code?: string | null }>
+  ): Promise<SetInventoryQuantitiesResult> {
+    const withErrors = (
+      base: SetInventoryQuantitiesResult
+    ): SetInventoryQuantitiesResult =>
+      chunkUserErrors?.length ? { ...base, userErrors: chunkUserErrors } : base;
+
+    if (appliedSnapshots.length === 0) {
+      return withErrors({
+        ok: false,
+        error: chunkError,
+        rolledBack: false,
+        appliedInventoryItemIds: [],
+        failedChunkIndex,
+      });
+    }
+    const nonRollbackable = appliedSnapshots.filter((s) => !s.canRollback);
+    if (nonRollbackable.length > 0) {
+      console.error(
+        `[inventory-set-quantities-server] チャンク${nonRollbackable.map((s) => s.chunkIndex).join(",")}の` +
+          `スナップショット取得が失敗しているためロールバック不可 — 手動復旧が必要です。` +
+          ` 元のエラー: ${chunkError}。` +
+          ` スナップショット: ${JSON.stringify(appliedSnapshots)}`
+      );
+      return withErrors({
+        ok: false,
+        error: chunkError,
+        rolledBack: false,
+        partiallyApplied: true,
+        appliedInventoryItemIds: [...appliedInventoryItemIds],
+        failedChunkIndex,
+      });
+    }
+    const rb = await rollbackAppliedSnapshots(admin, locationGid, appliedSnapshots, casFromLiveSnapshot);
+    if (!rb.ok) {
+      console.error(
+        `[inventory-set-quantities-server] ロールバック失敗 — 手動復旧が必要です。` +
+          ` 元のエラー: ${chunkError}。ロールバックエラー: ${rb.errorMsg}。` +
+          ` スナップショット: ${JSON.stringify(appliedSnapshots)}`
+      );
+      return withErrors({
+        ok: false,
+        error: chunkError,
+        rolledBack: false,
+        partiallyApplied: true,
+        appliedInventoryItemIds: [...appliedInventoryItemIds],
+        failedChunkIndex,
+      });
+    }
+    if (rb.skippedConcurrent > 0) {
+      // 同時変動行を意図的に残した → 完全ロールバックではない。
+      // partiallyApplied にして apply-change の stale/transient 再 set を止める（再上書き防止）。
+      console.warn(
+        `[inventory-set-quantities-server] rollback completed with ${rb.skippedConcurrent} concurrent skip(s); mark partiallyApplied`
+      );
+      return withErrors({
+        ok: false,
+        error: chunkError,
+        rolledBack: true,
+        partiallyApplied: true,
+        appliedInventoryItemIds: [...appliedInventoryItemIds],
+        failedChunkIndex,
+      });
+    }
+    return withErrors({
+      ok: false,
+      error: chunkError,
+      rolledBack: true,
+      appliedInventoryItemIds: [],
+      failedChunkIndex,
+    });
+  }
 
   try {
     for (let i = 0; i < validQuantities.length; i += INVENTORY_SET_QUANTITIES_MAX) {
       const chunk = validQuantities.slice(i, i + INVENTORY_SET_QUANTITIES_MAX);
       const chunkIndex = Math.floor(i / INVENTORY_SET_QUANTITIES_MAX);
 
-      // 適用前の数量を取得してスナップショットを保存
       const chunkItemGids = chunk.map((q) => q.inventoryItemId);
       const { quantities: beforeMap, failedGids } = await fetchChunkQuantities(admin, locationGid, chunkItemGids);
       if (failedGids.length > 0) {
         console.warn(
           `[inventory-set-quantities-server] チャンク${chunkIndex}のスナップショット取得失敗 (${failedGids.length}件): ${failedGids.join(", ")} ` +
-          `― このチャンクが失敗した場合のロールバックは安全に実行できません`
+            `― このチャンクが失敗した場合のロールバックは安全に実行できません`
         );
+        if (casFromLiveSnapshot) {
+          return await rollbackOrPartial(failClosedReadError(failedGids.length), beforeStates, chunkIndex);
+        }
       }
+
+      // 目標値到達済みは skip。rollback 対象にも入れない（書いていない SKU を巻き戻さない）
+      const writeChunk = casFromLiveSnapshot
+        ? chunk.filter((q) => beforeMap.get(q.inventoryItemId) !== q.quantity)
+        : chunk;
+      if (writeChunk.length === 0) {
+        continue;
+      }
+
+      const writeGids = writeChunk.map((q) => q.inventoryItemId);
+      if (casFromLiveSnapshot) {
+        const missingLive = writeGids.filter((gid) => {
+          const live = beforeMap.get(gid);
+          return live == null || !Number.isFinite(live);
+        });
+        if (missingLive.length > 0) {
+          return await rollbackOrPartial(failClosedReadError(missingLive.length), beforeStates, chunkIndex);
+        }
+      }
+
+      const writeSnapshotMissing = writeGids.filter((gid) => failedGids.includes(gid));
       beforeStates.push({
         chunkIndex,
-        quantities: chunkItemGids
+        quantities: writeGids
           .filter((gid) => !failedGids.includes(gid))
-          .map((gid) => ({ inventoryItemId: gid, quantity: beforeMap.get(gid) ?? 0 })),
-        canRollback: failedGids.length === 0,
+          .map((gid) => {
+            const row = writeChunk.find((q) => q.inventoryItemId === gid)!;
+            return {
+              inventoryItemId: gid,
+              quantity: beforeMap.get(gid) ?? 0,
+              writtenQuantity: row.quantity,
+            };
+          }),
+        canRollback: writeSnapshotMissing.length === 0,
       });
 
       const input: Record<string, unknown> = {
         name: "available",
         reason: "correction",
-        quantities: chunk.map((q) => ({
-          inventoryItemId: q.inventoryItemId,
-          locationId: locationGid,
-          quantity: q.quantity,
-          changeFromQuantity: null,
-        })),
+        quantities: writeChunk.map((q) => {
+          let changeFromQuantity: number | null = q.changeFromQuantity;
+          if (casFromLiveSnapshot) {
+            changeFromQuantity = Math.floor(Number(beforeMap.get(q.inventoryItemId)));
+          }
+          return {
+            inventoryItemId: q.inventoryItemId,
+            locationId: locationGid,
+            quantity: q.quantity,
+            changeFromQuantity,
+          };
+        }),
       };
       if (refUri) input.referenceDocumentUri = refUri;
 
-      let chunkFailed = false;
-      let chunkError = "";
-      let chunkHadUserErrors = false;
-      try {
-        const { response: resp, json } = await graphqlWithRetry(admin, `#graphql
-            mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-              inventorySetQuantities(input: $input) {
-                inventoryAdjustmentGroup { id }
-                userErrors { field message }
-              }
-            }
-          `, { input });
-        const errJson = json as InventorySetQuantitiesJson;
-        const topLevelErrors = Array.isArray(errJson?.errors) ? errJson.errors : [];
-        const data = errJson?.data?.inventorySetQuantities;
-        if (!resp.ok) {
-          chunkError = topLevelErrors[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
-          chunkFailed = true;
-          // HTTP エラーは適用済みの可能性を否定できない（userErrors なし）
-        } else if (topLevelErrors.length > 0 && !data) {
-          // HTTP 200 + top-level GraphQL errors / null data — 成功扱いにしない
-          chunkError = topLevelErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "GraphQL errors";
-          chunkFailed = true;
-        } else {
-          const errs = data?.userErrors ?? [];
-          if (errs.length) {
-            chunkError = errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
-            chunkFailed = true;
-            chunkHadUserErrors = true;
-          }
-        }
-      } catch (e) {
-        chunkError = e instanceof Error ? e.message : String(e);
-        chunkFailed = true;
-      }
+      const mut = await mutateSetQuantities(admin, input);
+      if (!mut.ok) {
+        const ambiguous = !isDefiniteUnaappliedRejection({ hadUserErrors: mut.hadUserErrors });
+        const appliedSnapshots = beforeStates.slice(0, -1);
 
-      if (chunkFailed) {
-        // userErrors 以外はすべて ambiguous（キーワード漏れで failed→再 set しない）
-        const ambiguous = !isDefiniteUnaappliedRejection({ hadUserErrors: chunkHadUserErrors });
-        // チャンク N の失敗 — 適用済みチャンク（beforeStates の最後のエントリを除く）をロールバック
-        const appliedSnapshots = beforeStates.slice(0, -1); // 現在のチャンクは適用されていないので除外
-
-        // 成否不明: 自動再 set を避けるため partial 扱い。ロールバックもしない
-        // （成功済み先行チャンクを戻すと、失敗チャンクが実は適用済みだった場合に更に壊れる）
         if (ambiguous) {
           console.error(
-            `[inventory-set-quantities-server] ambiguous chunk${chunkIndex} failure (treat as partial/uncertain): ${chunkError}`
+            `[inventory-set-quantities-server] ambiguous chunk${chunkIndex} failure (treat as partial/uncertain): ${mut.error}`
           );
           return {
             ok: false,
-            error: chunkError,
+            error: mut.error,
             rolledBack: false,
             partiallyApplied: true,
             applicationUncertain: true,
-            // 先行成功分は確実。当該チャンクは不明のため含めない
             appliedInventoryItemIds: [...appliedInventoryItemIds],
             failedChunkIndex: chunkIndex,
+            userErrors: mut.userErrors?.length ? mut.userErrors : undefined,
           };
         }
 
-        if (appliedSnapshots.length === 0) {
-          // 最初のチャンクが確定失敗（userErrors 等）— ロールバック不要
-          return {
-            ok: false,
-            error: chunkError,
-            rolledBack: false,
-            appliedInventoryItemIds: [],
-            failedChunkIndex: chunkIndex,
-          };
-        }
-
-        // スナップショット取得が失敗していたチャンクがある場合、安全にロールバックできないため中断する
-        const nonRollbackable = appliedSnapshots.filter((s) => !s.canRollback);
-        if (nonRollbackable.length > 0) {
-          const msg =
-            `[inventory-set-quantities-server] チャンク${nonRollbackable.map((s) => s.chunkIndex).join(",")}の` +
-            `スナップショット取得が失敗しているためロールバック不可 — 手動復旧が必要です。` +
-            ` 元のエラー: ${chunkError}。` +
-            ` スナップショット: ${JSON.stringify(appliedSnapshots)}`;
-          console.error(msg);
-          return {
-            ok: false,
-            error: chunkError,
-            rolledBack: false,
-            partiallyApplied: true,
-            appliedInventoryItemIds: [...appliedInventoryItemIds],
-            failedChunkIndex: chunkIndex,
-          };
-        }
-
-        let rollbackOk = true;
-        let rollbackErrorMsg = "";
-        // 逆順でロールバック
-        for (let ri = appliedSnapshots.length - 1; ri >= 0; ri--) {
-          const snapshot = appliedSnapshots[ri];
-          const rollbackInput: Record<string, unknown> = {
-            name: "available",
-            reason: "correction",
-            quantities: snapshot.quantities.map((q) => ({
-              inventoryItemId: q.inventoryItemId,
-              locationId: locationGid,
-              quantity: q.quantity,
-              changeFromQuantity: null,
-            })),
-          };
-          try {
-            const { response: rbResp, json: rbJson } = await graphqlWithRetry(admin, `#graphql
-                mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-                  inventorySetQuantities(input: $input) {
-                    inventoryAdjustmentGroup { id }
-                    userErrors { field message }
-                  }
-                }
-              `, { input: rollbackInput });
-            if (!rbResp.ok) {
-              rollbackOk = false;
-              const rbErrJson = rbJson as InventorySetQuantitiesJson;
-              rollbackErrorMsg = rbErrJson?.errors?.[0]?.message ?? rbResp.statusText ?? `HTTP ${rbResp.status}`;
-            } else {
-              const rbData = (rbJson as InventorySetQuantitiesJson)?.data?.inventorySetQuantities;
-              const rbErrs = rbData?.userErrors ?? [];
-              if (rbErrs.length) {
-                rollbackOk = false;
-                rollbackErrorMsg = rbErrs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
-              }
-            }
-          } catch (rbErr) {
-            rollbackOk = false;
-            rollbackErrorMsg = rbErr instanceof Error ? rbErr.message : String(rbErr);
-          }
-          if (!rollbackOk) break;
-        }
-        if (!rollbackOk) {
-          console.error(
-            `[inventory-set-quantities-server] ロールバック失敗 — 手動復旧が必要です。` +
-            ` 元のエラー: ${chunkError}。ロールバックエラー: ${rollbackErrorMsg}。` +
-            ` スナップショット: ${JSON.stringify(appliedSnapshots)}`
-          );
-          return {
-            ok: false,
-            error: chunkError,
-            rolledBack: false,
-            partiallyApplied: true,
-            appliedInventoryItemIds: [...appliedInventoryItemIds],
-            failedChunkIndex: chunkIndex,
-          };
-        }
-        // ロールバック成功: Shopify 上は適用前に戻った
-        return {
-          ok: false,
-          error: chunkError,
-          rolledBack: true,
-          appliedInventoryItemIds: [],
-          failedChunkIndex: chunkIndex,
-        };
+        return await rollbackOrPartial(
+          mut.error,
+          appliedSnapshots,
+          chunkIndex,
+          mut.userErrors
+        );
       }
 
-      // チャンク成功: 適用済み GID を記録
-      for (const gid of chunkItemGids) appliedInventoryItemIds.push(gid);
+      for (const gid of writeGids) appliedInventoryItemIds.push(gid);
     }
     return {
       ok: true,
@@ -384,13 +576,11 @@ export async function setInventoryQuantitiesServer(
       appliedInventoryItemIds,
     };
   } catch (unexpected: unknown) {
-    // 適用済みチャンクがあるのに例外が外へ出ると、呼び出し側が failed→再試行で再 set し得る
     const msg = unexpected instanceof Error ? unexpected.message : String(unexpected);
     console.error(
       `[inventory-set-quantities-server] unexpected error after applied=${appliedInventoryItemIds.length}:`,
       msg
     );
-    // 予期せぬ例外は成否不明として partial（failed→再 set を避ける）
     return {
       ok: false,
       error: msg || "unexpected error during setQuantities",
@@ -452,7 +642,6 @@ export async function adjustInventoryQuantitiesServer(
     .filter((x): x is { inventoryItemId: string; delta: number } => x != null);
   const invalidCount = (changes ?? []).length - valid.length;
   if (valid.length === 0) {
-    // delta=0 のみ、または有効なアイテムが存在しない場合は変更なしで成功として扱う
     return { ok: true, invalidCount };
   }
   const uri = referenceDocumentUri
