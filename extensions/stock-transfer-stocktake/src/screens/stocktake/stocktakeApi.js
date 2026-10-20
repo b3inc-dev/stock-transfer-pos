@@ -1,5 +1,6 @@
 import { ensureInventoryActivatedWithSkuBarcodeRetry } from "../../../../common/inventoryActivateRetry.js";
 import { normalizeStocktakeId, pendingSnapshotIds, toNormalizedIdSet } from "./stocktakeLineIdentity.js";
+import { tryCountsApi, setDbListCache, getDbListCache, pageForChunkIndex, totalPagesFor } from "./stocktakeCountsApi.js";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -444,6 +445,22 @@ function toMinimalCountForList(c) {
  * ディスクリプタ・商品グループ・表示件数を Promise.all で並列取得し、一覧用メタフィールドがあればそれを使用。
  */
 export async function readInventoryCountsFirstPage() {
+  const viaApi = await tryCountsApi("list");
+  if (viaApi) {
+    const [productGroups, listLimit] = await Promise.all([readProductGroups(), getStocktakeListLimit()]);
+    const all = fixCountsStatusOnly(Array.isArray(viaApi.counts) ? viaApi.counts : [], productGroups || []);
+    setDbListCache(all, listLimit);
+    const totalPages = totalPagesFor(all.length, listLimit);
+    return {
+      counts: pageForChunkIndex(all, listLimit, totalPages - 1),
+      hasMore: totalPages > 1,
+      chunkCount: totalPages,
+      loadedChunkCount: 1,
+      productGroups: productGroups || [],
+      listLimit,
+      useListMetafield: false,
+    };
+  }
   const gqlMain = `#graphql
     query InventoryCountsMain {
       currentAppInstallation {
@@ -598,6 +615,10 @@ export async function readInventoryCountsFirstPage() {
  * opts.productGroups, opts.totalChunks, opts.useListMetafield を渡すとディスクリプタ・readProductGroups をスキップしチャンク1本だけ取得（軽量化）。
  */
 export async function readInventoryCountsPage(pageIndex, opts = {}) {
+  const dbList = getDbListCache();
+  if (dbList) {
+    return { counts: pageForChunkIndex(dbList.counts, dbList.listLimit, pageIndex) };
+  }
   const { productGroups: optsProductGroups, totalChunks: optsTotalChunks, useListMetafield: optsUseListMetafield } = opts;
   const hasLightOpts = optsProductGroups != null && typeof optsTotalChunks === "number" && optsTotalChunks > 0;
 
@@ -679,6 +700,13 @@ export async function readInventoryCountById(countId) {
   const id = String(countId).trim();
   const n = normalizeIdForMatch(id);
 
+  const viaApi = await tryCountsApi("get", id);
+  if (viaApi?.count) {
+    const productGroups = await readProductGroups();
+    const fixed = fixCountsStatusOnly([viaApi.count], productGroups);
+    return fixed[0] ?? null;
+  }
+
   const gqlIndex = `#graphql
     query InventoryCountIndex {
       currentAppInstallation {
@@ -745,6 +773,23 @@ export async function readInventoryCountById(countId) {
   const productGroups = await readProductGroups();
   const fixed = fixCountsStatusOnly([found], productGroups);
   return fixed[0] ?? null;
+}
+
+/**
+ * 棚卸を開いたときの draft → in_progress。db モードはサーバーで 1 件だけ更新し、
+ * それ以外は従来どおりメタフィールドの全件を読み書きする。
+ */
+export async function startInventoryCount(countId) {
+  const viaApi = await tryCountsApi("start", String(countId ?? ""));
+  if (viaApi) return;
+  const allCounts = await readInventoryCounts();
+  const countIdStr = String(countId ?? "");
+  const updated = (Array.isArray(allCounts) ? allCounts : []).map((c) =>
+    String(c?.id ?? "") === countIdStr ? { ...c, status: "in_progress" } : c
+  );
+  // 楽観ロック（他端末の completed 上書きレース緩和）
+  const version = await getInventoryCountsVersion();
+  await writeInventoryCounts(updated, version);
 }
 
 export async function readInventoryCounts() {

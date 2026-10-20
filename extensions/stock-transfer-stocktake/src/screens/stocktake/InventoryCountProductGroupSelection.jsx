@@ -2,9 +2,7 @@ import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks"
 import {
   getProductGroupName,
   readInventoryCountById,
-  readInventoryCounts,
-  writeInventoryCounts,
-  getInventoryCountsVersion,
+  startInventoryCount,
   fetchProductsByGroups,
   getCurrentQuantitiesBulk,
   normalizeIdForMatch,
@@ -99,14 +97,7 @@ export function InventoryCountProductGroupSelection({
         }
         if (fetched.status === "draft") {
           try {
-            const allCounts = await readInventoryCounts();
-            const countIdStr = String(count?.id ?? "");
-            const updated = (Array.isArray(allCounts) ? allCounts : []).map((c) =>
-              String(c?.id ?? "") === countIdStr ? { ...c, status: "in_progress" } : c
-            );
-            // InventoryCountList と同様に楽観ロック（他端末の completed 上書きレース緩和）
-            const version = await getInventoryCountsVersion();
-            await writeInventoryCounts(updated, version);
+            await startInventoryCount(count?.id);
             fetched = { ...fetched, status: "in_progress" };
           } catch (e) {
             console.error("Failed to update count status:", e);

@@ -13,6 +13,16 @@ import {
 } from "./app.inventory-count";
 import { upsertInventoryCountDocument } from "../utils/inventory-count-document.server";
 import {
+  getEffectiveStorageMode,
+  readPendingCompleteDb,
+  writePendingCompleteDb,
+  clearPendingCompleteDb,
+  applyCompleteInDb,
+  mirrorCountsToDbAfterLegacyWrite,
+  markMirrorDirty,
+  scheduleMirrorSync,
+} from "../utils/stocktake-count-store.server";
+import {
   writePendingCompleteBackup,
   readPendingCompleteBackup,
   applyPendingCompleteFromBackup,
@@ -218,8 +228,12 @@ export async function action({ request }: ActionFunctionArgs) {
   const itemsRaw = typeof body === "object" && body !== null && "items" in body ? (body as { items: unknown }).items : undefined;
   const completedGroupsRaw = typeof body === "object" && body !== null && "completedGroups" in body ? (body as { completedGroups: unknown }).completedGroups : undefined;
 
+  const storageMode = await getEffectiveStorageMode(shop);
+
   if (retryOnly) {
-    const backup = await readPendingCompleteBackup(admin);
+    const backup =
+      (storageMode !== "legacy" ? await readPendingCompleteDb(shop, countId) : null) ??
+      (await readPendingCompleteBackup(admin));
     if (!backup || normalizeIdForMatch(backup.countId) !== normalizeIdForMatch(countId)) {
       return jsonResponse(
         { ok: false, error: "再試行用バックアップが見つかりません。棚卸を開き直してから確定してください。", needMetafieldRetry: true, countId },
@@ -250,11 +264,16 @@ export async function action({ request }: ActionFunctionArgs) {
     completedGroups,
     savedAt: new Date().toISOString(),
   };
+  if (storageMode === "db") {
+    return completeInDb(shop, admin, ownerId, backupPayload, completedGroupIds);
+  }
+
   // バックアップ失敗でも POS はフルペイロード再送できるためメタ更新は続行する。
   // 失敗時は応答に backupPersisted:false を付け、Admin retryOnly の 404 リスクを明示する。
   const backupWrite = await writePendingCompleteBackup(admin, ownerId, backupPayload);
-  const backupPersisted = backupWrite.ok;
-  if (!backupPersisted) {
+  const dbBackupOk = storageMode === "dual" ? await writePendingCompleteDb(shop, backupPayload) : false;
+  const backupPersisted = backupWrite.ok || dbBackupOk;
+  if (!backupWrite.ok) {
     console.warn(
       "[api.pos-stocktake-complete] pending_complete backup write failed (continuing apply):",
       backupWrite.error
@@ -307,7 +326,10 @@ export async function action({ request }: ActionFunctionArgs) {
       // apply が返した savedCount を使い、成功後の全チャンク再読込を避ける（応答遅延・切断対策）
       try {
         const saved = result.savedCount;
-        if (saved) {
+        if (storageMode === "dual") {
+          if (saved) await mirrorCountsToDbAfterLegacyWrite(shop, [saved]);
+          await clearPendingCompleteDb(shop, result.countId);
+        } else if (saved) {
           await upsertInventoryCountDocument({
             shop,
             countId: String(saved.id),
@@ -367,6 +389,53 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   console.warn("STOCKTAKE_API_ORIGIN [server] response 200 ok:false needMetafieldRetry after retries:", lastError);
+  return jsonResponse(
+    {
+      ok: false,
+      error: lastError || "ステータスの反映に失敗しました。再試行してください。",
+      needMetafieldRetry: true,
+      countId,
+      completedGroupIds,
+      backupPersisted,
+    },
+    200
+  );
+}
+
+/**
+ * db モードの完了報告。棚卸 1 行だけを更新し、メタフィールド（旧 POS 用）への書き写しは応答後に行う。
+ */
+async function completeInDb(
+  shop: string,
+  admin: AdminGraphql,
+  ownerId: string,
+  backupPayload: PendingCompleteBackup,
+  completedGroupIds: string[]
+) {
+  const countId = backupPayload.countId;
+  const backupPersisted = await writePendingCompleteDb(shop, backupPayload);
+  let lastError = "";
+  for (let attempt = 1; attempt <= META_RETRY_MAX; attempt++) {
+    const result = await applyCompleteInDb(shop, countId, backupPayload.completedGroups);
+    if (result.ok) {
+      await clearPendingCompleteDb(shop, result.countId);
+      await markMirrorDirty(shop);
+      scheduleMirrorSync(shop, admin, ownerId, "pos-complete");
+      console.warn(
+        "STOCKTAKE_API_ORIGIN [server] response 200 ok:true (success, db) attempt=" + attempt + " status=" + result.status
+      );
+      return jsonResponse(
+        { ok: true, status: result.status, completedAt: result.completedAt, countId: result.countId, backupPersisted },
+        200
+      );
+    }
+    if (result.notFound) {
+      return jsonResponse({ ok: false, error: result.error, needMetafieldRetry: false, countId }, 400);
+    }
+    lastError = result.error;
+    if (attempt < META_RETRY_MAX) await sleep(META_RETRY_DELAY_MS * attempt);
+  }
+  console.warn("STOCKTAKE_API_ORIGIN [server] response 200 ok:false needMetafieldRetry (db):", lastError);
   return jsonResponse(
     {
       ok: false,
