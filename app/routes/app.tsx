@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import type { HeadersFunction, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { Outlet, redirect, useLoaderData, useNavigation, useRouteError, data } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
@@ -8,6 +8,7 @@ import "@shopify/polaris/build/esm/styles.css";
 
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
+import { isInventoryCountReadOnlySubmission } from "../utils/inventory-count-revalidation";
 import { AppNavBar } from "../components/AppNavBar";
 import type { ActiveSubscription } from "../utils/billing";
 import {
@@ -420,6 +421,12 @@ export default function App() {
     </AppProvider>
   );
 }
+
+/** 棚卸画面の読み取り専用 POST（検索・明細取得）ではレイアウト loader（プラン判定）を再実行しない。他画面は既定どおり */
+export const shouldRevalidate: ShouldRevalidateFunction = (args) => {
+  if (isInventoryCountReadOnlySubmission(args)) return false;
+  return args.defaultShouldRevalidate;
+};
 
 // Shopify needs React Router to catch some thrown responses, so that their headers are included in the response.
 export function ErrorBoundary() {

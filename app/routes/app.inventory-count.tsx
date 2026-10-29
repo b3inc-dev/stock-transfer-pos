@@ -1,10 +1,13 @@
 // app/routes/app.inventory-count.tsx
 // 棚卸（商品グループ設定・棚卸ID発行・履歴管理）画面
 import { randomBytes } from "crypto";
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useRevalidator, data } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator, useRouteError, isRouteErrorResponse, data } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+import { findCountInChunkRaws, lookupCountChunkIndices, parseCountChunkIndex, tailChunkIndices } from "../utils/inventory-count-single-read";
+import { isInventoryCountReadOnlyAction } from "../utils/inventory-count-revalidation";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 import db from "../db.server";
@@ -571,6 +574,68 @@ export async function readInventoryCountsChunked(
     fullCounts.push(mergeCountParts(parts));
   }
   return fullCounts;
+}
+
+const MAIN_AND_INDEX_QUERY = `#graphql
+  query InventoryCountMainAndIndex {
+    currentAppInstallation {
+      main: metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_KEY}") { value }
+      index: metafield(namespace: "${NS}", key: "${INVENTORY_COUNT_INDEX_KEY}") { value }
+    }
+  }
+`;
+/** インデックス未登録（append で末尾に足された新規発行分）を探す末尾チャンク数 */
+const SINGLE_READ_TAIL_CHUNKS = 2;
+
+/**
+ * 棚卸 1 件を読む（get_count_full 用）。readInventoryCountsChunked(admin).find(id) と同じ結果を返すが、
+ * inventory_count_index_v1 → 末尾チャンクの順で該当チャンクだけを読み、確定できないときだけ全チャンク読込にフォールバックする。
+ */
+async function readInventoryCountForDetail(
+  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
+  countId: string
+): Promise<{ count: InventoryCount | null; source: "main" | "index" | "tail" | "full" }> {
+  const matchesId = (id: unknown) =>
+    id != null && (String(id) === String(countId) || normalizeIdForMatch(id as string) === normalizeIdForMatch(countId));
+  try {
+    const json = (await safeJsonFromResponseForLoader(await admin.graphql(MAIN_AND_INDEX_QUERY), null)) as {
+      data?: { currentAppInstallation?: { main?: { value?: string | null } | null; index?: { value?: string | null } | null } };
+    } | null;
+    const inst = json?.data?.currentAppInstallation;
+    if (inst) {
+      const main = parseMainMetafieldValue(inst.main?.value);
+      if (main && !main.chunked) {
+        return { count: main.array.find((c) => matchesId(c?.id)) ?? null, source: "main" };
+      }
+      if (main?.chunked) {
+        const index = parseCountChunkIndex(inst.index?.value);
+        const indexed = lookupCountChunkIndices(index, String(countId), main.totalChunks, normalizeIdForMatch) ?? [];
+        const attempts: Array<{ source: "index" | "tail"; indices: number[] }> = [
+          { source: "index", indices: indexed },
+          { source: "tail", indices: tailChunkIndices(main.totalChunks, SINGLE_READ_TAIL_CHUNKS, indexed) },
+        ];
+        for (const { source, indices } of attempts) {
+          if (indices.length === 0) continue;
+          const raws = await Promise.all(
+            indices.map((i) => fetchOneChunk(admin, `${INVENTORY_COUNTS_CHUNK_KEY_PREFIX}${i}`, i))
+          );
+          if (raws.some((r) => r == null)) break;
+          const result = findCountInChunkRaws<InventoryCount>(
+            indices.map((index, k) => ({ index, raw: raws[k] as string })),
+            String(countId),
+            normalizeIdForMatch,
+            (parts) => mergeCountParts(parts as CountPart[])
+          );
+          if (result.status === "found") return { count: result.count, source };
+          if (result.status === "incomplete") break;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[inventory-count] single count read failed, falling back to full read:", e instanceof Error ? e.message : String(e));
+  }
+  const counts = await readInventoryCountsChunked(admin);
+  return { count: counts.find((c) => matchesId(c?.id)) ?? null, source: "full" };
 }
 
 /** 1件の棚卸を CHUNK_BYTES 以下に収まるパートに分割する（groupItems/items のみ分割、メタは part 0 に） */
@@ -2412,7 +2477,23 @@ async function getInventoryItemIdsForGroup(
   return [];
 }
 
-export async function action({ request }: ActionFunctionArgs) {
+export async function action(args: ActionFunctionArgs) {
+  const startedAt = Date.now();
+  const meta: InventoryCountActionMeta = { actionType: "", detail: "" };
+  try {
+    return await handleInventoryCountAction(args, meta);
+  } finally {
+    if (meta.actionType) {
+      console.log(
+        `[inventory-count] action actionType=${meta.actionType} durationMs=${Date.now() - startedAt}${meta.detail ? ` ${meta.detail}` : ""}`
+      );
+    }
+  }
+}
+
+type InventoryCountActionMeta = { actionType: string; detail: string };
+
+async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta: InventoryCountActionMeta) {
   let { admin, session } = await authenticate.admin(request);
   admin = withGraphQLRetry(admin);
   const formData = await request.formData();
@@ -2431,6 +2512,7 @@ export async function action({ request }: ActionFunctionArgs) {
     );
   }
   const actionTypeNorm = actionType.trim();
+  meta.actionType = actionTypeNorm;
 
   try {
   // SKU検索は metafield 不要のため先に実行（ownerId 未取得で早期 return されないようにする）
@@ -2892,7 +2974,6 @@ export async function action({ request }: ActionFunctionArgs) {
     actionTypeNorm === "reset_stocktake_all" ||
     actionTypeNorm === "cancel_stocktake_group" ||
     actionTypeNorm === "cancel_stocktake" ||
-    actionTypeNorm === "get_count_full" ||
     actionTypeNorm === "restore_count_as_completed" ||
     actionTypeNorm === "redistribute_count_group_items" ||
     actionTypeNorm === "ensure_count_groups_completed" ||
@@ -4474,7 +4555,8 @@ export async function action({ request }: ActionFunctionArgs) {
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
-    const count = inventoryCounts.find((c) => String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId));
+    const { count, source } = await readInventoryCountForDetail(admin, countId);
+    meta.detail = `source=${source}`;
     if (!count) return { ok: false, error: "棚卸が見つかりません" as const };
     const { inventoryItemIdsByGroup: _omit, ...rest } = count as InventoryCount & { inventoryItemIdsByGroup?: unknown };
     return { ok: true, count: rest };
@@ -4967,6 +5049,39 @@ export type SkuSearchVariant = {
   option3?: string;
 };
 
+/** 読み取り専用 action（検索・明細取得など）の後は loader を再実行しない。書き込み系は従来どおり再検証する */
+export const shouldRevalidate: ShouldRevalidateFunction = ({ formMethod, formData, defaultShouldRevalidate }) => {
+  if (isInventoryCountReadOnlyAction(formMethod, formData)) return false;
+  return defaultShouldRevalidate;
+};
+
+/**
+ * 通信断・502 などで loader/action が失敗しても React Router 既定の「Application Error」にしない。
+ * Shopify の認証レスポンス（ErrorResponse）は boundary.error に渡して従来どおり処理させる。
+ */
+export function ErrorBoundary() {
+  const error = useRouteError();
+  if (isRouteErrorResponse(error)) return boundary.error(error);
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  console.error("[inventory-count] ErrorBoundary:", message);
+  return (
+    <s-page heading="棚卸">
+      <s-section>
+        <s-stack gap="base">
+          <s-text type="strong">棚卸画面の読み込み中に通信エラーが発生しました。</s-text>
+          <s-text color="subdued">
+            一時的な通信断やサーバー混雑の可能性があります。保存済みの棚卸データには影響ありません。再読み込みしてください。
+          </s-text>
+          {message ? <s-text color="subdued">詳細: {message}</s-text> : null}
+          <s-button variant="primary" onClick={() => window.location.reload()}>
+            再読み込み
+          </s-button>
+        </s-stack>
+      </s-section>
+    </s-page>
+  );
+}
+
 export default function InventoryCountPage() {
   const loaderData = useLoaderData<typeof loader>();
   const {
@@ -5145,11 +5260,10 @@ export default function InventoryCountPage() {
   }, [fetcher.data, revalidator]);
   // ✅ list 由来で groupItems がない棚卸のフルデータ取得（モーダルでステータス・完了/未完了を正しく表示するため）
   const countFullFetcher = useFetcher<typeof action>();
-  // ✅ 履歴一覧：各行の「N件 N/N」をバックグラウンドで取得（先に描画し数値は後から流し込む）
-  const listRowDetailFetcher = useFetcher<typeof action>();
+  // ✅ 履歴一覧：行を開いて取得したフルデータ（以後その行に「N件 N/N」を表示）。一覧表示のために全行分を自動取得はしない
   const [listCountDetails, setListCountDetails] = useState<Record<string, InventoryCount>>({});
-  const [loadingListDetailIds, setLoadingListDetailIds] = useState<Set<string>>(new Set());
-  const listDetailQueueRef = useRef<string[]>([]);
+  /** get_count_full が失敗応答で終わった棚卸ID（明細待ちを解除するため） */
+  const [countFullFailedId, setCountFullFailedId] = useState<string | null>(null);
   // ✅ 未完了グループの商品リストを取得するためのfetcherとstate（モーダル用）
   const incompleteGroupProductsFetcher = useFetcher<typeof action>();
   const incompleteGroupProductsFetcher2 = useFetcher<typeof action>();
@@ -5287,6 +5401,15 @@ export default function InventoryCountPage() {
     }
   }, [skuResolveFetcher.data]);
 
+  const modalDetailReady = (() => {
+    if (!modalCount) return false;
+    const id = String(modalCount.id);
+    const groupItems = (modalCount as InventoryCountLike)?.groupItems;
+    if (groupItems && typeof groupItems === "object" && Object.keys(groupItems).length > 0) return true;
+    if (Array.isArray(modalCount.items) && modalCount.items.length > 0) return true;
+    return listCountDetails[id] != null || countFullFailedId === id;
+  })();
+
   // ✅ モーダルが開いたときに未完了グループの商品リストを取得。編集状態のリセットはモーダルを閉じたときのみ行う（開いたまま modalCount が get_count_full 等で更新されると modalCount?.id の参照が変わり effect が再実行されて編集モードが戻ってしまうため）
   useEffect(() => {
     if (!modalOpen || !modalCount) {
@@ -5299,6 +5422,14 @@ export default function InventoryCountPage() {
       lastProcessedIncompleteByFetcherRef.current = { f1: null, f2: null, f3: null };
       setModalEditMode(false);
       setModalEditedQuantities({});
+      return;
+    }
+    // list 由来（明細なし）のまま判定すると全グループを未完了とみなして母数取得を連発するため、get_count_full の結果を待つ
+    if (!modalDetailReady) {
+      const pendingGroupIds = Array.isArray(modalCount.productGroupIds) && modalCount.productGroupIds.length > 0
+        ? modalCount.productGroupIds
+        : modalCount.productGroupId ? [modalCount.productGroupId] : [];
+      setLoadingIncompleteGroupIds(new Set(pendingGroupIds.map((id) => String(id))));
       return;
     }
 
@@ -5346,7 +5477,7 @@ export default function InventoryCountPage() {
     } else {
       incompleteGroupQueueRef.current = [];
     }
-  }, [modalOpen, modalCount?.id]);
+  }, [modalOpen, modalCount?.id, modalDetailReady]);
 
   const lastRequestedFullCountIdRef = useRef<string | null>(null);
   // ✅ list 由来で groupItems がない棚卸をモーダルで開いたとき、フルデータを取得してステータス・完了/未完了表示を正確にする（同一IDで二重送信しない）
@@ -5370,8 +5501,16 @@ export default function InventoryCountPage() {
   // ✅ get_count_full のレスポンスを modalCount にマージ（同じ棚卸IDのときのみ。別の棚卸を開き直した場合は無視）
   useEffect(() => {
     const data = countFullFetcher.data;
-    if (!data || !(data as { ok?: boolean }).ok || !(data as { count?: InventoryCount }).count) return;
+    if (!data) return;
+    if (!(data as { ok?: boolean }).ok || !(data as { count?: InventoryCount }).count) {
+      if (lastRequestedFullCountIdRef.current) setCountFullFailedId(lastRequestedFullCountIdRef.current);
+      return;
+    }
     const fullCount = (data as { count: InventoryCount }).count;
+    if (fullCount?.id != null) {
+      const id = String(fullCount.id);
+      setListCountDetails((prev) => (prev[id] === fullCount ? prev : { ...prev, [id]: fullCount }));
+    }
     if (!modalCount) return;
     if (String(modalCount.id) !== String(fullCount.id) && normalizeIdForMatch(modalCount.id) !== normalizeIdForMatch(fullCount.id)) return;
     setModalCount((prev) => {
@@ -5379,49 +5518,6 @@ export default function InventoryCountPage() {
       return { ...prev, ...fullCount };
     });
   }, [countFullFetcher.data, modalCount?.id]);
-
-  // ✅ 履歴一覧：list 由来で groupItems がない行をキューに追加
-  useEffect(() => {
-    const list = Array.isArray(inventoryCounts) ? inventoryCounts : [];
-    const queue = listDetailQueueRef.current;
-    const details = listCountDetails;
-    for (const c of list) {
-      const id = c?.id;
-      if (!id || details[id]) continue;
-      const hasDetail = (c as InventoryCountLike)?.groupItems && typeof (c as InventoryCountLike).groupItems === "object" && Object.keys((c as InventoryCountLike).groupItems || {}).length > 0;
-      if (hasDetail) continue;
-      if (Array.isArray(c.items) && c.items.length > 0) continue;
-      if (queue.includes(id)) continue;
-      queue.push(id);
-    }
-  }, [inventoryCounts, listCountDetails]);
-
-  // ✅ 履歴一覧：キューから1件ずつ get_count_full を送信
-  useEffect(() => {
-    if (listRowDetailFetcher.state !== "idle") return;
-    const queue = listDetailQueueRef.current;
-    if (queue.length === 0) return;
-    const id = queue.shift()!;
-    setLoadingListDetailIds((prev) => new Set(prev).add(id));
-    const fd = new FormData();
-    fd.set("action", "get_count_full");
-    fd.set("countId", id);
-    listRowDetailFetcher.submit(fd, { method: "post" });
-  }, [inventoryCounts, listCountDetails, listRowDetailFetcher.state]);
-
-  // ✅ 履歴一覧：get_count_full レスポンスを listCountDetails にマージ
-  useEffect(() => {
-    const data = listRowDetailFetcher.data;
-    if (!data || !(data as { ok?: boolean }).ok || !(data as { count?: InventoryCount }).count) return;
-    const fullCount = (data as { count: InventoryCount }).count;
-    const id = String(fullCount.id);
-    setListCountDetails((prev) => ({ ...prev, [id]: fullCount }));
-    setLoadingListDetailIds((prev) => {
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
-  }, [listRowDetailFetcher.data]);
 
   // ✅ 未完了グループの商品リスト取得完了時の処理（3 fetcher 並列：成功時はマージ・loading 解除・キューから次をその fetcher に submit）
   const processIncompleteFetcherData = (
@@ -7978,9 +8074,14 @@ export default function InventoryCountPage() {
                       ) : (
                         <s-stack gap="none">
                   {filteredCounts.map((c) => {
-                    // ✅ バックグラウンドで取得したフルデータがあればそれを使用（N件 N/N を表示）
+                    // ✅ 行を開いて取得したフルデータがあればそれを使用（N件 N/N を表示）。list 由来で明細が無い行は件数を出さない（0件と誤表示しない）
                     const displayCount = listCountDetails[c.id] ?? c;
-                    const isDetailLoading = loadingListDetailIds.has(c.id);
+                    const hasRowDetail =
+                      listCountDetails[c.id] != null ||
+                      Object.keys(((c as InventoryCountLike)?.groupItems && typeof (c as InventoryCountLike).groupItems === "object" ? (c as InventoryCountLike).groupItems : {}) || {}).length > 0 ||
+                      (Array.isArray(c.items) && c.items.length > 0);
+                    const isDetailLoading =
+                      !hasRowDetail && countFullFetcher.state !== "idle" && lastRequestedFullCountIdRef.current === String(c.id);
                     const isSelected = selectedIds.has(c.id);
                     const locName = getLocationName(displayCount.locationId);
                     const statusLabel = getStatusLabel(getDisplayStatusForCount(displayCount));
@@ -8134,7 +8235,11 @@ export default function InventoryCountPage() {
                                 <span style={getStatusBadgeStyle(getDisplayStatusForCount(displayCount))}>{statusLabel}</span>
                               </s-text>
                               <s-text color="subdued" style={{ whiteSpace: "nowrap" }}>
-                                {isDetailLoading ? "…" : `${itemCount}件・実数${totalQty}${hasIncompleteGroup ? "/-" : currentQty > 0 ? `/${currentQty}` : "/-"}`}
+                                {isDetailLoading
+                                  ? "…"
+                                  : hasRowDetail
+                                    ? `${itemCount}件・実数${totalQty}${hasIncompleteGroup ? "/-" : currentQty > 0 ? `/${currentQty}` : "/-"}`
+                                    : "件数は開くと表示"}
                               </s-text>
                             </div>
                           </div>
