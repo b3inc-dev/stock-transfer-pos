@@ -67,13 +67,13 @@ test("createdAt 同値・欠落時は棚卸ID番号の降順", () => {
   assert.ok(compareCountsNewestFirst(b, a) < 0);
 });
 
-test("id 重複は先に現れた方だけ残し、入力配列は変更しない", () => {
+test("id 重複は後に現れた方（新しいチャンク側）を残し、入力配列は変更しない", () => {
   const counts = makeCounts(3);
   const input = [...counts, { ...counts[0], status: "completed" }];
   const snapshot = JSON.stringify(input);
   const out = sortCountsNewestFirst(input);
   assert.equal(out.length, 3);
-  assert.equal(out.find((c) => c.id === "count-1").status, "in_progress");
+  assert.equal(out.find((c) => c.id === "count-1").status, "completed");
   assert.equal(JSON.stringify(input), snapshot);
 });
 

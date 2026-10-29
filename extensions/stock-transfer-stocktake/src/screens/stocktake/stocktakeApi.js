@@ -422,7 +422,7 @@ function fixCountsStatusOnly(counts, productGroupsOrGroupIds) {
 export async function getStocktakeListLimit() {
   const settings = await fetchSettings();
   const n = Number(settings?.outbound?.historyInitialLimit ?? 100);
-  return Math.max(1, Math.min(250, n));
+  return Number.isFinite(n) ? Math.max(1, Math.min(250, Math.floor(n))) : 100;
 }
 
 /** 一覧用ミニマムオブジェクト（groupItems/items なし）。管理画面のキャンセルと同期するため cancelledGroupIds と productGroupNames を含める */

@@ -20,20 +20,24 @@ export function compareCountsNewestFirst(a, b) {
   return countNameNumber(b) - countNameNumber(a);
 }
 
-/** 新しい順に並べ替えた新しい配列を返す（id 重複は先に現れた方を残す） */
+/**
+ * 新しい順に並べ替えた新しい配列を返す。
+ * id 重複は後に現れた方を残す（チャンクは古い順に連結されるため、後勝ち＝新しく書かれた側）。
+ */
 export function sortCountsNewestFirst(counts) {
   const list = Array.isArray(counts) ? counts.filter(Boolean) : [];
-  const seen = new Set();
-  const unique = [];
+  const byId = new Map();
+  const noId = [];
   for (const c of list) {
     const id = c?.id != null ? String(c.id) : "";
-    if (id) {
-      if (seen.has(id)) continue;
-      seen.add(id);
+    if (!id) {
+      noId.push(c);
+      continue;
     }
-    unique.push(c);
+    byId.delete(id);
+    byId.set(id, c);
   }
-  return unique.sort(compareCountsNewestFirst);
+  return [...byId.values(), ...noId].sort(compareCountsNewestFirst);
 }
 
 /**
