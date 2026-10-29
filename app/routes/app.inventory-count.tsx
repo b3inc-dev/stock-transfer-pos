@@ -5480,6 +5480,8 @@ export default function InventoryCountPage() {
   }, [modalOpen, modalCount?.id, modalDetailReady]);
 
   const lastRequestedFullCountIdRef = useRef<string | null>(null);
+  /** 処理済みの get_count_full 失敗応答（別の棚卸を開いたときに古い失敗を再適用しない） */
+  const handledCountFullFailureRef = useRef<unknown>(null);
   // ✅ list 由来で groupItems がない棚卸をモーダルで開いたとき、フルデータを取得してステータス・完了/未完了表示を正確にする（同一IDで二重送信しない）
   useEffect(() => {
     if (!modalOpen || !modalCount) {
@@ -5492,6 +5494,7 @@ export default function InventoryCountPage() {
     const countIdStr = String(modalCount.id);
     if (lastRequestedFullCountIdRef.current === countIdStr) return;
     lastRequestedFullCountIdRef.current = countIdStr;
+    setCountFullFailedId(null);
     const fd = new FormData();
     fd.set("action", "get_count_full");
     fd.set("countId", countIdStr);
@@ -5503,6 +5506,8 @@ export default function InventoryCountPage() {
     const data = countFullFetcher.data;
     if (!data) return;
     if (!(data as { ok?: boolean }).ok || !(data as { count?: InventoryCount }).count) {
+      if (handledCountFullFailureRef.current === data) return;
+      handledCountFullFailureRef.current = data;
       if (lastRequestedFullCountIdRef.current) setCountFullFailedId(lastRequestedFullCountIdRef.current);
       return;
     }
