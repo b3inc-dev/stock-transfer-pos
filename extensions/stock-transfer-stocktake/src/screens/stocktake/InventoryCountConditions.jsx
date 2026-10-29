@@ -12,6 +12,7 @@ import {
   getGroupItemsByKey,
   normalizeIdForMatch,
 } from "./stocktakeApi.js";
+import { selectCountsForList, sortCountsNewestFirst } from "./stocktakeCountListSelection.js";
 import { getStatusBadgeTone } from "../../stocktakeHelpers.js";
 import { FixedFooterNavBar } from "../common/FixedFooterNavBar.jsx";
 
@@ -114,7 +115,9 @@ export function InventoryCountConditions({
   const [allLocations, setAllLocations] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  /** ロケーション絞り込み済み・新しい順の全件。画面には displayLimit 件まで表示する */
   const [counts, setCounts] = useState([]);
+  const [displayLimit, setDisplayLimit] = useState(0);
   const [locationNames, setLocationNames] = useState(new Map());
   const [productGroupNames, setProductGroupNames] = useState(new Map());
   const [pendingCountForModal, setPendingCountForModal] = useState(null);
@@ -145,8 +148,13 @@ export function InventoryCountConditions({
 
   // ✅ 確定後にコンディション画面に戻ったとき、一覧が古いステータスのままになる不整合を防ぐ：親から渡された count（確定直後の updatedCount）で同一IDの行を上書き
   // 親が minimal のときは行の groupItems/items を消さない（他処理・バックグラウンド取得で得た詳細を維持）
+  const { visible: visibleCounts, hasMore: hasMoreToDisplay } = useMemo(
+    () => selectCountsForList(counts, { limit: displayLimit }),
+    [counts, displayLimit]
+  );
+
   const displayedCounts = useMemo(() => {
-    const base = Array.isArray(counts) ? counts : [];
+    const base = visibleCounts;
     if (!currentCountFromParent?.id) return base;
     const parentId = String(currentCountFromParent.id);
     return base.map((c) => {
@@ -158,21 +166,24 @@ export function InventoryCountConditions({
       if (!parentHasItems && Array.isArray(c?.items) && c.items.length > 0) merged.items = c.items;
       return merged;
     });
-  }, [counts, currentCountFromParent]);
+  }, [visibleCounts, currentCountFromParent]);
 
   const listToShow = useMemo(() => {
     return viewMode === "completed" ? displayedCounts.filter(isCompleted) : displayedCounts.filter((c) => !isCompleted(c));
   }, [displayedCounts, viewMode]);
 
-  const hasMoreHistory = loadedChunkCount < chunkCount;
-  // ✅ さらに読み込み：productGroups/totalChunks/useListMetafield を渡してチャンク1本だけ取得（軽量化）
+  const hasMoreHistory = hasMoreToDisplay || loadedChunkCount < chunkCount;
+  // ✅ さらに読み込み：取得済みの過去分を表示件数ぶん広げる。未取得チャンクが残っていれば1本ずつ取得（軽量化）
   const loadMoreHistory = useCallback(async () => {
-    if (loadedChunkCount >= chunkCount) return;
+    const opts = firstPageOptsRef.current;
+    const listLimit = opts.listLimit ?? (await getStocktakeListLimit());
+    if (loadedChunkCount >= chunkCount) {
+      setDisplayLimit((prev) => prev + listLimit);
+      return;
+    }
     setLoading(true);
     await new Promise((r) => setTimeout(r, 0)); // 押した直後に「読込中...」を描画してから取得開始
     try {
-      const opts = firstPageOptsRef.current;
-      const listLimit = opts.listLimit ?? (await getStocktakeListLimit());
       const accumulated = [];
       let nextLoaded = loadedChunkCount;
       while (nextLoaded < chunkCount && accumulated.length < listLimit) {
@@ -187,12 +198,9 @@ export function InventoryCountConditions({
         accumulated.push(...filtered);
         nextLoaded += 1;
       }
-      setCounts((prev) => {
-        const next = [...prev, ...accumulated];
-        next.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-        return next;
-      });
+      setCounts((prev) => sortCountsNewestFirst([...prev, ...accumulated]));
       setLoadedChunkCount(nextLoaded);
+      setDisplayLimit((prev) => prev + listLimit);
     } catch (e) {
       setError(String(e?.message ?? e));
     } finally {
@@ -218,7 +226,7 @@ export function InventoryCountConditions({
           locMap.set(locationGid, "（取得できませんでした）");
         }
       }
-      for (const count of counts) {
+      for (const count of visibleCounts) {
         if (count.locationId && !locMap.has(count.locationId)) {
           try {
             const name = await getLocationName(count.locationId);
@@ -246,7 +254,7 @@ export function InventoryCountConditions({
       setProductGroupNames(groupMap);
     };
     loadNames();
-  }, [counts, locationGid]);
+  }, [visibleCounts, locationGid]);
 
   // ✅ 履歴一覧は入庫と同様に軽量表示のみ。未完了グループの在庫数は自動取得しない（入庫の履歴一覧は追加クエリなしで totalQuantity/receivedQuantity を表示するため、棚卸も一覧表示時は在庫クエリを発生させない）。数量は groupItems がある場合のみ表示し、未取得時は「—」表示。
 
@@ -287,20 +295,11 @@ export function InventoryCountConditions({
           loadedChunks += 1;
           filtered = filterByLocation(allFetched, locationGid);
         }
-        const sorted = [...filtered].sort((a, b) => {
-          const t1 = new Date(a.createdAt || 0).getTime();
-          const t2 = new Date(b.createdAt || 0).getTime();
-          return t2 - t1;
-        });
-        setCounts(sorted);
+        setCounts(sortCountsNewestFirst(filtered));
       } else {
-        const sorted = [...allFetched].sort((a, b) => {
-          const t1 = new Date(a.createdAt || 0).getTime();
-          const t2 = new Date(b.createdAt || 0).getTime();
-          return t2 - t1;
-        });
-        setCounts(sorted);
+        setCounts(sortCountsNewestFirst(allFetched));
       }
+      setDisplayLimit(result.listLimit ?? (await getStocktakeListLimit()));
       setChunkCount(totalChunks);
       setLoadedChunkCount(loadedChunks);
     } catch (e) {
@@ -317,7 +316,7 @@ export function InventoryCountConditions({
 
   // ✅ 一覧表示後に各行の「N件 N/N」をバックグラウンドで取得（先に描画し数値は後から流し込む）
   useEffect(() => {
-    const list = Array.isArray(counts) ? counts : [];
+    const list = visibleCounts;
     const idsToRequest = [];
     for (const c of list) {
       const id = c?.id;
@@ -367,7 +366,7 @@ export function InventoryCountConditions({
           });
         });
     }
-  }, [counts]);
+  }, [visibleCounts]);
 
   const onTapCount = async (c) => {
     // ✅ 単一グループの棚卸は API/ストレージで productGroupIds が無く productGroupId のみのことがあるためフォールバック

@@ -1,5 +1,6 @@
 import { ensureInventoryActivatedWithSkuBarcodeRetry } from "../../../../common/inventoryActivateRetry.js";
 import { normalizeStocktakeId, pendingSnapshotIds, toNormalizedIdSet } from "./stocktakeLineIdentity.js";
+import { sortCountsNewestFirst } from "./stocktakeCountListSelection.js";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -440,8 +441,9 @@ function toMinimalCountForList(c) {
 }
 
 /**
- * 一覧用：先頭1チャンクだけ取得（読込スピード統一）。
- * ディスクリプタ・商品グループ・表示件数を Promise.all で並列取得し、一覧用メタフィールドがあればそれを使用。
+ * 一覧用：ディスクリプタ・商品グループ・表示件数を Promise.all で並列取得し、一覧用メタフィールドがあればそれを使用。
+ * counts は読み込んだ全件を新しい順で返す。表示件数（listLimit）での切り出しは呼び出し側がロケーション絞り込み後に行う
+ * （メタフィールドは古い順に追記されるため、ここで切ると上限超過後の新規棚卸が POS に出なくなる）。
  */
 export async function readInventoryCountsFirstPage() {
   const gqlMain = `#graphql
@@ -502,11 +504,9 @@ export async function readInventoryCountsFirstPage() {
       chunkCounts = fixCountsStatusOnly(chunkCounts, productGroups || []);
       accumulated = accumulated.concat(chunkCounts);
     }
-    const limited = accumulated.slice(0, listLimit);
-    const hasMore = accumulated.length > listLimit || chunkResults.length < totalChunks;
     return {
-      counts: limited,
-      hasMore,
+      counts: sortCountsNewestFirst(accumulated),
+      hasMore: chunkResults.length < totalChunks,
       chunkCount: totalChunks,
       loadedChunkCount: chunkResults.length,
       productGroups: productGroups || [],
@@ -541,11 +541,8 @@ export async function readInventoryCountsFirstPage() {
         counts = parseChunkAndMergeParts(chunk);
       } catch {}
     }
-    const totalChunks = 1;
     counts = fixCountsStatusOnly(counts, productGroups || []);
-    const limited = counts.slice(0, listLimit);
-    const hasMore = counts.length > listLimit || totalChunks > 1;
-    return { counts: limited, hasMore, chunkCount: totalChunks, loadedChunkCount: 1, productGroups: productGroups || [], listLimit, useListMetafield: false };
+    return { counts: sortCountsNewestFirst(counts), hasMore: false, chunkCount: 1, loadedChunkCount: 1, productGroups: productGroups || [], listLimit, useListMetafield: false };
   }
 
   if (!parsed?._chunked || typeof parsed.totalChunks !== "number" || parsed.totalChunks < 1) {
@@ -580,11 +577,9 @@ export async function readInventoryCountsFirstPage() {
     chunkCounts = fixCountsStatusOnly(chunkCounts, productGroups || []);
     accumulated = accumulated.concat(chunkCounts);
   }
-  const limited = accumulated.slice(0, listLimit);
-  const hasMore = accumulated.length > listLimit || chunkResults.length < totalChunks;
   return {
-    counts: limited,
-    hasMore,
+    counts: sortCountsNewestFirst(accumulated),
+    hasMore: chunkResults.length < totalChunks,
     chunkCount: totalChunks,
     loadedChunkCount: chunkResults.length,
     productGroups: productGroups || [],
