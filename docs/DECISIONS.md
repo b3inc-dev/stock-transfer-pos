@@ -155,6 +155,14 @@ API バージョンバンプとセットで別 PR。
 - 非売上 webhook: PENDING_ORDER 長時間 sleep しない（Phase C）
 - メタ失敗時: `needMetafieldRetry`、二重 setQuantities 禁止（Phase D）
 
+## D11. POS の `e.nodeType` エラーは DOM ポリフィル不具合を共通補修で塞ぐ（2026-10-30）
+
+- **症状**: 明細が 50 件を超える（表示ページネーションの「前へ/次へ」が出る）と `undefined is not an object (evaluating 'e.nodeType')`。入庫で #28〜#36 に繰り返した同名エラーも同じ系統と推定。
+- **根本原因**: POS ランタイムの `@remote-dom/polyfill`（≤1.5.x）は `insertBefore(child, ref)` で ref が先頭以外のとき、直前ノードの `nextSibling` を更新しない。`childNodes` は正しいが連結リストが壊れ、Preact の差分が以降の更新で行の並び崩れ・欠落を起こして落ちる。上流は新しい版で修正済み（Shopify/remote-dom の insertBefore 修正）。
+- **再現**: Preact 10.28 + polyfill 1.5.1 で 50→51 件にすると親 `s-stack` の childNodes 54 に対し nextSibling 辿りが 52。ランダム操作 400 回で 394 回不整合。polyfill 1.6.0 または本補修ありで 0 回。
+- **判断**: 画面ごとの構造回避（Host 化・pageOverlay・行モーダル移設など）ではなく、壊れているプリミティブを [`extensions/common/remoteDomSiblingFix.js`](../extensions/common/remoteDomSiblingFix.js) で補修する。起動時に切り離しノードで不具合を検出したときだけ挿入系を包み、直前ノードの next を張り直す。ランタイムが修正版なら何もしない。
+- **適用**: 全 POS 拡張の modal エントリ先頭で import（出庫・入庫・ロス・調整・発注・仕入・棚卸）。新しい POS 拡張を足すときも同じ import を入れる。
+
 ---
 
 ## 関連正本

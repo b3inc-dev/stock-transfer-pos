@@ -1,3 +1,5 @@
+// POS DOM ポリフィルの兄弟リンク不具合を render より前に補修（common/remoteDomSiblingFix.js）
+import "../../common/remoteDomSiblingFix.js";
 import { render, Component } from "preact";
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
 import { getStateSlice, setStateSlice, toUserMessage, getStatusBadgeTone, readValue } from "./inboundHelpers.js";
