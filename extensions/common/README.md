@@ -6,6 +6,7 @@
 - **logInventoryChange.js**: 在庫変動を `api/log-inventory-change` に記録する**共通関数**です。出庫・入庫・ロス・仕入などで使用。
 - **applyInventoryChange.js**: Phase1 用。在庫変更＋履歴を1本化した `api/inventory/apply-change` を呼ぶ**共通関数**です。棚卸・調整の確定で使用（イベント先保存→Shopify 実行→履歴記録をサーバで一括実行）。
 - **listDisplayPagination.js** / **ListPageControls.jsx**: POS 明細リストの表示ページネーション（既定 50 件/ページ）。データ取得の「さらに読み込む」とは別レイヤ。出庫・入庫・ロス・調整・発注・仕入・棚卸で共有。
+- **remoteDomSiblingFix.js**: POS ランタイムの DOM ポリフィルが「途中への insertBefore」で nextSibling を壊す不具合（`e.nodeType` エラーの原因）を起動時に検出して補修する。各 POS 拡張の modal エントリ先頭で import する（`docs/DECISIONS.md` D11）。
 
 ## 設定ファイル
 

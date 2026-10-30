@@ -1,4 +1,6 @@
 // ModalOutbound.jsx（出庫のみ）
+// POS DOM ポリフィルの兄弟リンク不具合を render より前に補修（common/remoteDomSiblingFix.js）
+import "../../common/remoteDomSiblingFix.js";
 import { render, Component } from "preact";
 import { memo } from "preact/compat";
 import { useEffect, useMemo, useRef, useState, useCallback } from "preact/hooks";
