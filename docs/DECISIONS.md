@@ -162,6 +162,14 @@ API バージョンバンプとセットで別 PR。
 - **再現**: Preact 10.28 + polyfill 1.5.1 で 50→51 件にすると親 `s-stack` の childNodes 54 に対し nextSibling 辿りが 52。ランダム操作 400 回で 394 回不整合。polyfill 1.6.0 または本補修ありで 0 回。
 - **判断**: 画面ごとの構造回避（Host 化・pageOverlay・行モーダル移設など）ではなく、壊れているプリミティブを [`extensions/common/remoteDomSiblingFix.js`](../extensions/common/remoteDomSiblingFix.js) で補修する。起動時に切り離しノードで不具合を検出したときだけ挿入系を包み、直前ノードの next を張り直す。ランタイムが修正版なら何もしない。
 - **適用**: 全 POS 拡張の modal エントリ先頭で import（出庫・入庫・ロス・調整・発注・仕入・棚卸）。新しい POS 拡張を足すときも同じ import を入れる。
+- **訂正（2026-10-31）**: D11 リリース後（pos-stock-178 / pos-stock-ciara-256）も実機で同じエラーが再発。真因は D12。ポリフィル補修は害がないため残すが、このエラーの原因ではなかった。
+
+## D12. 拡張フォルダ外の共通 JSX は Preact でビルドする（2026-10-31）
+
+- **症状**: 出庫・ロス・調整・発注・仕入で明細が 51 件以上になると `undefined is not an object (evaluating 'e.nodeType')`。
+- **真因**: `extensions/common/ListPageControls.jsx` は拡張フォルダの外にあるため、esbuild（Shopify CLI）がリポジトリ直下の tsconfig（管理画面 React 用 `jsx: react-jsx`、jsxImportSource 未指定＝react）を使い、`react/jsx-runtime` でビルドされていた。51 件目で「前へ/次へ」が描画されると React 要素が Preact に渡り、Preact が DOM を持たない子を挿入しようとして落ちる。50 件以下では `return null` なので発症しない。棚卸はこの部品を使わず、入庫は現在ページネーションなしのため影響外。#35（入庫 E7 再適用）→ #36 revert の e.nodeType も同じ部品を使っていた。
+- **再現**: 実際の ListPageControls.jsx を同じ設定でビルドし、Preact 10.28 + polyfill 1.5.1、`NODE_ENV=production` で 50→51 件にすると `Cannot read properties of undefined (reading 'nodeType')`。`extensions/common/tsconfig.json` を置くと 0 件。
+- **判断**: `extensions/common/tsconfig.json`（jsxImportSource: preact）を追加し、共通フォルダの JSX を常に Preact でビルドする。`tests/extension-jsx-runtime.test.mjs` で全 POS エントリのバンドルに React の JSX ランタイムが混ざらないことを検査する（esbuild がある環境で実行）。
 
 ---
 
