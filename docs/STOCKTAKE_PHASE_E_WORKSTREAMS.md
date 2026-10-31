@@ -12,7 +12,7 @@
 | ID | 優先 | トラック | Owner（未定は空） | スコープ（含む） | スコープ外 | 根拠 docs |
 |----|------|----------|-------------------|------------------|------------|-----------|
 | **E1** | 次 | 公開審査: Billing / Managed Pricing・設定 500 | | App Store 向け Billing UI、Managed Pricing、設定画面 500 調査・修正 | 棚卸 UX / webhook | `RELEASE_REQUIREMENTS_PUBLIC_APP`, `ADMIN_HOME_AND_PLAN_UI_REQUIREMENTS`, `PUBLIC_APP_PLAN_FEATURES_DESIGN` |
-| **E2** | 次 | API 2026-04 concurrency（`changeFromQuantity`） | | apply-change / loss / order 等の mutation 対応、DECISIONS 記録済み方針の実装 | API バージョンだけ上げて検証なし | Shopify changelog, `DECISIONS` D9, apply-change |
+| **E2** | 進行 | API 2026-04 concurrency（`changeFromQuantity`） | Cursor | apply-change / loss / order 等の mutation 対応、DECISIONS D9 実装。**API バージョンは 2026-01 維持**（2026-04 バンプは `@idempotent` と別 PR）。棚卸・調整 live CAS は #19 と協調（再 null 禁止） | API バージョンだけ上げて検証なし | Shopify changelog, `DECISIONS` D9, apply-change |
 | **E3** | 次 | 出庫: 作成冪等・250 分割途中失敗・multi-shipment 再検証 | | Transfer 作成チェックポイント、timeout 後成功確認、`OUTBOUND_MULTI_SHIPMENT_BEHAVIOR` 再監査 | 古い `Modal.jsx` gap を盲信 | `DECISIONS` P0, `STATE_MACHINE`, `OUTBOUND_MULTI_SHIPMENT_BEHAVIOR` |
 | **E4** | 後 | 入庫: multi-shipment 一括表示・settings 未適用 | | 一括表示 UX、settings 適用のコード突合 | Modal.jsx 前提の陳腐 gap | `MULTI_SHIPMENT_REQUIREMENTS`, `INBOUND_MODAL_MIGRATION_GAP`（要コード確認） |
 | **E5** | 後 | 仕入/発注: docs「未着手」と実コード突合後の残件のみ | | 再監査 → 残ギャップのみ PR | docs の「未着手」をそのまま実装前提にしない | `REQUIREMENTS_PURCHASE_AND_ORDER`, `PURCHASE_*` |
