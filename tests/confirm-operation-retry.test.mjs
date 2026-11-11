@@ -4,9 +4,11 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   appliedOperationFromDraft,
   beginConfirmOperation,
+  clearLocationDraft,
   operationToKeepAfterError,
   planDraftRestore,
   resolveConfirmLines,
@@ -275,4 +277,123 @@ describe("screen restore does not attach another location's applied operation", 
       assert.equal(confirmA.sourceLines[0].qty, 1);
     });
   }
+});
+
+describe("screen save and delete keep the other location's repair", () => {
+  const screens = [
+    {
+      activity: "purchase_entry",
+      key: "stock_transfer_pos_purchase_draft_v1",
+      file: "extensions/stock-transfer-purchase/src/screens/purchase/PurchaseProductList.jsx",
+      draftConst: "PURCHASE_DRAFT_KEY",
+    },
+    {
+      activity: "loss_entry",
+      key: "stock_transfer_pos_loss_draft_v1",
+      file: "extensions/stock-transfer-loss/src/screens/loss/LossProductList.jsx",
+      draftConst: "LOSS_DRAFT_KEY",
+    },
+    {
+      activity: "adjustment",
+      key: "stock_transfer_pos_adjustment_draft_v1",
+      file: "extensions/stock-transfer-adjustment/src/screens/loss/AdjustmentProductList.jsx",
+      draftConst: "ADJUSTMENT_DRAFT_KEY",
+    },
+  ];
+
+  function memoryStorage() {
+    return {
+      data: {},
+      async get(k) { return this.data[k] ?? null; },
+      async set(k, v) { this.data[k] = v; },
+      async delete(k) { delete this.data[k]; },
+    };
+  }
+
+  function reopen(storage, key, locationId) {
+    return planDraftRestore(storage.data[key], locationId);
+  }
+
+  function confirmRepair(plan, editedLines) {
+    let minted = 0;
+    const begun = beginConfirmOperation(plan.operation, () => {
+      minted += 1;
+      return { entryId: `new_${minted}`, appEventId: `evt_new_${minted}` };
+    });
+    return {
+      minted,
+      reused: begun.reused,
+      appEventId: begun.operation.appEventId,
+      lines: resolveConfirmLines(begun.operation, editedLines),
+    };
+  }
+
+  for (const screen of screens) {
+    it(`${screen.activity} keeps location A after B success, reset, and history failure`, async () => {
+      const src = readFileSync(new URL(`../${screen.file}`, import.meta.url), "utf8");
+      assert.match(src, /clearLocationDraft\(/);
+      assert.doesNotMatch(src, new RegExp(`storage\\.delete\\(\\s*${screen.draftConst}\\s*\\)`));
+
+      const aLines = [{ id: "a", inventoryItemId: "101", qty: 1, sku: "A" }];
+      const bLines = [{ id: "b", inventoryItemId: "202", qty: 4, sku: "B" }];
+      const storage = memoryStorage();
+      const locationA = "gid://shopify/Location/A";
+      const locationB = "gid://shopify/Location/B";
+
+      await saveAppliedOperation(storage, screen.key, {
+        entryId: `${screen.activity}_a`,
+        appEventId: `evt_${screen.activity}_a`,
+        locationId: locationA,
+        lines: aLines,
+      });
+      await saveScreenDraft(storage, screen.key, { conds: { locationId: locationB }, lines: bLines }, null);
+
+      await clearLocationDraft(storage, screen.key, locationB);
+      let atA = reopen(storage, screen.key, locationA);
+      let repair = confirmRepair(atA, bLines);
+      assert.equal(repair.reused, true);
+      assert.equal(repair.minted, 0);
+      assert.equal(repair.appEventId, `evt_${screen.activity}_a`);
+      assert.equal(repair.lines[0].inventoryItemId, "101");
+      assert.equal(repair.lines[0].qty, 1);
+
+      await clearLocationDraft(storage, screen.key, locationB);
+      atA = reopen(storage, screen.key, locationA);
+      assert.equal(atA.operation.appEventId, `evt_${screen.activity}_a`);
+
+      const failed = operationToKeepAfterError(
+        { entryId: `${screen.activity}_b`, appEventId: `evt_${screen.activity}_b`, locationId: locationB },
+        Object.assign(new Error("history"), { code: "history_incomplete", inventoryApplied: true }),
+        null,
+        bLines
+      );
+      await saveAppliedOperation(storage, screen.key, failed);
+      atA = reopen(storage, screen.key, locationA);
+      const atB = reopen(storage, screen.key, locationB);
+      assert.equal(atA.operation.appEventId, `evt_${screen.activity}_a`);
+      assert.equal(atB.operation.appEventId, `evt_${screen.activity}_b`);
+      assert.notEqual(atA.operation.appEventId, atB.operation.appEventId);
+      repair = confirmRepair(atA, bLines);
+      assert.equal(repair.reused, true);
+      assert.equal(repair.minted, 0);
+    });
+  }
+
+  it("reads a legacy single appliedOperation draft at its saved location", () => {
+    const legacy = {
+      conds: { locationId: "gid://shopify/Location/A" },
+      lines: [{ id: "a", inventoryItemId: "101", qty: 1 }],
+      appliedOperation: {
+        entryId: "legacy_1",
+        appEventId: "evt_legacy_1",
+        lines: [{ id: "a", inventoryItemId: "101", qty: 1 }],
+      },
+    };
+    const atA = planDraftRestore(legacy, "gid://shopify/Location/A");
+    const atB = planDraftRestore(legacy, "gid://shopify/Location/B");
+    assert.equal(atA.restore, true);
+    assert.equal(atA.operation.appEventId, "evt_legacy_1");
+    assert.equal(atB.restore, false);
+    assert.equal(atB.operation, null);
+  });
 });

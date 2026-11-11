@@ -16,6 +16,7 @@ import {
   operationToKeepAfterError,
   planDraftRestore,
   resolveConfirmLines,
+  clearLocationDraft,
   saveAppliedOperation,
   saveScreenDraft,
 } from "../../../../common/confirmOperationRetry.js";
@@ -389,6 +390,8 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
   const pendingOpRef = useRef(null);
+  const locationIdRef = useRef("");
+  locationIdRef.current = String(conds?.locationId || "");
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -955,7 +958,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       // 4) 下書き削除（確定成功時のみ）
       if (SHOPIFY?.storage?.delete) {
         Promise.all([
-          SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY),
+          clearLocationDraft(SHOPIFY.storage, ADJUSTMENT_DRAFT_KEY, locationIdRef.current),
           SHOPIFY.storage.delete(ADJUSTMENT_CONDITIONS_DRAFT_KEY),
         ]).catch((e) => console.error("Failed to clear adjustment draft:", e));
       }
@@ -1358,9 +1361,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
     setCandidates([]);
     setCandidateQtyMap({});
     try {
-      if (SHOPIFY?.storage?.delete) {
-        await SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY);
-      }
+      await clearLocationDraft(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, locationIdRef.current);
     } catch (e) {
       console.error("Failed to clear loss draft:", e);
     }

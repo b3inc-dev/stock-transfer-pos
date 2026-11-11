@@ -17,6 +17,7 @@ import {
   operationToKeepAfterError,
   planDraftRestore,
   resolveConfirmLines,
+  clearLocationDraft,
   saveAppliedOperation,
   saveScreenDraft,
 } from "../../../../common/confirmOperationRetry.js";
@@ -390,6 +391,8 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
   const pendingOpRef = useRef(null);
+  const locationIdRef = useRef("");
+  locationIdRef.current = String(conds?.locationId || "");
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -1009,8 +1012,8 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       };
 
       await writePurchaseEntries([entry, ...existing]);
+      await clearLocationDraft(SHOPIFY?.storage, PURCHASE_DRAFT_KEY, locationIdRef.current);
       if (SHOPIFY?.storage?.delete) {
-        await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
         await SHOPIFY.storage.delete(PURCHASE_CONDITIONS_DRAFT_KEY);
       }
       if (invalidLines.length > 0) {
@@ -1417,9 +1420,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     setCandidates([]);
     setCandidateQtyMap({});
     try {
-      if (SHOPIFY?.storage?.delete) {
-        await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
-      }
+      await clearLocationDraft(SHOPIFY?.storage, PURCHASE_DRAFT_KEY, locationIdRef.current);
     } catch (e) {
       console.error("Failed to clear purchase draft:", e);
     }

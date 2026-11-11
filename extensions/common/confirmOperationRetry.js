@@ -22,6 +22,7 @@ export function beginConfirmOperation(pending, mint) {
       operation: {
         entryId,
         appEventId,
+        locationId: locationIdOf(pending.locationId),
         lines: Array.isArray(pending.lines) ? pending.lines : [],
       },
       reused: true,
@@ -75,24 +76,48 @@ function locationIdOf(value) {
  * 画面を開き直したときの下書き復元。
  * 別ロケーションでは適用済み操作も明細も復元しない。元のロケーションなら履歴修復用に戻す。
  */
+function operationRecord(operation) {
+  const kept = keptOperation(operation);
+  if (!kept) return null;
+  return {
+    ...kept,
+    locationId: locationIdOf(operation.locationId),
+    lines: Array.isArray(operation.lines) ? operation.lines : [],
+  };
+}
+
+export function appliedOperationsByLocation(saved) {
+  const map = {};
+  const raw = saved?.appliedOperationsByLocation;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const [key, op] of Object.entries(raw)) {
+      const loc = locationIdOf(op?.locationId) || locationIdOf(key);
+      const record = operationRecord({ ...op, locationId: loc });
+      if (record) map[loc] = { ...record, locationId: loc };
+    }
+  }
+  const legacy = operationRecord(saved?.appliedOperation);
+  if (legacy) {
+    const loc = legacy.locationId || locationIdOf(saved?.conds?.locationId);
+    if (loc && !map[loc]) map[loc] = { ...legacy, locationId: loc };
+  }
+  return map;
+}
+
 export function planDraftRestore(saved, currentLocationId) {
   const current = locationIdOf(currentLocationId);
   const savedLocation = locationIdOf(saved?.conds?.locationId);
-  const operation = appliedOperationFromDraft(saved);
-  const operationLocation = locationIdOf(operation?.locationId) || savedLocation;
-  if (operation && current && operationLocation === current && operation.lines.length > 0) {
+  const map = appliedOperationsByLocation(saved);
+  const operation = current ? map[current] || null : null;
+  if (operation && operation.lines.length > 0) {
     return { restore: true, operation, lines: operation.lines };
   }
   if (savedLocation && current && savedLocation !== current) {
     return { restore: false, operation: null, lines: [] };
   }
-  if (operation && current && operationLocation && operationLocation !== current) {
-    const lines = Array.isArray(saved?.lines) ? saved.lines : [];
-    return { restore: lines.length > 0, operation: null, lines };
-  }
-  const lines = firstLines(operation?.lines, saved?.lines);
+  const lines = Array.isArray(saved?.lines) ? saved.lines : [];
   if (!lines.length) return { restore: false, operation: null, lines: [] };
-  return { restore: true, operation, lines };
+  return { restore: true, operation: null, lines };
 }
 
 /** 修復待ちの再確定は、最初に在庫へ出した明細だけを使う。 */
@@ -101,37 +126,33 @@ export function resolveConfirmLines(operation, currentLines) {
   return Array.isArray(currentLines) ? currentLines : [];
 }
 
-export function appliedOperationFromDraft(saved) {
-  const op = saved?.appliedOperation;
-  const kept = keptOperation(op);
-  if (!kept) return null;
-  return {
-    ...kept,
-    locationId: locationIdOf(op.locationId),
-    lines: Array.isArray(op.lines) ? op.lines : [],
-  };
+export function appliedOperationFromDraft(saved, currentLocationId) {
+  const map = appliedOperationsByLocation(saved);
+  const current = locationIdOf(currentLocationId);
+  if (current && map[current]) return map[current];
+  if (!current) {
+    const values = Object.values(map);
+    if (values.length === 1) return values[0];
+  }
+  return null;
+}
+
+function writeOperationMap(saved, map) {
+  const next = { ...(saved || {}) };
+  delete next.appliedOperation;
+  if (Object.keys(map).length > 0) next.appliedOperationsByLocation = map;
+  else delete next.appliedOperationsByLocation;
+  return next;
 }
 
 export function mergeDraftAppliedOperation(draft, operation, existingSaved = null) {
-  const next = { ...(draft || {}) };
-  const kept = keptOperation(operation);
-  if (kept) {
-    next.appliedOperation = {
-      ...kept,
-      locationId: locationIdOf(operation.locationId) || locationIdOf(draft?.conds?.locationId),
-      lines: Array.isArray(operation.lines) ? operation.lines : [],
-    };
-    return next;
-  }
-  const foreign = appliedOperationFromDraft(existingSaved);
-  const foreignLocation = locationIdOf(foreign?.locationId);
-  const currentLocation = locationIdOf(draft?.conds?.locationId);
-  if (foreign && foreignLocation && currentLocation && foreignLocation !== currentLocation) {
-    next.appliedOperation = existingSaved.appliedOperation;
-    return next;
-  }
-  delete next.appliedOperation;
-  return next;
+  const map = appliedOperationsByLocation(existingSaved);
+  const record = operationRecord({
+    ...operation,
+    locationId: locationIdOf(operation?.locationId) || locationIdOf(draft?.conds?.locationId),
+  });
+  if (record) map[record.locationId || ""] = { ...record, locationId: record.locationId };
+  return writeOperationMap({ ...(existingSaved || {}), ...(draft || {}) }, map);
 }
 
 export async function saveScreenDraft(storage, key, draft, pendingOperation = null) {
@@ -149,15 +170,41 @@ export async function saveAppliedOperation(storage, key, operation) {
   if (!storage?.get || !storage?.set || !keptOperation(operation)) return null;
   const saved = (await storage.get(key)) || {};
   const lines = firstLines(operation.lines, saved.lines);
-  const next = mergeDraftAppliedOperation(
-    { ...saved, ...(lines.length ? { lines } : {}) },
-    {
-      ...operation,
-      lines,
-      locationId: locationIdOf(operation.locationId) || locationIdOf(saved?.conds?.locationId),
-    },
-    saved
-  );
+  const locationId = locationIdOf(operation.locationId) || locationIdOf(saved?.conds?.locationId);
+  const savedLocation = locationIdOf(saved?.conds?.locationId);
+  const draft = { ...saved };
+  if (!savedLocation || savedLocation === locationId) {
+    if (lines.length) draft.lines = lines;
+    draft.conds = { ...(saved.conds || {}), ...(locationId ? { locationId } : {}) };
+  }
+  const next = mergeDraftAppliedOperation(draft, { ...operation, lines, locationId }, saved);
+  await storage.set(key, next);
+  return next;
+}
+
+/** この店舗の下書きと修復待ちだけを外し、他店舗の修復待ちは残す。 */
+export async function clearLocationDraft(storage, key, locationId) {
+  if (!storage?.get || !storage?.set) {
+    if (storage?.delete) await storage.delete(key);
+    return null;
+  }
+  const saved = (await storage.get(key)) || null;
+  if (!saved) {
+    if (storage.delete) await storage.delete(key);
+    return null;
+  }
+  const current = locationIdOf(locationId) || locationIdOf(saved?.conds?.locationId);
+  const map = appliedOperationsByLocation(saved);
+  if (current) delete map[current];
+  const savedLocation = locationIdOf(saved?.conds?.locationId);
+  const clearingVisibleDraft = !savedLocation || !current || savedLocation === current;
+  if (Object.keys(map).length === 0 && clearingVisibleDraft) {
+    if (storage.delete) await storage.delete(key);
+    else await storage.set(key, null);
+    return null;
+  }
+  const next = writeOperationMap(saved, map);
+  if (clearingVisibleDraft) next.lines = [];
   await storage.set(key, next);
   return next;
 }
