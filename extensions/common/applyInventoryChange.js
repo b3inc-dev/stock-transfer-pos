@@ -5,6 +5,7 @@ import {
   APPLY_PENDING_MESSAGE,
   APPLY_UNCERTAIN_MESSAGE,
   APPLY_PARTIAL_MESSAGE,
+  APPLY_HISTORY_INCOMPLETE_MESSAGE,
 } from "./applyChangeRecovery.js";
 
 /**
@@ -98,7 +99,7 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
       try {
         const { res, data } = await post({ statusOnly: true, appEventId }, 20000);
         last = res.ok ? decideFromEventStatus(data) : "unknown";
-        if (last === "completed") return { decision: last, data };
+        if (last === "completed" || last === "history_incomplete") return { decision: last, data };
         if (last === "resend" || last === "manual") return { decision: last, data };
       } catch (e) {
         console.warn("[applyInventoryChangeToApi] status poll failed:", e?.message ?? e);
@@ -126,6 +127,16 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
     if (res) {
       const kind = classifyApplyChangeResponse(res.status, data);
       if (kind === "success") return data;
+      if (kind === "history_incomplete") {
+        if (attempt < MAX_REQUEST_RETRIES) {
+          await delay(RETRY_DELAY_MS * Math.min(attempt, 2));
+          continue;
+        }
+        throw errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
+          historyIncomplete: true,
+          inventoryApplied: true,
+        });
+      }
       if ((kind === "auth" || kind === "retryable") && attempt < MAX_REQUEST_RETRIES) {
         await delay(RETRY_DELAY_MS * Math.min(attempt, 2));
         continue;
@@ -152,6 +163,16 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
         appliedCount: statusData?.lineCount,
         recoveredViaStatus: true,
       };
+    }
+    if (decision === "history_incomplete") {
+      if (resends < RECOVER_MAX_RESENDS) {
+        resends++;
+        continue;
+      }
+      throw errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
+        historyIncomplete: true,
+        inventoryApplied: true,
+      });
     }
     if (decision === "resend" && resends < RECOVER_MAX_RESENDS) {
       resends++;
@@ -241,6 +262,20 @@ export async function applyInventoryChangeToApi({
       });
       const data = await res.json().catch(() => ({}));
 
+      const kind = classifyApplyChangeResponse(res.status, data);
+      if (kind === "success") {
+        return data;
+      }
+      if (kind === "history_incomplete") {
+        if (attempt < MAX_REQUEST_RETRIES) {
+          await delay(RETRY_DELAY_MS * Math.min(attempt, 2));
+          continue;
+        }
+        throw errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
+          historyIncomplete: true,
+          inventoryApplied: true,
+        });
+      }
       if (res.ok && data?.ok !== false) {
         return data;
       }

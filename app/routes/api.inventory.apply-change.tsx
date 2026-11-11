@@ -19,6 +19,10 @@ import {
 } from "../utils/ensure-inventory-activated-server";
 import { decideOuterCatchAction } from "../utils/apply-change-outer-catch-guard";
 import {
+  decideCompletedEventRetry,
+  replayCompletedHistory,
+} from "../../extensions/common/inventoryLogWrite.js";
+import {
   formatInventoryApiError,
   isNotStockedRetryableError,
 } from "../utils/format-inventory-api-error";
@@ -320,6 +324,65 @@ export async function action({ request }: ActionFunctionArgs) {
     }).catch(() => null);
     if (existingEvent) {
       if (existingEvent.status === "completed") {
+        const retryDecision = decideCompletedEventRetry(existingEvent);
+        if (retryDecision.action === "retry_history_only") {
+          // 在庫は適用済み。再送では setQuantities を呼ばず、保存済み明細から履歴だけ upsert する。
+          const shopTimezone = await getShopTimezone(admin).catch(() => "UTC");
+          const requestedAt = existingEvent.requestedAt ?? new Date();
+          const replay = await replayCompletedHistory(db, {
+            shop,
+            appEventId,
+            activity: existingEvent.activity,
+            locationId: existingEvent.locationId,
+            locationName: existingEvent.locationName || "",
+            sourceId: existingEvent.sourceId,
+            requestedAt,
+            date: getDateInShopTimezone(requestedAt, shopTimezone),
+            lines: existingEvent.lines.map((l) => ({
+              inventoryItemId: l.inventoryItemId,
+              variantId: l.variantId,
+              sku: l.sku,
+              delta: l.delta,
+              quantityAfter: l.quantityAfterActual ?? l.quantityAfterExpected,
+            })),
+          });
+          if (replay.ok) {
+            await db.inventoryChangeEvent
+              .update({ where: { id: existingEvent.id }, data: { errorSummary: null } })
+              .catch(() => null);
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                eventId: existingEvent.id,
+                appEventId,
+                status: "completed",
+                appliedCount: existingEvent.lines.length,
+                historyReplayed: true,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+            );
+          }
+          const historyError = replay.error || "history finalize failed";
+          await db.inventoryChangeEvent
+            .update({
+              where: { id: existingEvent.id },
+              data: { errorSummary: `history_incomplete: ${replay.errorCode}: ${historyError}`.slice(0, 500) },
+            })
+            .catch(() => null);
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              eventId: existingEvent.id,
+              appEventId,
+              status: "completed",
+              appliedCount: existingEvent.lines.length,
+              historyIncomplete: true,
+              errorCode: "history_incomplete",
+              historyError,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+          );
+        }
         return new Response(
           JSON.stringify({
             ok: true,
@@ -847,7 +910,11 @@ export async function action({ request }: ActionFunctionArgs) {
           appliedCount: lineRecords.length,
           invalidCount: result.invalidCount,
           ...(historyIncomplete
-            ? { historyIncomplete: true, historyError: historyError ?? "history finalize failed" }
+            ? {
+                historyIncomplete: true,
+                errorCode: "history_incomplete",
+                historyError: historyError ?? "history finalize failed",
+              }
             : {}),
         }),
         { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
@@ -1057,9 +1124,11 @@ export async function action({ request }: ActionFunctionArgs) {
             JSON.stringify({
               ok: true,
               error: message,
+              errorCode: "history_incomplete",
               eventId: createdEventId,
               status: "completed",
               historyIncomplete: true,
+              historyError: message,
               ...(cleanupAppEventId ? { appEventId: cleanupAppEventId } : {}),
             }),
             { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }

@@ -4,6 +4,7 @@
 import db from "../db.server";
 import { getDateInShopTimezone, getShopTimezone } from "./timezone";
 import type { InventoryActivity } from "../types";
+import { classifyInventoryLogWriteError } from "../../extensions/common/inventoryLogWrite.js";
 
 export type InventoryChangeLogData = {
   shop: string;
@@ -98,7 +99,9 @@ export async function logInventoryChange(data: InventoryChangeLogData): Promise<
 
     return true;
   } catch (error) {
-    console.error("[logInventoryChange] Error:", error);
+    const classified = classifyInventoryLogWriteError(error);
+    if (classified.idempotentSuccess) return true;
+    console.error(`[logInventoryChange] ${classified.code}:`, classified.message);
     return false;
   }
 }
