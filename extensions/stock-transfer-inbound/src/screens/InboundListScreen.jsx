@@ -52,6 +52,7 @@ import {
 } from "../InboundUiParts.jsx";
 import { logInventoryChangeToApi } from "../../../common/logInventoryChange.js";
 import { buildInboundReceiveLogAppEventId } from "../../../common/buildStableAppEventId.js";
+import { inboundCappedReceive, inboundPlannedReceiveQuantity } from "../../../common/posLiteInventoryPlan.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -1435,15 +1436,10 @@ export function InboundListScreen({
           quantity: Math.max(0, Math.floor(Number(r.shortageQty || 0))),
           reason: "REJECTED",
         })).filter((x) => x.shipmentLineItemId && x.quantity > 0) : [];
-        const plannedItems = rows.map((r) => {
-          const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
-          const targetAccepted = Math.max(0, Math.floor(Number(r.receiveQty || 0)));
-          const alreadyAccepted = Math.max(0, Math.floor(Number(r.alreadyAcceptedQty || 0)));
-          const alreadyOver = Math.max(0, Math.floor(Number(r.overAcceptedQty || 0)));
-          const alreadyTotal = alreadyAccepted + alreadyOver;
-          const delta = Math.max(0, targetAccepted - alreadyTotal);
-          return { shipmentLineItemId, quantity: delta };
-        }).filter((x) => x.shipmentLineItemId && x.quantity > 0);
+        const plannedItems = rows.map((r) => ({
+          shipmentLineItemId: String(r.shipmentLineItemId || "").trim(),
+          quantity: inboundPlannedReceiveQuantity(r),
+        })).filter((x) => x.shipmentLineItemId && x.quantity > 0);
         const hasAnyAction = plannedItems.length > 0 || extraDeltas.length > 0 || rejectedItems.length > 0;
         if (!hasAnyAction) {
           toast(finalize ? "送信する差分がありません" : "一部入庫として送る差分がありません");
@@ -1494,20 +1490,11 @@ export function InboundListScreen({
             } else {
             const overflowMap = new Map();
             const cappedItems = rows.map((r) => {
-              const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
-              const inventoryItemId = String(r.inventoryItemId || "").trim();
-              const planned = Math.max(0, Math.floor(Number(r.plannedQty || 0)));
-              const alreadyRejected = Math.max(0, Math.floor(Number(r.alreadyRejectedQty || 0)));
-              const alreadyAccepted = Math.max(0, Math.floor(Number(r.alreadyAcceptedQty || 0)));
-              const alreadyOver = Math.max(0, Math.floor(Number(r.overAcceptedQty || 0)));
-              const alreadyTotal = alreadyAccepted + alreadyOver;
-              const targetAccepted = Math.max(0, Math.floor(Number(r.receiveQty || 0)));
-              const wantDelta = Math.max(0, targetAccepted - alreadyTotal);
-              const remainingReceivable = Math.max(0, planned - alreadyRejected - alreadyAccepted);
-              const deltaPlanned = Math.min(remainingReceivable, wantDelta);
-              const overflow = Math.max(0, wantDelta - deltaPlanned);
-              if (overflow > 0 && inventoryItemId) overflowMap.set(inventoryItemId, (overflowMap.get(inventoryItemId) || 0) + overflow);
-              return { shipmentLineItemId, quantity: deltaPlanned };
+              const capped = inboundCappedReceive(r);
+              if (capped.overflow > 0 && capped.inventoryItemId) {
+                overflowMap.set(capped.inventoryItemId, (overflowMap.get(capped.inventoryItemId) || 0) + capped.overflow);
+              }
+              return { shipmentLineItemId: capped.shipmentLineItemId, quantity: capped.quantity };
             }).filter((x) => x.shipmentLineItemId && x.quantity > 0);
             if (cappedItems.length > 0) {
               await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: cappedItems });
@@ -1634,15 +1621,10 @@ export function InboundListScreen({
         const plannedByShip = new Map();
         const rejectedByShip = new Map();
         byShipment.forEach((sRows, sid) => {
-          const plannedItems = sRows.map((r) => {
-            const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
-            const targetAccepted = Math.max(0, Math.floor(Number(r.receiveQty || 0)));
-            const alreadyAccepted = Math.max(0, Math.floor(Number(r.alreadyAcceptedQty || 0)));
-            const alreadyOver = Math.max(0, Math.floor(Number(r.overAcceptedQty || 0)));
-            const alreadyTotal = alreadyAccepted + alreadyOver;
-            const delta = Math.max(0, targetAccepted - alreadyTotal);
-            return { shipmentLineItemId, quantity: delta };
-          }).filter((x) => x.shipmentLineItemId && x.quantity > 0);
+          const plannedItems = sRows.map((r) => ({
+            shipmentLineItemId: String(r.shipmentLineItemId || "").trim(),
+            quantity: inboundPlannedReceiveQuantity(r),
+          })).filter((x) => x.shipmentLineItemId && x.quantity > 0);
           if (plannedItems.length > 0) hasAnyPlanned = true;
           plannedByShip.set(sid, plannedItems);
           const shipShortage = (shortageRows || []).filter((sr) => {
@@ -1713,20 +1695,11 @@ export function InboundListScreen({
               throw e;
             } else {
             const cappedItems = sRows.map((r) => {
-              const shipmentLineItemId = String(r.shipmentLineItemId || "").trim();
-              const inventoryItemId = String(r.inventoryItemId || "").trim();
-              const planned = Math.max(0, Math.floor(Number(r.plannedQty || 0)));
-              const alreadyRejected = Math.max(0, Math.floor(Number(r.alreadyRejectedQty || 0)));
-              const alreadyAccepted = Math.max(0, Math.floor(Number(r.alreadyAcceptedQty || 0)));
-              const alreadyOver = Math.max(0, Math.floor(Number(r.overAcceptedQty || 0)));
-              const alreadyTotal = alreadyAccepted + alreadyOver;
-              const targetAccepted = Math.max(0, Math.floor(Number(r.receiveQty || 0)));
-              const wantDelta = Math.max(0, targetAccepted - alreadyTotal);
-              const remainingReceivable = Math.max(0, planned - alreadyRejected - alreadyAccepted);
-              const deltaPlanned = Math.min(remainingReceivable, wantDelta);
-              const overflow = Math.max(0, wantDelta - deltaPlanned);
-              if (overflow > 0 && inventoryItemId) overflowMap.set(inventoryItemId, (overflowMap.get(inventoryItemId) || 0) + overflow);
-              return { shipmentLineItemId, quantity: deltaPlanned };
+              const capped = inboundCappedReceive(r);
+              if (capped.overflow > 0 && capped.inventoryItemId) {
+                overflowMap.set(capped.inventoryItemId, (overflowMap.get(capped.inventoryItemId) || 0) + capped.overflow);
+              }
+              return { shipmentLineItemId: capped.shipmentLineItemId, quantity: capped.quantity };
             }).filter((x) => x.shipmentLineItemId && x.quantity > 0);
             if (cappedItems.length > 0) {
               await receiveShipmentWithFallbackV2({ shipmentId: sid, items: cappedItems });
