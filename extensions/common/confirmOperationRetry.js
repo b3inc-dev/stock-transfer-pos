@@ -155,56 +155,72 @@ export function mergeDraftAppliedOperation(draft, operation, existingSaved = nul
   return writeOperationMap({ ...(existingSaved || {}), ...(draft || {}) }, map);
 }
 
+const draftWriteQueues = new Map();
+
+/** 同じ下書きキーの読み取りから書き込みまでを直列化し、古いスナップショットの上書きを防ぐ。 */
+function enqueueDraftWrite(key, task) {
+  const prev = draftWriteQueues.get(key) || Promise.resolve();
+  const run = prev.catch(() => {}).then(task);
+  draftWriteQueues.set(key, run.catch(() => {}));
+  return run;
+}
+
 export async function saveScreenDraft(storage, key, draft, pendingOperation = null) {
-  if (!storage?.set) return null;
-  const existing = storage.get ? (await storage.get(key)) || null : null;
-  const operation = pendingOperation
-    ? { ...pendingOperation, locationId: locationIdOf(pendingOperation.locationId) || locationIdOf(draft?.conds?.locationId) }
-    : null;
-  const next = mergeDraftAppliedOperation(draft, operation, existing);
-  await storage.set(key, next);
-  return next;
+  return enqueueDraftWrite(key, async () => {
+    if (!storage?.set) return null;
+    const existing = storage.get ? (await storage.get(key)) || null : null;
+    const operation = pendingOperation
+      ? { ...pendingOperation, locationId: locationIdOf(pendingOperation.locationId) || locationIdOf(draft?.conds?.locationId) }
+      : null;
+    const next = mergeDraftAppliedOperation(draft, operation, existing);
+    await storage.set(key, next);
+    return next;
+  });
 }
 
 export async function saveAppliedOperation(storage, key, operation) {
-  if (!storage?.get || !storage?.set || !keptOperation(operation)) return null;
-  const saved = (await storage.get(key)) || {};
-  const lines = firstLines(operation.lines, saved.lines);
-  const locationId = locationIdOf(operation.locationId) || locationIdOf(saved?.conds?.locationId);
-  const savedLocation = locationIdOf(saved?.conds?.locationId);
-  const draft = { ...saved };
-  if (!savedLocation || savedLocation === locationId) {
-    if (lines.length) draft.lines = lines;
-    draft.conds = { ...(saved.conds || {}), ...(locationId ? { locationId } : {}) };
-  }
-  const next = mergeDraftAppliedOperation(draft, { ...operation, lines, locationId }, saved);
-  await storage.set(key, next);
-  return next;
+  return enqueueDraftWrite(key, async () => {
+    if (!storage?.get || !storage?.set || !keptOperation(operation)) return null;
+    const saved = (await storage.get(key)) || {};
+    const lines = firstLines(operation.lines, saved.lines);
+    const locationId = locationIdOf(operation.locationId) || locationIdOf(saved?.conds?.locationId);
+    const savedLocation = locationIdOf(saved?.conds?.locationId);
+    const draft = { ...saved };
+    if (!savedLocation || savedLocation === locationId) {
+      if (lines.length) draft.lines = lines;
+      draft.conds = { ...(saved.conds || {}), ...(locationId ? { locationId } : {}) };
+    }
+    const next = mergeDraftAppliedOperation(draft, { ...operation, lines, locationId }, saved);
+    await storage.set(key, next);
+    return next;
+  });
 }
 
 /** この店舗の下書きと修復待ちだけを外し、他店舗の修復待ちは残す。 */
 export async function clearLocationDraft(storage, key, locationId) {
-  if (!storage?.get || !storage?.set) {
-    if (storage?.delete) await storage.delete(key);
-    return null;
-  }
-  const saved = (await storage.get(key)) || null;
-  if (!saved) {
-    if (storage.delete) await storage.delete(key);
-    return null;
-  }
-  const current = locationIdOf(locationId) || locationIdOf(saved?.conds?.locationId);
-  const map = appliedOperationsByLocation(saved);
-  if (current) delete map[current];
-  const savedLocation = locationIdOf(saved?.conds?.locationId);
-  const clearingVisibleDraft = !savedLocation || !current || savedLocation === current;
-  if (Object.keys(map).length === 0 && clearingVisibleDraft) {
-    if (storage.delete) await storage.delete(key);
-    else await storage.set(key, null);
-    return null;
-  }
-  const next = writeOperationMap(saved, map);
-  if (clearingVisibleDraft) next.lines = [];
-  await storage.set(key, next);
-  return next;
+  return enqueueDraftWrite(key, async () => {
+    if (!storage?.get || !storage?.set) {
+      if (storage?.delete) await storage.delete(key);
+      return null;
+    }
+    const saved = (await storage.get(key)) || null;
+    if (!saved) {
+      if (storage.delete) await storage.delete(key);
+      return null;
+    }
+    const current = locationIdOf(locationId) || locationIdOf(saved?.conds?.locationId);
+    const map = appliedOperationsByLocation(saved);
+    if (current) delete map[current];
+    const savedLocation = locationIdOf(saved?.conds?.locationId);
+    const clearingVisibleDraft = !savedLocation || !current || savedLocation === current;
+    if (Object.keys(map).length === 0 && clearingVisibleDraft) {
+      if (storage.delete) await storage.delete(key);
+      else await storage.set(key, null);
+      return null;
+    }
+    const next = writeOperationMap(saved, map);
+    if (clearingVisibleDraft) next.lines = [];
+    await storage.set(key, next);
+    return next;
+  });
 }

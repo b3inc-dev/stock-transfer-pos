@@ -397,3 +397,92 @@ describe("screen save and delete keep the other location's repair", () => {
     assert.equal(atB.operation, null);
   });
 });
+
+describe("draft writes on one key do not overlap", () => {
+  const screens = [
+    { activity: "purchase_entry", key: "stock_transfer_pos_purchase_draft_v1" },
+    { activity: "loss_entry", key: "stock_transfer_pos_loss_draft_v1" },
+    { activity: "adjustment", key: "stock_transfer_pos_adjustment_draft_v1" },
+  ];
+
+  function gatingStorage(initial) {
+    const box = { value: structuredClone(initial) };
+    let firstGet = true;
+    let releaseFirstGet = () => {};
+    const firstGetStarted = new Promise((resolve) => {
+      releaseFirstGet = resolve;
+    });
+    let releaseFirstGetDone = () => {};
+    const firstGetReached = new Promise((resolve) => {
+      releaseFirstGetDone = resolve;
+    });
+    return {
+      box,
+      releaseFirstGet,
+      firstGetReached,
+      async get() {
+        if (firstGet) {
+          firstGet = false;
+          releaseFirstGetDone();
+          await firstGetStarted;
+        }
+        return structuredClone(box.value);
+      },
+      async set(_key, value) {
+        box.value = structuredClone(value);
+      },
+      async delete() {
+        box.value = null;
+      },
+    };
+  }
+
+  for (const screen of screens) {
+    it(`${screen.activity} keeps the repair when autosave read is stale`, async () => {
+      const locationA = "gid://shopify/Location/A";
+      const locationB = "gid://shopify/Location/B";
+      const aLines = [{ id: "a", inventoryItemId: "101", qty: 1, sku: "A" }];
+      const bLines = [{ id: "b", inventoryItemId: "202", qty: 4, sku: "B" }];
+      const storage = gatingStorage({
+        conds: { locationId: locationA },
+        lines: aLines,
+        appliedOperationsByLocation: {
+          [locationA]: {
+            entryId: `${screen.activity}_a`,
+            appEventId: `evt_${screen.activity}_a`,
+            locationId: locationA,
+            lines: aLines,
+          },
+        },
+      });
+
+      const autosave = saveScreenDraft(storage, screen.key, {
+        conds: { locationId: locationB },
+        lines: bLines,
+      }, null);
+      await storage.firstGetReached;
+      const saved = saveAppliedOperation(storage, screen.key, {
+        entryId: `${screen.activity}_b`,
+        appEventId: `evt_${screen.activity}_b`,
+        locationId: locationB,
+        lines: bLines,
+      });
+      storage.releaseFirstGet();
+      await Promise.all([autosave, saved]);
+
+      const reopenedB = planDraftRestore(storage.box.value, locationB);
+      const reopenedA = planDraftRestore(storage.box.value, locationA);
+      assert.equal(reopenedB.operation?.appEventId, `evt_${screen.activity}_b`);
+      assert.equal(reopenedA.operation?.appEventId, `evt_${screen.activity}_a`);
+      let minted = 0;
+      const again = beginConfirmOperation(reopenedB.operation, () => {
+        minted += 1;
+        return { entryId: "new", appEventId: "evt_new" };
+      });
+      assert.equal(again.reused, true);
+      assert.equal(minted, 0);
+      assert.equal(again.operation.appEventId, `evt_${screen.activity}_b`);
+      assert.equal(resolveConfirmLines(again.operation, aLines)[0].inventoryItemId, "202");
+    });
+  }
+});
