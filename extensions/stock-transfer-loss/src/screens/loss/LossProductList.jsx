@@ -11,6 +11,7 @@ import {
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import { beginConfirmOperation, operationToKeepAfterError } from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
@@ -380,6 +381,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
+  const pendingOpRef = useRef(null);
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -845,9 +847,13 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     }
     submitLockRef.current = true;
     setSubmitting(true);
-    try {
+    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
       const lossEntryId = generateLossId();
-      const appEventId = buildStableAppEventId("loss_entry", lossEntryId);
+      return { entryId: lossEntryId, appEventId: buildStableAppEventId("loss_entry", lossEntryId) };
+    });
+    const lossEntryId = operation.entryId;
+    const appEventId = operation.appEventId;
+    try {
       const entriesForApply = lines
         .filter((l) => Math.abs(Number(l.qty) || 0) > 0)
         .map((l) => ({
@@ -920,11 +926,13 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         await SHOPIFY.storage.delete(LOSS_DRAFT_KEY);
         await SHOPIFY.storage.delete(LOSS_CONDITIONS_DRAFT_KEY);
       }
+      pendingOpRef.current = null;
       toast("ロスしました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
     } catch (e) {
+      pendingOpRef.current = operationToKeepAfterError(operation, e);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;

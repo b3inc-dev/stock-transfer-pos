@@ -12,6 +12,7 @@ import {
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import { beginConfirmOperation, operationToKeepAfterError } from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
@@ -381,6 +382,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
+  const pendingOpRef = useRef(null);
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -924,9 +926,16 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     }
     submitLockRef.current = true;
     setSubmitting(true);
-    try {
+    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
       const purchaseEntryId = generatePurchaseId();
-      const appEventId = buildStableAppEventId("purchase_entry", purchaseEntryId);
+      return {
+        entryId: purchaseEntryId,
+        appEventId: buildStableAppEventId("purchase_entry", purchaseEntryId),
+      };
+    });
+    const purchaseEntryId = operation.entryId;
+    const appEventId = operation.appEventId;
+    try {
       // inventoryItemId のない明細は自動スキップ（SKU変更・削除済み商品など）
       const entriesForApply = lines
         .filter((l) => Math.abs(Number(l.qty) || 0) > 0 && l.inventoryItemId)
@@ -1009,10 +1018,12 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       } else {
         toast("仕入を登録しました");
       }
+      pendingOpRef.current = null;
       confirmPurchaseModalRef?.current?.hideOverlay?.();
       confirmPurchaseModalRef?.current?.hide?.();
       onAfterConfirm?.();
     } catch (e) {
+      pendingOpRef.current = operationToKeepAfterError(operation, e);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;

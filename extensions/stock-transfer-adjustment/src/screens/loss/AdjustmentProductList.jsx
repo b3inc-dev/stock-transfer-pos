@@ -11,6 +11,7 @@ import {
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import { beginConfirmOperation, operationToKeepAfterError } from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
@@ -380,6 +381,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
+  const pendingOpRef = useRef(null);
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -860,8 +862,16 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
     setSubmitting(true);
     const cur = (l) => Number(l.currentQuantity ?? l.available ?? 0);
     const act = (l) => Number(l.qty ?? 0);
-    try {
+    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
       const adjustmentEntryId = generateAdjustmentId();
+      return {
+        entryId: adjustmentEntryId,
+        appEventId: buildStableAppEventId("adjustment", adjustmentEntryId),
+      };
+    });
+    const adjustmentEntryId = operation.entryId;
+    const appEventId = operation.appEventId;
+    try {
       const entriesForApply = lines.map((l) => ({
         inventoryItemId: l.inventoryItemId,
         variantId: l.variantId ?? undefined,
@@ -871,7 +881,6 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       }));
 
       // 1) Phase1: 在庫変更＋履歴を1本化（apply-change API）
-      const appEventId = buildStableAppEventId("adjustment", adjustmentEntryId);
       let adjustmentGroupId = null;
       try {
         const applyResult = await applyInventoryChangeToApi({
@@ -887,6 +896,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           toast(`⚠️ ${applyResult.invalidCount}件の商品が不正なIDのため除外されました`);
         }
       } catch (applyErr) {
+        pendingOpRef.current = operationToKeepAfterError(operation, applyErr);
         const msg = String(applyErr?.message ?? applyErr);
         toast(`在庫調整エラー: ${msg}`);
         return;
@@ -934,6 +944,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       await writeAdjustmentEntries([entry, ...existing]);
 
       // 3) UI完了（全処理成功後にトースト・モーダル閉じ・コールバック）
+      pendingOpRef.current = null;
       toast("調整を確定しました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
@@ -947,6 +958,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         ]).catch((e) => console.error("Failed to clear adjustment draft:", e));
       }
     } catch (e) {
+      pendingOpRef.current = operationToKeepAfterError(operation, e);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
