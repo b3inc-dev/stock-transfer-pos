@@ -8,8 +8,10 @@ import {
   appliedOperationFromDraft,
   beginConfirmOperation,
   operationToKeepAfterError,
+  planDraftRestore,
   resolveConfirmLines,
   saveAppliedOperation,
+  saveScreenDraft,
 } from "../extensions/common/confirmOperationRetry.js";
 import { applyInventoryChangeToApi } from "../extensions/common/applyInventoryChange.js";
 
@@ -189,6 +191,88 @@ describe("loss, purchase, and adjustment keep the applied draft across remount",
       assert.equal(used.length, 1);
       assert.equal(used[0].inventoryItemId, "101");
       assert.equal(used[0].qty, frozen[0].qty);
+    });
+  }
+});
+
+describe("screen restore does not attach another location's applied operation", () => {
+  const screens = [
+    { activity: "purchase_entry", key: "stock_transfer_pos_purchase_draft_v1" },
+    { activity: "loss_entry", key: "stock_transfer_pos_loss_draft_v1" },
+    { activity: "adjustment", key: "stock_transfer_pos_adjustment_draft_v1" },
+  ];
+
+  function memoryStorage(initial) {
+    return {
+      data: { ...initial },
+      async get(k) { return this.data[k] ?? null; },
+      async set(k, v) { this.data[k] = v; },
+    };
+  }
+
+  function openProductScreen(saved, currentLocationId) {
+    const pendingRef = { current: null };
+    const plan = planDraftRestore(saved, currentLocationId);
+    if (!plan.restore) return { pendingRef, lines: [], restored: false };
+    if (plan.operation) pendingRef.current = plan.operation;
+    return { pendingRef, lines: plan.lines, restored: true };
+  }
+
+  function confirmAt(screen, currentLocationId, currentLines) {
+    let minted = 0;
+    const begun = beginConfirmOperation(screen.pendingRef.current, () => {
+      minted += 1;
+      return { entryId: `new_${minted}`, appEventId: `evt_new_${minted}` };
+    });
+    const sourceLines = resolveConfirmLines(begun.operation, currentLines);
+    return {
+      minted,
+      reused: begun.reused,
+      appEventId: begun.operation.appEventId,
+      sourceLines,
+      savedLocationId: currentLocationId,
+    };
+  }
+
+  for (const { activity, key } of screens) {
+    it(`${activity} ignores location B and repairs only back at location A`, async () => {
+      const originalLines = [{ id: "a", inventoryItemId: "101", qty: 1, sku: "A" }];
+      const storage = memoryStorage();
+      await saveAppliedOperation(storage, key, {
+        entryId: `${activity}_1`,
+        appEventId: `evt_${activity}_1`,
+        locationId: "gid://shopify/Location/A",
+        lines: originalLines,
+      });
+      const savedAtA = await storage.get(key);
+      savedAtA.conds = { locationId: "gid://shopify/Location/A" };
+
+      const atB = openProductScreen(savedAtA, "gid://shopify/Location/B");
+      assert.equal(atB.restored, false);
+      assert.equal(atB.pendingRef.current, null);
+      const bLines = [{ id: "b", inventoryItemId: "202", qty: 3, sku: "B" }];
+      const confirmB = confirmAt(atB, "gid://shopify/Location/B", bLines);
+      assert.equal(confirmB.reused, false);
+      assert.equal(confirmB.minted, 1);
+      assert.equal(confirmB.savedLocationId, "gid://shopify/Location/B");
+      assert.equal(confirmB.sourceLines[0].inventoryItemId, "202");
+      assert.notEqual(confirmB.appEventId, `evt_${activity}_1`);
+
+      await saveScreenDraft(storage, key, {
+        conds: { locationId: "gid://shopify/Location/B" },
+        lines: bLines,
+      }, null);
+
+      const atA = openProductScreen(await storage.get(key), "gid://shopify/Location/A");
+      assert.equal(atA.restored, true);
+      assert.equal(atA.pendingRef.current.appEventId, `evt_${activity}_1`);
+      const confirmA = confirmAt(atA, "gid://shopify/Location/A", bLines);
+      assert.equal(confirmA.reused, true);
+      assert.equal(confirmA.minted, 0);
+      assert.equal(confirmA.appEventId, `evt_${activity}_1`);
+      assert.equal(confirmA.savedLocationId, "gid://shopify/Location/A");
+      assert.equal(confirmA.sourceLines[0].inventoryItemId, "101");
+      assert.equal(confirmA.sourceLines[0].qty, 1);
     });
   }
 });

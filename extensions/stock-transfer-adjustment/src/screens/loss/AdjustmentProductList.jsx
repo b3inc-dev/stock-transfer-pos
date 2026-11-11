@@ -12,12 +12,12 @@ import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
 import {
-  appliedOperationFromDraft,
   beginConfirmOperation,
-  mergeDraftAppliedOperation,
   operationToKeepAfterError,
+  planDraftRestore,
   resolveConfirmLines,
   saveAppliedOperation,
+  saveScreenDraft,
 } from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
@@ -490,26 +490,13 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           return;
         }
 
-        const savedConds = saved.conds;
-        const restored = appliedOperationFromDraft(saved);
-        if (restored) pendingOpRef.current = restored;
-        const savedLinesRaw = restored?.lines?.length
-          ? restored.lines
-          : (Array.isArray(saved.lines) ? saved.lines : []);
-        if (savedLinesRaw.length === 0) {
+        const plan = planDraftRestore(saved, conds?.locationId);
+        if (!plan.restore) {
           lossDraftLoadedRef.current = false;
           return;
         }
-
-        // 条件が一致する場合のみ復元
-        if (savedConds && conds) {
-          const savedLocationId = String(savedConds.locationId || "").trim();
-          const currentLocationId = String(conds.locationId || "").trim();
-          if (savedLocationId !== currentLocationId) {
-            lossDraftLoadedRef.current = false;
-            return;
-          }
-        }
+        if (plan.operation) pendingOpRef.current = plan.operation;
+        const savedLinesRaw = plan.lines;
 
         const normalized = savedLinesRaw
           .map((l, i) => ({
@@ -564,7 +551,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           }))
           .filter((l) => l.variantId || l.inventoryItemId);
 
-        await SHOPIFY.storage.set(ADJUSTMENT_DRAFT_KEY, mergeDraftAppliedOperation({
+        await saveScreenDraft(SHOPIFY.storage, ADJUSTMENT_DRAFT_KEY, {
           version: 1,
           savedAt: Date.now(),
           conds: {
@@ -575,7 +562,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
             staffName: conds.staffName,
           },
           lines: minimized,
-        }, pendingOpRef.current));
+        }, pendingOpRef.current);
       } catch (e) {
         console.error("Failed to save loss draft:", e);
       }
@@ -910,6 +897,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         }
       } catch (applyErr) {
         pendingOpRef.current = operationToKeepAfterError(operation, applyErr, pendingOpRef.current, sourceLines);
+        if (pendingOpRef.current) pendingOpRef.current.locationId = String(conds?.locationId || "");
         if (pendingOpRef.current) await saveAppliedOperation(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, pendingOpRef.current);
         const msg = String(applyErr?.message ?? applyErr);
         toast(`在庫調整エラー: ${msg}`);
@@ -973,6 +961,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       }
     } catch (e) {
       const kept = operationToKeepAfterError(operation, e, pendingOpRef.current, sourceLines);
+      if (kept) kept.locationId = String(conds?.locationId || "");
       pendingOpRef.current = kept;
       if (kept) await saveAppliedOperation(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, kept);
       toast(`エラー: ${e?.message ?? e}`);
