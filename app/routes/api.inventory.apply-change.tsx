@@ -20,6 +20,7 @@ import {
 import { decideOuterCatchAction } from "../utils/apply-change-outer-catch-guard";
 import {
   decideCompletedEventRetry,
+  isHistoryReplayOwnedByShop,
   replayCompletedHistory,
 } from "../../extensions/common/inventoryLogWrite.js";
 import {
@@ -323,6 +324,18 @@ export async function action({ request }: ActionFunctionArgs) {
       include: { lines: true },
     }).catch(() => null);
     if (existingEvent) {
+      // statusOnly と同じく、書き込み前にイベントの所属ショップを確認する。
+      if (!isHistoryReplayOwnedByShop(existingEvent.shop, shop)) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "Event belongs to another shop",
+            errorCode: "shop_mismatch",
+            appEventId,
+          }),
+          { status: 403, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
       if (existingEvent.status === "completed") {
         const retryDecision = decideCompletedEventRetry(existingEvent);
         if (retryDecision.action === "retry_history_only") {

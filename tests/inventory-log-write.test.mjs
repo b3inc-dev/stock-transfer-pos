@@ -2,6 +2,7 @@
  * 在庫変更履歴の書き込み失敗: 合成データで整合性・再送の重複・エラー分類を検証する。
  * Run: node --test tests/inventory-log-write.test.mjs
  */
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -9,6 +10,7 @@ import {
   classifyInventoryLogWriteError,
   decideCompletedEventRetry,
   interpretLogChunkResponse,
+  isHistoryReplayOwnedByShop,
   replayCompletedHistory,
   resolveSameActivityAction,
   summarizeLogWriteBatch,
@@ -225,5 +227,76 @@ describe("completed inventory replays history without a second stock mutation", 
     assert.equal(result.ok, false);
     assert.equal(result.errorCode, "db_unavailable");
     assert.equal(result.written, 0);
+  });
+});
+
+describe("history replay stays inside the event shop", () => {
+  const line = {
+    inventoryItemId: "gid://shopify/InventoryItem/101",
+    sku: "SKU-101",
+    delta: -1,
+    quantityAfter: 4,
+  };
+
+  function eventFor(shop) {
+    return {
+      shop,
+      appEventId: "evt_shop_boundary",
+      activity: "loss_entry",
+      locationId: "gid://shopify/Location/1",
+      locationName: "合成店",
+      sourceId: "loss_1",
+      requestedAt: new Date("2026-11-11T00:00:00.000Z"),
+      status: "completed",
+      errorSummary: "history_incomplete: db_unavailable: Can't reach database server",
+      lines: [line],
+    };
+  }
+
+  async function replayLikeRoute(event, sessionShop, db) {
+    if (!isHistoryReplayOwnedByShop(event.shop, sessionShop)) {
+      return { status: 403, errorCode: "shop_mismatch", errorSummary: event.errorSummary };
+    }
+    const result = await replayCompletedHistory(db, {
+      shop: event.shop,
+      appEventId: event.appEventId,
+      activity: event.activity,
+      locationId: event.locationId,
+      locationName: event.locationName,
+      sourceId: event.sourceId,
+      requestedAt: event.requestedAt,
+      date: "2026-11-11",
+      lines: event.lines.map((l) => ({
+        inventoryItemId: l.inventoryItemId,
+        sku: l.sku,
+        delta: l.delta,
+        quantityAfter: l.quantityAfter,
+      })),
+    });
+    if (result.ok) event.errorSummary = null;
+    return { status: 200, historyReplayed: result.ok, errorSummary: event.errorSummary };
+  }
+
+  it("does not write shop B history or clear shop A's repair marker", async () => {
+    const route = readFileSync(new URL("../app/routes/api.inventory.apply-change.tsx", import.meta.url), "utf8");
+    const guardAt = route.indexOf("isHistoryReplayOwnedByShop(existingEvent.shop, shop)");
+    const replayAt = route.indexOf("replayCompletedHistory(");
+    assert.ok(guardAt > 0 && replayAt > guardAt);
+
+    const db = memoryDb();
+    const event = eventFor("shop-a.myshopify.com");
+    const foreign = await replayLikeRoute(event, "shop-b.myshopify.com", db);
+    assert.equal(foreign.status, 403);
+    assert.equal(foreign.errorCode, "shop_mismatch");
+    assert.equal(foreign.errorSummary.startsWith("history_incomplete:"), true);
+    assert.equal(db.rows.length, 0);
+    assert.equal(db.rows.some((row) => row.shop === "shop-b.myshopify.com"), false);
+
+    const owned = await replayLikeRoute(event, "shop-a.myshopify.com", db);
+    assert.equal(owned.historyReplayed, true);
+    assert.equal(owned.errorSummary, null);
+    assert.equal(db.rows.length, 1);
+    assert.equal(db.rows[0].shop, "shop-a.myshopify.com");
+    assert.equal(db.rows[0].delta, -1);
   });
 });

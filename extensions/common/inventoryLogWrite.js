@@ -98,6 +98,13 @@ export function decideCompletedEventRetry(event) {
   return { action: "continue" };
 }
 
+/** 履歴再生は、イベントの所属ショップとセッショントークンのショップが一致するときだけ許可する。 */
+export function isHistoryReplayOwnedByShop(eventShop, sessionShop) {
+  const event = String(eventShop ?? "").trim();
+  const session = String(sessionShop ?? "").trim();
+  return event.length > 0 && event === session;
+}
+
 export function historyNoteForAppEvent(appEventId) {
   const id = typeof appEventId === "string" ? appEventId.trim() : "";
   return id ? `appEventId:${id}` : null;
