@@ -13,6 +13,8 @@ import {
   inboundCappedReceive,
   lossConfirmFingerprint,
   decideLossConfirmIdentity,
+  lossPendingDisposition,
+  lossResumeFromPending,
   readLossPendingForLocation,
   writeLossPendingForLocation,
   clearLossPendingForLocation,
@@ -168,6 +170,91 @@ describe("棚卸・ロス・通信再試行・店舗切替", () => {
     );
     assert.equal(readLossPendingForLocation(cleared, "gid://shopify/Location/1"), null);
   });
+
+  it("在庫未適用が確定した失敗は pending を外し、内容を直した再確定を許す", () => {
+    const failed = lossPendingDisposition({ code: "APPLY_UNAPPLIED", status: "failed", unapplied: true });
+    const uncertain = lossPendingDisposition({ code: "APPLY_UNCERTAIN" });
+    const pending = lossPendingDisposition({ code: "APPLY_PENDING" });
+    const partial = lossPendingDisposition({ code: "APPLY_PARTIAL", partiallyApplied: true });
+    const unknown = lossPendingDisposition(new Error("Load failed"));
+    assert.equal(failed, "clear");
+    assert.equal(uncertain, "keep");
+    assert.equal(pending, "keep");
+    assert.equal(partial, "keep");
+    assert.equal(unknown, "keep");
+
+    const fingerprint = lossConfirmFingerprint({
+      locationId: "gid://shopify/Location/1",
+      lines: [{ inventoryItemId: "gid://shopify/InventoryItem/9", qty: 2 }],
+      reason: "破損",
+      date: "2026-11-11",
+    });
+    const stored = writeLossPendingForLocation({}, {
+      locationId: "gid://shopify/Location/1",
+      lossEntryId: "loss_failed",
+      appEventId: "evt_loss_entry_loss_failed",
+      fingerprint,
+      lines: [{ inventoryItemId: "gid://shopify/InventoryItem/9", qty: 2 }],
+      conds: { locationId: "gid://shopify/Location/1", reason: "破損", date: "2026-11-11" },
+    });
+    const cleared = clearLossPendingForLocation(stored, "gid://shopify/Location/1");
+    const next = decideLossConfirmIdentity({
+      pending: readLossPendingForLocation(cleared, "gid://shopify/Location/1"),
+      fingerprint: lossConfirmFingerprint({
+        locationId: "gid://shopify/Location/1",
+        lines: [{ inventoryItemId: "gid://shopify/InventoryItem/8", qty: 1 }],
+        reason: "破損",
+        date: "2026-11-11",
+      }),
+      locationId: "gid://shopify/Location/1",
+      createId: () => "loss_edited",
+    });
+    assert.equal(next.action, "create");
+    assert.equal(next.lossEntryId, "loss_edited");
+  });
+
+  it("未確認ロスは店舗別に明細と条件を復元でき、同じ指紋になる", () => {
+    const lines = [{ id: "row-1", inventoryItemId: "gid://shopify/InventoryItem/9", qty: 2, sku: "A" }];
+    const conds = {
+      locationId: "gid://shopify/Location/1",
+      locationName: "店舗A",
+      date: "2026-11-11",
+      reason: "破損",
+      staffName: "担当",
+    };
+    const fingerprint = lossConfirmFingerprint({ locationId: conds.locationId, lines, reason: conds.reason, date: conds.date });
+    let store = writeLossPendingForLocation({}, {
+      locationId: conds.locationId,
+      lossEntryId: "loss_a",
+      appEventId: "evt_loss_entry_loss_a",
+      fingerprint,
+      lines,
+      conds,
+    });
+    store = writeLossPendingForLocation(store, {
+      locationId: "gid://shopify/Location/2",
+      lossEntryId: "loss_b",
+      appEventId: "evt_loss_entry_loss_b",
+      fingerprint: "other",
+      lines: [{ inventoryItemId: "gid://shopify/InventoryItem/3", qty: 1 }],
+      conds: { locationId: "gid://shopify/Location/2", reason: "紛失", date: "2026-11-12" },
+    });
+    const resume = lossResumeFromPending(readLossPendingForLocation(store, "gid://shopify/Location/1"));
+    assert.equal(resume.lines[0].inventoryItemId, "gid://shopify/InventoryItem/9");
+    assert.equal(resume.lines[0].qty, 2);
+    assert.equal(resume.conds.reason, "破損");
+    assert.equal(resume.conds.date, "2026-11-11");
+    assert.equal(
+      lossConfirmFingerprint({
+        locationId: resume.conds.locationId,
+        lines: resume.lines,
+        reason: resume.conds.reason,
+        date: resume.conds.date,
+      }),
+      fingerprint
+    );
+    assert.equal(readLossPendingForLocation(store, "gid://shopify/Location/2").lossEntryId, "loss_b");
+  });
 });
 
 describe("注文Webhookは手持ち在庫を更新しない", () => {
@@ -209,5 +296,8 @@ describe("本番経路が受入判定を使う", () => {
     );
     assert.equal(source.includes("decideLossConfirmIdentity"), true);
     assert.equal(source.includes("recoverUncertain: true"), true);
+    assert.equal(source.includes("lossPendingDisposition"), true);
+    assert.equal(source.includes("lossResumeFromPending"), true);
+    assert.equal(source.includes("snapshotLossLines"), true);
   });
 });

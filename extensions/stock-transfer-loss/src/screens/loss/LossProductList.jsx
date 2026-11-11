@@ -15,7 +15,11 @@ import {
   clearLossPendingForLocation,
   decideLossConfirmIdentity,
   lossConfirmFingerprint,
+  lossPendingDisposition,
+  lossResumeFromPending,
   readLossPendingForLocation,
+  snapshotLossConds,
+  snapshotLossLines,
   writeLossPendingForLocation,
 } from "../../../../common/posLiteInventoryPlan.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
@@ -358,7 +362,7 @@ function isEan8_(code) {
   return check === (code.charCodeAt(7) - 48);
 }
 
-export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setFooter, liteMode: liteModeProp, onToggleLiteMode }) {
+export function LossProductList({ conds, onBack, onAfterConfirm, onRestoreConds, setHeader, setFooter, liteMode: liteModeProp, onToggleLiteMode }) {
   const CONFIRM_LOSS_MODAL_ID = "confirm-loss-modal";
   const CONFIRM_RESET_MODAL_ID = "confirm-reset-modal";
   const confirmLossModalRef = useRef(null);
@@ -485,6 +489,22 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       try {
         if (!SHOPIFY?.storage?.get) {
           lossDraftLoadedRef.current = false;
+          return;
+        }
+
+        const currentLocationId = String(conds?.locationId || "").trim();
+        const pendingStore = await SHOPIFY.storage.get(LOSS_PENDING_CONFIRM_KEY);
+        const resume = lossResumeFromPending(readLossPendingForLocation(pendingStore, currentLocationId));
+        if (resume && currentLocationId && resume.conds.locationId === currentLocationId) {
+          setLines(resume.lines.map((line, i) => ({
+            ...line,
+            id: String(line.id || `${Date.now()}-${i}`),
+            qty: Math.max(1, Number(line.qty || 1)),
+            available: null,
+            stockLoading: false,
+          })));
+          onRestoreConds?.(resume.conds);
+          toast("未確認のロスを復元しました。同じ内容でもう一度確定すると結果を確認します。");
           return;
         }
 
@@ -856,10 +876,10 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       else if (!conds?.locationId) toast("ロケーションが指定されていません");
       return;
     }
+    const locationId = String(conds.locationId || "").trim();
     submitLockRef.current = true;
     setSubmitting(true);
     try {
-      const locationId = String(conds.locationId || "").trim();
       const fingerprint = lossConfirmFingerprint({
         locationId,
         lines,
@@ -867,14 +887,28 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         date: conds.date,
       });
       const pendingStore = await loadLossPendingStore();
+      const pending = readLossPendingForLocation(pendingStore, locationId);
       const decision = decideLossConfirmIdentity({
-        pending: readLossPendingForLocation(pendingStore, locationId),
+        pending,
         fingerprint,
         locationId,
         createId: generateLossId,
       });
       if (decision.action === "block") {
-        toast("直前のロスの結果がまだ確認できていません。数量・日付・理由を変えずに、もう一度確定してください。内容を変えた確定は在庫が二重に減るため止めています。");
+        const resume = lossResumeFromPending(pending);
+        if (resume?.lines?.length) {
+          setLines(resume.lines.map((line, i) => ({
+            ...line,
+            id: String(line.id || `${Date.now()}-${i}`),
+            qty: Math.max(1, Number(line.qty || 1)),
+            available: null,
+            stockLoading: false,
+          })));
+          onRestoreConds?.(resume.conds);
+          toast("未確認のロスを元の明細に戻しました。同じ内容でもう一度確定すると結果を確認します。");
+        } else {
+          toast("直前のロスの結果がまだ確認できていません。数量・日付・理由を変えずに、もう一度確定してください。内容を変えた確定は在庫が二重に減るため止めています。");
+        }
         return;
       }
       const lossEntryId = decision.lossEntryId;
@@ -901,6 +935,8 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
             appEventId,
             fingerprint,
             locationId,
+            lines: snapshotLossLines(lines),
+            conds: snapshotLossConds(conds),
           })
         );
       }
@@ -976,12 +1012,18 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
     } catch (e) {
+      if (lossPendingDisposition(e) === "clear" && SHOPIFY?.storage?.set) {
+        try {
+          const latestPending = await loadLossPendingStore();
+          await SHOPIFY.storage.set(LOSS_PENDING_CONFIRM_KEY, clearLossPendingForLocation(latestPending, locationId));
+        } catch (_) {}
+      }
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
       setSubmitting(false);
     }
-  }, [lines, conds, canSubmit, onAfterConfirm]);
+  }, [lines, conds, canSubmit, onAfterConfirm, onRestoreConds]);
 
   const closeSearchHard = () => {
     setQuery("");

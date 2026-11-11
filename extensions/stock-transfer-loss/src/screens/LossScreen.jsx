@@ -89,6 +89,20 @@ export function LossScreen({ onBack, setHeader, setFooter, onViewChange, liteMod
     setConds(c);
     setView(VIEW.PRODUCT_LIST);
   }, []);
+  const handleRestoreConds = useCallback((next) => {
+    setConds((prev) => {
+      if (!prev) return prev;
+      if (String(prev.locationId || "") !== String(next?.locationId || "")) return prev;
+      return {
+        ...prev,
+        date: next.date ?? prev.date,
+        reason: next.reason ?? prev.reason,
+        staffMemberId: next.staffMemberId ?? prev.staffMemberId,
+        staffName: next.staffName ?? prev.staffName,
+        locationName: next.locationName || prev.locationName,
+      };
+    });
+  }, []);
   const handleOpenHistory = useCallback(() => setView(VIEW.HISTORY), []);
   const handleBackFromProduct = useCallback(() => {
     setConds(null);
@@ -112,6 +126,7 @@ export function LossScreen({ onBack, setHeader, setFooter, onViewChange, liteMod
         conds={conds}
         onBack={handleBackFromProduct}
         onAfterConfirm={handleAfterConfirm}
+        onRestoreConds={handleRestoreConds}
         setHeader={setHeader}
         setFooter={setFooter}
         liteMode={liteMode}

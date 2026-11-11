@@ -102,6 +102,53 @@ export function readLossPendingForLocation(store, locationId) {
   return entry;
 }
 
+export function snapshotLossLines(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .map((line) => ({
+      id: String(line?.id || ""),
+      qty: Math.abs(Number(line?.qty ?? line?.quantity ?? 0)),
+      variantId: line?.variantId ?? null,
+      inventoryItemId: String(line?.inventoryItemId || "").trim(),
+      sku: String(line?.sku || ""),
+      barcode: String(line?.barcode || ""),
+      productTitle: String(line?.productTitle || ""),
+      variantTitle: String(line?.variantTitle || ""),
+      imageUrl: String(line?.imageUrl || ""),
+    }))
+    .filter((line) => line.inventoryItemId && line.qty > 0);
+}
+
+export function snapshotLossConds(conds) {
+  return {
+    locationId: String(conds?.locationId || "").trim(),
+    locationName: String(conds?.locationName || ""),
+    date: String(conds?.date || ""),
+    reason: String(conds?.reason || ""),
+    staffMemberId: conds?.staffMemberId ?? null,
+    staffName: conds?.staffName ?? null,
+  };
+}
+
+export function lossResumeFromPending(pending) {
+  const lines = snapshotLossLines(pending?.lines);
+  if (lines.length === 0) return null;
+  const conds = snapshotLossConds(pending?.conds || { locationId: pending?.locationId });
+  return { lines, conds };
+}
+
+/**
+ * 在庫未適用が応答で確定した失敗だけ pending を外す。
+ * 応答不明・処理中・一部適用は残し、内容を変えた再確定を止めたままにする。
+ */
+export function lossPendingDisposition(error) {
+  const code = String(error?.code || "");
+  if (code === "APPLY_PARTIAL" || code === "APPLY_PENDING" || code === "APPLY_UNCERTAIN") return "keep";
+  if (error?.partiallyApplied === true) return "keep";
+  if (code === "APPLY_UNAPPLIED" || error?.unapplied === true) return "clear";
+  if (error?.status === "failed") return "clear";
+  return "keep";
+}
+
 export function writeLossPendingForLocation(store, entry) {
   const loc = String(entry?.locationId || "").trim();
   const next = { ...(store && typeof store === "object" ? store : {}) };
@@ -111,6 +158,8 @@ export function writeLossPendingForLocation(store, entry) {
     appEventId: String(entry.appEventId || "").trim(),
     fingerprint: String(entry.fingerprint || ""),
     locationId: loc,
+    lines: snapshotLossLines(entry.lines),
+    conds: snapshotLossConds(entry.conds || { locationId: loc }),
   };
   return next;
 }

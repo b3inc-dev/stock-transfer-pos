@@ -135,7 +135,11 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
       }
       if (kind !== "pending") {
         const msg = buildApiErrorMessage(res, data);
-        throw new Error(data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`);
+        const text = data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`;
+        if (data?.status === "failed" && data?.partiallyApplied !== true) {
+          throw errorWithCode(text, "APPLY_UNAPPLIED", { unapplied: true, status: "failed" });
+        }
+        throw new Error(text);
       }
       pendingStatus = data?.status || "applying";
     } else {
