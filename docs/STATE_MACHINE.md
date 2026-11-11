@@ -171,8 +171,12 @@ pending → applying → completed
 | 途中停止（アプリクラッシュ） | 上に同じ | CP + 下書きが残れば再開容易 | Shopify 側の掃除は手動（孤児 Transfer） |
 | 同時実行（2 端末） | 二重 | 端末ローカル lock / CP のみ | **高**（分散ロックなし） |
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
-| 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー | 比較的低い |
+| 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー | 比較的低い。Lite実機の通信断は未確認 |
 | apply-change 再送 | 二重 set | `appEventId` unique | 設計意図どおり |
+| POS Lite 店舗切替 | 切替で在庫が動く | 切替自体は在庫mutationなし。ロス下書きはロケーション不一致なら復元しない。未確認ロスは店舗別に保持 | 実機未確認 |
+| 販売注文の引当・配送の出荷元変更 | アプリが手持ちを再減算 | 注文Webhookは履歴のみ。手持ちの書き込みは0 | 実機未確認 |
+| 受取に伴う店舗間移管 | 移管と引当の二重減算 | 手持ちは物理移管の1回。引当は注文側 | 実機未確認 |
+| ロスの通信再試行 | 毎回新しいIDで二重減算 | 同一内容は保存済みIDを再利用し、同一IDで状態照会。内容変更は止める | 実機未確認。調整タイルは未修正 |
 
 ### Idempotency の境界
 

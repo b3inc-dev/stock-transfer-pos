@@ -10,7 +10,14 @@ import {
 } from "./lossApi.js";
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
-import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import {
+  LOSS_PENDING_CONFIRM_KEY,
+  clearLossPendingForLocation,
+  decideLossConfirmIdentity,
+  lossConfirmFingerprint,
+  readLossPendingForLocation,
+  writeLossPendingForLocation,
+} from "../../../../common/posLiteInventoryPlan.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
@@ -39,6 +46,12 @@ function useDebounce(value, ms) {
 
 function generateLossId() {
   return `loss_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function loadLossPendingStore() {
+  if (!SHOPIFY?.storage?.get) return {};
+  const saved = await SHOPIFY.storage.get(LOSS_PENDING_CONFIRM_KEY);
+  return saved && typeof saved === "object" ? saved : {};
 }
 
 // =========================
@@ -846,8 +859,26 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     submitLockRef.current = true;
     setSubmitting(true);
     try {
-      const lossEntryId = generateLossId();
-      const appEventId = buildStableAppEventId("loss_entry", lossEntryId);
+      const locationId = String(conds.locationId || "").trim();
+      const fingerprint = lossConfirmFingerprint({
+        locationId,
+        lines,
+        reason: conds.reason,
+        date: conds.date,
+      });
+      const pendingStore = await loadLossPendingStore();
+      const decision = decideLossConfirmIdentity({
+        pending: readLossPendingForLocation(pendingStore, locationId),
+        fingerprint,
+        locationId,
+        createId: generateLossId,
+      });
+      if (decision.action === "block") {
+        toast("直前のロスの結果がまだ確認できていません。数量・日付・理由を変えずに、もう一度確定してください。内容を変えた確定は在庫が二重に減るため止めています。");
+        return;
+      }
+      const lossEntryId = decision.lossEntryId;
+      const appEventId = decision.appEventId;
       const entriesForApply = lines
         .filter((l) => Math.abs(Number(l.qty) || 0) > 0)
         .map((l) => ({
@@ -862,6 +893,18 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         return;
       }
 
+      if (SHOPIFY?.storage?.set) {
+        await SHOPIFY.storage.set(
+          LOSS_PENDING_CONFIRM_KEY,
+          writeLossPendingForLocation(pendingStore, {
+            lossEntryId,
+            appEventId,
+            fingerprint,
+            locationId,
+          })
+        );
+      }
+
       await applyInventoryChangeToApi({
         appEventId,
         activity: "loss_entry",
@@ -870,6 +913,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         sourceId: lossEntryId,
         referenceDocumentUri: lossEntryId,
         entries: entriesForApply,
+        recoverUncertain: true,
       });
 
       const items = lines.map((l) => {
@@ -899,6 +943,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       // 既存のエントリを取得して連番を決定
       const existing = await readLossEntries();
       const existingCount = Array.isArray(existing) ? existing.length : 0;
+      const alreadyRecorded = Array.isArray(existing) && existing.some((entry) => entry?.id === lossEntryId);
       const lossName = `#L${String(existingCount + 1).padStart(4, "0")}`;
       
       const entry = {
@@ -915,10 +960,16 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         createdAt: new Date().toISOString(),
         adjustmentGroupId: null,
       };
-      await writeLossEntries([entry, ...existing]);
+      if (!alreadyRecorded) {
+        await writeLossEntries([entry, ...existing]);
+      }
       if (SHOPIFY?.storage?.delete) {
         await SHOPIFY.storage.delete(LOSS_DRAFT_KEY);
         await SHOPIFY.storage.delete(LOSS_CONDITIONS_DRAFT_KEY);
+      }
+      if (SHOPIFY?.storage?.set) {
+        const latestPending = await loadLossPendingStore();
+        await SHOPIFY.storage.set(LOSS_PENDING_CONFIRM_KEY, clearLossPendingForLocation(latestPending, locationId));
       }
       toast("ロスしました");
       confirmLossModalRef?.current?.hideOverlay?.();

@@ -170,7 +170,7 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
 
 /**
  * @param {Object} opts
- * @param {boolean} [opts.recoverUncertain] - true のとき通信断/タイムアウト/202 を同一 appEventId の状態照会で解決する（棚卸のみ使用）
+ * @param {boolean} [opts.recoverUncertain] - true のとき通信断/タイムアウト/202 を同一 appEventId の状態照会で解決する（棚卸・ロス）
  * @param {number} [opts.requestTimeoutMs] - recoverUncertain 時の 1 リクエスト上限
  * @param {number[]} [opts.recoveryDelaysMs] - recoverUncertain 時の状態照会間隔（テスト用）
  */
