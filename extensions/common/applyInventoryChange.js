@@ -33,6 +33,16 @@ function isRetryableStatus(status) {
   return status === 429 || status === 503 || (status >= 500 && status < 600);
 }
 
+/** 一度でも在庫適用済みと分かった失敗は、後続の 503 や通信エラーにもその印を残す。 */
+export function carryInventoryApplied(error, seen) {
+  const err = error instanceof Error ? error : new Error(String(error || "applyInventoryChangeToApi: Request failed"));
+  if (!seen && err.inventoryApplied !== true && err.code !== "history_incomplete") return err;
+  err.inventoryApplied = true;
+  err.historyIncomplete = true;
+  if (!err.code) err.code = "history_incomplete";
+  return err;
+}
+
 async function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -111,6 +121,7 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
 
   let resends = 0;
   let attempt = 0;
+  let sawApplied = false;
   for (;;) {
     attempt++;
     let res = null;
@@ -128,25 +139,32 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
       const kind = classifyApplyChangeResponse(res.status, data);
       if (kind === "success") return data;
       if (kind === "history_incomplete") {
+        sawApplied = true;
         if (attempt < MAX_REQUEST_RETRIES) {
           await delay(RETRY_DELAY_MS * Math.min(attempt, 2));
           continue;
         }
-        throw errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
-          historyIncomplete: true,
-          inventoryApplied: true,
-        });
+        throw carryInventoryApplied(
+          errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
+            historyIncomplete: true,
+            inventoryApplied: true,
+          }),
+          true
+        );
       }
       if ((kind === "auth" || kind === "retryable") && attempt < MAX_REQUEST_RETRIES) {
         await delay(RETRY_DELAY_MS * Math.min(attempt, 2));
         continue;
       }
       if (kind === "partial_failed") {
-        throw errorWithCode(`${buildApiErrorMessage(res, data)}（${APPLY_PARTIAL_MESSAGE}）`, "APPLY_PARTIAL", { partiallyApplied: true });
+        throw carryInventoryApplied(
+          errorWithCode(`${buildApiErrorMessage(res, data)}（${APPLY_PARTIAL_MESSAGE}）`, "APPLY_PARTIAL", { partiallyApplied: true }),
+          sawApplied
+        );
       }
       if (kind !== "pending") {
         const msg = buildApiErrorMessage(res, data);
-        throw new Error(data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`);
+        throw carryInventoryApplied(new Error(data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`), sawApplied);
       }
       pendingStatus = data?.status || "applying";
     } else {
@@ -165,14 +183,18 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
       };
     }
     if (decision === "history_incomplete") {
+      sawApplied = true;
       if (resends < RECOVER_MAX_RESENDS) {
         resends++;
         continue;
       }
-      throw errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
-        historyIncomplete: true,
-        inventoryApplied: true,
-      });
+      throw carryInventoryApplied(
+        errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
+          historyIncomplete: true,
+          inventoryApplied: true,
+        }),
+        true
+      );
     }
     if (decision === "resend" && resends < RECOVER_MAX_RESENDS) {
       resends++;
@@ -185,7 +207,7 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
       throw errorWithCode(APPLY_PENDING_MESSAGE, "APPLY_PENDING");
     }
     const detail = fetchErr?.message ? `（${fetchErr.message}）` : "";
-    throw errorWithCode(`${APPLY_UNCERTAIN_MESSAGE}${detail}`, "APPLY_UNCERTAIN");
+    throw carryInventoryApplied(errorWithCode(`${APPLY_UNCERTAIN_MESSAGE}${detail}`, "APPLY_UNCERTAIN"), sawApplied);
   }
 }
 
@@ -206,6 +228,7 @@ export async function applyInventoryChangeToApi({
   recoverUncertain = false,
   requestTimeoutMs,
   recoveryDelaysMs,
+  retryDelayMs,
 }) {
   const session = globalThis?.shopify?.session;
   if (!session?.getSessionToken) {
@@ -249,6 +272,8 @@ export async function applyInventoryChangeToApi({
   }
 
   let lastError = null;
+  let sawApplied = false;
+  const waitMsUnit = Number.isFinite(Number(retryDelayMs)) ? Number(retryDelayMs) : RETRY_DELAY_MS;
   for (let attempt = 1; attempt <= MAX_REQUEST_RETRIES; attempt++) {
     const token = await session.getSessionToken();
     if (!token) {
@@ -267,14 +292,18 @@ export async function applyInventoryChangeToApi({
         return data;
       }
       if (kind === "history_incomplete") {
+        sawApplied = true;
         if (attempt < MAX_REQUEST_RETRIES) {
-          await delay(RETRY_DELAY_MS * Math.min(attempt, 2));
+          await delay(waitMsUnit * Math.min(attempt, 2));
           continue;
         }
-        throw errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
-          historyIncomplete: true,
-          inventoryApplied: true,
-        });
+        throw carryInventoryApplied(
+          errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
+            historyIncomplete: true,
+            inventoryApplied: true,
+          }),
+          true
+        );
       }
       if (res.ok && data?.ok !== false) {
         return data;
@@ -291,14 +320,17 @@ export async function applyInventoryChangeToApi({
       } else if (code && !msg.includes(code)) {
         msg = `${msg} [${code}]`;
       }
-      lastError = new Error(data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`);
+      lastError = carryInventoryApplied(
+        new Error(data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`),
+        sawApplied
+      );
 
       if (res.status === 401 && attempt < MAX_REQUEST_RETRIES) {
-        await delay(attempt === 1 ? 500 : RETRY_DELAY_MS * Math.min(attempt - 1, 2));
+        await delay(attempt === 1 ? 500 : waitMsUnit * Math.min(attempt - 1, 2));
         continue;
       }
       if (isRetryableStatus(res.status) && attempt < MAX_REQUEST_RETRIES) {
-        const waitMs = RETRY_DELAY_MS * Math.min(attempt, 2);
+        const waitMs = waitMsUnit * Math.min(attempt, 2);
         if (attempt > 1) {
           console.warn(`[applyInventoryChangeToApi] attempt ${attempt}/${MAX_REQUEST_RETRIES}, retrying in ${waitMs}ms (status=${res.status})`);
         }
@@ -308,10 +340,10 @@ export async function applyInventoryChangeToApi({
 
       throw lastError;
     } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
+      lastError = carryInventoryApplied(err instanceof Error ? err : new Error(String(err)), sawApplied);
       const isNetworkOrServer = lastError.message.includes("fetch") || lastError.message.includes("Network");
       if (isNetworkOrServer && attempt < MAX_REQUEST_RETRIES) {
-        const waitMs = RETRY_DELAY_MS * Math.min(attempt, 2);
+        const waitMs = waitMsUnit * Math.min(attempt, 2);
         console.warn(`[applyInventoryChangeToApi] attempt ${attempt}/${MAX_REQUEST_RETRIES}, retrying in ${waitMs}ms: ${lastError.message}`);
         await delay(waitMs);
         continue;
@@ -319,5 +351,5 @@ export async function applyInventoryChangeToApi({
       throw lastError;
     }
   }
-  throw lastError || new Error("applyInventoryChangeToApi: Request failed");
+  throw carryInventoryApplied(lastError || new Error("applyInventoryChangeToApi: Request failed"), sawApplied);
 }

@@ -18,7 +18,14 @@ export function beginConfirmOperation(pending, mint) {
   const entryId = typeof pending?.entryId === "string" ? pending.entryId.trim() : "";
   const appEventId = typeof pending?.appEventId === "string" ? pending.appEventId.trim() : "";
   if (entryId && appEventId) {
-    return { operation: { entryId, appEventId }, reused: true };
+    return {
+      operation: {
+        entryId,
+        appEventId,
+        lines: Array.isArray(pending.lines) ? pending.lines : [],
+      },
+      reused: true,
+    };
   }
   const created = mint();
   return {
@@ -41,9 +48,59 @@ function keptOperation(operation) {
  * 在庫適用済みの ID は、その後の別エラーでも捨てない。
  * 捨てると次の確定が新しいイベントになり、在庫がもう一度動く。
  */
-export function operationToKeepAfterError(operation, error, previousPending = null) {
-  if (shouldReuseOperationAfterError(error)) {
-    return keptOperation(operation) || keptOperation(previousPending);
+function firstLines(...candidates) {
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length > 0) return candidate;
   }
-  return keptOperation(previousPending);
+  return [];
+}
+
+export function operationToKeepAfterError(operation, error, previousPending = null, linesSnapshot = null) {
+  const base = shouldReuseOperationAfterError(error)
+    ? keptOperation(operation) || keptOperation(previousPending)
+    : keptOperation(previousPending);
+  if (!base) return null;
+  return {
+    ...base,
+    lines: firstLines(operation?.lines, previousPending?.lines, linesSnapshot),
+  };
+}
+
+/** 修復待ちの再確定は、最初に在庫へ出した明細だけを使う。 */
+export function resolveConfirmLines(operation, currentLines) {
+  if (Array.isArray(operation?.lines) && operation.lines.length > 0) return operation.lines;
+  return Array.isArray(currentLines) ? currentLines : [];
+}
+
+export function appliedOperationFromDraft(saved) {
+  const op = saved?.appliedOperation;
+  const kept = keptOperation(op);
+  if (!kept) return null;
+  return { ...kept, lines: Array.isArray(op.lines) ? op.lines : [] };
+}
+
+export function mergeDraftAppliedOperation(draft, operation) {
+  const next = { ...(draft || {}) };
+  const kept = keptOperation(operation);
+  if (!kept) {
+    delete next.appliedOperation;
+    return next;
+  }
+  next.appliedOperation = {
+    ...kept,
+    lines: Array.isArray(operation.lines) ? operation.lines : [],
+  };
+  return next;
+}
+
+export async function saveAppliedOperation(storage, key, operation) {
+  if (!storage?.get || !storage?.set || !keptOperation(operation)) return null;
+  const saved = (await storage.get(key)) || {};
+  const lines = firstLines(operation.lines, saved.lines);
+  const next = mergeDraftAppliedOperation(
+    { ...saved, ...(lines.length ? { lines } : {}) },
+    { ...operation, lines }
+  );
+  await storage.set(key, next);
+  return next;
 }

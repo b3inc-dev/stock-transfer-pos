@@ -11,7 +11,14 @@ import {
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
-import { beginConfirmOperation, operationToKeepAfterError } from "../../../../common/confirmOperationRetry.js";
+import {
+  appliedOperationFromDraft,
+  beginConfirmOperation,
+  mergeDraftAppliedOperation,
+  operationToKeepAfterError,
+  resolveConfirmLines,
+  saveAppliedOperation,
+} from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
@@ -484,7 +491,11 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         }
 
         const savedConds = saved.conds;
-        const savedLinesRaw = Array.isArray(saved.lines) ? saved.lines : [];
+        const restored = appliedOperationFromDraft(saved);
+        if (restored) pendingOpRef.current = restored;
+        const savedLinesRaw = restored?.lines?.length
+          ? restored.lines
+          : (Array.isArray(saved.lines) ? saved.lines : []);
         if (savedLinesRaw.length === 0) {
           lossDraftLoadedRef.current = false;
           return;
@@ -536,7 +547,8 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       try {
         if (!SHOPIFY?.storage?.set) return;
 
-        const minimized = lines
+        const draftLines = resolveConfirmLines(pendingOpRef.current, lines);
+        const minimized = draftLines
           .map((l, i) => ({
             id: String(l?.id ?? `${Date.now()}-${i}`),
             qty: Math.max(0, Number(l?.qty || 0)),
@@ -550,7 +562,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
           }))
           .filter((l) => Number(l.qty || 0) > 0);
 
-        await SHOPIFY.storage.set(LOSS_DRAFT_KEY, {
+        await SHOPIFY.storage.set(LOSS_DRAFT_KEY, mergeDraftAppliedOperation({
           version: 1,
           savedAt: Date.now(),
           conds: {
@@ -561,7 +573,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
             staffName: conds.staffName,
           },
           lines: minimized,
-        });
+        }, pendingOpRef.current));
       } catch (e) {
         console.error("Failed to save loss draft:", e);
       }
@@ -853,8 +865,9 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     });
     const lossEntryId = operation.entryId;
     const appEventId = operation.appEventId;
+    const sourceLines = resolveConfirmLines(operation, lines);
     try {
-      const entriesForApply = lines
+      const entriesForApply = sourceLines
         .filter((l) => Math.abs(Number(l.qty) || 0) > 0)
         .map((l) => ({
           inventoryItemId: l.inventoryItemId,
@@ -878,7 +891,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         entries: entriesForApply,
       });
 
-      const items = lines.map((l) => {
+      const items = sourceLines.map((l) => {
         // オプション情報を抽出
         const pRaw = String(l.productTitle || "").trim() || "(unknown)";
         const vRaw = String(l.variantTitle || "").trim();
@@ -932,7 +945,9 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
     } catch (e) {
-      pendingOpRef.current = operationToKeepAfterError(operation, e, pendingOpRef.current);
+      const kept = operationToKeepAfterError(operation, e, pendingOpRef.current, sourceLines);
+      pendingOpRef.current = kept;
+      if (kept) await saveAppliedOperation(SHOPIFY?.storage, LOSS_DRAFT_KEY, kept);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
@@ -1306,6 +1321,14 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
   const LossAddedLineRowMemo = lossAddedLineRowMemoRef.current;
 
   const handleReset = useCallback(async () => {
+    const frozen = pendingOpRef.current?.lines;
+    if (Array.isArray(frozen) && frozen.length > 0) {
+      setLines(frozen.map((l) => ({ ...l })));
+      confirmResetModalRef?.current?.hideOverlay?.();
+      confirmResetModalRef?.current?.hide?.();
+      toast("在庫反映済みのため、確定した明細のままもう一度確定してください");
+      return;
+    }
     setLines([]);
     setQuery("");
     setCandidates([]);
