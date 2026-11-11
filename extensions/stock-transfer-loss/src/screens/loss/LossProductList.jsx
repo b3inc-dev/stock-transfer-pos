@@ -932,7 +932,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
     } catch (e) {
-      pendingOpRef.current = operationToKeepAfterError(operation, e);
+      pendingOpRef.current = operationToKeepAfterError(operation, e, pendingOpRef.current);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;

@@ -896,7 +896,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           toast(`⚠️ ${applyResult.invalidCount}件の商品が不正なIDのため除外されました`);
         }
       } catch (applyErr) {
-        pendingOpRef.current = operationToKeepAfterError(operation, applyErr);
+        pendingOpRef.current = operationToKeepAfterError(operation, applyErr, pendingOpRef.current);
         const msg = String(applyErr?.message ?? applyErr);
         toast(`在庫調整エラー: ${msg}`);
         return;
@@ -958,7 +958,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
         ]).catch((e) => console.error("Failed to clear adjustment draft:", e));
       }
     } catch (e) {
-      pendingOpRef.current = operationToKeepAfterError(operation, e);
+      pendingOpRef.current = operationToKeepAfterError(operation, e, pendingOpRef.current);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;

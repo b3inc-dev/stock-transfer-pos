@@ -15,6 +15,38 @@ function pressConfirm(state, mint) {
   return begun;
 }
 
+function historyError() {
+  return Object.assign(new Error("history"), { code: "history_incomplete", inventoryApplied: true });
+}
+
+/**
+ * 確定ボタンの連続押下。新しい appEventId の初回だけ在庫を動かし、同じ ID は履歴修復にする。
+ */
+function pressSequence(outcomes) {
+  let pending = null;
+  let minted = 0;
+  const stockMutations = [];
+  const sentIds = [];
+  for (const outcome of outcomes) {
+    const begun = beginConfirmOperation(pending, () => {
+      minted += 1;
+      return { entryId: `loss_${minted}`, appEventId: `evt_${minted}` };
+    });
+    sentIds.push(begun.operation.appEventId);
+    if (!stockMutations.includes(begun.operation.appEventId)) {
+      stockMutations.push(begun.operation.appEventId);
+    }
+    if (outcome === "ok") {
+      pending = null;
+    } else if (outcome === "history_incomplete") {
+      pending = operationToKeepAfterError(begun.operation, historyError(), pending);
+    } else {
+      pending = operationToKeepAfterError(begun.operation, new Error(outcome), pending);
+    }
+  }
+  return { pending, minted, stockMutations, sentIds };
+}
+
 describe("confirm button retry after history_incomplete", () => {
   it("reuses the applied operation id on the next press and mints a new one only after success", () => {
     const state = { pending: null, last: null };
@@ -59,5 +91,23 @@ describe("confirm button retry after history_incomplete", () => {
     assert.equal(second.reused, false);
     assert.notEqual(second.operation.appEventId, first.operation.appEventId);
     assert.equal(minted, 2);
+  });
+
+  it("second confirm reuses the applied id, so stock moves once", () => {
+    const fixed = pressSequence(["history_incomplete", "ok"]);
+    assert.deepEqual(fixed.sentIds, ["evt_1", "evt_1"]);
+    assert.deepEqual(fixed.stockMutations, ["evt_1"]);
+    assert.equal(fixed.minted, 1);
+    assert.equal(fixed.pending, null);
+
+    const mintedEveryPress = ["evt_1", "evt_2"];
+    assert.notDeepEqual(fixed.sentIds, mintedEveryPress);
+  });
+
+  it("keeps the applied id when a later press fails for another reason", () => {
+    const run = pressSequence(["history_incomplete", "local_save_failed", "ok"]);
+    assert.deepEqual(run.sentIds, ["evt_1", "evt_1", "evt_1"]);
+    assert.deepEqual(run.stockMutations, ["evt_1"]);
+    assert.equal(run.pending, null);
   });
 });
