@@ -5,11 +5,13 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
 import "@shopify/polaris/build/esm/styles.css";
+import "../admin-ui.css";
 
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { isInventoryCountReadOnlySubmission } from "../utils/inventory-count-revalidation";
 import { AppNavBar } from "../components/AppNavBar";
+import { AdminNotice } from "../components/AdminChrome";
 import type { ActiveSubscription } from "../utils/billing";
 import {
   getPlanFromActiveSubscriptions,
@@ -371,23 +373,13 @@ export default function App() {
       {/* 上部メニュー（s-app-nav が表示されない環境用・常に表示） */}
       <AppNavBar shopPlan={shopPlan} />
       {shopPlan.locationPlanMismatch && (
-        <div
-          style={{
-            margin: "8px 16px",
-            padding: "12px 16px",
-            background: "#fff4e5",
-            border: "1px solid #e0b252",
-            borderRadius: "8px",
-            fontSize: "14px",
-            color: "#202223",
-          }}
-        >
+        <AdminNotice tone="warning" style={{ margin: "8px 16px" }}>
           <strong>ロケーション数がプランと一致していません。</strong>
           <span style={{ marginLeft: "4px" }}>
             現在のプランは{shopPlan.maxLocationsForPlan}ロケーションまでです。ストアのロケーション数（{shopPlan.locationsCount}）に合ったプランに変更するまで、設定・在庫・入出庫などの機能をご利用いただけません。
-            <a href="/app/plan" style={{ marginLeft: "8px", color: "#2c6ecb", fontWeight: 600 }}>料金プランで変更する</a>
+            <a href="/app/plan" className="admin-text-link" style={{ marginLeft: "8px", fontWeight: 600 }}>料金プランで変更する</a>
           </span>
-        </div>
+        </AdminNotice>
       )}
       {shopPlan.planDebug && (
         <div

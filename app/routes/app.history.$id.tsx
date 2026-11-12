@@ -220,44 +220,40 @@ export default function HistoryDetailPage() {
                 <s-text color="subdued">商品明細がありません</s-text>
               </s-box>
             ) : (
-              <s-stack gap="none">
-                {lineItems.map((item, idx) => (
-                  <div key={item.id || idx}>
-                    <div style={{ padding: "12px" }}>
-                      <s-stack gap="small">
-                        <s-text type="strong">
-                          {item.title || "(商品名なし)"}
-                        </s-text>
-                        {item.sku ? (
-                          <s-text color="subdued">
-                            SKU: {item.sku}
-                          </s-text>
-                        ) : null}
-                        {item.barcode ? (
-                          <s-text color="subdued">
-                            JAN: {item.barcode}
-                          </s-text>
-                        ) : null}
-                        {(item.option1 || item.option2 || item.option3) ? (
-                          <s-text color="subdued">
-                            オプション: {[item.option1, item.option2, item.option3].filter(Boolean).join(" / ")}
-                          </s-text>
-                        ) : null}
-                        <s-text color="subdued">
-                          数量: {item.quantity}
-                        </s-text>
-                      </s-stack>
-                    </div>
-                    <s-divider />
-                  </div>
-                ))}
-              </s-stack>
+              <div className="admin-outline-card">
+                <div className="admin-qty-scroll">
+                  <table className="admin-qty-table">
+                    <thead>
+                      <tr>
+                        <th>商品名</th>
+                        <th>SKU</th>
+                        <th>JAN</th>
+                        <th>オプション</th>
+                        <th className="admin-qty-num">数量</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {lineItems.map((item, idx) => (
+                        <tr key={item.id || idx}>
+                          <td>{item.title || "(商品名なし)"}</td>
+                          <td>{item.sku || "-"}</td>
+                          <td>{item.barcode || "-"}</td>
+                          <td>{[item.option1, item.option2, item.option3].filter(Boolean).join(" / ") || "-"}</td>
+                          <td className="admin-qty-num">{item.quantity}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             )}
           </s-section>
 
           {/* 戻るボタン */}
           <s-box padding="base">
-            <s-button onClick={() => navigate("/app/history")}>戻る</s-button>
+            <button type="button" className="admin-secondary" onClick={() => navigate("/app/history")}>
+              戻る
+            </button>
           </s-box>
         </s-stack>
       </s-scroll-box>

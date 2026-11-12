@@ -42,24 +42,7 @@ export function AppNavBar({ shopPlan }: AppNavBarProps) {
   }
 
   return (
-    <nav
-      data-app-nav="pos-stock"
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: "4px 16px",
-        alignItems: "center",
-        padding: "12px 20px",
-        marginBottom: "16px",
-        background: "#f6f6f7",
-        borderBottom: "1px solid #e1e3e5",
-        fontSize: "14px",
-        position: "relative",
-        zIndex: 100,
-        minHeight: "44px",
-        boxSizing: "border-box",
-      }}
-    >
+    <nav className="admin-nav" data-app-nav="pos-stock">
       {items.map(({ path, label }) => {
         const to = path + search;
         const isActive = location.pathname === path;
@@ -67,11 +50,8 @@ export function AppNavBar({ shopPlan }: AppNavBarProps) {
           <Link
             key={path}
             to={to}
-            style={{
-              color: isActive ? "#2c6ecb" : "#202223",
-              fontWeight: isActive ? 600 : 400,
-              textDecoration: "none",
-            }}
+            className={isActive ? "admin-nav-link is-active" : "admin-nav-link"}
+            aria-current={isActive ? "page" : undefined}
           >
             {label}
           </Link>
