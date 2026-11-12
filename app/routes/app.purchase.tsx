@@ -62,9 +62,10 @@ async function executePurchaseReceive(
       const invId = normalizeInventoryItemGid(item.inventoryItemId);
       const qty = Math.max(0, Number(item.quantity || 0));
       if (!invId || qty === 0) return null;
-      return { inventoryItemId: invId, locationId: locationGid, delta: qty };
+      // changeFromQuantity: null = 意図的オプトアウト（Admin API 2026-04 実質必須）
+      return { inventoryItemId: invId, locationId: locationGid, delta: qty, changeFromQuantity: null as number | null };
     })
-    .filter((c): c is { inventoryItemId: string; locationId: string; delta: number } => c !== null);
+    .filter((c): c is { inventoryItemId: string; locationId: string; delta: number; changeFromQuantity: number | null } => c !== null);
 
   if (changes.length === 0) return { ok: false, error: "有効な在庫変更がありません" };
 
@@ -190,9 +191,10 @@ async function executePurchaseCancel(
       const invId = normalizeInventoryItemGid(item.inventoryItemId);
       const qty = Math.max(0, Number(item.quantity || 0));
       if (!invId || qty === 0) return null;
-      return { inventoryItemId: invId, locationId: locationGid, delta: -qty };
+      // changeFromQuantity: null = 意図的オプトアウト（Admin API 2026-04 実質必須）
+      return { inventoryItemId: invId, locationId: locationGid, delta: -qty, changeFromQuantity: null as number | null };
     })
-    .filter((c): c is { inventoryItemId: string; locationId: string; delta: number } => c !== null);
+    .filter((c): c is { inventoryItemId: string; locationId: string; delta: number; changeFromQuantity: number | null } => c !== null);
 
   if (changes.length === 0) return { ok: true };
 

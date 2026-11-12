@@ -544,8 +544,9 @@ export async function adjustInventoryToActual({ locationId, items }) {
       const inventoryItemGid = toInventoryItemGid(x.inventoryItemId);
       if (!inventoryItemGid) return null;
       const actual = Math.max(0, Math.floor(Number(x.actualQuantity) || 0));
-      const current = Number.isFinite(Number(x.currentQuantity)) ? Math.max(0, Math.floor(Number(x.currentQuantity) || 0)) : 0;
-      return { inventoryItemId: inventoryItemGid, quantity: actual, changeFromQuantity: current };
+      // 主経路 (extensions/stock-transfer-stocktake) に揃え null オプトアウト。
+      // UI current CAS はカウント中のずれで確定失敗し得る。ルートツリーは extensions/* 外の legacy。
+      return { inventoryItemId: inventoryItemGid, quantity: actual, changeFromQuantity: null };
     })
     .filter((x) => x !== null);
 
