@@ -147,6 +147,68 @@ Render `pos-stock`（srv-d5vcsr7pm1nc73cfph90）は `b3inc-dev/stock-transfer-po
 
 GitHub main `c3cfefff` とPRを同じNode24/依存/envで比較し、lint 3,093 errors/157 warnings、typecheck 452 error行が同一（lintの絶対path・列幅を正規化）。今回差分による新規失敗なし。正式Green baselineは未成立。
 
+## PR Preview Workflow
+
+本番 deploy / Shopify deploy / Render / DB migrate を行わず、**PR の内容だけ**をローカルで確認するための手順です。Preview 専用 worktree（既定: リポジトリの兄弟ディレクトリ `../ciara-system-preview`）を使い、本体の作業ディレクトリや branch は切り替えません。ブラウザの確認 URL は常に同じです。
+
+**Preview URL:** `http://127.0.0.1:3001`（通常の `npm run dev` は 3000。競合させない）
+
+コマンドはすべて **本体側の checkout**（`preview:*` スクリプトがある dir。通常は main 作業 dir）で実行します。`cd ../ciara-system-preview` してから `preview:*` を回す必要はありません（Preview 内実行は拒否します）。
+
+### 初回だけ（Preview worktree 準備）
+
+```bash
+npm run preview:setup
+npm run preview:pr -- <PR番号>
+npm run preview:dev
+```
+
+- 既に `../ciara-system-preview` があれば再利用し、二重作成しません。
+- パスを変えたい場合は `PREVIEW_WORKTREE_PATH=/absolute/path` を付けて実行。
+- Preview worktree が dirty（未コミット変更）のときは破棄せず停止します。`git reset --hard` / `git clean -fd` / force push は使いません。
+- `preview:setup` / `preview:pr` は必要時のみ Preview 内で `npm ci` します（本体の `node_modules` は触りません）。
+
+### 以後（PR を切り替えて確認）
+
+```bash
+npm run preview:pr -- <PR番号>
+npm run preview:dev
+```
+
+例（PR #27）:
+
+```bash
+npm run preview:pr -- 27
+npm run preview:dev
+```
+
+ブラウザで `http://127.0.0.1:3001` を開いて確認します。
+
+### 起動経路・依存関係・Prisma / env
+
+- `preview:dev` は **`shopify app dev` を使いません**。`shopify.web.toml` の `prisma migrate deploy` を踏まないよう、`prisma generate`（DB変更なし）+ `react-router dev`（`PORT=3001`）だけを Preview worktree で起動します。
+- `package.json` / `package-lock.json` が `origin/main` から変わっている場合は明示し、ロック／マニフェストのハッシュが変わっていれば Preview 内だけで `npm ci` します。
+- Prisma schema / migration の差分は**警告のみ**です。`db push` / `migrate deploy` / `migrate apply` / production DB / production sync は**絶対に自動実行しません**。
+- `.env` / secrets は自動コピーしません。Preview でアプリ動作確認が必要なら、本体側と同様の**ローカル用** `.env` を Preview worktree に手動配置してください（本番 credentials を書かない）。
+- 通常の `npm run dev`（3000）と同時起動は可能ですが、Shopify CLI のトンネル／`FRONTEND_PORT` とは別プロセスです。混同しないでください。
+- PR 取得は `gh` を優先し、だめなら `refs/pull/<PR>/head` に fallback します。存在しない PR は明確にエラー終了します。
+
+### 確認後 → 本番反映ワークフローへ
+
+プレビューで問題なければ、人間向けの合図として次を使い、既存の production release workflow（本書前半の PR merge 承認 → Render / 必要時 Shopify deploy）へ進めてください。**この Preview 手順自体は merge / 本番操作を行いません。**
+
+```text
+プレビュー確認済み。問題ないので本番反映まで進めて。
+```
+
+### 禁止事項（Preview スクリプト・運用）
+
+- PR の自動 merge
+- production deploy / Shopify deploy / Render 操作 / rollback
+- `git reset --hard` / `git clean -fd` / force push
+- 本番 DB 操作・secrets 変更
+- Preview 起動経路での `prisma migrate deploy` / `db push`
+
 ### 依頼ごとに自動で行う作業分離
 
 ユーザーは変更内容を通常の言葉で依頼するだけでよい。Cursor・Codex・Claude Codeの担当toolは、編集前に次を自律実行し、branch/worktreeの作成・再利用について毎回の確認を求めない。
