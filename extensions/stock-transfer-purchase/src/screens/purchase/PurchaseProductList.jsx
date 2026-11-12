@@ -12,6 +12,15 @@ import {
 import { FixedFooterNavBar } from "../../FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import {
+  beginConfirmOperation,
+  operationToKeepAfterError,
+  planDraftRestore,
+  resolveConfirmLines,
+  clearLocationDraft,
+  saveAppliedOperation,
+  saveScreenDraft,
+} from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
@@ -381,6 +390,9 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
+  const pendingOpRef = useRef(null);
+  const locationIdRef = useRef("");
+  locationIdRef.current = String(conds?.locationId || "");
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -483,22 +495,13 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
           return;
         }
 
-        const savedConds = saved.conds;
-        const savedLinesRaw = Array.isArray(saved.lines) ? saved.lines : [];
-        if (savedLinesRaw.length === 0) {
+        const plan = planDraftRestore(saved, conds?.locationId);
+        if (!plan.restore) {
           purchaseDraftLoadedRef.current = false;
           return;
         }
-
-        // 条件が一致する場合のみ復元
-        if (savedConds && conds) {
-          const savedLocationId = String(savedConds.locationId || "").trim();
-          const currentLocationId = String(conds.locationId || "").trim();
-          if (savedLocationId !== currentLocationId) {
-            purchaseDraftLoadedRef.current = false;
-            return;
-          }
-        }
+        if (plan.operation) pendingOpRef.current = plan.operation;
+        const savedLinesRaw = plan.lines;
 
         const normalized = savedLinesRaw
           .map((l, i) => ({
@@ -573,7 +576,8 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       try {
         if (!SHOPIFY?.storage?.set) return;
 
-        const minimized = lines
+        const draftLines = resolveConfirmLines(pendingOpRef.current, lines);
+        const minimized = draftLines
           .map((l, i) => ({
             id: String(l?.id ?? `${Date.now()}-${i}`),
             qty: Math.max(0, Number(l?.qty || 0)),
@@ -587,7 +591,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
           }))
           .filter((l) => Number(l.qty || 0) > 0);
 
-        await SHOPIFY.storage.set(PURCHASE_DRAFT_KEY, {
+        await saveScreenDraft(SHOPIFY.storage, PURCHASE_DRAFT_KEY, {
           version: 1,
           savedAt: Date.now(),
           conds: {
@@ -603,7 +607,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
             note: conds.note,
           },
           lines: minimized,
-        });
+        }, pendingOpRef.current);
       } catch (e) {
         console.error("Failed to save purchase draft:", e);
       }
@@ -924,11 +928,19 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     }
     submitLockRef.current = true;
     setSubmitting(true);
-    try {
+    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
       const purchaseEntryId = generatePurchaseId();
-      const appEventId = buildStableAppEventId("purchase_entry", purchaseEntryId);
+      return {
+        entryId: purchaseEntryId,
+        appEventId: buildStableAppEventId("purchase_entry", purchaseEntryId),
+      };
+    });
+    const purchaseEntryId = operation.entryId;
+    const appEventId = operation.appEventId;
+    const sourceLines = resolveConfirmLines(operation, lines);
+    try {
       // inventoryItemId のない明細は自動スキップ（SKU変更・削除済み商品など）
-      const entriesForApply = lines
+      const entriesForApply = sourceLines
         .filter((l) => Math.abs(Number(l.qty) || 0) > 0 && l.inventoryItemId)
         .map((l) => ({
           inventoryItemId: l.inventoryItemId,
@@ -949,7 +961,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         });
       }
 
-      const items = lines.map((l) => {
+      const items = sourceLines.map((l) => {
         // オプション情報を抽出
         const pRaw = String(l.productTitle || "").trim() || "(unknown)";
         const vRaw = String(l.variantTitle || "").trim();
@@ -1000,8 +1012,8 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       };
 
       await writePurchaseEntries([entry, ...existing]);
+      await clearLocationDraft(SHOPIFY?.storage, PURCHASE_DRAFT_KEY, locationIdRef.current);
       if (SHOPIFY?.storage?.delete) {
-        await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
         await SHOPIFY.storage.delete(PURCHASE_CONDITIONS_DRAFT_KEY);
       }
       if (invalidLines.length > 0) {
@@ -1009,10 +1021,15 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       } else {
         toast("仕入を登録しました");
       }
+      pendingOpRef.current = null;
       confirmPurchaseModalRef?.current?.hideOverlay?.();
       confirmPurchaseModalRef?.current?.hide?.();
       onAfterConfirm?.();
     } catch (e) {
+      const kept = operationToKeepAfterError(operation, e, pendingOpRef.current, sourceLines);
+      if (kept) kept.locationId = String(conds?.locationId || "");
+      pendingOpRef.current = kept;
+      if (kept) await saveAppliedOperation(SHOPIFY?.storage, PURCHASE_DRAFT_KEY, kept);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
@@ -1390,14 +1407,20 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
   const PurchaseAddedLineRowMemo = purchaseAddedLineRowMemoRef.current;
 
   const handleReset = useCallback(async () => {
+    const frozen = pendingOpRef.current?.lines;
+    if (Array.isArray(frozen) && frozen.length > 0) {
+      setLines(frozen.map((l) => ({ ...l })));
+      confirmResetModalRef?.current?.hideOverlay?.();
+      confirmResetModalRef?.current?.hide?.();
+      toast("在庫反映済みのため、確定した明細のままもう一度確定してください");
+      return;
+    }
     setLines([]);
     setQuery("");
     setCandidates([]);
     setCandidateQtyMap({});
     try {
-      if (SHOPIFY?.storage?.delete) {
-        await SHOPIFY.storage.delete(PURCHASE_DRAFT_KEY);
-      }
+      await clearLocationDraft(SHOPIFY?.storage, PURCHASE_DRAFT_KEY, locationIdRef.current);
     } catch (e) {
       console.error("Failed to clear purchase draft:", e);
     }

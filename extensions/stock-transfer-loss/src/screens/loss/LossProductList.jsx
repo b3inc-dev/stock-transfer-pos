@@ -11,6 +11,15 @@ import {
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import {
+  beginConfirmOperation,
+  operationToKeepAfterError,
+  planDraftRestore,
+  resolveConfirmLines,
+  clearLocationDraft,
+  saveAppliedOperation,
+  saveScreenDraft,
+} from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
@@ -380,6 +389,9 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
+  const pendingOpRef = useRef(null);
+  const locationIdRef = useRef("");
+  locationIdRef.current = String(conds?.locationId || "");
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -481,22 +493,13 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
           return;
         }
 
-        const savedConds = saved.conds;
-        const savedLinesRaw = Array.isArray(saved.lines) ? saved.lines : [];
-        if (savedLinesRaw.length === 0) {
+        const plan = planDraftRestore(saved, conds?.locationId);
+        if (!plan.restore) {
           lossDraftLoadedRef.current = false;
           return;
         }
-
-        // 条件が一致する場合のみ復元
-        if (savedConds && conds) {
-          const savedLocationId = String(savedConds.locationId || "").trim();
-          const currentLocationId = String(conds.locationId || "").trim();
-          if (savedLocationId !== currentLocationId) {
-            lossDraftLoadedRef.current = false;
-            return;
-          }
-        }
+        if (plan.operation) pendingOpRef.current = plan.operation;
+        const savedLinesRaw = plan.lines;
 
         const normalized = savedLinesRaw
           .map((l, i) => ({
@@ -534,7 +537,8 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       try {
         if (!SHOPIFY?.storage?.set) return;
 
-        const minimized = lines
+        const draftLines = resolveConfirmLines(pendingOpRef.current, lines);
+        const minimized = draftLines
           .map((l, i) => ({
             id: String(l?.id ?? `${Date.now()}-${i}`),
             qty: Math.max(0, Number(l?.qty || 0)),
@@ -548,7 +552,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
           }))
           .filter((l) => Number(l.qty || 0) > 0);
 
-        await SHOPIFY.storage.set(LOSS_DRAFT_KEY, {
+        await saveScreenDraft(SHOPIFY.storage, LOSS_DRAFT_KEY, {
           version: 1,
           savedAt: Date.now(),
           conds: {
@@ -559,7 +563,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
             staffName: conds.staffName,
           },
           lines: minimized,
-        });
+        }, pendingOpRef.current);
       } catch (e) {
         console.error("Failed to save loss draft:", e);
       }
@@ -845,10 +849,15 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     }
     submitLockRef.current = true;
     setSubmitting(true);
-    try {
+    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
       const lossEntryId = generateLossId();
-      const appEventId = buildStableAppEventId("loss_entry", lossEntryId);
-      const entriesForApply = lines
+      return { entryId: lossEntryId, appEventId: buildStableAppEventId("loss_entry", lossEntryId) };
+    });
+    const lossEntryId = operation.entryId;
+    const appEventId = operation.appEventId;
+    const sourceLines = resolveConfirmLines(operation, lines);
+    try {
+      const entriesForApply = sourceLines
         .filter((l) => Math.abs(Number(l.qty) || 0) > 0)
         .map((l) => ({
           inventoryItemId: l.inventoryItemId,
@@ -872,7 +881,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         entries: entriesForApply,
       });
 
-      const items = lines.map((l) => {
+      const items = sourceLines.map((l) => {
         // オプション情報を抽出
         const pRaw = String(l.productTitle || "").trim() || "(unknown)";
         const vRaw = String(l.variantTitle || "").trim();
@@ -916,15 +925,20 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         adjustmentGroupId: null,
       };
       await writeLossEntries([entry, ...existing]);
+      await clearLocationDraft(SHOPIFY?.storage, LOSS_DRAFT_KEY, locationIdRef.current);
       if (SHOPIFY?.storage?.delete) {
-        await SHOPIFY.storage.delete(LOSS_DRAFT_KEY);
         await SHOPIFY.storage.delete(LOSS_CONDITIONS_DRAFT_KEY);
       }
+      pendingOpRef.current = null;
       toast("ロスしました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
       onAfterConfirm?.();
     } catch (e) {
+      const kept = operationToKeepAfterError(operation, e, pendingOpRef.current, sourceLines);
+      if (kept) kept.locationId = String(conds?.locationId || "");
+      pendingOpRef.current = kept;
+      if (kept) await saveAppliedOperation(SHOPIFY?.storage, LOSS_DRAFT_KEY, kept);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
@@ -1298,14 +1312,20 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
   const LossAddedLineRowMemo = lossAddedLineRowMemoRef.current;
 
   const handleReset = useCallback(async () => {
+    const frozen = pendingOpRef.current?.lines;
+    if (Array.isArray(frozen) && frozen.length > 0) {
+      setLines(frozen.map((l) => ({ ...l })));
+      confirmResetModalRef?.current?.hideOverlay?.();
+      confirmResetModalRef?.current?.hide?.();
+      toast("在庫反映済みのため、確定した明細のままもう一度確定してください");
+      return;
+    }
     setLines([]);
     setQuery("");
     setCandidates([]);
     setCandidateQtyMap({});
     try {
-      if (SHOPIFY?.storage?.delete) {
-        await SHOPIFY.storage.delete(LOSS_DRAFT_KEY);
-      }
+      await clearLocationDraft(SHOPIFY?.storage, LOSS_DRAFT_KEY, locationIdRef.current);
     } catch (e) {
       console.error("Failed to clear loss draft:", e);
     }

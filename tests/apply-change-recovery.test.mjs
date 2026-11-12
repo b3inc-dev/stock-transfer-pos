@@ -64,10 +64,23 @@ describe("applyChangeRecovery helpers", () => {
     assert.equal(classifyApplyChangeResponse(400, { ok: false, status: "partial_failed" }), "partial_failed");
     assert.equal(classifyApplyChangeResponse(503, {}), "retryable");
     assert.equal(classifyApplyChangeResponse(400, { ok: false, error: "x" }), "fatal");
+    assert.equal(
+      classifyApplyChangeResponse(200, { ok: true, status: "completed", historyIncomplete: true, errorCode: "history_incomplete" }),
+      "history_incomplete"
+    );
   });
 
   it("maps event status to next action without re-applying partial/applying", () => {
     assert.equal(decideFromEventStatus({ ok: true, found: true, status: "completed" }), "completed");
+    assert.equal(
+      decideFromEventStatus({
+        ok: true,
+        found: true,
+        status: "completed",
+        errorSummary: "history_incomplete: db_unavailable: Can't reach database server",
+      }),
+      "history_incomplete"
+    );
     assert.equal(decideFromEventStatus({ ok: true, found: false }), "resend");
     assert.equal(decideFromEventStatus({ ok: true, found: true, status: "failed" }), "resend");
     assert.equal(decideFromEventStatus({ ok: true, found: true, status: "applying" }), "wait");
@@ -147,6 +160,50 @@ describe("applyInventoryChangeToApi recoverUncertain", () => {
     await assert.rejects(apply(baseArgs), (e) => e.code === "APPLY_UNCERTAIN");
     assert.equal(calls.main.length, 1);
     assert.equal(calls.status.length, 3);
+  });
+
+  it("historyIncomplete retries the same appEventId and then accepts the healed history", async () => {
+    installSession();
+    const calls = mockFetch({
+      main: (n) => {
+        if (n === 1) {
+          return jsonRes(200, {
+            ok: true,
+            status: "completed",
+            historyIncomplete: true,
+            errorCode: "history_incomplete",
+            historyError: "Can't reach database server",
+          });
+        }
+        return jsonRes(200, { ok: true, status: "completed", historyReplayed: true });
+      },
+      status: () => jsonRes(200, { ok: true, found: true, status: "completed" }),
+    });
+    const apply = await loadApply(`h${Date.now()}`);
+    const r = await apply({ ...baseArgs, recoverUncertain: false });
+    assert.equal(r.ok, true);
+    assert.equal(r.historyReplayed, true);
+    assert.equal(calls.main.length, 2);
+    assert.ok(calls.main.every((b) => b.appEventId === baseArgs.appEventId));
+    assert.equal(calls.status.length, 0);
+  });
+
+  it("history that stays incomplete throws history_incomplete and does not mint a new appEventId", async () => {
+    installSession();
+    const calls = mockFetch({
+      main: () =>
+        jsonRes(200, {
+          ok: true,
+          status: "completed",
+          historyIncomplete: true,
+          errorCode: "history_incomplete",
+        }),
+      status: () => jsonRes(200, { ok: true, found: true, status: "completed" }),
+    });
+    const apply = await loadApply(`i${Date.now()}`);
+    await assert.rejects(apply({ ...baseArgs, recoverUncertain: false }), (e) => e.code === "history_incomplete");
+    assert.equal(calls.main.length, 3);
+    assert.ok(calls.main.every((b) => b.appEventId === baseArgs.appEventId));
   });
 
   it("without recoverUncertain the legacy path is unchanged (Load failed thrown as-is)", async () => {

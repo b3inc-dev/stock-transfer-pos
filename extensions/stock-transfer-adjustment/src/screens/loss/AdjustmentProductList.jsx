@@ -11,6 +11,15 @@ import {
 import { FixedFooterNavBar } from "./FixedFooterNavBar.jsx";
 import { applyInventoryChangeToApi } from "../../../../common/applyInventoryChange.js";
 import { buildStableAppEventId } from "../../../../common/buildStableAppEventId.js";
+import {
+  beginConfirmOperation,
+  operationToKeepAfterError,
+  planDraftRestore,
+  resolveConfirmLines,
+  clearLocationDraft,
+  saveAppliedOperation,
+  saveScreenDraft,
+} from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
 
@@ -380,6 +389,9 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
   const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
+  const pendingOpRef = useRef(null);
+  const locationIdRef = useRef("");
+  locationIdRef.current = String(conds?.locationId || "");
   const [candidateQtyMap, setCandidateQtyMap] = useState({});
   
   // ✅ メニュー画面のprefsから初期値を読み込む
@@ -481,22 +493,13 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           return;
         }
 
-        const savedConds = saved.conds;
-        const savedLinesRaw = Array.isArray(saved.lines) ? saved.lines : [];
-        if (savedLinesRaw.length === 0) {
+        const plan = planDraftRestore(saved, conds?.locationId);
+        if (!plan.restore) {
           lossDraftLoadedRef.current = false;
           return;
         }
-
-        // 条件が一致する場合のみ復元
-        if (savedConds && conds) {
-          const savedLocationId = String(savedConds.locationId || "").trim();
-          const currentLocationId = String(conds.locationId || "").trim();
-          if (savedLocationId !== currentLocationId) {
-            lossDraftLoadedRef.current = false;
-            return;
-          }
-        }
+        if (plan.operation) pendingOpRef.current = plan.operation;
+        const savedLinesRaw = plan.lines;
 
         const normalized = savedLinesRaw
           .map((l, i) => ({
@@ -535,7 +538,8 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       try {
         if (!SHOPIFY?.storage?.set) return;
 
-        const minimized = lines
+        const draftLines = resolveConfirmLines(pendingOpRef.current, lines);
+        const minimized = draftLines
           .map((l, i) => ({
             id: String(l?.id ?? `${Date.now()}-${i}`),
             currentQuantity: Number(l?.currentQuantity ?? l?.available ?? 0),
@@ -550,7 +554,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           }))
           .filter((l) => l.variantId || l.inventoryItemId);
 
-        await SHOPIFY.storage.set(ADJUSTMENT_DRAFT_KEY, {
+        await saveScreenDraft(SHOPIFY.storage, ADJUSTMENT_DRAFT_KEY, {
           version: 1,
           savedAt: Date.now(),
           conds: {
@@ -561,7 +565,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
             staffName: conds.staffName,
           },
           lines: minimized,
-        });
+        }, pendingOpRef.current);
       } catch (e) {
         console.error("Failed to save loss draft:", e);
       }
@@ -860,9 +864,18 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
     setSubmitting(true);
     const cur = (l) => Number(l.currentQuantity ?? l.available ?? 0);
     const act = (l) => Number(l.qty ?? 0);
-    try {
+    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
       const adjustmentEntryId = generateAdjustmentId();
-      const entriesForApply = lines.map((l) => ({
+      return {
+        entryId: adjustmentEntryId,
+        appEventId: buildStableAppEventId("adjustment", adjustmentEntryId),
+      };
+    });
+    const adjustmentEntryId = operation.entryId;
+    const appEventId = operation.appEventId;
+    const sourceLines = resolveConfirmLines(operation, lines);
+    try {
+      const entriesForApply = sourceLines.map((l) => ({
         inventoryItemId: l.inventoryItemId,
         variantId: l.variantId ?? undefined,
         sku: l.sku ?? undefined,
@@ -871,7 +884,6 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       }));
 
       // 1) Phase1: 在庫変更＋履歴を1本化（apply-change API）
-      const appEventId = buildStableAppEventId("adjustment", adjustmentEntryId);
       let adjustmentGroupId = null;
       try {
         const applyResult = await applyInventoryChangeToApi({
@@ -887,12 +899,15 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
           toast(`⚠️ ${applyResult.invalidCount}件の商品が不正なIDのため除外されました`);
         }
       } catch (applyErr) {
+        pendingOpRef.current = operationToKeepAfterError(operation, applyErr, pendingOpRef.current, sourceLines);
+        if (pendingOpRef.current) pendingOpRef.current.locationId = String(conds?.locationId || "");
+        if (pendingOpRef.current) await saveAppliedOperation(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, pendingOpRef.current);
         const msg = String(applyErr?.message ?? applyErr);
         toast(`在庫調整エラー: ${msg}`);
         return;
       }
 
-      const items = lines.map((l) => {
+      const items = sourceLines.map((l) => {
         const pRaw = String(l.productTitle || "").trim() || "(unknown)";
         const vRaw = String(l.variantTitle || "").trim();
         const options = normalizeVariantOptions_(pRaw, vRaw);
@@ -934,6 +949,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       await writeAdjustmentEntries([entry, ...existing]);
 
       // 3) UI完了（全処理成功後にトースト・モーダル閉じ・コールバック）
+      pendingOpRef.current = null;
       toast("調整を確定しました");
       confirmLossModalRef?.current?.hideOverlay?.();
       confirmLossModalRef?.current?.hide?.();
@@ -942,11 +958,15 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       // 4) 下書き削除（確定成功時のみ）
       if (SHOPIFY?.storage?.delete) {
         Promise.all([
-          SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY),
+          clearLocationDraft(SHOPIFY.storage, ADJUSTMENT_DRAFT_KEY, locationIdRef.current),
           SHOPIFY.storage.delete(ADJUSTMENT_CONDITIONS_DRAFT_KEY),
         ]).catch((e) => console.error("Failed to clear adjustment draft:", e));
       }
     } catch (e) {
+      const kept = operationToKeepAfterError(operation, e, pendingOpRef.current, sourceLines);
+      if (kept) kept.locationId = String(conds?.locationId || "");
+      pendingOpRef.current = kept;
+      if (kept) await saveAppliedOperation(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, kept);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
@@ -1328,14 +1348,20 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
   const AdjustmentAddedLineRowMemo = adjustmentAddedLineRowMemoRef.current;
 
   const handleReset = useCallback(async () => {
+    const frozen = pendingOpRef.current?.lines;
+    if (Array.isArray(frozen) && frozen.length > 0) {
+      setLines(frozen.map((l) => ({ ...l })));
+      confirmResetModalRef?.current?.hideOverlay?.();
+      confirmResetModalRef?.current?.hide?.();
+      toast("在庫反映済みのため、確定した明細のままもう一度確定してください");
+      return;
+    }
     setLines([]);
     setQuery("");
     setCandidates([]);
     setCandidateQtyMap({});
     try {
-      if (SHOPIFY?.storage?.delete) {
-        await SHOPIFY.storage.delete(ADJUSTMENT_DRAFT_KEY);
-      }
+      await clearLocationDraft(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, locationIdRef.current);
     } catch (e) {
       console.error("Failed to clear loss draft:", e);
     }

@@ -10,6 +10,14 @@ import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
+import {
+  appEventNoteWhere,
+  buildInventoryLogIdempotencyKey,
+  classifyInventoryLogWriteError,
+  historyNoteForAppEvent,
+  resolveSameActivityAction,
+  summarizeLogWriteBatch,
+} from "../../extensions/common/inventoryLogWrite.js";
 
 const API_VERSION = "2026-01";
 
@@ -126,7 +134,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!hasAuth) {
       console.warn("[api.log-inventory-change] No Authorization Bearer header");
       return new Response(
-        JSON.stringify({ ok: false, error: "Missing session token" }),
+        JSON.stringify({ ok: false, error: "Missing session token", errorCode: "auth_failed" }),
         { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
@@ -148,7 +156,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const dest = typeof sessionToken.dest === "string" ? sessionToken.dest : (sessionToken as { dest?: string }).dest;
     if (!dest) {
       return new Response(
-        JSON.stringify({ ok: false, error: "No shop in session token" }),
+        JSON.stringify({ ok: false, error: "No shop in session token", errorCode: "auth_failed" }),
         { status: 401, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
     }
@@ -206,8 +214,9 @@ export async function action({ request }: ActionFunctionArgs) {
       shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
     }
 
-    const results: Array<{ ok: boolean; id?: number; updated?: boolean; message?: string; error?: string }> = [];
+    const results: Array<{ ok: boolean; id?: string | number; updated?: boolean; message?: string; error?: string; errorCode?: string }> = [];
     for (const singleBody of entries) {
+      try {
       const {
         appEventId: appEventIdFromBody,
         inventoryItemId,
@@ -225,7 +234,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
       if (!inventoryItemId || !locationId || !activity) {
         console.warn(`[api.log-inventory-change] Missing required fields: inventoryItemId=${!!inventoryItemId}, locationId=${!!locationId}, activity=${!!activity}`);
-        results.push({ ok: false, error: "Missing required fields" });
+        results.push({ ok: false, error: "Missing required fields", errorCode: "invalid_entry" });
         continue;
       }
       
@@ -238,11 +247,15 @@ export async function action({ request }: ActionFunctionArgs) {
       // idempotencyKey: appEventId があれば 1 操作単位で一意にし再送時に upsert。なければ従来どおり sourceId または timestamp
       const appEventId = typeof appEventIdFromBody === "string" && appEventIdFromBody.trim() ? appEventIdFromBody.trim() : null;
       const tsRounded = timestamp ? new Date(Math.floor(new Date(timestamp).getTime() / 1000) * 1000) : new Date(Math.floor(ts.getTime() / 1000) * 1000);
-      const idempotencyKey = appEventId
-        ? `${shop}_app_${appEventId}_${rawItemId}_${rawLocId}`
-        : sourceId
-          ? `${shop}_${activity}_${inventoryItemId}_${locationId}_${sourceId}`
-          : `${shop}_${activity}_${inventoryItemId}_${locationId}_${tsRounded.toISOString()}`;
+      const idempotencyKey = buildInventoryLogIdempotencyKey({
+        shop,
+        appEventId,
+        activity,
+        inventoryItemId: rawItemId,
+        locationId: rawLocId,
+        sourceId: sourceId != null ? String(sourceId) : null,
+        timestampIso: tsRounded.toISOString(),
+      });
 
       // 入庫・出庫・仕入・ロス・棚卸で変動があったロケーション名を確実に保存する。
       // 未設定・ラベル（出庫元）・GID形式（gid://shopify/Location/...）のときは GraphQL で実ロケーション名を取得する。
@@ -260,7 +273,7 @@ export async function action({ request }: ActionFunctionArgs) {
         });
         if (existingLog) {
           if (appEventId) {
-            const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
+            const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: historyNoteForAppEvent(appEventId) };
             if (variantId != null && variantId !== "") updateData.variantId = variantId;
             if (sku != null && sku !== "") updateData.sku = String(sku);
             if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
@@ -287,6 +300,28 @@ export async function action({ request }: ActionFunctionArgs) {
           rawLocId,
           `gid://shopify/Location/${rawLocId}`,
         ];
+        if (appEventId) {
+          const stampedLog = await db.inventoryChangeLog.findFirst({
+            where: {
+              shop,
+              inventoryItemId: { in: inventoryItemIdCandidates },
+              locationId: { in: locationIdCandidates },
+              ...appEventNoteWhere(appEventId),
+            },
+            orderBy: { timestamp: "desc" },
+          });
+          if (stampedLog) {
+            const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: historyNoteForAppEvent(appEventId) };
+            if (variantId != null && variantId !== "") updateData.variantId = variantId;
+            if (sku != null && sku !== "") updateData.sku = String(sku);
+            if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
+            if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
+            if (sourceId != null) updateData.sourceId = sourceId;
+            await db.inventoryChangeLog.update({ where: { id: stampedLog.id }, data: updateData });
+            results.push({ ok: true, updated: true, id: stampedLog.id });
+            continue;
+          }
+        }
         let recentAdminLog = await findWithAdminWebhookRetry<{ id: number }>(
           () =>
             db.inventoryChangeLog.findFirst({
@@ -312,7 +347,7 @@ export async function action({ request }: ActionFunctionArgs) {
             adjustmentGroupId: adjustmentGroupId || null,
             locationName: resolvedLocationName,
             // Webhook が delta=null で保存した際の備考「変動数は直前ログが…」を、種別上書き時にクリアする
-            note: null,
+            note: historyNoteForAppEvent(appEventId),
           };
           if (variantId != null && variantId !== "") updateData.variantId = variantId;
           if (sku != null && sku !== "") updateData.sku = String(sku);
@@ -342,7 +377,7 @@ export async function action({ request }: ActionFunctionArgs) {
             orderBy: { timestamp: "desc" },
           });
           if (recentSameLog) {
-            const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
+            const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: historyNoteForAppEvent(appEventId) };
             if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
             if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
             await db.inventoryChangeLog.update({ where: { id: recentSameLog.id }, data: updateData });
@@ -364,8 +399,18 @@ export async function action({ request }: ActionFunctionArgs) {
             },
             orderBy: { timestamp: "desc" },
           });
-          if (recentSameActivityLog) {
-            const updateDataPos: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null, note: null };
+          if (
+            recentSameActivityLog &&
+            resolveSameActivityAction({
+              incomingAppEventId: appEventId,
+              existingNote: recentSameActivityLog.note,
+              existingSourceId: recentSameActivityLog.sourceId,
+              incomingSourceId: sourceId != null ? String(sourceId) : null,
+              existingDelta: recentSameActivityLog.delta,
+              incomingDelta: delta !== undefined && delta !== null ? Number(delta) : null,
+            }) === "update"
+          ) {
+            const updateDataPos: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null, note: historyNoteForAppEvent(appEventId) };
             if (delta !== undefined && delta !== null) updateDataPos.delta = Number(delta);
             if (quantityAfter !== undefined && quantityAfter !== null) updateDataPos.quantityAfter = Number(quantityAfter);
             await db.inventoryChangeLog.update({ where: { id: recentSameActivityLog.id }, data: updateDataPos });
@@ -391,7 +436,7 @@ export async function action({ request }: ActionFunctionArgs) {
             sourceId: sourceId || null,
             adjustmentGroupId: adjustmentGroupId || null,
             idempotencyKey,
-            note: null,
+            note: historyNoteForAppEvent(appEventId),
           },
         });
         results.push({ ok: true, id: log.id });
@@ -404,7 +449,7 @@ export async function action({ request }: ActionFunctionArgs) {
       });
       if (existingLog) {
         if (appEventId) {
-          const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
+          const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: historyNoteForAppEvent(appEventId) };
           if (variantId != null && variantId !== "") updateData.variantId = variantId;
           if (sku != null && sku !== "") updateData.sku = String(sku);
           if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
@@ -430,6 +475,28 @@ export async function action({ request }: ActionFunctionArgs) {
         rawLocId,
         `gid://shopify/Location/${rawLocId}`,
       ];
+      if (appEventId) {
+        const stampedLog = await db.inventoryChangeLog.findFirst({
+          where: {
+            shop: shopId,
+            inventoryItemId: { in: inventoryItemIdCandidates },
+            locationId: { in: locationIdCandidates },
+            ...appEventNoteWhere(appEventId),
+          },
+          orderBy: { timestamp: "desc" },
+        });
+        if (stampedLog) {
+          const updateData: Record<string, unknown> = { locationName: resolvedLocationName, note: historyNoteForAppEvent(appEventId) };
+          if (variantId != null && variantId !== "") updateData.variantId = variantId;
+          if (sku != null && sku !== "") updateData.sku = String(sku);
+          if (delta !== undefined && delta !== null) updateData.delta = Number(delta);
+          if (quantityAfter !== undefined && quantityAfter !== null) updateData.quantityAfter = Number(quantityAfter);
+          if (sourceId != null) updateData.sourceId = sourceId;
+          await db.inventoryChangeLog.update({ where: { id: stampedLog.id }, data: updateData });
+          results.push({ ok: true, updated: true, id: stampedLog.id });
+          continue;
+        }
+      }
       let recentAdminLog = await findWithAdminWebhookRetry<{ id: number }>(
         () =>
           db.inventoryChangeLog.findFirst({
@@ -455,7 +522,7 @@ export async function action({ request }: ActionFunctionArgs) {
           adjustmentGroupId: adjustmentGroupId || null,
           locationName: resolvedLocationName,
           // Webhook が delta=null で保存した際の備考「変動数は直前ログが…」を、種別上書き時にクリアする
-          note: null,
+          note: historyNoteForAppEvent(appEventId),
         };
         if (variantId != null && variantId !== "") updateData.variantId = variantId;
         if (sku != null && sku !== "") updateData.sku = String(sku);
@@ -484,7 +551,7 @@ export async function action({ request }: ActionFunctionArgs) {
           orderBy: { timestamp: "desc" },
         });
         if (recentSameLogSession) {
-          const updateDataSession: Record<string, unknown> = { locationName: resolvedLocationName, note: null };
+          const updateDataSession: Record<string, unknown> = { locationName: resolvedLocationName, note: historyNoteForAppEvent(appEventId) };
           if (delta !== undefined && delta !== null) updateDataSession.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateDataSession.quantityAfter = Number(quantityAfter);
           await db.inventoryChangeLog.update({ where: { id: recentSameLogSession.id }, data: updateDataSession });
@@ -506,8 +573,18 @@ export async function action({ request }: ActionFunctionArgs) {
           },
           orderBy: { timestamp: "desc" },
         });
-        if (recentSameActivityLogSession) {
-          const updateDataPosSession: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null, note: null };
+        if (
+          recentSameActivityLogSession &&
+          resolveSameActivityAction({
+            incomingAppEventId: appEventId,
+            existingNote: recentSameActivityLogSession.note,
+            existingSourceId: recentSameActivityLogSession.sourceId,
+            incomingSourceId: sourceId != null ? String(sourceId) : null,
+            existingDelta: recentSameActivityLogSession.delta,
+            incomingDelta: delta !== undefined && delta !== null ? Number(delta) : null,
+          }) === "update"
+        ) {
+          const updateDataPosSession: Record<string, unknown> = { locationName: resolvedLocationName, sourceId: sourceId || null, adjustmentGroupId: adjustmentGroupId || null, note: historyNoteForAppEvent(appEventId) };
           if (delta !== undefined && delta !== null) updateDataPosSession.delta = Number(delta);
           if (quantityAfter !== undefined && quantityAfter !== null) updateDataPosSession.quantityAfter = Number(quantityAfter);
           await db.inventoryChangeLog.update({ where: { id: recentSameActivityLogSession.id }, data: updateDataPosSession });
@@ -533,27 +610,54 @@ export async function action({ request }: ActionFunctionArgs) {
           sourceId: sourceId || null,
           adjustmentGroupId: adjustmentGroupId || null,
           idempotencyKey,
-          note: null,
+          note: historyNoteForAppEvent(appEventId),
         },
       });
       results.push({ ok: true, id: log.id });
+      } catch (entryErr: unknown) {
+        const classified = classifyInventoryLogWriteError(entryErr);
+        if (classified.idempotentSuccess) {
+          results.push({ ok: true, message: "Log already exists", errorCode: classified.code });
+        } else {
+          console.error(`[api.log-inventory-change] entry ${classified.code}:`, classified.message);
+          results.push({ ok: false, error: classified.message, errorCode: classified.code });
+        }
+      }
     }
 
-    const payload = entries.length === 1
-      ? (results[0]?.ok ? results[0] : { ok: false, error: results[0]?.error ?? "Unknown" })
-      : { ok: true, results };
-    const status = entries.length === 1 && !results[0]?.ok ? 400 : 200;
+    const summary = summarizeLogWriteBatch(results);
+    const single = entries.length === 1 ? results[0] : null;
+    const payload = single
+      ? {
+          ok: summary.ok,
+          ...(single.id != null ? { id: single.id } : {}),
+          ...(single.updated ? { updated: true } : {}),
+          ...(single.message ? { message: single.message } : {}),
+          ...(summary.errorCode ? { error: summary.error, errorCode: summary.errorCode } : {}),
+        }
+      : {
+          ok: summary.ok,
+          failedCount: summary.failedCount,
+          ...(summary.errorCode ? { error: summary.error, errorCode: summary.errorCode } : {}),
+          results,
+        };
     return new Response(
       JSON.stringify(payload),
-      { status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      { status: summary.httpStatus, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   } catch (e: unknown) {
-    console.error("[api.log-inventory-change] Error:", e);
-    const errorMessage = e instanceof Error ? e.message : "Unknown error";
+    const classified = classifyInventoryLogWriteError(e);
+    console.error(`[api.log-inventory-change] ${classified.code}:`, classified.message);
     const stack = e instanceof Error ? e.stack : undefined;
+    const status = classified.code === "auth_failed" ? 401 : classified.code === "db_unavailable" ? 503 : 500;
     return new Response(
-      JSON.stringify({ ok: false, error: errorMessage, ...(process.env.NODE_ENV !== "production" && stack ? { stack } : {}) }),
-      { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      JSON.stringify({
+        ok: false,
+        error: classified.message,
+        errorCode: classified.code,
+        ...(process.env.NODE_ENV !== "production" && stack ? { stack } : {}),
+      }),
+      { status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
 }

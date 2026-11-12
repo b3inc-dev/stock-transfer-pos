@@ -16,6 +16,8 @@
  * @param {string|null} [opts.adjustmentGroupId] - ロス用の InventoryAdjustmentGroup ID（省略可）
  */
 
+import { interpretLogChunkResponse } from "./inventoryLogWrite.js";
+
 /** 1リクエストあたりの最大件数。これ以上は複数リクエストに分割し、タイムアウトによる途中切れと「管理」のまま残る漏れを防ぐ。 */
 const LOG_INVENTORY_CHANGE_CHUNK_SIZE = 50;
 
@@ -30,6 +32,7 @@ const RETRY_DELAY_MS = 1000;
  * @returns {Promise<boolean>} 成功したかどうか
  */
 async function sendChunkWithRetry(apiUrl, token, body, activity, chunkIndex, totalChunks) {
+  let lastCode = "unknown";
   for (let attempt = 1; attempt <= MAX_CHUNK_RETRIES; attempt++) {
     try {
       const res = await fetch(apiUrl, {
@@ -37,20 +40,25 @@ async function sendChunkWithRetry(apiUrl, token, body, activity, chunkIndex, tot
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (res.ok) return true;
+      const data = await res.json().catch(() => ({}));
+      const verdict = interpretLogChunkResponse(res.status, data);
+      if (verdict.success) return { ok: true, errorCode: verdict.errorCode };
+      lastCode = verdict.errorCode || "unknown";
       const delayMs = RETRY_DELAY_MS * Math.min(attempt, 2);
-      if (attempt < MAX_CHUNK_RETRIES) {
+      if (verdict.retryable && attempt < MAX_CHUNK_RETRIES) {
         console.warn(
-          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} failed (attempt ${attempt}), retrying in ${delayMs}ms... status=${res.status}`
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} failed (attempt ${attempt}), retrying in ${delayMs}ms... status=${res.status} errorCode=${lastCode}`
         );
         await new Promise((r) => setTimeout(r, delayMs));
       } else {
-        const text = await res.text().catch(() => "");
+        const text = typeof data?.error === "string" ? data.error : "";
         console.error(
-          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} failed after ${MAX_CHUNK_RETRIES} attempts: status=${res.status}, activity=${activity}, error=${text.substring(0, 300)}`
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} failed after ${attempt} attempts: status=${res.status}, activity=${activity}, errorCode=${lastCode}, error=${text.substring(0, 300)}`
         );
+        return { ok: false, errorCode: lastCode };
       }
     } catch (fetchErr) {
+      lastCode = "network";
       const delayMs = RETRY_DELAY_MS * Math.min(attempt, 2);
       if (attempt < MAX_CHUNK_RETRIES) {
         console.warn(
@@ -59,12 +67,13 @@ async function sendChunkWithRetry(apiUrl, token, body, activity, chunkIndex, tot
         await new Promise((r) => setTimeout(r, delayMs));
       } else {
         console.error(
-          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} exception after ${MAX_CHUNK_RETRIES} attempts: activity=${activity}, error=${fetchErr?.message}`
+          `[logInventoryChangeToApi] Chunk ${chunkIndex}/${totalChunks} exception after ${MAX_CHUNK_RETRIES} attempts: activity=${activity}, errorCode=${lastCode}, error=${fetchErr?.message}`
         );
+        return { ok: false, errorCode: lastCode };
       }
     }
   }
-  return false;
+  return { ok: false, errorCode: lastCode };
 }
 
 export async function logInventoryChangeToApi({
@@ -144,7 +153,9 @@ export async function logInventoryChangeToApi({
     console.log(`[logInventoryChangeToApi] Sending in ${chunks.length} chunks (${chunkSize} entries each) to avoid timeout`);
   }
 
-  const failedChunks = [];
+  const describeFailure = (failed) =>
+    `errorCode=${failed.map((f) => f.errorCode).join("|") || "unknown"} failedChunks=${failed.map((f) => f.index).join(",")} (activity=${activity}, appEventId=${appEventId})`;
+
   const sendChunks = async (t) => {
     const failed = [];
     for (let i = 0; i < chunks.length; i++) {
@@ -161,25 +172,28 @@ export async function logInventoryChangeToApi({
         entryIndexStart: i * chunkSize,
         entries: chunk,
       };
-      const ok = await sendChunkWithRetry(apiUrl, t, body, activity, i + 1, chunks.length);
-      if (!ok) failed.push(i + 1);
+      const result = await sendChunkWithRetry(apiUrl, t, body, activity, i + 1, chunks.length);
+      if (!result.ok) failed.push({ index: i + 1, errorCode: result.errorCode || "unknown" });
     }
     return failed;
   };
 
-  failedChunks.push(...(await sendChunks(token)));
+  const failedChunks = await sendChunks(token);
 
-  // 失敗チャンクがあればトークン再取得して1回だけ全チャンク再送（idempotency で重複は防がれる）
-  if (failedChunks.length > 0) {
+  // 失敗チャンクがあればトークン再取得して1回だけ全チャンク再送（同じ appEventId の idempotency で重複は増えない）
+  const retryable = failedChunks.some((f) => f.errorCode !== "invalid_entry");
+  if (failedChunks.length > 0 && retryable) {
     const token2 = await session.getSessionToken();
     if (token2) {
       console.warn(`[logInventoryChangeToApi] Retrying ${failedChunks.length} failed chunk(s) with fresh token (activity=${activity})`);
       const retryFailed = await sendChunks(token2);
       if (retryFailed.length > 0) {
-        throw new Error(`Inventory log partially failed. failedChunks=${retryFailed.join(",")} (activity=${activity}, appEventId=${appEventId})`);
+        throw new Error(`Inventory log partially failed. ${describeFailure(retryFailed)}`);
       }
     } else {
-      throw new Error(`Inventory log partially failed. failedChunks=${failedChunks.join(",")} (activity=${activity}, appEventId=${appEventId})`);
+      throw new Error(`Inventory log partially failed. ${describeFailure(failedChunks)}`);
     }
+  } else if (failedChunks.length > 0) {
+    throw new Error(`Inventory log partially failed. ${describeFailure(failedChunks)}`);
   }
 }
