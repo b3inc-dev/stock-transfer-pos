@@ -50,12 +50,24 @@ git push origin <feature-branch>
 **サーバー側（app/routes など）の変更だけ**なら不要。  
 **拡張のコード**（extensions 内の JS/設定）を変えたときだけ実行します。
 
+公開用（POS Stock）と自社用（POS Stock - Ciara）の二重デプロイは、**必ず次の npm スクリプトだけ**で行います（明示承認時のみ）。
+
 ```bash
 cd /Users/develop/ShopifyApps/stock-transfer-pos
-shopify app deploy
+npm run deploy:public    # APP_MODE=public  + shopify.app.public.toml
+npm run deploy:inhouse   # APP_MODE=inhouse + shopify.app.toml
+git checkout -- extensions/common/appUrl.js   # APP_MODE の書き換えはコミットしない
 ```
 
-※ 本番アプリにデプロイする場合は、`shopify.app.public.toml` を指定するなど、プロジェクトの設定に合わせて実行してください。
+- **`npx shopify app deploy` / `shopify app deploy` / `npm run deploy` を直接実行しない。** 拡張は `extensions/common/appUrl.js` の `APP_MODE` でビルド時に呼び先サーバーが決まり、main のコミット値は `public` です。`set-app-mode` を飛ばして Ciara に deploy すると、Ciara POS が公開用サーバーを呼び `Invalid session token`（401）になります（pos-stock-ciara-251 で発生）。
+- 各スクリプトは deploy 直前に `scripts/verify-app-mode.js <toml>` を実行し、`APP_MODE` と toml の `application_url`（inhouse ↔ `stock-transfer-pos.onrender.com`、public ↔ `pos-stock.onrender.com`）が不一致なら停止します。
+- deploy 後の確認（各 deploy 直後、`extensions/*/dist` はその deploy のビルド結果）:
+
+```bash
+grep -o -E '="(inhouse|public)",[A-Za-z_$]+="http://localhost' extensions/*/dist/*.js
+```
+
+  `deploy:inhouse` 後は全行 `"inhouse"`、`deploy:public` 後は全行 `"public"` であること（`stock-transfer-order` は appUrl 未使用で出力なし）。両 URL の文字列は三項演算子の定数として常にバンドルに残るため、URL 文字列の有無ではなく `APP_MODE` の値で判定します。
 
 ---
 
