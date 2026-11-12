@@ -1,7 +1,8 @@
 // app/routes/app.history.tsx
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useFetcher, useSearchParams, data } from "react-router";
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
+import { AdminChoiceRow } from "../components/AdminChrome";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone } from "../utils/timezone";
@@ -1208,6 +1209,17 @@ export default function HistoryPage() {
     setModalLineItems([]);
     setModalGroupedLineItems([]);
   };
+  const closeLineItemsModalRef = useRef(closeLineItemsModal);
+  closeLineItemsModalRef.current = closeLineItemsModal;
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeLineItemsModalRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [modalOpen]);
 
   // モーダル内の商品リストをCSV出力
   const exportModalCSV = () => {
@@ -1312,82 +1324,77 @@ export default function HistoryPage() {
                         <s-divider />
                         <s-text type="strong">出庫ロケーション</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                          <div onClick={() => setOutboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: outboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: outboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <input type="checkbox" checked={outboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: outboundLocationFilters.size === 0 ? 600 : 500 }}>全て</span>
-                          </div>
+                          <AdminChoiceRow
+                            selected={outboundLocationFilters.size === 0}
+                            label="全て"
+                            onSelect={() => setOutboundLocationFilters(new Set())}
+                          />
                           {locations.map((loc) => {
                             const isSelected = outboundLocationFilters.has(loc.id);
                             return (
-                              <div
+                              <AdminChoiceRow
                                 key={loc.id}
-                                onClick={() => {
+                                selected={isSelected}
+                                label={loc.name}
+                                style={{ marginTop: "4px" }}
+                                onSelect={() => {
                                   const newFilters = new Set(outboundLocationFilters);
                                   if (isSelected) newFilters.delete(loc.id);
                                   else newFilters.add(loc.id);
                                   setOutboundLocationFilters(newFilters);
                                 }}
-                                style={{
-                                  padding: "10px 12px",
-                                  borderRadius: "6px",
-                                  cursor: "pointer",
-                                  backgroundColor: isSelected ? "#eff6ff" : "transparent",
-                                  border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
-                                  marginTop: "4px",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: "8px",
-                                }}
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={isSelected}
-                                  readOnly
-                                  style={{ width: "16px", height: "16px", flexShrink: 0 }}
-                                />
-                                <span
-                                  style={{
-                                    fontWeight: isSelected ? 600 : 500,
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                  }}
-                                >
-                                  {loc.name}
-                                </span>
-                              </div>
+                              />
                             );
                           })}
                         </div>
                         <s-text type="strong">入庫ロケーション</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                          <div onClick={() => setInboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: inboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: inboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <input type="checkbox" checked={inboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: inboundLocationFilters.size === 0 ? 600 : 500 }}>全て</span>
-                          </div>
+                          <AdminChoiceRow
+                            selected={inboundLocationFilters.size === 0}
+                            label="全て"
+                            onSelect={() => setInboundLocationFilters(new Set())}
+                          />
                           {locations.map((loc) => {
                             const isSelected = inboundLocationFilters.has(loc.id);
                             return (
-                              <div key={loc.id} onClick={() => { const newFilters = new Set(inboundLocationFilters); if (isSelected) newFilters.delete(loc.id); else newFilters.add(loc.id); setInboundLocationFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#eff6ff" : "transparent", border: isSelected ? "1px solid #2563eb" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
-                                <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                                <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
-                              </div>
+                              <AdminChoiceRow
+                                key={loc.id}
+                                selected={isSelected}
+                                label={loc.name}
+                                style={{ marginTop: "4px" }}
+                                onSelect={() => {
+                                  const newFilters = new Set(inboundLocationFilters);
+                                  if (isSelected) newFilters.delete(loc.id);
+                                  else newFilters.add(loc.id);
+                                  setInboundLocationFilters(newFilters);
+                                }}
+                              />
                             );
                           })}
                         </div>
                         <s-text type="strong">ステータス</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                          <div onClick={() => setStatusFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: statusFilters.size === 0 ? "#eff6ff" : "transparent", border: statusFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <input type="checkbox" checked={statusFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: statusFilters.size === 0 ? 600 : 500 }}>全て</span>
-                          </div>
+                          <AdminChoiceRow
+                            selected={statusFilters.size === 0}
+                            label="全て"
+                            onSelect={() => setStatusFilters(new Set())}
+                          />
                           {statuses.map((status) => {
                             const statusLabel = STATUS_LABEL[status] || status;
                             const isSelected = statusFilters.has(status);
                             return (
-                              <div key={status} onClick={() => { const newFilters = new Set(statusFilters); if (isSelected) newFilters.delete(status); else newFilters.add(status); setStatusFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#eff6ff" : "transparent", border: isSelected ? "1px solid #2563eb" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
-                                <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                                <span style={{ fontWeight: isSelected ? 600 : 500 }}>{statusLabel}</span>
-                              </div>
+                              <AdminChoiceRow
+                                key={status}
+                                selected={isSelected}
+                                label={statusLabel}
+                                style={{ marginTop: "4px" }}
+                                onSelect={() => {
+                                  const newFilters = new Set(statusFilters);
+                                  if (isSelected) newFilters.delete(status);
+                                  else newFilters.add(status);
+                                  setStatusFilters(newFilters);
+                                }}
+                              />
                             );
                           })}
                         </div>
@@ -1395,20 +1402,26 @@ export default function HistoryPage() {
                     </div>
 
                     {/* ソート: 日付 昇順 / 降順 */}
-                    <div style={{ background: "#ffffff", borderRadius: 12, boxShadow: "0 0 0 1px #e1e3e5", padding: 16 }}>
+                    <div className="admin-outline-card">
                       <s-stack gap="base">
                         <s-text type="strong">ソート</s-text>
                         <s-text color="subdued">入出庫履歴の表示順（日付）を選びます。</s-text>
                         <s-divider />
                         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                          <div onClick={() => setDateSortOrder("desc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: dateSortOrder === "desc" ? "#eff6ff" : "transparent", border: dateSortOrder === "desc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <input type="radio" checked={dateSortOrder === "desc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: dateSortOrder === "desc" ? 600 : 500 }}>日付 降順（新しい順）</span>
-                          </div>
-                          <div onClick={() => setDateSortOrder("asc")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: dateSortOrder === "asc" ? "#eff6ff" : "transparent", border: dateSortOrder === "asc" ? "1px solid #2563eb" : "1px solid #e1e3e5", display: "flex", alignItems: "center", gap: "8px" }}>
-                            <input type="radio" checked={dateSortOrder === "asc"} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
-                            <span style={{ fontWeight: dateSortOrder === "asc" ? 600 : 500 }}>日付 昇順（古い順）</span>
-                          </div>
+                          <AdminChoiceRow
+                            control="radio"
+                            idleBorder="neutral"
+                            selected={dateSortOrder === "desc"}
+                            label="日付 降順（新しい順）"
+                            onSelect={() => setDateSortOrder("desc")}
+                          />
+                          <AdminChoiceRow
+                            control="radio"
+                            idleBorder="neutral"
+                            selected={dateSortOrder === "asc"}
+                            label="日付 昇順（古い順）"
+                            onSelect={() => setDateSortOrder("asc")}
+                          />
                         </div>
                       </s-stack>
                     </div>
@@ -1502,13 +1515,16 @@ export default function HistoryPage() {
                 return (
                   <div key={history.id}>
                     <div
-                      style={{
-                        display: "flex",
-                        alignItems: "flex-start",
-                        padding: "12px",
-                        cursor: "pointer",
-                      }}
+                      className="admin-hit"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`${history.name || history.id} の商品リストを開く`}
                       onClick={() => openLineItemsModal(history)}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        openLineItemsModal(history);
+                      }}
                     >
                       {/* 調整中: チェックボックスを一時的に非表示 */}
                       {/* <input
@@ -1522,21 +1538,23 @@ export default function HistoryPage() {
                         style={{ width: "18px", height: "18px", cursor: "pointer", marginRight: "12px", marginTop: "2px" }}
                       /> */}
                       <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                          <s-text type="strong" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {history.name || history.id}
-                          </s-text>
-                          <s-text color="subdued" style={{ whiteSpace: "nowrap", marginLeft: "8px" }}>
-                            {date}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "8px", marginBottom: "4px" }}>
+                          <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+                            <s-text type="strong">
+                              {history.name || history.id}
+                            </s-text>
+                          </div>
+                          <s-text color="subdued">
+                            <span style={{ whiteSpace: "nowrap" }}>{date}</span>
                           </s-text>
                         </div>
-                        <div style={{ marginBottom: "2px" }}>
-                          <s-text color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
+                        <div style={{ marginBottom: "2px", overflowWrap: "anywhere" }}>
+                          <s-text color="subdued">
                             出庫元: {originName}
                           </s-text>
                         </div>
-                        <div>
-                          <s-text color="subdued" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
+                        <div style={{ overflowWrap: "anywhere" }}>
+                          <s-text color="subdued">
                             入庫先: {destName}
                           </s-text>
                         </div>
@@ -1555,8 +1573,8 @@ export default function HistoryPage() {
                               return null;
                             })()}
                           </s-text>
-                          <s-text color="subdued" style={{ whiteSpace: "nowrap" }}>
-                            {history.receivedQuantity}/{history.totalQuantity}
+                          <s-text color="subdued">
+                            <span className="admin-qty-num">{history.receivedQuantity}/{history.totalQuantity}</span>
                           </s-text>
                         </div>
                       </div>
@@ -1617,7 +1635,7 @@ export default function HistoryPage() {
                       ? `${(csvExportProgress.current / csvExportProgress.total) * 100}%`
                       : "0%",
                     height: "100%",
-                    backgroundColor: "#007bff",
+                    backgroundColor: "#2c6ecb",
                     transition: "width 0.3s ease",
                   }}
                 />
@@ -1648,35 +1666,21 @@ export default function HistoryPage() {
           onClick={closeLineItemsModal}
         >
           <div
-            style={{
-              backgroundColor: "white",
-              borderRadius: "8px",
-              padding: "24px",
-              maxWidth: "90%",
-              maxHeight: "90%",
-              overflow: "auto",
-              boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
-            }}
+            className="admin-modal-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="history-line-items-title"
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <h2 style={{ margin: 0, fontSize: "20px", fontWeight: "bold" }}>
+            <div style={{ marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+              <h2 id="history-line-items-title" style={{ margin: 0, fontSize: "20px", fontWeight: "bold", minWidth: 0, overflowWrap: "anywhere" }}>
                 商品リスト
               </h2>
               <button
+                type="button"
+                className="admin-icon-button"
+                aria-label="閉じる"
                 onClick={closeLineItemsModal}
-                style={{
-                  background: "none",
-                  border: "none",
-                  fontSize: "24px",
-                  cursor: "pointer",
-                  padding: "0",
-                  width: "32px",
-                  height: "32px",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
               >
                 ×
               </button>
@@ -1780,7 +1784,7 @@ export default function HistoryPage() {
                     </span>
                   )}
                 </div>
-                <div style={{ maxHeight: "400px", overflowY: "auto" }}>
+                <div className="admin-qty-scroll" style={{ maxHeight: "400px" }}>
                   {modalGroupedLineItems.length > 0 ? (
                     modalGroupedLineItems.map((grp) => {
                       const isExtras = grp.shipmentMetadata.id === "extras";
@@ -1822,14 +1826,7 @@ export default function HistoryPage() {
                             )}
                           </div>
                           {grp.items.length > 0 ? (
-                            <table
-                              style={{
-                                width: "100%",
-                                borderCollapse: "collapse",
-                                fontSize: "14px",
-                                backgroundColor: "transparent",
-                              }}
-                            >
+                            <table className="admin-qty-table admin-qty-table--ruled">
                               <thead>
                                 <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
                                   <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
@@ -1838,8 +1835,8 @@ export default function HistoryPage() {
                                   <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション1</th>
                                   <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション2</th>
                                   <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>オプション3</th>
-                                  <th style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #ddd" }}>予定数</th>
-                                  <th style={{ padding: "8px", textAlign: "right" }}>入庫数</th>
+                                  <th className="admin-qty-num">予定数</th>
+                                  <th className="admin-qty-num">入庫数</th>
                                 </tr>
                               </thead>
                               <tbody>
@@ -1869,10 +1866,10 @@ export default function HistoryPage() {
                                     <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                                       {item.option3 || "-"}
                                     </td>
-                                    <td style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #eee" }}>
+                                    <td className="admin-qty-num">
                                       {item.quantity ?? "-"}
                                     </td>
-                                    <td style={{ padding: "8px", textAlign: "right" }}>
+                                    <td className="admin-qty-num">
                                       {item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity}
                                     </td>
                                   </tr>
@@ -1888,7 +1885,7 @@ export default function HistoryPage() {
                       );
                     })
                   ) : (
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
+                    <table className="admin-qty-table admin-qty-table--ruled">
                       <thead>
                         <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
                           <th style={{ padding: "8px", textAlign: "left" }}>配送ID</th>
@@ -1899,8 +1896,8 @@ export default function HistoryPage() {
                           <th style={{ padding: "8px", textAlign: "left" }}>オプション1</th>
                           <th style={{ padding: "8px", textAlign: "left" }}>オプション2</th>
                           <th style={{ padding: "8px", textAlign: "left" }}>オプション3</th>
-                          <th style={{ padding: "8px", textAlign: "right" }}>予定数</th>
-                          <th style={{ padding: "8px", textAlign: "right" }}>入庫数</th>
+                          <th className="admin-qty-num">予定数</th>
+                          <th className="admin-qty-num">入庫数</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1916,8 +1913,8 @@ export default function HistoryPage() {
                             <td style={{ padding: "8px" }}>{item.option1 || "-"}</td>
                             <td style={{ padding: "8px" }}>{item.option2 || "-"}</td>
                             <td style={{ padding: "8px" }}>{item.option3 || "-"}</td>
-                            <td style={{ padding: "8px", textAlign: "right" }}>{item.quantity ?? "-"}</td>
-                            <td style={{ padding: "8px", textAlign: "right" }}>
+                            <td className="admin-qty-num">{item.quantity ?? "-"}</td>
+                            <td className="admin-qty-num">
                               {item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity}
                             </td>
                           </tr>
@@ -1935,33 +1932,11 @@ export default function HistoryPage() {
 
             <div style={{ marginTop: "16px", display: "flex", justifyContent: "flex-end", gap: "8px" }}>
               {modalLineItems.length > 0 && (
-                <button
-                  onClick={exportModalCSV}
-                  style={{
-                    padding: "8px 16px",
-                    backgroundColor: "#007bff",
-                    color: "white",
-                    border: "none",
-                    borderRadius: "4px",
-                    cursor: "pointer",
-                    fontSize: "14px",
-                  }}
-                >
+                <button type="button" className="admin-primary" onClick={exportModalCSV}>
                   CSV出力
                 </button>
               )}
-              <button
-                onClick={closeLineItemsModal}
-                style={{
-                  padding: "8px 16px",
-                  backgroundColor: "#6c757d",
-                  color: "white",
-                  border: "none",
-                  borderRadius: "4px",
-                  cursor: "pointer",
-                  fontSize: "14px",
-                }}
-              >
+              <button type="button" className="admin-secondary" onClick={closeLineItemsModal}>
                 閉じる
               </button>
             </div>

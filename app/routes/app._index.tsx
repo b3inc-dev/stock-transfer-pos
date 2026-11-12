@@ -125,34 +125,34 @@ export default function HomePage() {
   const summaryBlock = (
     <div className="HomePage-summary">
       <SummaryCard title="現在の料金プラン" style={{ marginBottom: "16px" }}>
-        <div style={{ marginBottom: "8px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
+        <div className="admin-emphasis" style={{ marginBottom: "8px" }}>
           {planLabel}
         </div>
         {!isInhouse && !plan && (
-          <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
+          <Link to="/app/plan" className="admin-text-link">
             料金プランを選択する
           </Link>
         )}
         {!isInhouse && plan === "lite" && (
-          <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
+          <Link to="/app/plan" className="admin-text-link">
             アップグレードして全機能を使いましょう
           </Link>
         )}
         {isInhouse && (
-          <span style={{ fontSize: "14px", color: "#6d7175" }}>
+          <span className="admin-subdued">
             全機能をご利用いただけます
           </span>
         )}
         {showBillingNote && (
-          <span style={{ fontSize: "14px", color: "#6d7175" }}>
+          <span className="admin-subdued">
             開発ストアのため課金は発生しません
           </span>
         )}
       </SummaryCard>
 
       <SummaryCard title="ロケーション数">
-        <span style={{ fontSize: "18px", fontWeight: 700, color: "#202223" }}>{locationsCount}</span>
-        <span style={{ marginLeft: "4px", fontSize: "14px", color: "#6d7175" }}>ロケーション</span>
+        <span className="admin-emphasis">{locationsCount}</span>
+        <span className="admin-subdued" style={{ marginLeft: "4px" }}>ロケーション</span>
       </SummaryCard>
     </div>
   );
@@ -224,35 +224,12 @@ function StepCard({
   highlight?: boolean;
 }) {
   return (
-    <div
-      style={{
-        marginBottom: "16px",
-        padding: "16px",
-        background: "#fff",
-        borderRadius: "8px",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-        borderLeft: highlight ? "4px solid #2c6ecb" : undefined,
-      }}
-    >
-      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
-        {title}
-      </div>
-      <div style={{ marginBottom: "12px", fontSize: "14px", color: "#6d7175", lineHeight: 1.4 }}>
+    <div className={highlight ? "admin-elevated-card is-highlight" : "admin-elevated-card"}>
+      <div className="admin-section-label">{title}</div>
+      <div className="admin-subdued" style={{ marginBottom: "12px" }}>
         {description}
       </div>
-      <Link
-        to={to}
-        style={{
-          display: "inline-block",
-          padding: "8px 16px",
-          background: "#2c6ecb",
-          color: "#fff",
-          borderRadius: "6px",
-          fontSize: "14px",
-          textDecoration: "none",
-          fontWeight: 500,
-        }}
-      >
+      <Link to={to} className="admin-primary">
         {buttonLabel}
       </Link>
     </div>
@@ -269,39 +246,22 @@ function StepCardPos({
 }) {
   const posUrl = getPosChannelUrl(storeHandle);
   const channelsUrl = getChannelsUrl(storeHandle);
-  const linkStyle = {
-    display: "inline-block",
-    padding: "8px 16px",
-    background: "#2c6ecb",
-    color: "#fff",
-    borderRadius: "6px",
-    fontSize: "14px",
-    textDecoration: "none" as const,
-    fontWeight: 500,
-  };
-  const secondaryStyle = { fontSize: "14px", color: "#2c6ecb", marginLeft: "12px" };
   return (
-    <div
-      style={{
-        marginBottom: "16px",
-        padding: "16px",
-        background: "#fff",
-        borderRadius: "8px",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-      }}
-    >
-      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
+    <div className="admin-elevated-card">
+      <div className="admin-section-label">
         {step.num}. {step.title}
       </div>
-      <div style={{ marginBottom: "12px", fontSize: "14px", color: "#6d7175", lineHeight: 1.4 }}>
+      <div className="admin-subdued" style={{ marginBottom: "12px" }}>
         {step.description}
       </div>
-      <a href={posUrl} target="_blank" rel="noopener noreferrer" style={linkStyle}>
-        POSの設定を開く
-      </a>
-      <a href={channelsUrl} target="_blank" rel="noopener noreferrer" style={secondaryStyle}>
-        販売チャネル一覧を開く
-      </a>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 12px", alignItems: "center" }}>
+        <a href={posUrl} target="_blank" rel="noopener noreferrer" className="admin-primary">
+          POSの設定を開く
+        </a>
+        <a href={channelsUrl} target="_blank" rel="noopener noreferrer" className="admin-text-link">
+          販売チャネル一覧を開く
+        </a>
+      </div>
     </div>
   );
 }
@@ -316,18 +276,8 @@ function SummaryCard({
   style?: React.CSSProperties;
 }) {
   return (
-    <div
-      style={{
-        padding: "16px",
-        background: "#fff",
-        borderRadius: "8px",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-        ...style,
-      }}
-    >
-      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
-        {title}
-      </div>
+    <div className="admin-elevated-card" style={style}>
+      <div className="admin-section-label">{title}</div>
       {children}
     </div>
   );

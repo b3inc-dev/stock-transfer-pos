@@ -63,14 +63,7 @@ export default function PlanPage() {
       // @ts-expect-error s-page は App Bridge の Web コンポーネント
       <s-page heading="料金プラン">
         <div style={{ padding: "16px", maxWidth: "600px", margin: "0 16px" }}>
-          <div
-            style={{
-              padding: "16px",
-              background: "#fff",
-              borderRadius: "8px",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-            }}
-          >
+          <div className="admin-elevated-card">
             {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
             <s-text type="strong">全機能をご利用いただけます</s-text>
             <div style={{ marginTop: "8px" }}>
@@ -90,15 +83,7 @@ export default function PlanPage() {
     <s-page heading="料金プラン">
       <div style={{ padding: "16px", maxWidth: "900px" }}>
         {locationPlanMismatch && maxLocationsForPlan != null && (
-          <div
-            style={{
-              marginBottom: "16px",
-              padding: "16px",
-              background: "#fff4e5",
-              border: "1px solid #e0b252",
-              borderRadius: "8px",
-            }}
-          >
+          <div className="admin-notice admin-notice--warning" style={{ marginBottom: "16px" }}>
             <div style={{ fontSize: "16px", fontWeight: 700, color: "#202223", marginBottom: "8px" }}>
               ロケーション数がプランと一致していません
             </div>
@@ -106,40 +91,18 @@ export default function PlanPage() {
               現在のプランは<strong>{maxLocationsForPlan}ロケーション</strong>までです。ストアのロケーション数は<strong>{locationsCount}</strong>のため、プラン変更が必要です。変更が反映されるまで設定・在庫・入出庫などの機能はご利用いただけません。
             </div>
             {canOpenPricing && pricingPlansUrl ? (
-              <a
-                href={pricingPlansUrl}
-                target="_top"
-                rel="noopener noreferrer"
-                style={{
-                  display: "inline-block",
-                  padding: "10px 20px",
-                  background: "#2c6ecb",
-                  color: "#fff",
-                  borderRadius: "6px",
-                  fontSize: "14px",
-                  fontWeight: 600,
-                  textDecoration: "none",
-                }}
-              >
+              <a href={pricingPlansUrl} target="_top" rel="noopener noreferrer" className="admin-primary">
                 Shopify でプランを変更する
               </a>
             ) : null}
-            <div style={{ marginTop: "8px", fontSize: "13px", color: "#6d7175" }}>
+            <div className="admin-subdued" style={{ marginTop: "8px", fontSize: "13px" }}>
               プラン変更後、このページを再読み込みしてください。承認・辞退・再承認は Shopify の画面で行えます。
             </div>
           </div>
         )}
 
         {isDevelopmentStore && (
-          <div
-            style={{
-              marginBottom: "16px",
-              padding: "12px 16px",
-              background: "#e3f1df",
-              borderRadius: "8px",
-              borderLeft: "4px solid #008060",
-            }}
-          >
+          <div className="admin-notice admin-notice--success" style={{ marginBottom: "16px" }}>
             {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
             <s-text type="strong">開発ストアのため課金は発生しません</s-text>
             <div style={{ marginTop: "4px" }}>
@@ -152,17 +115,7 @@ export default function PlanPage() {
         )}
 
         {!pricingPlansUrl && (
-          <div
-            style={{
-              marginBottom: "16px",
-              padding: "12px 16px",
-              background: "#fff4e5",
-              border: "1px solid #e0b252",
-              borderRadius: "8px",
-              fontSize: "14px",
-              color: "#202223",
-            }}
-          >
+          <div className="admin-notice admin-notice--warning" style={{ marginBottom: "16px" }}>
             プラン選択ページの URL を組み立てられませんでした。店舗ドメインを確認するか、サポートにお問い合わせください。
           </div>
         )}
@@ -171,7 +124,7 @@ export default function PlanPage() {
         <div style={{ marginBottom: "32px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "8px" }}>
             <span style={{ fontSize: "18px", fontWeight: 700, color: "#202223" }}>料金プラン</span>
-            <span style={{ fontSize: "14px", color: "#6d7175" }}>ロケーション数: {locationsCount}</span>
+            <span className="admin-subdued">ロケーション数: {locationsCount}</span>
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "16px" }}>
@@ -236,12 +189,7 @@ export default function PlanPage() {
           </div>
           {plan !== "pro" && pricingPlansUrl && (
             <div style={{ marginTop: "16px" }}>
-              <a
-                href={pricingPlansUrl}
-                target="_top"
-                rel="noopener noreferrer"
-                style={{ fontSize: "14px", color: "#2c6ecb" }}
-              >
+              <a href={pricingPlansUrl} target="_top" rel="noopener noreferrer" className="admin-text-link">
                 アップグレードして全機能を使う →
               </a>
             </div>
@@ -271,11 +219,10 @@ function PlanCard({
 }) {
   return (
     <div
+      className="admin-elevated-card"
       style={{
+        marginBottom: 0,
         padding: "20px",
-        background: "#fff",
-        borderRadius: "8px",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
         border: isCurrent ? "2px solid #2c6ecb" : "1px solid #e1e3e5",
       }}
     >
@@ -310,32 +257,13 @@ function PlanCard({
             このプランを利用中
           </div>
           {pricingPlansUrl && (
-            <a
-              href={pricingPlansUrl}
-              target="_top"
-              rel="noopener noreferrer"
-              style={{ fontSize: "13px", color: "#2c6ecb" }}
-            >
+            <a href={pricingPlansUrl} target="_top" rel="noopener noreferrer" className="admin-text-link">
               Shopify でプラン・請求を変更する
             </a>
           )}
         </div>
       ) : pricingPlansUrl ? (
-        <a
-          href={pricingPlansUrl}
-          target="_top"
-          rel="noopener noreferrer"
-          style={{
-            display: "inline-block",
-            padding: "8px 16px",
-            background: "#2c6ecb",
-            color: "#fff",
-            borderRadius: "6px",
-            fontSize: "14px",
-            fontWeight: 500,
-            textDecoration: "none",
-          }}
-        >
+        <a href={pricingPlansUrl} target="_top" rel="noopener noreferrer" className="admin-primary">
           このプランを選択する
         </a>
       ) : (
@@ -355,15 +283,7 @@ function FeatureCard({
   pro?: boolean;
 }) {
   return (
-    <div
-      style={{
-        padding: "16px",
-        background: "#fff",
-        borderRadius: "8px",
-        boxShadow: "0 1px 2px rgba(0,0,0,0.06)",
-        border: "1px solid #e1e3e5",
-      }}
-    >
+    <div className="admin-elevated-card" style={{ marginBottom: 0, border: "1px solid #e1e3e5" }}>
       <div style={{ marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" }}>
         <span style={{ fontSize: "15px", fontWeight: 700, color: "#202223" }}>{title}</span>
         {pro && (

@@ -16,6 +16,7 @@ import type {
   SettingsV1,
   InputLikeEvent,
 } from "../types";
+import { AdminChoiceRow, AdminNotice, AdminSaveBar } from "../components/AdminChrome";
 
 // 型定義は app/types.ts に集約。後方互換のため re-export する
 export type {
@@ -1878,22 +1879,14 @@ export default function SettingsPage() {
         <s-stack gap="base">
           {loadError && (
             <s-box padding="base">
-              <div style={{ padding: "10px 12px", background: "#fff4e5", border: "1px solid #e0b252", borderRadius: 6, fontSize: 14, color: "#202223" }}>
+              <AdminNotice tone="warning">
                 一部の設定読み込みに失敗しました。ページを再読み込みしても続く場合はサポートに連絡してください。
-              </div>
+              </AdminNotice>
             </s-box>
           )}
           {/* 上部タブナビゲーション（アプリ設定 / 出庫設定 / 入庫設定 / 仕入設定 / ロス設定） */}
           <s-box padding="none">
-            <div
-              style={{
-                display: "flex",
-                gap: "8px",
-                padding: "0 16px 8px",
-                borderBottom: "1px solid #e1e3e5",
-                flexWrap: "wrap",
-              }}
-            >
+            <div className="admin-tablist" role="tablist" aria-label="設定の種類">
               {[
                 { id: "app" as SettingsTabId, label: "アプリ設定" },
                 { id: "outbound" as SettingsTabId, label: "出庫設定" },
@@ -1909,18 +1902,12 @@ export default function SettingsPage() {
                   <button
                     key={tab.id}
                     type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    className="admin-tab"
                     onClick={() => {
                       setActiveTab(tab.id);
                       setSearchParams({ tab: tab.id });
-                    }}
-                    style={{
-                      border: "none",
-                      backgroundColor: selected ? "#e5e7eb" : "transparent",
-                      borderRadius: 8,
-                      padding: "6px 12px",
-                      cursor: "pointer",
-                      fontSize: 14,
-                      fontWeight: selected ? 600 : 500,
                     }}
                   >
                     {tab.label}
@@ -1994,52 +1981,24 @@ export default function SettingsPage() {
                               padding: "6px",
                             }}
                           >
-                            <div
-                              onClick={() =>
+                            <AdminChoiceRow
+                              selected={(settings.visibleLocationIds ?? []).length === 0}
+                              label="全て表示"
+                              onSelect={() =>
                                 setSettings((s) => ({ ...s, visibleLocationIds: [] }))
                               }
-                              style={{
-                                padding: "10px 12px",
-                                borderRadius: "6px",
-                                cursor: "pointer",
-                                backgroundColor:
-                                  (settings.visibleLocationIds ?? []).length === 0
-                                    ? "#eff6ff"
-                                    : "transparent",
-                                border:
-                                  (settings.visibleLocationIds ?? []).length === 0
-                                    ? "1px solid #2563eb"
-                                    : "1px solid transparent",
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "8px",
-                              }}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={(settings.visibleLocationIds ?? []).length === 0}
-                                readOnly
-                                style={{ width: "16px", height: "16px", flexShrink: 0 }}
-                              />
-                              <span
-                                style={{
-                                  fontWeight:
-                                    (settings.visibleLocationIds ?? []).length === 0
-                                      ? 600
-                                      : 500,
-                                }}
-                              >
-                                全て表示
-                              </span>
-                            </div>
+                            />
                             {locations.map((l) => {
                               const isSelected = (settings.visibleLocationIds ?? []).includes(
                                 l.id
                               );
                               return (
-                                <div
+                                <AdminChoiceRow
                                   key={l.id}
-                                  onClick={() => {
+                                  selected={isSelected}
+                                  label={l.name}
+                                  style={{ marginTop: "4px" }}
+                                  onSelect={() => {
                                     const current = settings.visibleLocationIds ?? [];
                                     const newIds = isSelected
                                       ? current.filter((id) => id !== l.id)
@@ -2049,36 +2008,7 @@ export default function SettingsPage() {
                                       visibleLocationIds: newIds,
                                     }));
                                   }}
-                                  style={{
-                                    padding: "10px 12px",
-                                    borderRadius: "6px",
-                                    cursor: "pointer",
-                                    backgroundColor: isSelected ? "#eff6ff" : "transparent",
-                                    border: isSelected
-                                      ? "1px solid #2563eb"
-                                      : "1px solid transparent",
-                                    marginTop: "4px",
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: "8px",
-                                  }}
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={isSelected}
-                                    readOnly
-                                    style={{ width: "16px", height: "16px", flexShrink: 0 }}
-                                  />
-                                  <span
-                                    style={{
-                                      fontWeight: isSelected ? 600 : 500,
-                                      overflow: "hidden",
-                                      textOverflow: "ellipsis",
-                                    }}
-                                  >
-                                    {l.name}
-                                  </span>
-                                </div>
+                                />
                               );
                             })}
                           </div>
@@ -4398,62 +4328,14 @@ export default function SettingsPage() {
 
       {/* 固定フッター: 変更時または保存直後（「保存しました」を約3秒表示・Location Stock と統一） */}
       {(isDirty || showSavedFeedback) && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 0,
-            left: 0,
-            right: 0,
-            background: "#fff",
-            borderTop: "1px solid #e1e3e5",
-            padding: "12px 24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            boxShadow: "0 -2px 6px rgba(0,0,0,0.06)",
-            zIndex: 100,
-          }}
-        >
-          <span style={{ fontSize: 14, color: "#6d7175" }}>
-            {showSavedFeedback && !isDirty ? "保存しました" : footerStatusText}
-          </span>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              onClick={() => setSettings(initial)}
-              disabled={saving || (showSavedFeedback && !isDirty)}
-              style={{
-                padding: "8px 16px",
-                borderRadius: 6,
-                border: "1px solid #c9cccf",
-                background: "#fff",
-                fontSize: 14,
-                fontWeight: 600,
-                cursor: saving || (showSavedFeedback && !isDirty) ? "not-allowed" : "pointer",
-                color: "#202223",
-              }}
-            >
-              破棄
-            </button>
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving || hasDisplayCountError || (showSavedFeedback && !isDirty)}
-              style={{
-                padding: "8px 16px",
-                borderRadius: 6,
-                border: "none",
-                background: "#2c6ecb",
-                color: "#fff",
-                fontSize: 14,
-                fontWeight: 600,
-                cursor: saving || hasDisplayCountError || (showSavedFeedback && !isDirty) ? "not-allowed" : "pointer",
-              }}
-            >
-              {saving ? "保存中..." : "保存"}
-            </button>
-          </div>
-        </div>
+        <AdminSaveBar
+          status={showSavedFeedback && !isDirty ? "保存しました" : footerStatusText}
+          onDiscard={() => setSettings(initial)}
+          onSave={save}
+          saving={saving}
+          discardDisabled={saving || (showSavedFeedback && !isDirty)}
+          saveDisabled={saving || hasDisplayCountError || (showSavedFeedback && !isDirty)}
+        />
       )}
     </s-page>
   );

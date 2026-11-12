@@ -1,0 +1,367 @@
+/**
+ * 管理画面の共通見た目。トークンの意味は app/components/adminUi.ts と
+ * docs/ADMIN_UI_GUIDELINES.md。
+ */
+
+body {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Yu Gothic", Meiryo, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  color: #202223;
+}
+
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  align-items: center;
+  padding: 12px 20px;
+  margin-bottom: 16px;
+  background: #f6f6f7;
+  border-bottom: 1px solid #e1e3e5;
+  font-size: 14px;
+  position: relative;
+  z-index: 100;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+
+.admin-nav-link {
+  color: #202223;
+  font-weight: 400;
+  font-size: 14px;
+  line-height: 1.4;
+  text-decoration: none;
+  padding: 6px 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-nav-link.is-active {
+  color: #2c6ecb;
+  font-weight: 600;
+}
+
+.admin-nav-link:focus-visible,
+.admin-tab:focus-visible,
+.admin-choice:focus-visible,
+.admin-primary:focus-visible,
+.admin-secondary:focus-visible,
+.admin-hit:focus-visible,
+.admin-icon-button:focus-visible {
+  outline: 2px solid #2c6ecb;
+  outline-offset: 2px;
+}
+
+.admin-elevated-card {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.admin-elevated-card.is-highlight {
+  border-left: 4px solid #2c6ecb;
+}
+
+.admin-outline-card {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px #e1e3e5;
+  padding: 16px;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.admin-section-label {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #6d7175;
+}
+
+.admin-subdued {
+  font-size: 14px;
+  color: #6d7175;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.admin-emphasis {
+  font-size: 18px;
+  font-weight: 700;
+  color: #202223;
+}
+
+.admin-primary,
+.admin-secondary {
+  display: inline-block;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-decoration: none;
+  cursor: pointer;
+  box-sizing: border-box;
+  font-family: inherit;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.admin-primary {
+  border: none;
+  background: #2c6ecb;
+  color: #fff;
+}
+
+.admin-secondary {
+  border: 1px solid #c9cccf;
+  background: #fff;
+  color: #202223;
+}
+
+.admin-primary:disabled,
+.admin-secondary:disabled {
+  cursor: not-allowed;
+}
+
+.admin-text-link {
+  font-size: 14px;
+  color: #2c6ecb;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.admin-text-link:focus-visible {
+  outline: 2px solid #2c6ecb;
+  outline-offset: 2px;
+}
+
+.admin-tablist {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 8px;
+  border-bottom: 1px solid #e1e3e5;
+  flex-wrap: wrap;
+}
+
+.admin-tab {
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  color: #202223;
+  font-family: inherit;
+}
+
+.admin-tab[aria-selected="true"] {
+  background: #e5e7eb;
+  font-weight: 600;
+}
+
+.admin-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #202223;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.admin-choice[data-idle-border="neutral"] {
+  border-color: #e1e3e5;
+}
+
+.admin-choice[aria-checked="true"] {
+  background: #eff6ff;
+  border-color: #2c6ecb;
+  font-weight: 600;
+}
+
+.admin-choice-input {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
+.admin-choice-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-notice {
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.4;
+  color: #202223;
+  overflow-wrap: anywhere;
+}
+
+.admin-notice--warning {
+  background: #fff4e5;
+  border: 1px solid #e0b252;
+}
+
+.admin-notice--success {
+  background: #e3f1df;
+  border-left: 4px solid #008060;
+}
+
+.admin-notice--critical {
+  background: #fff5f5;
+  border: 1px solid #d72c0d;
+  color: #d72c0d;
+}
+
+.admin-save-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border-top: 1px solid #e1e3e5;
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.06);
+  z-index: 100;
+  box-sizing: border-box;
+}
+
+.admin-save-bar-status {
+  font-size: 14px;
+  color: #6d7175;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-save-bar-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-hit {
+  display: flex;
+  align-items: flex-start;
+  padding: 12px;
+  cursor: pointer;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  box-sizing: border-box;
+}
+
+.admin-qty-scroll {
+  max-width: 100%;
+  overflow: auto;
+}
+
+.admin-qty-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  background-color: transparent;
+}
+
+.admin-qty-table th,
+.admin-qty-table td {
+  padding: 8px;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.admin-qty-table th {
+  text-align: left;
+  background: #f5f5f5;
+  border-bottom: 2px solid #ddd;
+  font-weight: 600;
+}
+
+.admin-qty-table td {
+  border-bottom: 1px solid #eee;
+}
+
+.admin-qty-table td.admin-qty-num,
+.admin-qty-table th.admin-qty-num,
+span.admin-qty-num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.admin-qty-table--ruled th:not(:last-child),
+.admin-qty-table--ruled td:not(:last-child) {
+  border-right: 1px solid #eee;
+}
+
+.admin-modal-panel {
+  background: #fff;
+  border-radius: 8px;
+  padding: 24px;
+  width: min(960px, 100%);
+  max-height: 90%;
+  overflow: auto;
+  box-sizing: border-box;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.admin-icon-button {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #202223;
+  flex-shrink: 0;
+}
+
+@media (max-width: 767px) {
+  .admin-nav {
+    padding: 8px 12px;
+    gap: 2px 12px;
+  }
+
+  .admin-modal-panel {
+    padding: 16px;
+  }
+
+  .admin-save-bar {
+    padding: 12px;
+  }
+}

@@ -1,8 +1,10 @@
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
+import { adminFontFamily } from "./components/adminUi";
+import "./admin-ui.css";
 
 export default function App() {
   return (
-    <html lang="en">
+    <html lang="ja">
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1" />
@@ -14,7 +16,14 @@ export default function App() {
         <Meta />
         <Links />
       </head>
-      <body>
+      <body
+        style={{
+          fontFamily: adminFontFamily,
+          fontSize: 14,
+          lineHeight: 1.4,
+          color: "#202223",
+        }}
+      >
         <Outlet />
         <ScrollRestoration />
         <Scripts />
