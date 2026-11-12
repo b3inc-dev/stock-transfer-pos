@@ -143,11 +143,39 @@ gap / 原因分析ドキュメントで「未実装」「準備中」と書い�
 - **詳細要件**: 各機能の正本（棚卸は Canon / 39GROUPS / COMPLETE_RETRY、履歴は `HISTORY_WEBHOOK_METAFIELD_REQUIREMENTS.md`）
 - 台帳と詳細が矛盾する場合は **詳細正本 + 現行コード** を優先し、台帳側を更新する
 
-## D9. API 2026-04 `changeFromQuantity`（記録のみ・2026-10-08）
+## D9. API 2026-04 `changeFromQuantity`（段階実装・更新 2026-10-09 residual-reduce）
 
-Shopify Inventory API 2026-04 で concurrency 制御として `changeFromQuantity` が必須化される見込み。  
-**本 workstream では実装しない**（Phase E2）。適用対象は apply-change / loss / order / stocktake setQuantities 経路。  
-API バージョンバンプとセットで別 PR。
+Shopify Inventory API は `changeFromQuantity` を **2026-01 で導入**し、**2026-04 で実質必須**（省略時ランタイムエラー）。
+
+### 実装方針
+
+| 経路 | `changeFromQuantity` | 根拠 |
+|------|----------------------|------|
+| apply-change → setQuantities（**`inventory_count` / `adjustment`**） | **activate 後チャンク直前の live available（CAS）** | 絶対値上書きと同時売上の last-write を縮小。読取失敗は fail-closed。目標値一致行は skip |
+| apply-change → その他 activity（ロス・仕入・転送など） | **`null`（オプトアウト）** | delta 正規化経路。E2 (#13) の明示 null と整合 |
+| CAS 経路のロールバック setQuantities | **再読取 CAS**（`live === written` の行のみ戻す。同時変動行はスキップ） | null ロールバックが売上を消すのを避ける。非 CAS 経路の rollback は従来どおり null |
+| Admin 棚卸 `app.inventory-count` | **共有 `setInventoryQuantitiesServer` + `casFromLiveSnapshot`** | 直 null set をやめる |
+| POS 直 `adjustInventoryToActual`（stocktake / adjustment） | **activate 後チャンク live CAS**（主確定は apply-change） | フォールバック直経路の null を縮小 |
+
+### 製品決定 R1（inherent・2026-10-09）
+
+- **カウント中〜確定タップ前**の売上/返品は、棚卸「実数絶対値」セマンティクスと両立する限り完全根絶できない。
+- CAS / UI は **確定 API 実行中**の競合緩和に留める。販売凍結・確定前ライブ差分確認は別製品変更（安全な UI confirm は現状の確定フローを壊し得るため本 PR では未実装）。
+- 受容する場合の文言: 「確定時点の計上実数を正とし、カウント中の販売は確定で上書きされ得る」。
+
+### stale matcher 検証ノート（R7）
+
+- 検出: `userErrors.message` の `changefromquantity` / `change from quantity` 等 + 可能なら `userErrors.code`（GraphQL で `code` を要求）。
+- **実ストア同時売却での userErrors 形は未ライブ証明**。ロケール/文言変更で message マッチは壊れ得る → コードベース優先を維持し、スモークで形を確認すること。
+- 検証手順（承認後）: 差異あり SKU を確定直前に別端末で売却 → stale エラー文言/code を記録 → matcher 更新。
+
+### #13（E2）調整（必須）
+
+- **マージ概念順: #19（棚卸・調整 CAS）を先に着地** → その後 #13 を rebase。
+- E2 が apply-change に明示 `null` を入れる場合でも、**`inventory_count` / `adjustment` の post-activate CAS を再 null 化しない**。
+- activate **前**読取 CAS は不整合（従来 D9）。**post-activate / チャンク直前**のみ。
+- **API バージョンは `2026-01` 維持**。2026-04 バンプは `@idempotent` とセットの別 PR。
+- **検証（2026-10-09）**: #13 tip `3e11437`（main `f8efd40`）は count/adjustment を再 null せず #19 に委譲。delta のみ post-activate CAS。双方 #19-first 合意。#13 tip を本 PR に先行 merge しない（着地後に #13 rebase）。
 
 ## D10. 棚卸確定順と webhook（2026-10-08）
 

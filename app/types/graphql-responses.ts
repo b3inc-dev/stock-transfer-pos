@@ -7,6 +7,8 @@
 export interface GraphQLUserError {
   field?: string;
   message?: string;
+  /** Shopify Inventory API 等が返す machine code（無い場合あり） */
+  code?: string | null;
 }
 
 /** トップレベルの errors 配列の要素 */
