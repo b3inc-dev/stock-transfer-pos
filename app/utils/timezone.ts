@@ -68,6 +68,10 @@ export function getHourInShopTimezone(date: Date = new Date(), timezone: string 
   return hour ? parseInt(hour.value, 10) : 0;
 }
 
+export type ShopTimezoneRead =
+  | { ok: true; timezone: string }
+  | { ok: false; reason: "request_failed" | "graphql_error" | "missing" };
+
 /**
  * ショップのタイムゾーンを取得する（loader内で使用）
  * @returns タイムゾーン文字列（IANA形式）、取得失敗時は"UTC"
@@ -75,16 +79,35 @@ export function getHourInShopTimezone(date: Date = new Date(), timezone: string 
 export async function getShopTimezone(
   admin: { graphql: (q: string, v?: Record<string, unknown>) => Promise<Response> }
 ): Promise<string> {
+  const read = await readShopTimezone(admin);
+  return read.ok ? read.timezone : "UTC";
+}
+
+/**
+ * 在庫更新の店舗日付に使う。通信失敗・GraphQLエラー・空の ianaTimezone は UTC と区別する。
+ * ショップの実タイムゾーンが UTC のときだけ { ok: true, timezone: "UTC" } になる。
+ */
+export async function readShopTimezone(
+  admin: { graphql: (q: string, v?: Record<string, unknown>) => Promise<Response> }
+): Promise<ShopTimezoneRead> {
   try {
     const resp = await admin.graphql(GET_SHOP_TIMEZONE_QUERY);
-    const json = await resp.json() as { data?: { shop?: { ianaTimezone?: string } }; errors?: Array<{ message?: string }> };
-    if (json?.errors?.length) {
-      console.error("[getShopTimezone] GraphQL errors:", json.errors);
-      return "UTC";
+    if (!resp.ok) {
+      console.error("[readShopTimezone] HTTP", resp.status);
+      return { ok: false, reason: "request_failed" };
     }
-    return json?.data?.shop?.ianaTimezone ?? "UTC";
+    const json = await resp.json() as { data?: { shop?: { ianaTimezone?: string | null } }; errors?: Array<{ message?: string }> };
+    if (json?.errors?.length) {
+      console.error("[readShopTimezone] GraphQL errors:", json.errors);
+      return { ok: false, reason: "graphql_error" };
+    }
+    const timezone = json?.data?.shop?.ianaTimezone;
+    if (typeof timezone !== "string" || timezone.trim() === "") {
+      return { ok: false, reason: "missing" };
+    }
+    return { ok: true, timezone: timezone.trim() };
   } catch (error) {
-    console.error("[getShopTimezone] Failed:", error);
-    return "UTC";
+    console.error("[readShopTimezone] Failed:", error);
+    return { ok: false, reason: "request_failed" };
   }
 }
