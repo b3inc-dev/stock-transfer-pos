@@ -246,6 +246,37 @@ async function main() {
     assert.equal(dbAll.length, 5, "DB rows are kept for a later retry");
   });
 
+  await step("rollback ingests an old POS write between mirror write and version acknowledgement", async () => {
+    assert.equal((await switchMode(SHOP, a, OWNER, "db")).ok, true);
+    let interruptions = 0;
+    let keepWriting = true;
+    const racingAdmin = {
+      graphql: async (query: string, opts?: { variables?: Record<string, unknown> }) => {
+        const response = await admin.graphql(query, opts);
+        if (keepWriting && query.includes("mutation SetNext(") &&
+            (opts?.variables?.metafields as unknown[] | undefined)?.length === 1) {
+          const counts = await readInventoryCountsChunked(admin);
+          interruptions++;
+          await legacyWrite(admin, [...counts, {
+            ...seedCounts()[2], id: `old-pos-${interruptions}`, countName: `#C010${interruptions}`,
+          }]);
+        }
+        return response;
+      },
+    };
+    const blocked = await switchMode(SHOP, racingAdmin, OWNER, "legacy", { force: true });
+    assert.equal(blocked.ok, false);
+    assert.ok(interruptions > 1, "retried after the first concurrent update");
+    assert.equal(await getEffectiveStorageMode(SHOP), "db");
+    keepWriting = false;
+    assert.equal((await switchMode(SHOP, racingAdmin, OWNER, "legacy")).ok, true);
+    const legacy = await readInventoryCountsChunked(admin);
+    for (let i = 1; i <= interruptions; i++) {
+      assert.ok(await getDbCount(SHOP, `old-pos-${i}`));
+      assert.ok(legacy.some((c) => c.id === `old-pos-${i}`));
+    }
+  });
+
   await reset();
   console.log("all steps passed");
 }

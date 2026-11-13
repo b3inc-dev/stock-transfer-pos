@@ -646,10 +646,16 @@ export async function runMirrorSync(
         break;
       }
       await writeLegacyNextNumber(admin, ownerId, maxCountNameNumber(dbCounts.map((c) => c.countName)) + 1);
-      const v1 = await getInventoryCountsVersion(admin);
+      // The chunked writer advances v0 by one. A later version belongs to another writer
+      // and must be ingested before this snapshot can be marked clean.
+      const writtenVersion = v0 + 1;
+      if ((await getInventoryCountsVersion(admin)) !== writtenVersion) {
+        lastError = "書き写しの直後に版番号が一致しなかったため、同期を確定できませんでした。";
+        continue;
+      }
       await db.stocktakeStorageState.update({
         where: { shop },
-        data: { mirroredLegacyVersion: v1, mirroredAt: new Date(), lastError: null },
+        data: { mirroredLegacyVersion: writtenVersion, mirroredAt: new Date(), lastError: null },
       });
       await db.stocktakeStorageState.updateMany({ where: { shop, mirrorSeq: seqAtStart }, data: { mirrorDirty: false } });
       return { ok: true, ingested, written: dbCounts.length };
@@ -742,7 +748,7 @@ export async function switchMode(
   }
   if (current === "db") {
     const r = await runMirrorSync(shop, admin, ownerId);
-    if (!r.ok && !opts.force) {
+    if (!r.ok) {
       return { ok: false, error: `メタフィールドへの書き写しに失敗したため切り替えません: ${r.error}` };
     }
   }
