@@ -512,12 +512,12 @@ export async function action({ request }: ActionFunctionArgs) {
           read: await readShopTimezone(admin),
           timestamp: requestedAt,
         });
-        if (!failedGate.clear) {
+        if (!failedGate.clear || typeof failedGate.shopDate !== "string") {
           return new Response(
             JSON.stringify({
               ok: false,
               error: "店舗タイムゾーンを読み取れなかったため、在庫は変更していません",
-              errorCode: failedGate.errorCode,
+              errorCode: failedGate.errorCode ?? "timezone_unavailable",
               appEventId,
               status: existingEvent.status,
               eventId: existingEvent.id,
