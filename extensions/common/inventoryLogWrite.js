@@ -287,6 +287,8 @@ export async function replayCompletedHistory(db, args) {
           sourceId: args.sourceId ?? null,
           locationName: args.locationName || rawLocId,
           note: historyNoteForAppEvent(args.appEventId),
+          // 同じ idempotency key の行だけ日付を直す。行は増やさず、在庫数量は変えない。
+          ...(typeof args.date === "string" && args.date ? { date: args.date } : {}),
         },
       });
       written += 1;

@@ -7,7 +7,8 @@ import { authenticate, sessionStorage } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import db from "../db.server";
 import type { SessionStorageWithFindByShop } from "../types";
-import { getDateInShopTimezone, getShopTimezone } from "../utils/timezone";
+import { readShopTimezone } from "../utils/timezone";
+import { planInventoryHistoryDate } from "../../extensions/common/shopHistoryDate.js";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import {
   setInventoryQuantitiesServer,
@@ -340,8 +341,35 @@ export async function action({ request }: ActionFunctionArgs) {
         const retryDecision = decideCompletedEventRetry(existingEvent);
         if (retryDecision.action === "retry_history_only") {
           // 在庫は適用済み。再送では setQuantities を呼ばず、保存済み明細から履歴だけ upsert する。
-          const shopTimezone = await getShopTimezone(admin).catch(() => "UTC");
+          // タイムゾーンが読めないときは UTC 日付で帰属を変えず、履歴未完了のまま再試行に残す。
           const requestedAt = existingEvent.requestedAt ?? new Date();
+          const historyDate = planInventoryHistoryDate({
+            phase: "after_inventory",
+            read: await readShopTimezone(admin),
+            timestamp: requestedAt,
+          });
+          if (historyDate.action !== "proceed") {
+            const historyError = "Shop timezone could not be read";
+            await db.inventoryChangeEvent
+              .update({
+                where: { id: existingEvent.id },
+                data: { errorSummary: `history_incomplete: timezone_unavailable: ${historyError}`.slice(0, 500) },
+              })
+              .catch(() => null);
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                eventId: existingEvent.id,
+                appEventId,
+                status: "completed",
+                appliedCount: existingEvent.lines.length,
+                historyIncomplete: true,
+                errorCode: "history_incomplete",
+                historyError,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+            );
+          }
           const replay = await replayCompletedHistory(db, {
             shop,
             appEventId,
@@ -350,7 +378,7 @@ export async function action({ request }: ActionFunctionArgs) {
             locationName: existingEvent.locationName || "",
             sourceId: existingEvent.sourceId,
             requestedAt,
-            date: getDateInShopTimezone(requestedAt, shopTimezone),
+            date: historyDate.date,
             lines: existingEvent.lines.map((l) => ({
               inventoryItemId: l.inventoryItemId,
               variantId: l.variantId,
@@ -510,6 +538,26 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
+    // 店舗日付が取れないまま在庫数量を変えると、境界付近の履歴が UTC の暦日に付く。
+    // 数量の変更はまだ行っていない。読めなければ在庫も履歴も書かず、同じ操作の再試行に返す。
+    const historyDate = planInventoryHistoryDate({
+      phase: "before_inventory",
+      read: await readShopTimezone(admin),
+      timestamp: requestedAt,
+    });
+    if (historyDate.action !== "proceed") {
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: "店舗タイムゾーンを読み取れなかったため、在庫は変更していません",
+          errorCode: "timezone_unavailable",
+          appEventId,
+        }),
+        { status: 503, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      );
+    }
+    const shopDate = historyDate.date;
+
     const event = await db.inventoryChangeEvent.create({
       data: {
         appEventId,
@@ -564,8 +612,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const rawLocIdEarly = toRawId(locationId);
     const resolvedLocationNameEarly = locationName || rawLocIdEarly || locationId;
-    const shopTimezoneEarly = await getShopTimezone(admin).catch(() => "UTC");
-    const shopDateEarly = getDateInShopTimezone(requestedAt, shopTimezoneEarly);
     const idempotencyKeyBaseEarly = `${shop}_app_${appEventId}`;
     cleanupIdempotencyKeys = lineRecords.map(
       (l) => `${idempotencyKeyBaseEarly}_${toRawId(l.inventoryItemId)}_${rawLocIdEarly}`
@@ -582,7 +628,7 @@ export async function action({ request }: ActionFunctionArgs) {
           create: {
             shop,
             timestamp: requestedAt,
-            date: shopDateEarly,
+            date: shopDate,
             inventoryItemId: rawItemId,
             variantId: l.variantId,
             sku: l.sku,
@@ -598,6 +644,7 @@ export async function action({ request }: ActionFunctionArgs) {
           },
           update: {
             delta: l.delta,
+            date: shopDate,
             activity,
             sourceType: activity,
             sourceId,
@@ -778,9 +825,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const rawLocId = toRawId(locationId);
     const resolvedLocationName = locationName || rawLocId || locationId;
-    // ショップのタイムゾーンで日付を計算（UTC固定だと日本など非UTCショップで日付がずれる）
-    const shopTimezone = await getShopTimezone(admin).catch(() => "UTC");
-    const shopDate = getDateInShopTimezone(requestedAt, shopTimezone);
 
     const appliedRawIds = new Set(
       (result.appliedInventoryItemIds ?? []).map((id) => toRawId(id)).filter(Boolean)
@@ -819,6 +863,7 @@ export async function action({ request }: ActionFunctionArgs) {
             update: {
               delta: l.delta,
               quantityAfter: l.quantityAfter,
+              date: shopDate,
               locationName: resolvedLocationName,
               sourceId,
               note: `appEventId:${appEventId}${noteSuffix}`,
