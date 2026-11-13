@@ -47,3 +47,19 @@ export function planInventoryHistoryDate(opts) {
   if (!SHOP_DATE.test(date)) return unavailable;
   return { action: "proceed", timezone, date };
 }
+
+/**
+ * failed イベントの削除より前に呼ぶ。
+ * 日付が取れなければ clear: false。呼び出し側はイベントも履歴も消さない。
+ */
+export function prepareFailedEventRetry({ read, timestamp }) {
+  const plan = planInventoryHistoryDate({
+    phase: "before_inventory",
+    read,
+    timestamp,
+  });
+  if (plan.action !== "proceed") {
+    return { clear: false, errorCode: "timezone_unavailable" };
+  }
+  return { clear: true, shopDate: plan.date };
+}

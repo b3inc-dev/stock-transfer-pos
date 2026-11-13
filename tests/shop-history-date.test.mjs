@@ -7,8 +7,8 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { getDateInShopTimezone, readShopTimezone } from "../app/utils/timezone.ts";
-import { planInventoryHistoryDate, shopCalendarDate, utcFallbackShiftsShopDate } from "../extensions/common/shopHistoryDate.js";
-import { replayCompletedHistory } from "../extensions/common/inventoryLogWrite.js";
+import { planInventoryHistoryDate, prepareFailedEventRetry, shopCalendarDate, utcFallbackShiftsShopDate } from "../extensions/common/shopHistoryDate.js";
+import { decideCompletedEventRetry, repairCompletedHistoryDates, replayCompletedHistory } from "../extensions/common/inventoryLogWrite.js";
 
 /** 日本時間 2026-11-13 00:30。UTC ではまだ 2026-11-12。 */
 const TOKYO_BOUNDARY = new Date("2026-11-12T15:30:00.000Z");
@@ -248,6 +248,316 @@ describe("recovery reprocess does not double-apply inventory or history", () => 
     assert.ok(guardAt > 0 && createAt > guardAt && setAt > createAt);
     const replayAt = route.indexOf('phase: "after_inventory"');
     assert.ok(replayAt > 0 && replayAt < createAt);
-    assert.ok(route.includes("history_incomplete: timezone_unavailable:"));
+    const failedAt = route.indexOf('existingEvent.status === "failed"');
+    const prepareAt = route.indexOf("prepareFailedEventRetry(");
+    const deleteAt = route.indexOf("inventoryChangeEvent.delete");
+    assert.ok(failedAt > 0 && prepareAt > failedAt && deleteAt > prepareAt);
+    const repairAt = route.indexOf("repairCompletedHistoryDates(");
+    assert.ok(repairAt > 0 && repairAt < failedAt);
+    assert.equal(route.includes("history_incomplete: timezone_unavailable:"), false);
+  });
+});
+
+const SHOP = "demo.myshopify.com";
+const APP_EVENT = "evt_tz_boundary";
+
+function logKey(appEventId, itemId = "101") {
+  return `${SHOP}_app_${appEventId}_${itemId}_7`;
+}
+
+function repairDb(seedRows) {
+  const rows = seedRows.map((row) => ({ ...row }));
+  const events = [];
+  return {
+    rows,
+    events,
+    inventoryChangeLog: {
+      async findUnique({ where }) {
+        const { shop, idempotencyKey } = where.shop_idempotencyKey;
+        return rows.find((r) => r.shop === shop && r.idempotencyKey === idempotencyKey) ?? null;
+      },
+      async update({ where, data }) {
+        const row = rows.find((r) => r.id === where.id);
+        if (!row) throw new Error("missing row");
+        if (Object.keys(data).some((key) => key !== "date")) {
+          throw new Error(`date-only repair wrote ${Object.keys(data).join(",")}`);
+        }
+        row.date = data.date;
+        return row;
+      },
+      async deleteMany() {
+        throw new Error("history delete is not allowed before a timezone read succeeds");
+      },
+    },
+    inventoryChangeEvent: {
+      async delete() {
+        throw new Error("event delete is not allowed before a timezone read succeeds");
+      },
+    },
+    inventoryChangeEventLine: {
+      async deleteMany() {
+        throw new Error("line delete is not allowed before a timezone read succeeds");
+      },
+    },
+  };
+}
+
+function completedEvent(requestedAt, date) {
+  return {
+    id: "evt_row",
+    shop: SHOP,
+    status: "completed",
+    errorSummary: null,
+    activity: "inventory_count",
+    locationId: "gid://shopify/Location/7",
+    requestedAt,
+    lines: [{ inventoryItemId: "gid://shopify/InventoryItem/101", delta: -2, quantityAfterActual: 8 }],
+    storedDate: date,
+  };
+}
+
+async function resendCleanCompleted({ db, event, read, inventoryWrites }) {
+  const decision = decideCompletedEventRetry(event);
+  if (decision.action !== "return_completed") {
+    throw new Error(`expected return_completed, got ${decision.action}`);
+  }
+  const plan = planInventoryHistoryDate({
+    phase: "after_inventory",
+    read,
+    timestamp: event.requestedAt,
+  });
+  if (plan.action !== "proceed") {
+    return {
+      status: 503,
+      errorCode: "timezone_unavailable",
+      inventoryWrites,
+      errorSummary: event.errorSummary,
+      statusText: event.status,
+    };
+  }
+  await repairCompletedHistoryDates(db, {
+    shop: event.shop,
+    appEventId: APP_EVENT,
+    activity: event.activity,
+    locationId: event.locationId,
+    date: plan.date,
+    lines: event.lines,
+  });
+  return { status: 200, inventoryWrites, date: db.rows[0]?.date };
+}
+
+describe("completed events repair a UTC history date without another stock write", () => {
+  it("rewrites Asia/Tokyo midnight onto the shop date and leaves quantity on the same row", async () => {
+    const event = completedEvent(TOKYO_BOUNDARY, "2026-11-12");
+    const db = repairDb([
+      {
+        id: "log_1",
+        shop: SHOP,
+        idempotencyKey: logKey(APP_EVENT),
+        date: "2026-11-12",
+        delta: -2,
+        quantityAfter: 8,
+      },
+      {
+        id: "log_other",
+        shop: SHOP,
+        idempotencyKey: logKey("evt_other"),
+        date: "2026-11-12",
+        delta: 4,
+        quantityAfter: 3,
+      },
+    ]);
+    const inventoryWrites = 0;
+    const first = await resendCleanCompleted({
+      db,
+      event,
+      read: { ok: true, timezone: "Asia/Tokyo" },
+      inventoryWrites,
+    });
+    assert.equal(first.status, 200);
+    assert.equal(first.inventoryWrites, 0);
+    assert.equal(db.rows.length, 2);
+    assert.equal(db.rows[0].date, "2026-11-13");
+    assert.equal(db.rows[0].quantityAfter, 8);
+    assert.equal(db.rows[0].delta, -2);
+    assert.equal(db.rows[1].date, "2026-11-12");
+    assert.equal(event.errorSummary, null);
+    assert.equal(event.status, "completed");
+
+    const again = await resendCleanCompleted({
+      db,
+      event,
+      read: { ok: true, timezone: "Asia/Tokyo" },
+      inventoryWrites: first.inventoryWrites,
+    });
+    assert.equal(again.status, 200);
+    assert.equal(again.inventoryWrites, 0);
+    assert.equal(db.rows.length, 2);
+    assert.equal(db.rows[0].id, "log_1");
+    assert.equal(db.rows[0].date, "2026-11-13");
+  });
+
+  it("rewrites a Pacific late evening off the next UTC date", async () => {
+    const event = completedEvent(PACIFIC_BOUNDARY, "2026-11-13");
+    const db = repairDb([
+      {
+        id: "log_1",
+        shop: SHOP,
+        idempotencyKey: logKey(APP_EVENT),
+        date: "2026-11-13",
+        delta: -2,
+        quantityAfter: 8,
+      },
+    ]);
+    const result = await resendCleanCompleted({
+      db,
+      event,
+      read: { ok: true, timezone: "America/Los_Angeles" },
+      inventoryWrites: 0,
+    });
+    assert.equal(result.status, 200);
+    assert.equal(result.inventoryWrites, 0);
+    assert.equal(db.rows.length, 1);
+    assert.equal(db.rows[0].date, "2026-11-12");
+    assert.equal(db.rows[0].quantityAfter, 8);
+  });
+
+  it("leaves a real UTC shop on the UTC calendar date", async () => {
+    const event = completedEvent(TOKYO_BOUNDARY, "2026-11-12");
+    const db = repairDb([
+      {
+        id: "log_1",
+        shop: SHOP,
+        idempotencyKey: logKey(APP_EVENT),
+        date: "2026-11-12",
+        delta: -2,
+        quantityAfter: 8,
+      },
+    ]);
+    const result = await resendCleanCompleted({
+      db,
+      event,
+      read: { ok: true, timezone: "UTC" },
+      inventoryWrites: 0,
+    });
+    assert.equal(result.status, 200);
+    assert.equal(db.rows[0].date, "2026-11-12");
+    assert.equal(db.rows[0].quantityAfter, 8);
+    assert.equal(planInventoryHistoryDate({
+      phase: "after_inventory",
+      read: { ok: true, timezone: "UTC" },
+      timestamp: TOKYO_BOUNDARY,
+    }).date, "2026-11-12");
+  });
+
+  it("returns 503 and writes nothing when the timezone read fails", async () => {
+    const failures = [
+      { ok: false, reason: "request_failed" },
+      { ok: false, reason: "graphql_error" },
+      { ok: false, reason: "missing" },
+    ];
+    for (const read of failures) {
+      const event = completedEvent(TOKYO_BOUNDARY, "2026-11-12");
+      const db = repairDb([
+        {
+          id: "log_1",
+          shop: SHOP,
+          idempotencyKey: logKey(APP_EVENT),
+          date: "2026-11-12",
+          delta: -2,
+          quantityAfter: 8,
+        },
+      ]);
+      const result = await resendCleanCompleted({ db, event, read, inventoryWrites: 0 });
+      assert.equal(result.status, 503);
+      assert.equal(result.errorCode, "timezone_unavailable");
+      assert.equal(result.inventoryWrites, 0);
+      assert.equal(result.errorSummary, null);
+      assert.equal(result.statusText, "completed");
+      assert.equal(db.rows[0].date, "2026-11-12");
+      assert.equal(db.rows[0].quantityAfter, 8);
+    }
+  });
+
+  it("repairs the same row once when two resends overlap", async () => {
+    const event = completedEvent(TOKYO_BOUNDARY, "2026-11-12");
+    const db = repairDb([
+      {
+        id: "log_1",
+        shop: SHOP,
+        idempotencyKey: logKey(APP_EVENT),
+        date: "2026-11-12",
+        delta: -2,
+        quantityAfter: 8,
+      },
+    ]);
+    const read = { ok: true, timezone: "Asia/Tokyo" };
+    const [a, b] = await Promise.all([
+      resendCleanCompleted({ db, event, read, inventoryWrites: 0 }),
+      resendCleanCompleted({ db, event, read, inventoryWrites: 0 }),
+    ]);
+    assert.equal(a.status, 200);
+    assert.equal(b.status, 200);
+    assert.equal(a.inventoryWrites + b.inventoryWrites, 0);
+    assert.equal(db.rows.length, 1);
+    assert.equal(db.rows[0].date, "2026-11-13");
+    assert.equal(db.rows[0].quantityAfter, 8);
+  });
+});
+
+describe("failed event retry checks the timezone before deleting anything", () => {
+  async function retryFailed(read) {
+    const db = repairDb([
+      {
+        id: "log_1",
+        shop: SHOP,
+        idempotencyKey: logKey(APP_EVENT),
+        date: "2026-11-12",
+        delta: -2,
+        quantityAfter: null,
+      },
+    ]);
+    db.events.push({ id: "evt_row", status: "failed", errorSummary: "previous failure" });
+    const gate = prepareFailedEventRetry({ read, timestamp: TOKYO_BOUNDARY });
+    if (!gate.clear) {
+      return { status: 503, events: db.events.length, logs: db.rows.length, date: db.rows[0].date };
+    }
+    db.events.splice(0, db.events.length);
+    return { status: 200, shopDate: gate.shopDate, events: db.events.length, logs: db.rows.length };
+  }
+
+  it("keeps the failed event and history when the timezone read fails", async () => {
+    const timeout = await readShopTimezone({
+      graphql: async () => {
+        throw new Error("The operation was aborted due to timeout");
+      },
+    });
+    const httpError = await readShopTimezone({
+      graphql: async () => jsonResponse(503, {}),
+    });
+    const graphqlError = await readShopTimezone({
+      graphql: async () => jsonResponse(200, { errors: [{ message: "Throttled" }] }),
+    });
+    const emptyZone = await readShopTimezone({
+      graphql: async () => jsonResponse(200, { data: { shop: { ianaTimezone: "  " } } }),
+    });
+    for (const read of [timeout, httpError, graphqlError, emptyZone]) {
+      const blocked = await retryFailed(read);
+      assert.equal(read.ok, false);
+      assert.equal(blocked.status, 503);
+      assert.equal(blocked.events, 1);
+      assert.equal(blocked.logs, 1);
+      assert.equal(blocked.date, "2026-11-12");
+    }
+  });
+
+  it("clears the failed event only after a real shop timezone is known", async () => {
+    const tokyo = await retryFailed({ ok: true, timezone: "Asia/Tokyo" });
+    assert.equal(tokyo.status, 200);
+    assert.equal(tokyo.shopDate, "2026-11-13");
+    assert.equal(tokyo.events, 0);
+    const utcShop = await retryFailed({ ok: true, timezone: "UTC" });
+    assert.equal(utcShop.shopDate, "2026-11-12");
+    assert.equal(utcShop.events, 0);
   });
 });

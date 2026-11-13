@@ -303,3 +303,34 @@ export async function replayCompletedHistory(db, args) {
   }
   return { ok: true, written };
 }
+
+/**
+ * 正常完了した操作の再送で、履歴の date だけを店舗日付へ直す。
+ * 行が無ければ作らない。数量・delta・在庫は変えない。
+ */
+export async function repairCompletedHistoryDates(db, args) {
+  const lines = Array.isArray(args?.lines) ? args.lines : [];
+  let repaired = 0;
+  let examined = 0;
+  for (const line of lines) {
+    const idempotencyKey = buildInventoryLogIdempotencyKey({
+      shop: args.shop,
+      appEventId: args.appEventId,
+      activity: args.activity,
+      inventoryItemId: line.inventoryItemId,
+      locationId: args.locationId,
+    });
+    const row = await db.inventoryChangeLog.findUnique({
+      where: { shop_idempotencyKey: { shop: args.shop, idempotencyKey } },
+    });
+    if (!row) continue;
+    examined += 1;
+    if (row.date === args.date) continue;
+    await db.inventoryChangeLog.update({
+      where: { id: row.id },
+      data: { date: args.date },
+    });
+    repaired += 1;
+  }
+  return { ok: true, repaired, examined };
+}
