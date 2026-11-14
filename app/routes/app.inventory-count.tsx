@@ -712,6 +712,19 @@ function splitCountIntoParts(count: InventoryCount): CountPart[] {
   return parts;
 }
 
+function stocktakeWriteResult(json: Record<string, unknown> | null): { userErrors: Array<{ message?: string }> } {
+  const result = json?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } } | undefined;
+  const errors = json?.errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    return { userErrors: [{ message: "棚卸の保存を確認できませんでした（GraphQLエラー）。" }] };
+  }
+  const userErrors = result?.metafieldsSet?.userErrors;
+  if (!Array.isArray(userErrors)) {
+    return { userErrors: [{ message: "棚卸の保存結果を取得できませんでした。" }] };
+  }
+  return { userErrors };
+}
+
 /**
  * メタフィールド書き込みをリトライ付きで実行する。
  * HTTP エラー・例外発生時のみリトライ。userErrors はリトライせず呼び出し元に委ねる。
@@ -974,8 +987,7 @@ export async function writeInventoryCountsChunked(
     const emptyMutation = `#graphql mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`;
     const emptyVars = { metafields };
     const emptyJson = await metafieldSetWithRetry(admin, emptyMutation, emptyVars, gql);
-    const data = (emptyJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
-    return { userErrors: data?.userErrors ?? [] };
+    return stocktakeWriteResult(emptyJson);
   }
 
   if (payloads.length === 1 && payloads[0].length === 1 && !(payloads[0][0] as CountPart)._part) {
@@ -989,8 +1001,7 @@ export async function writeInventoryCountsChunked(
         ],
       };
       const singleJson = await metafieldSetWithRetry(admin, singleMutation, singleVars, gql);
-      const data = (singleJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
-      return { userErrors: data?.userErrors ?? [] };
+      return stocktakeWriteResult(singleJson);
     }
   }
 
@@ -1012,8 +1023,8 @@ export async function writeInventoryCountsChunked(
     const batch = metafields.slice(i, i + METAFIELDS_SET_MAX);
     const chunkVars = { metafields: batch };
     const chunkJson = await metafieldSetWithRetry(admin, chunkMutation, chunkVars, gql);
-    const data = (chunkJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
-    if (data?.userErrors?.length) return { userErrors: data.userErrors };
+    const result = stocktakeWriteResult(chunkJson);
+    if (result.userErrors.length) return result;
   }
 
   const listItems = arr.map(toMinimalCountForList);
@@ -1053,8 +1064,8 @@ export async function writeInventoryCountsChunked(
     const batch = listMetafields.slice(i, i + METAFIELDS_SET_MAX);
     const listVars = { metafields: batch };
     const listJson = await metafieldSetWithRetry(admin, listChunkMutation, listVars, gql);
-    const data = (listJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
-    if (data?.userErrors?.length) return { userErrors: data.userErrors };
+    const result = stocktakeWriteResult(listJson);
+    if (result.userErrors.length) return result;
   }
   const nextNum = arr.reduce((max, c) => Math.max(max, parseCountNameNumber(c?.countName)), 0) + 1;
   const setNextMutation = `#graphql mutation SetNext($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
@@ -1064,11 +1075,8 @@ export async function writeInventoryCountsChunked(
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
     ],
   };
-  // setNext は棚卸ID連番カウンタとバージョン更新。失敗しても本体データは保存済みのため非クリティカル扱い
-  await metafieldSetWithRetry(admin, setNextMutation, setNextVars, gql).catch((e) => {
-    console.warn("[writeInventoryCountsChunked] setNext write failed (non-critical):", (e as Error)?.message ?? e);
-  });
-  return { userErrors: [] };
+  const nextJson = await metafieldSetWithRetry(admin, setNextMutation, setNextVars, gql);
+  return stocktakeWriteResult(nextJson);
 }
 
 export type LocationNode = { id: string; name: string };
