@@ -5,6 +5,7 @@
  */
 import type { Prisma } from "@prisma/client";
 import db from "../db.server";
+import { readMode, requireMode, withMaintenanceLock } from "./stocktake-storage-lock.server";
 import {
   readInventoryCountsChunked,
   writeInventoryCountsChunked,
@@ -20,7 +21,6 @@ import {
   nextCountName,
   normalizeStocktakeId,
   reconcileLegacyIntoDb,
-  resolveEffectiveMode,
   sortListNewestFirst,
   splitCount,
   toListEntry,
@@ -54,29 +54,29 @@ function errMsg(e: unknown): string {
 // モード
 // ---------------------------------------------------------------------------
 
-export async function getStorageState(shop: string) {
-  return db.stocktakeStorageState.findUnique({ where: { shop } });
+export async function getStorageState(shop: string, client: Tx = db) {
+  return client.stocktakeStorageState.findUnique({ where: { shop } });
+}
+
+async function recordDbWrite(shop: string, tx: Tx) {
+  await tx.stocktakeStorageState.update({
+    where: { shop }, data: { mirrorDirty: true, mirrorSeq: { increment: 1 } },
+  });
 }
 
 /** DB 未マイグレーション・接続失敗時は legacy（現行動作）に倒す */
 export async function getEffectiveStorageMode(shop: string): Promise<StocktakeStorageMode> {
-  const envMode = process.env.STOCKTAKE_STORAGE_MODE;
-  if (!shop) return resolveEffectiveMode({ envMode: "legacy", override: null, backfilled: false });
+  if (!shop) return "legacy";
   try {
-    const state = await getStorageState(shop);
-    return resolveEffectiveMode({
-      envMode,
-      override: state?.modeOverride ?? null,
-      backfilled: Boolean(state?.backfilledAt),
-    });
+    return await readMode(shop, db);
   } catch (e) {
     console.warn(LOG, "mode lookup failed, using legacy:", errMsg(e));
     return "legacy";
   }
 }
 
-async function upsertState(shop: string, data: Prisma.StocktakeStorageStateUpdateInput) {
-  return db.stocktakeStorageState.upsert({
+async function upsertState(shop: string, data: Prisma.StocktakeStorageStateUpdateInput, client: Tx = db) {
+  return client.stocktakeStorageState.upsert({
     where: { shop },
     create: { ...(data as Omit<Prisma.StocktakeStorageStateCreateInput, "shop">), shop },
     update: data,
@@ -315,6 +315,7 @@ export async function saveDbCounts(
   if (counts.length === 0) return { ok: true };
   try {
     await db.$transaction(async (tx) => {
+      await requireMode(shop, tx, "db");
       for (const c of counts) {
         const key = normalizeStocktakeId(c.id);
         const docId = await findDocId(shop, String(c.id ?? ""), tx);
@@ -326,6 +327,7 @@ export async function saveDbCounts(
           await writeCountTx(tx, shop, c, null);
         }
       }
+      await recordDbWrite(shop, tx);
     }, TX_OPTS);
     return { ok: true };
   } catch (e) {
@@ -345,6 +347,7 @@ export async function mirrorCountsToDbAfterLegacyWrite(shop: string, counts: Cou
   for (const c of counts) {
     try {
       await db.$transaction(async (tx) => {
+        await requireMode(shop, tx, "dual");
         const docId = await findDocId(shop, String(c.id ?? ""), tx);
         if (docId) {
           await lockDocument(tx, docId);
@@ -368,6 +371,7 @@ export async function createDbCount(
 ): Promise<{ ok: true; countName: string } | { ok: false; error: string }> {
   try {
     const countName = await db.$transaction(async (tx) => {
+      await requireMode(shop, tx, "db");
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${"stocktake:" + shop}))`;
       const names = await tx.inventoryCountDocument.findMany({ where: { shop }, select: { countName: true } });
       const name = nextCountName(
@@ -375,6 +379,7 @@ export async function createDbCount(
         legacyNext
       );
       await writeCountTx(tx, shop, { ...newCount, countName: name }, null);
+      await recordDbWrite(shop, tx);
       return name;
     }, TX_OPTS);
     return { ok: true, countName };
@@ -387,6 +392,7 @@ export async function createDbCount(
 /** POS の draft→in_progress（db）。既に in_progress 以上なら何もしない */
 export async function startDbCount(shop: string, countId: string): Promise<CountLike | null> {
   return db.$transaction(async (tx) => {
+    await requireMode(shop, tx, "db");
     const docId = await findDocId(shop, countId, tx);
     if (!docId) return null;
     await lockDocument(tx, docId);
@@ -395,6 +401,7 @@ export async function startDbCount(shop: string, countId: string): Promise<Count
     if (rec.count.status !== "draft") return rec.count;
     const next = { ...rec.count, status: "in_progress" };
     await writeCountTx(tx, shop, next, { documentId: rec.documentId, version: rec.version });
+    await recordDbWrite(shop, tx);
     return next;
   }, TX_OPTS);
 }
@@ -418,6 +425,7 @@ export async function applyCompleteInDb(
 > {
   try {
     return await db.$transaction(async (tx) => {
+      await requireMode(shop, tx, "db");
       const docId = await findDocId(shop, countId, tx);
       if (!docId) return { ok: false as const, notFound: true, error: "棚卸が見つかりません", countId };
       await lockDocument(tx, docId);
@@ -436,6 +444,7 @@ export async function applyCompleteInDb(
       );
       const saved = (prepared ?? merged.savedCount) as CountLike;
       await writeCountTx(tx, shop, saved, { documentId: rec.documentId, version: rec.version });
+      await recordDbWrite(shop, tx);
       const status = saved.status === "completed" ? "completed" : "in_progress";
       return {
         ok: true as const,
@@ -457,13 +466,16 @@ export async function applyCompleteInDb(
 
 export type PendingCompleteDbBackup = { countId: string; completedGroups: CompletedGroupInput[]; savedAt: string };
 
-export async function writePendingCompleteDb(shop: string, backup: PendingCompleteDbBackup): Promise<boolean> {
+export async function writePendingCompleteDb(shop: string, backup: PendingCompleteDbBackup, expectedMode: "dual" | "db" = "db"): Promise<boolean> {
   try {
-    await db.stocktakePendingComplete.upsert({
-      where: { shop_countId: { shop, countId: String(backup.countId) } },
-      create: { shop, countId: String(backup.countId), payloadJson: JSON.stringify(backup), savedAt: new Date() },
-      update: { payloadJson: JSON.stringify(backup), savedAt: new Date() },
-    });
+    await db.$transaction(async (tx) => {
+      await requireMode(shop, tx, expectedMode);
+      await tx.stocktakePendingComplete.upsert({
+        where: { shop_countId: { shop, countId: String(backup.countId) } },
+        create: { shop, countId: String(backup.countId), payloadJson: JSON.stringify(backup), savedAt: new Date() },
+        update: { payloadJson: JSON.stringify(backup), savedAt: new Date() },
+      });
+    }, TX_OPTS);
     return true;
   } catch (e) {
     console.warn(LOG, "pending backup write failed:", errMsg(e));
@@ -509,14 +521,15 @@ export async function clearPendingCompleteDb(shop: string, countId: string): Pro
 export async function ingestLegacyCounts(
   shop: string,
   legacyCounts: CountLike[],
-  policy: "overwrite" | "conservative"
+  policy: "overwrite" | "conservative",
+  existingTx?: Tx
 ): Promise<{ inserted: number; updated: number; unchanged: number; failed: string[] }> {
   const result = { inserted: 0, updated: 0, unchanged: 0, failed: [] as string[] };
   for (const lg of legacyCounts) {
     const id = String(lg?.id ?? "");
     if (!id) continue;
     try {
-      const outcome = await db.$transaction(async (tx) => {
+      const ingest = async (tx: Tx) => {
         const docId = await findDocId(shop, id, tx);
         if (!docId) {
           await writeCountTx(tx, shop, lg, null);
@@ -535,7 +548,8 @@ export async function ingestLegacyCounts(
         if (!changed && rec.format === "v2") return "unchanged" as const;
         await writeCountTx(tx, shop, next, { documentId: rec.documentId, version: rec.version });
         return "updated" as const;
-      }, TX_OPTS);
+      };
+      const outcome = existingTx ? await ingest(existingTx) : await db.$transaction(ingest, TX_OPTS);
       result[outcome] += 1;
     } catch (e) {
       console.warn(LOG, "ingest failed for", id, errMsg(e));
@@ -545,14 +559,19 @@ export async function ingestLegacyCounts(
   return result;
 }
 
-export async function backfillFromLegacy(
-  shop: string,
-  admin: AdminGraphql
-): Promise<{ ok: boolean; error?: string; total: number; inserted: number; updated: number; unchanged: number; failed: string[]; legacyVersion: number }> {
-  const mode = await getEffectiveStorageMode(shop);
+export function backfillFromLegacy(shop: string, admin: AdminGraphql) {
+  return withMaintenanceLock(shop, (tx) => backfillLocked(shop, admin, tx));
+}
+
+async function backfillLocked(shop: string, admin: AdminGraphql, tx: Tx) {
+  const mode = await readMode(shop, tx);
+  const state = await getStorageState(shop, tx);
+  if (mode !== "db" && state?.mirrorDirty) {
+    return { ok: false, error: "DB の未同期データがあります。照合が必要です。", total: 0, inserted: 0, updated: 0, unchanged: 0, failed: [], legacyVersion: 0 };
+  }
   const legacyVersion = await getInventoryCountsVersion(admin);
   const legacy = (await readInventoryCountsChunked(admin)) as unknown as CountLike[];
-  const r = await ingestLegacyCounts(shop, legacy, mode === "db" ? "conservative" : "overwrite");
+  const r = await ingestLegacyCounts(shop, legacy, mode === "db" ? "conservative" : "overwrite", tx);
   const ok = r.failed.length === 0;
   if (ok) {
     await upsertState(shop, {
@@ -560,32 +579,20 @@ export async function backfillFromLegacy(
       backfillLegacyVersion: legacyVersion,
       ...(mode === "db" ? {} : { mirroredLegacyVersion: legacyVersion }),
       lastError: null,
-    });
+    }, tx);
   }
   return { ok, error: ok ? undefined : `取り込みに失敗した棚卸があります: ${r.failed.join(", ")}`, total: legacy.length, ...r, legacyVersion };
 }
 
-export async function verifyAgainstLegacy(shop: string, admin: AdminGraphql) {
+export async function verifyAgainstLegacy(shop: string, admin: AdminGraphql, tx: Tx = db) {
   const legacy = (await readInventoryCountsChunked(admin)) as unknown as CountLike[];
-  const dbCounts = (await listDbCountsFull(shop)).map((r) => r.count);
+  const dbCounts = (await listDbCountsFull(shop, tx)).map((r) => r.count);
   return { ...compareCountSets(dbCounts, legacy), dbTotal: dbCounts.length, legacyTotal: legacy.length };
 }
 
 // ---------------------------------------------------------------------------
 // メタフィールドへの書き写し（db モード・旧 POS 互換）
 // ---------------------------------------------------------------------------
-
-export async function markMirrorDirty(shop: string): Promise<void> {
-  try {
-    await db.stocktakeStorageState.upsert({
-      where: { shop },
-      create: { shop, mirrorDirty: true, mirrorSeq: 1 },
-      update: { mirrorDirty: true, mirrorSeq: { increment: 1 } },
-    });
-  } catch (e) {
-    console.warn(LOG, "markMirrorDirty failed:", errMsg(e));
-  }
-}
 
 async function writeLegacyNextNumber(admin: AdminGraphql, ownerId: string, next: number) {
   const mutation = `#graphql mutation SetNext($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
@@ -614,31 +621,35 @@ export async function readLegacyNextNumber(admin: AdminGraphql): Promise<number 
 /**
  * 1 回分の書き写し。旧 POS の書き込み（版番号の変化）を保守的に取り込んでから、DB の全件をそのまま書く。
  */
-export async function runMirrorSync(
-  shop: string,
-  admin: AdminGraphql,
-  ownerId: string
-): Promise<{ ok: boolean; error?: string; ingested?: number; written?: number }> {
-  const state = await getStorageState(shop);
+export function runMirrorSync(shop: string, admin: AdminGraphql, ownerId: string) {
+  return withMaintenanceLock(shop, (tx) => mirrorLocked(shop, admin, ownerId, tx));
+}
+
+async function mirrorLocked(shop: string, admin: AdminGraphql, ownerId: string, tx: Tx):
+  Promise<{ ok: boolean; error?: string; ingested?: number; written?: number }> {
+  if (await readMode(shop, tx) !== "db") {
+    return { ok: false, error: "現在の保存先では DB からの書き写しは実行できません。" };
+  }
+  const state = await getStorageState(shop, tx);
   const seqAtStart = state?.mirrorSeq ?? 0;
   let lastError = "";
   for (let attempt = 1; attempt <= MIRROR_CAS_MAX_ATTEMPTS; attempt++) {
     try {
-      const current = await getStorageState(shop);
+      const current = await getStorageState(shop, tx);
       const v0 = await getInventoryCountsVersion(admin);
       let ingested = 0;
       if (current?.mirroredLegacyVersion == null || current.mirroredLegacyVersion !== v0) {
         const legacy = (await readInventoryCountsChunked(admin, { allowMissingChunksForRepair: true })) as unknown as CountLike[];
-        const r = await ingestLegacyCounts(shop, legacy, "conservative");
+        const r = await ingestLegacyCounts(shop, legacy, "conservative", tx);
         if (r.failed.length > 0) {
           lastError = `旧データの取り込みに失敗: ${r.failed.join(", ")}`;
           break;
         }
         ingested = r.inserted + r.updated;
         if (ingested > 0) console.warn(LOG, `ingested legacy writes shop=${shop} count=${ingested} legacyVersion=${v0}`);
-        await upsertState(shop, { lastLegacyIngestAt: new Date() });
+        await upsertState(shop, { lastLegacyIngestAt: new Date() }, tx);
       }
-      const dbCounts = (await listDbCountsFull(shop)).map((r) => r.count) as unknown as InventoryCount[];
+      const dbCounts = (await listDbCountsFull(shop, tx)).map((r) => r.count) as unknown as InventoryCount[];
       const { userErrors } = await writeInventoryCountsChunked(admin, dbCounts, ownerId, v0, { existingCounts: dbCounts });
       if (userErrors.length > 0) {
         lastError = userErrors.map((e) => e?.message ?? "").join(" / ");
@@ -653,11 +664,11 @@ export async function runMirrorSync(
         lastError = "書き写しの直後に版番号が一致しなかったため、同期を確定できませんでした。";
         continue;
       }
-      await db.stocktakeStorageState.update({
+      await tx.stocktakeStorageState.update({
         where: { shop },
         data: { mirroredLegacyVersion: writtenVersion, mirroredAt: new Date(), lastError: null },
       });
-      await db.stocktakeStorageState.updateMany({ where: { shop, mirrorSeq: seqAtStart }, data: { mirrorDirty: false } });
+      await tx.stocktakeStorageState.updateMany({ where: { shop, mirrorSeq: seqAtStart }, data: { mirrorDirty: false } });
       return { ok: true, ingested, written: dbCounts.length };
     } catch (e) {
       lastError = errMsg(e);
@@ -666,7 +677,7 @@ export async function runMirrorSync(
   }
   console.error(LOG, `mirror sync failed shop=${shop}:`, lastError);
   try {
-    await upsertState(shop, { lastError: `mirror: ${lastError}`.slice(0, 1000) });
+    await upsertState(shop, { lastError: `mirror: ${lastError}`.slice(0, 1000) }, tx);
   } catch {
     // 状態の記録失敗は無視（印は残っているので次回再実行される）
   }
@@ -735,25 +746,34 @@ export async function switchMode(
   target: StocktakeStorageMode,
   opts: { force?: boolean } = {}
 ): Promise<{ ok: boolean; error?: string; detail?: unknown }> {
-  const current = await getEffectiveStorageMode(shop);
-  if (target === "db") {
-    const bf = await backfillFromLegacy(shop, admin);
-    if (!bf.ok) return { ok: false, error: bf.error, detail: bf };
-    const v = await verifyAgainstLegacy(shop, admin);
-    if ((v.onlyInLegacy.length > 0 || v.different.length > 0) && !opts.force) {
-      return { ok: false, error: "照合で差分があります。内容を確認してください。", detail: v };
+  return withMaintenanceLock(shop, async (tx) => {
+    const current = await readMode(shop, tx);
+    if (current === target && target === "db") return { ok: true };
+    if (current !== target && await tx.stocktakePendingComplete.count({ where: { shop } }) > 0) {
+      return { ok: false, error: "再試行待ちの確定結果があります。結果を照合してから保存先を変更してください。" };
     }
-    await upsertState(shop, { modeOverride: "db", mirroredLegacyVersion: bf.legacyVersion, mirrorDirty: false });
-    return { ok: true, detail: { backfill: bf, verify: v } };
-  }
-  if (current === "db") {
-    const r = await runMirrorSync(shop, admin, ownerId);
-    if (!r.ok) {
-      return { ok: false, error: `メタフィールドへの書き写しに失敗したため切り替えません: ${r.error}` };
+    if (target === "db") {
+      const bf = await backfillLocked(shop, admin, tx);
+      if (!bf.ok) return { ok: false, error: bf.error, detail: bf };
+      const v = await verifyAgainstLegacy(shop, admin, tx);
+      if (v.onlyInDb.length > 0) {
+        return { ok: false, error: "DB だけに存在する棚卸があります。切替前に照合してください。", detail: v };
+      }
+      if ((v.onlyInLegacy.length > 0 || v.different.length > 0) && !opts.force) {
+        return { ok: false, error: "照合で差分があります。内容を確認してください。", detail: v };
+      }
+      await upsertState(shop, { modeOverride: "db", mirroredLegacyVersion: bf.legacyVersion, mirrorDirty: false }, tx);
+      return { ok: true, detail: { backfill: bf, verify: v } };
     }
-  }
-  await upsertState(shop, { modeOverride: target });
-  return { ok: true };
+    if (current === "db") {
+      const r = await mirrorLocked(shop, admin, ownerId, tx);
+      if (!r.ok) {
+        return { ok: false, error: `メタフィールドへの書き写しに失敗したため切り替えません: ${r.error}` };
+      }
+    }
+    await upsertState(shop, { modeOverride: target }, tx);
+    return { ok: true };
+  });
 }
 
 export async function getStorageStatus(shop: string) {

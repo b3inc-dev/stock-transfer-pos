@@ -5,6 +5,7 @@
  * Admin「在庫変動履歴」は InventoryChangeLog のまま（本モジュール対象外）。
  */
 import db from "../db.server";
+import { requireMode } from "./stocktake-storage-lock.server";
 
 const PAYLOAD_INLINE_MAX_CHARS = 100_000;
 
@@ -41,46 +42,49 @@ export async function upsertInventoryCountDocument(
     const useInline = payloadStr != null && payloadStr.length <= PAYLOAD_INLINE_MAX_CHARS;
     const completedAt = toDate(input.completedAt ?? null);
 
-    const doc = await db.inventoryCountDocument.upsert({
-      where: { shop_countId: { shop: input.shop, countId: String(input.countId) } },
-      create: {
-        shop: input.shop,
-        countId: String(input.countId),
-        countName: input.countName ?? null,
-        status: input.status,
-        locationId: input.locationId ?? null,
-        locationName: input.locationName ?? null,
-        payloadJson: useInline ? payloadStr : null,
-        version: 1,
-        source: "db",
-        completedAt,
-      },
-      update: {
-        countName: input.countName ?? null,
-        status: input.status,
-        locationId: input.locationId ?? null,
-        locationName: input.locationName ?? null,
-        payloadJson: useInline ? payloadStr : null,
-        version: { increment: 1 },
-        source: "db",
-        completedAt,
-      },
-    });
+    return await db.$transaction(async (tx) => {
+      await requireMode(input.shop, tx, "legacy");
+      const doc = await tx.inventoryCountDocument.upsert({
+        where: { shop_countId: { shop: input.shop, countId: String(input.countId) } },
+        create: {
+          shop: input.shop,
+          countId: String(input.countId),
+          countName: input.countName ?? null,
+          status: input.status,
+          locationId: input.locationId ?? null,
+          locationName: input.locationName ?? null,
+          payloadJson: useInline ? payloadStr : null,
+          version: 1,
+          source: "db",
+          completedAt,
+        },
+        update: {
+          countName: input.countName ?? null,
+          status: input.status,
+          locationId: input.locationId ?? null,
+          locationName: input.locationName ?? null,
+          payloadJson: useInline ? payloadStr : null,
+          version: { increment: 1 },
+          source: "db",
+          completedAt,
+        },
+      });
 
-    if (payloadStr && !useInline) {
-      await db.inventoryCountDocumentChunk.deleteMany({ where: { documentId: doc.id } });
-      const chunkSize = PAYLOAD_INLINE_MAX_CHARS;
-      let idx = 0;
-      for (let offset = 0; offset < payloadStr.length; offset += chunkSize) {
-        const slice = payloadStr.slice(offset, offset + chunkSize);
-        await db.inventoryCountDocumentChunk.create({
-          data: { documentId: doc.id, chunkIndex: idx, payload: slice },
-        });
-        idx += 1;
+      if (payloadStr && !useInline) {
+        await tx.inventoryCountDocumentChunk.deleteMany({ where: { documentId: doc.id } });
+        const chunkSize = PAYLOAD_INLINE_MAX_CHARS;
+        let idx = 0;
+        for (let offset = 0; offset < payloadStr.length; offset += chunkSize) {
+          const slice = payloadStr.slice(offset, offset + chunkSize);
+          await tx.inventoryCountDocumentChunk.create({
+            data: { documentId: doc.id, chunkIndex: idx, payload: slice },
+          });
+          idx += 1;
+        }
       }
-    }
 
-    return { ok: true, id: doc.id };
+      return { ok: true, id: doc.id };
+    });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     console.warn("[inventory-count-document] upsert failed (metafield remains SoT):", msg);

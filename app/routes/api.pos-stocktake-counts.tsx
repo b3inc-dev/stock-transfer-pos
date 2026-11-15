@@ -12,7 +12,6 @@ import {
   listDbCountsMinimal,
   getDbCount,
   startDbCount,
-  markMirrorDirty,
   scheduleMirrorSync,
   ensureMirrorFresh,
 } from "../utils/stocktake-count-store.server";
@@ -149,7 +148,6 @@ export async function action({ request }: ActionFunctionArgs) {
       const before = await getDbCount(shop, countId);
       const count = await startDbCount(shop, countId);
       if (before?.count?.status === "draft" && count?.status === "in_progress") {
-        await markMirrorDirty(shop);
         const admin = await adminForShop(shop);
         const ownerId = admin ? await ownerIdFor(admin) : "";
         if (admin && ownerId) scheduleMirrorSync(shop, admin, ownerId, "pos-start");

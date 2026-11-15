@@ -2824,7 +2824,6 @@ export async function action({ request }: ActionFunctionArgs) {
   const store = await import("../utils/stocktake-count-store.server");
   const storageMode = await store.getEffectiveStorageMode(storeShop);
   const scheduleMirror = async (reason: string) => {
-    await store.markMirrorDirty(storeShop);
     store.scheduleMirrorSync(storeShop, admin, ownerId, reason);
   };
 

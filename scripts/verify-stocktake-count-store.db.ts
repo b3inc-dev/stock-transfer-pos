@@ -232,6 +232,8 @@ async function main() {
     await clearPendingCompleteDb(SHOP, "ic-2");
     assert.equal(await readPendingCompleteDb(SHOP, "ic-2"), null);
     assert.equal((await readPendingCompleteDb(SHOP))?.countId, "ic-4");
+    assert.equal((await switchMode(SHOP, a, OWNER, "legacy", { force: true })).ok, false);
+    await clearPendingCompleteDb(SHOP, "ic-4");
   });
 
   await step("rollback to legacy writes DB content back first", async () => {
@@ -275,6 +277,31 @@ async function main() {
       assert.ok(await getDbCount(SHOP, `old-pos-${i}`));
       assert.ok(legacy.some((c) => c.id === `old-pos-${i}`));
     }
+  });
+
+  await step("after rollback a delayed DB completion and mirror cannot overwrite legacy", async () => {
+    const before = await getDbCount(SHOP, "ic-3");
+    const stale = await applyCompleteInDb(SHOP, "ic-3", [{ groupId: "g1", items: group("7", 99) }]);
+    assert.equal(stale.ok, false);
+    assert.equal((await getDbCount(SHOP, "ic-3"))?.version, before?.version);
+    assert.equal(await writePendingCompleteDb(SHOP, { countId: "ic-3", completedGroups: [], savedAt: new Date().toISOString() }), false);
+    const kept = (await readInventoryCountsChunked(a)).filter((c) => c.id !== "ic-2");
+    await legacyWrite(admin, kept);
+    const version = await getInventoryCountsVersion(a);
+    assert.equal((await runMirrorSync(SHOP, a, OWNER)).ok, false);
+    assert.equal(await getInventoryCountsVersion(a), version);
+    assert.ok(!(await readInventoryCountsChunked(a)).some((c) => c.id === "ic-2"));
+    assert.equal((await switchMode(SHOP, a, OWNER, "db", { force: true })).ok, false);
+    assert.equal(await getEffectiveStorageMode(SHOP), "legacy");
+  });
+
+  await step("legacy mode with a pre-existing unsynced DB result refuses backfill and forced re-entry", async () => {
+    await db.stocktakeStorageState.update({ where: { shop: SHOP }, data: { mirrorDirty: true } });
+    const before = await listDbCountsFull(SHOP);
+    assert.equal((await backfillFromLegacy(SHOP, a)).ok, false);
+    assert.equal((await switchMode(SHOP, a, OWNER, "db", { force: true })).ok, false);
+    assert.equal(await getEffectiveStorageMode(SHOP), "legacy");
+    assert.deepEqual(await listDbCountsFull(SHOP), before);
   });
 
   await reset();

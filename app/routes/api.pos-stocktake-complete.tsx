@@ -19,7 +19,6 @@ import {
   clearPendingCompleteDb,
   applyCompleteInDb,
   mirrorCountsToDbAfterLegacyWrite,
-  markMirrorDirty,
   scheduleMirrorSync,
 } from "../utils/stocktake-count-store.server";
 import {
@@ -271,7 +270,7 @@ export async function action({ request }: ActionFunctionArgs) {
   // バックアップ失敗でも POS はフルペイロード再送できるためメタ更新は続行する。
   // 失敗時は応答に backupPersisted:false を付け、Admin retryOnly の 404 リスクを明示する。
   const backupWrite = await writePendingCompleteBackup(admin, ownerId, backupPayload);
-  const dbBackupOk = storageMode === "dual" ? await writePendingCompleteDb(shop, backupPayload) : false;
+  const dbBackupOk = storageMode === "dual" ? await writePendingCompleteDb(shop, backupPayload, "dual") : false;
   const backupPersisted = backupWrite.ok || dbBackupOk;
   if (!backupWrite.ok) {
     console.warn(
@@ -419,7 +418,6 @@ async function completeInDb(
     const result = await applyCompleteInDb(shop, countId, backupPayload.completedGroups);
     if (result.ok) {
       await clearPendingCompleteDb(shop, result.countId);
-      await markMirrorDirty(shop);
       scheduleMirrorSync(shop, admin, ownerId, "pos-complete");
       console.warn(
         "STOCKTAKE_API_ORIGIN [server] response 200 ok:true (success, db) attempt=" + attempt + " status=" + result.status
