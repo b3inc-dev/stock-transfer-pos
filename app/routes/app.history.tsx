@@ -1,11 +1,26 @@
 // app/routes/app.history.tsx
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useFetcher, useSearchParams, data } from "react-router";
-import { useState, useMemo, useEffect } from "react";
+import { useLoaderData, useFetcher, useNavigation, useLocation, useSearchParams, data } from "react-router";
+import { useState, useEffect } from "react";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone } from "../utils/timezone";
 import type { LocationNode, TransferLineItem, GroupedLineItemsEntry, TransferHistory } from "../types";
+import { buildTransferSearch, changeHistoryCriteria, resetHistoryPage, TRANSFER_STATUSES, type HistoryFilter } from "../utils/transfer-history-filters";
+
+type TransferEndpoint = { name?: string; location?: LocationNode | null };
+type HistoryTransferNode = {
+  id: string;
+  name: string;
+  status: string;
+  note?: string;
+  dateCreated?: string;
+  totalQuantity: number;
+  receivedQuantity: number;
+  origin?: TransferEndpoint | null;
+  destination?: TransferEndpoint | null;
+  shipments: { nodes: Array<{ id: string; totalRejectedQuantity: number }> };
+};
 
 // 入出庫履歴CSV列（設定画面の「入出庫履歴CSV出力項目設定」と一致）
 const HISTORY_CSV_COLUMN_IDS = [
@@ -137,40 +152,47 @@ export async function loader({ request }: LoaderFunctionArgs) {
     admin = withGraphQLRetry(admin);
     const url = new URL(request.url);
     const cursor = url.searchParams.get("cursor") || null;
-    const direction = url.searchParams.get("direction") || "next"; // "next" or "prev"
+    const direction = url.searchParams.get("direction") === "prev" ? "prev" : "next";
+    const query = buildTransferSearch(url.searchParams);
+    const newestFirst = url.searchParams.get("sort") !== "asc";
 
-    // ロケーション一覧を取得
-    const locationsResp = await admin.graphql(
-      `#graphql
-        query Locations($first: Int!) {
-          locations(first: $first) {
-            nodes {
-              id
-              name
+    // 全ロケーションを選択できるように、候補一覧もページングする。
+    const locations: LocationNode[] = [];
+    let afterLocation: string | null = null;
+    do {
+      const response: Response = await admin.graphql(
+        `#graphql
+          query HistoryLocations($after: String) {
+            locations(first: 250, after: $after) {
+              nodes { id name }
+              pageInfo { hasNextPage endCursor }
             }
           }
-        }
-      `,
-      { variables: { first: 250 } }
-    );
+        `,
+        { variables: { after: afterLocation } },
+      );
+      const locationResult = await response.json();
+      const connection = locationResult.data?.locations;
+      if (!connection) throw new Error("ロケーション一覧を取得できませんでした");
+      if (connection.pageInfo.hasNextPage && (!connection.pageInfo.endCursor || connection.pageInfo.endCursor === afterLocation)) {
+        throw new Error("ロケーション一覧の続きを取得できませんでした");
+      }
+      locations.push(...connection.nodes);
+      afterLocation = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : null;
+    } while (afterLocation);
 
-    const locationsData = await locationsResp.json();
-    const locations: LocationNode[] = locationsData?.data?.locations?.nodes ?? [];
-
-    // 全履歴を1つのクエリで取得（出庫・入庫をまとめて取得）
-    // ページネーション対応
-    // 注意: beforeを使う場合はlast、afterを使う場合はfirstが必要
     const pageSize = 100;
     const transfersResp = await admin.graphql(
       `#graphql
-        query AllTransfers($first: Int, $last: Int, $after: String, $before: String) {
+        query AllTransfers($first: Int, $last: Int, $after: String, $before: String, $query: String, $reverse: Boolean!) {
           inventoryTransfers(
             first: $first
             last: $last
             after: $after
             before: $before
             sortKey: CREATED_AT
-            reverse: true
+            query: $query
+            reverse: $reverse
           ) {
             nodes {
               id
@@ -213,6 +235,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       `,
       {
         variables: {
+          query,
+          reverse: newestFirst,
           ...(cursor && direction === "next"
             ? { first: pageSize, after: cursor }
             : cursor && direction === "prev"
@@ -223,13 +247,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     );
 
     const transfersData = await transfersResp.json();
-    const allNodes = transfersData?.data?.inventoryTransfers?.nodes ?? [];
-    const pageInfo = transfersData?.data?.inventoryTransfers?.pageInfo ?? {
-      hasNextPage: false,
-      hasPreviousPage: false,
-      startCursor: null,
-      endCursor: null,
-    };
+    const connection = transfersData?.data?.inventoryTransfers;
+    if (!connection) throw new Error("入出庫履歴を取得できませんでした");
+    const allNodes: HistoryTransferNode[] = connection.nodes;
+    const pageInfo = connection.pageInfo;
 
     // inbound_audit_v1（予定外入庫監査ログ）を取得。
     // note 追記が失敗しても、監査ログから予定外入庫件数/数量を補完して表示漏れを防ぐ。
@@ -250,12 +271,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
       inboundAuditEntries = [];
     }
 
-    // 全履歴を整形（出庫・入庫を分類）
+    // Shopifyで絞り込み・並べ替え済みの移管を、1移管につき1行に整形する。
     const allHistories: TransferHistory[] = allNodes
-      .map((t: { id?: string; name?: string; status?: string; [key: string]: unknown }) => {
+      .map((t): TransferHistory | null => {
         const originId = t?.origin?.location?.id;
         const destinationId = t?.destination?.location?.id;
-        const shipmentNodes = Array.isArray(t?.shipments?.nodes) ? t.shipments.nodes : [];
+        if (!originId && !destinationId) return null;
+        const shipmentNodes = t.shipments?.nodes ?? [];
         const shipmentIds = shipmentNodes.map((s: { id?: string }) => String(s?.id || "").trim()).filter(Boolean);
         const auditExtrasIndex = buildInboundAuditExtrasIndex(inboundAuditEntries, String(destinationId || "").trim());
         const auditAgg = shipmentIds.reduce(
@@ -283,68 +305,35 @@ export async function loader({ request }: LoaderFunctionArgs) {
         const receivedQuantityDisplay =
           Number(t.receivedQuantity ?? 0) - Number(rejectedQuantity) + Number(extrasQuantity);
 
-        // 出庫履歴（originLocationIdがある場合）
-        if (originId) {
-          return {
-            id: t.id,
-            name: t.name || "",
-            status: t.status || "",
-            note: t.note || "",
-            extrasCount,
-            dateCreated: t.dateCreated || "",
-            totalQuantity: t.totalQuantity ?? 0,
-            receivedQuantity: receivedQuantityDisplay,
-            originLocationId: originId,
-            originLocationName: t.origin?.location?.name || t.origin?.name || "",
-            destinationLocationId: destinationId || "",
-            destinationLocationName: t?.destination?.location?.name || t?.destination?.name || "",
-            shipmentCount: shipmentNodes.length,
-            lineItems,
-            type: "outbound" as const,
-          };
-        }
-
-        // 入庫履歴（destinationLocationIdがある場合）
-        if (destinationId) {
-          return {
-            id: t.id,
-            name: t.name || "",
-            status: t.status || "",
-            note: t.note || "",
-            extrasCount,
-            dateCreated: t.dateCreated || "",
-            totalQuantity: t.totalQuantity ?? 0,
-            receivedQuantity: receivedQuantityDisplay,
-            originLocationId: originId || "",
-            originLocationName: t?.origin?.location?.name || t?.origin?.name || "",
-            destinationLocationId: destinationId,
-            destinationLocationName: t?.destination?.location?.name || t?.destination?.name || "",
-            shipmentCount: shipmentNodes.length,
-            lineItems,
-            type: "inbound" as const,
-          };
-        }
-
-        return null;
+        return {
+          id: t.id,
+          name: t.name || "",
+          status: t.status || "",
+          note: t.note || "",
+          extrasCount,
+          dateCreated: t.dateCreated || "",
+          totalQuantity: t.totalQuantity ?? 0,
+          receivedQuantity: receivedQuantityDisplay,
+          originLocationId: originId || "",
+          originLocationName: t.origin?.location?.name || t.origin?.name || "",
+          destinationLocationId: destinationId || "",
+          destinationLocationName: t.destination?.location?.name || t.destination?.name || "",
+          shipmentCount: shipmentNodes.length,
+          lineItems,
+          type: originId ? "outbound" : "inbound",
+        };
       })
-      .filter((h: TransferHistory | null): h is TransferHistory => h !== null)
-      .sort((a, b) => {
-        const dateA = new Date(a.dateCreated).getTime();
-        const dateB = new Date(b.dateCreated).getTime();
-        return dateB - dateA; // 新しい順
-      });
+      .filter((h): h is TransferHistory => h !== null);
 
-    // 総数・表示範囲の計算
-    const isPage2OrLater = Boolean(cursor && direction === "next");
-    const totalFromApi =
-      !pageInfo.hasNextPage && isPage2OrLater
-        ? pageSize + allHistories.length
-        : !pageInfo.hasNextPage && !cursor
-          ? allHistories.length
-          : null;
-    const totalFromUrl = url.searchParams.get("total");
-    const total = totalFromApi ?? (totalFromUrl ? parseInt(totalFromUrl, 10) : null);
-    const startIndex = isPage2OrLater ? pageSize + 1 : 1;
+    // 旧URLにはページ位置がないので、そこから通算件数を推測しない。
+    const boundaryParam = url.searchParams.get("boundary");
+    const boundary = boundaryParam === null ? null : Number(boundaryParam);
+    const hasBoundary = boundary !== null && Number.isSafeInteger(boundary) && boundary >= 0;
+    const startOffset = !cursor ? 0 : hasBoundary
+      ? Math.max(0, direction === "next" ? boundary : boundary - allHistories.length)
+      : null;
+    const requestedPage = Number(url.searchParams.get("page"));
+    const page = !cursor ? 1 : Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : null;
 
     // ショップのタイムゾーンを取得
     const shopTimezoneResp = await admin.graphql(
@@ -395,20 +384,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
         todayInShopTimezone, // サーバー側で計算した「今日の日付」をクライアントに渡す
         historyCsvExportColumns,
         pageInfo: {
-          hasNextPage: pageInfo.hasNextPage || false,
-          hasPreviousPage: pageInfo.hasPreviousPage || false,
+          hasNextPage: Boolean(pageInfo.hasNextPage || (cursor && direction === "prev")),
+          hasPreviousPage: Boolean(pageInfo.hasPreviousPage || (cursor && direction === "next")),
           startCursor: pageInfo.startCursor || null,
           endCursor: pageInfo.endCursor || null,
         },
-        pagination: {
-          total: Number.isFinite(total) ? total : null,
-          startIndex,
-          pageSize,
-        },
+        pagination: { startOffset, page },
       },
       { headers: { "Cache-Control": "private, no-store" } }
     );
   } catch (error) {
+    if (error instanceof Response) throw error;
     const msg = error instanceof Error ? error.message : String(error);
     console.error("History loader error:", error);
     throw new Response(JSON.stringify({ error: msg }), {
@@ -787,56 +773,58 @@ export default function HistoryPage() {
     todayInShopTimezone: getDateInShopTimezone(new Date(), "UTC"),
     historyCsvExportColumns: DEFAULT_HISTORY_CSV_COLUMNS,
     pageInfo: { hasNextPage: false, hasPreviousPage: false, startCursor: null, endCursor: null },
-    pagination: { total: null, startIndex: 1, pageSize: 100 },
+    pagination: { startOffset: 0, page: 1 },
   };
   const csvColumns = historyCsvExportColumns ?? DEFAULT_HISTORY_CSV_COLUMNS;
   const fetcher = useFetcher<typeof action>();
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // 総数をURLに永続化（2ページ目で判明した総数を1ページ目に戻ったときも表示するため）
-  const totalFromLoader = pagination?.total ?? null;
-  const totalFromUrl = searchParams.get("total");
-  const total = totalFromLoader ?? (totalFromUrl ? parseInt(totalFromUrl, 10) : null);
-  const startIndex = pagination?.startIndex ?? 1;
-  const pageSize = pagination?.pageSize ?? 100;
+  const navigation = useNavigation();
+  const location = useLocation();
+  const updating = navigation.state === "loading" && navigation.location?.pathname === location.pathname;
+  const criteria = updating ? new URLSearchParams(navigation.location.search) : searchParams;
+  const outboundLocationFilters = new Set(criteria.getAll("origin"));
+  const inboundLocationFilters = new Set(criteria.getAll("destination"));
+  const statusFilters = new Set(criteria.getAll("status"));
+  const dateSortOrder = criteria.get("sort") === "asc" ? "asc" : "desc";
 
-  const isPage2OrLater = Boolean(searchParams.get("cursor") && searchParams.get("direction") === "next");
-  const currentPage = isPage2OrLater ? 2 : 1; // 2ページ構成を前提。3ページ以上は将来対応
-  const totalPages = total && Number.isFinite(total) ? Math.ceil(total / pageSize) : null;
+  function toggleFilter(key: HistoryFilter, value?: string) {
+    const selected = new Set(criteria.getAll(key));
+    if (!value) selected.clear();
+    else if (selected.has(value)) selected.delete(value);
+    else selected.add(value);
+    setSearchParams(changeHistoryCriteria(criteria, key, selected), { preventScrollReset: true, flushSync: true });
+  }
 
-  const hasPagination = pageInfo.hasPreviousPage || pageInfo.hasNextPage;
+  function setDateSortOrder(order: "asc" | "desc") {
+    setSearchParams(changeHistoryCriteria(criteria, "sort", [order]), { preventScrollReset: true, flushSync: true });
+  }
 
-  useEffect(() => {
-    if (totalFromLoader != null && !searchParams.get("total")) {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.set("total", String(totalFromLoader));
-          return next;
-        },
-        { replace: true }
-      );
+  const { startOffset, page } = pagination;
+  const endOffset = startOffset === null ? null : startOffset + histories.length;
+  const rangeDisplay = histories.length === 0 || startOffset === null
+    ? `このページの該当件数: ${histories.length}件`
+    : `表示: ${startOffset + 1}–${endOffset}件`;
+  const totalDisplay = endOffset === null || (histories.length === 0 && pageInfo.hasPreviousPage)
+    ? "" : ` / ${endOffset}件${pageInfo.hasNextPage ? "以上" : ""}`;
+
+  function goToPage(direction: "prev" | "next") {
+    const forward = direction === "next";
+    const cursor = forward ? pageInfo.endCursor : pageInfo.startCursor;
+    if (updating) return;
+    if (!cursor) {
+      setSearchParams(resetHistoryPage(searchParams), { preventScrollReset: true });
+      return;
     }
-  }, [totalFromLoader, searchParams.get("total"), setSearchParams]);
-
-  // 表示範囲・総数・ページ表示の文字列
-  const endIndex = startIndex + histories.length - 1;
-  const rangeDisplay =
-    histories.length > 0
-      ? startIndex === endIndex
-        ? `表示: ${startIndex}件`
-        : `表示: ${startIndex}-${endIndex}件`
-      : "表示: 0件";
-  const totalDisplay = total != null ? `${total}件` : `${histories.length}件以上`;
-  const pageDisplay = hasPagination
-    ? totalPages != null
-      ? `${currentPage}/${totalPages}`
-      : pageInfo.hasPreviousPage && !pageInfo.hasNextPage
-        ? "最終ページ"
-        : !pageInfo.hasPreviousPage && pageInfo.hasNextPage
-          ? "1/2+"
-          : "2/3+"
-    : "";
+    const next = new URLSearchParams(searchParams);
+    next.delete("total");
+    next.set("cursor", cursor);
+    next.set("direction", direction);
+    const boundary = forward ? endOffset : startOffset;
+    if (boundary !== null) next.set("boundary", String(boundary));
+    if (page !== null) next.set("page", String(Math.max(1, page + (forward ? 1 : -1))));
+    setSearchParams(next, { preventScrollReset: true });
+  }
 
   // ステータスの日本語表記
   const STATUS_LABEL: Record<string, string> = {
@@ -847,6 +835,7 @@ export default function HistoryPage() {
     RECEIVED: "受領",
     TRANSFERRED: "入庫済み",
     CANCELED: "キャンセル",
+    OTHER: "その他",
   };
 
   // ステータスバッジ用スタイル（アプリと同様のバッチ表示）
@@ -858,11 +847,6 @@ export default function HistoryPage() {
     return { ...base, backgroundColor: "#cce5ff", color: "#004085" }; // READY_TO_SHIP, IN_PROGRESS, IN_TRANSIT 等
   };
 
-  // フィルター状態（複数選択対応）
-  const [outboundLocationFilters, setOutboundLocationFilters] = useState<Set<string>>(new Set());
-  const [inboundLocationFilters, setInboundLocationFilters] = useState<Set<string>>(new Set());
-  const [statusFilters, setStatusFilters] = useState<Set<string>>(new Set());
-  const [dateSortOrder, setDateSortOrder] = useState<"asc" | "desc">("desc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // 商品リストモーダル状態（lineItems は CSV 用、grouped は UI 表示用）
@@ -875,51 +859,6 @@ export default function HistoryPage() {
   const [csvExporting, setCsvExporting] = useState(false);
   const [csvExportProgress, setCsvExportProgress] = useState({ current: 0, total: 0 });
 
-  // フィルター適用後の履歴
-  const filteredHistories = useMemo(() => {
-    let filtered = histories;
-
-    // 出庫ロケーションフィルター（複数選択対応）
-    if (outboundLocationFilters.size > 0) {
-      filtered = filtered.filter((h) => {
-        if (h.type === "outbound") {
-          return outboundLocationFilters.has(h.originLocationId);
-        }
-        return true; // 入庫履歴は出庫ロケーションフィルターの影響を受けない
-      });
-    }
-
-    // 入庫ロケーションフィルター（複数選択対応）
-    if (inboundLocationFilters.size > 0) {
-      filtered = filtered.filter((h) => {
-        if (h.type === "inbound") {
-          return inboundLocationFilters.has(h.destinationLocationId);
-        }
-        return true; // 出庫履歴は入庫ロケーションフィルターの影響を受けない
-      });
-    }
-
-    // ステータスフィルター（複数選択対応）
-    if (statusFilters.size > 0) {
-      filtered = filtered.filter((h) => statusFilters.has(h.status));
-    }
-
-    return filtered.sort((a, b) => {
-      const t1 = new Date(a.dateCreated || 0).getTime();
-      const t2 = new Date(b.dateCreated || 0).getTime();
-      return dateSortOrder === "desc" ? t2 - t1 : t1 - t2;
-    });
-  }, [histories, outboundLocationFilters, inboundLocationFilters, statusFilters, dateSortOrder]);
-
-  // ステータスの一覧を取得（日本語表記）
-  const statuses = useMemo(() => {
-    const statusSet = new Set<string>();
-    histories.forEach((h) => {
-      if (h.status) statusSet.add(h.status);
-    });
-    return Array.from(statusSet).sort();
-  }, [histories]);
-
   // CSV出力（商品明細まで含める）
   const exportCSV = async () => {
     if (selectedIds.size === 0) {
@@ -927,7 +866,7 @@ export default function HistoryPage() {
       return;
     }
 
-    const selectedHistories = filteredHistories.filter((h) => selectedIds.has(h.id));
+    const selectedHistories = histories.filter((h) => selectedIds.has(h.id));
 
     // 商品リスト数の制限チェック
     // 理論上の最大: 50シップメント × 250商品 = 12,500商品/履歴
@@ -956,8 +895,6 @@ export default function HistoryPage() {
       for (let i = 0; i < selectedHistories.length; i++) {
         const h = selectedHistories[i];
         setCsvExportProgress({ current: i + 1, total: selectedHistories.length });
-      const locationName =
-        h.type === "outbound" ? h.originLocationName : h.destinationLocationName;
       const date = h.dateCreated ? new Date(h.dateCreated).toISOString().split("T")[0] : "";
       const statusLabel = STATUS_LABEL[h.status] || h.status;
 
@@ -1115,11 +1052,11 @@ export default function HistoryPage() {
 
   // 全選択/全解除（現在のページのみ）
   const toggleSelectAll = () => {
-    if (selectedIds.size === filteredHistories.length) {
+    if (selectedIds.size === histories.length) {
       setSelectedIds(new Set());
     } else {
       // 現在のページの全件を選択（ページネーションを超えることはない）
-      setSelectedIds(new Set(filteredHistories.map((h) => h.id)));
+      setSelectedIds(new Set(histories.map((h) => h.id)));
     }
   };
 
@@ -1312,21 +1249,17 @@ export default function HistoryPage() {
                         <s-divider />
                         <s-text type="strong">出庫ロケーション</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                          <div onClick={() => setOutboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: outboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: outboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
+                          <div onClick={() => toggleFilter("origin")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: outboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: outboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
                             <input type="checkbox" checked={outboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                             <span style={{ fontWeight: outboundLocationFilters.size === 0 ? 600 : 500 }}>全て</span>
                           </div>
                           {locations.map((loc) => {
-                            const isSelected = outboundLocationFilters.has(loc.id);
+                            const locationId = loc.id.split("/").pop()!;
+                            const isSelected = outboundLocationFilters.has(locationId);
                             return (
                               <div
                                 key={loc.id}
-                                onClick={() => {
-                                  const newFilters = new Set(outboundLocationFilters);
-                                  if (isSelected) newFilters.delete(loc.id);
-                                  else newFilters.add(loc.id);
-                                  setOutboundLocationFilters(newFilters);
-                                }}
+                                onClick={() => toggleFilter("origin", locationId)}
                                 style={{
                                   padding: "10px 12px",
                                   borderRadius: "6px",
@@ -1360,14 +1293,15 @@ export default function HistoryPage() {
                         </div>
                         <s-text type="strong">入庫ロケーション</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                          <div onClick={() => setInboundLocationFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: inboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: inboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
+                          <div onClick={() => toggleFilter("destination")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: inboundLocationFilters.size === 0 ? "#eff6ff" : "transparent", border: inboundLocationFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
                             <input type="checkbox" checked={inboundLocationFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                             <span style={{ fontWeight: inboundLocationFilters.size === 0 ? 600 : 500 }}>全て</span>
                           </div>
                           {locations.map((loc) => {
-                            const isSelected = inboundLocationFilters.has(loc.id);
+                            const locationId = loc.id.split("/").pop()!;
+                            const isSelected = inboundLocationFilters.has(locationId);
                             return (
-                              <div key={loc.id} onClick={() => { const newFilters = new Set(inboundLocationFilters); if (isSelected) newFilters.delete(loc.id); else newFilters.add(loc.id); setInboundLocationFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#eff6ff" : "transparent", border: isSelected ? "1px solid #2563eb" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
+                              <div key={loc.id} onClick={() => toggleFilter("destination", locationId)} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#eff6ff" : "transparent", border: isSelected ? "1px solid #2563eb" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
                                 <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                                 <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis" }}>{loc.name}</span>
                               </div>
@@ -1376,15 +1310,15 @@ export default function HistoryPage() {
                         </div>
                         <s-text type="strong">ステータス</s-text>
                         <div style={{ maxHeight: "160px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "6px" }}>
-                          <div onClick={() => setStatusFilters(new Set())} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: statusFilters.size === 0 ? "#eff6ff" : "transparent", border: statusFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
+                          <div onClick={() => toggleFilter("status")} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: statusFilters.size === 0 ? "#eff6ff" : "transparent", border: statusFilters.size === 0 ? "1px solid #2563eb" : "1px solid transparent", display: "flex", alignItems: "center", gap: "8px" }}>
                             <input type="checkbox" checked={statusFilters.size === 0} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                             <span style={{ fontWeight: statusFilters.size === 0 ? 600 : 500 }}>全て</span>
                           </div>
-                          {statuses.map((status) => {
+                          {TRANSFER_STATUSES.map((status) => {
                             const statusLabel = STATUS_LABEL[status] || status;
                             const isSelected = statusFilters.has(status);
                             return (
-                              <div key={status} onClick={() => { const newFilters = new Set(statusFilters); if (isSelected) newFilters.delete(status); else newFilters.add(status); setStatusFilters(newFilters); }} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#eff6ff" : "transparent", border: isSelected ? "1px solid #2563eb" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
+                              <div key={status} onClick={() => toggleFilter("status", status)} style={{ padding: "10px 12px", borderRadius: "6px", cursor: "pointer", backgroundColor: isSelected ? "#eff6ff" : "transparent", border: isSelected ? "1px solid #2563eb" : "1px solid transparent", marginTop: "4px", display: "flex", alignItems: "center", gap: "8px" }}>
                                 <input type="checkbox" checked={isSelected} readOnly style={{ width: "16px", height: "16px", flexShrink: 0 }} />
                                 <span style={{ fontWeight: isSelected ? 600 : 500 }}>{statusLabel}</span>
                               </div>
@@ -1427,77 +1361,41 @@ export default function HistoryPage() {
                     <s-stack gap="base">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
                       <s-text color="subdued">
-                        {rangeDisplay} / {totalDisplay}
+                        {updating ? "履歴を読み込み中…" : rangeDisplay + totalDisplay}
                       </s-text>
                       {(pageInfo.hasPreviousPage || pageInfo.hasNextPage) && (
                         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                           <s-button
-                            onClick={() => {
-                              if (pageInfo.hasPreviousPage && pageInfo.startCursor) {
-                                setSearchParams(
-                                  (prev) => {
-                                    const next = new URLSearchParams(prev);
-                                    next.set("cursor", pageInfo.startCursor!);
-                                    next.set("direction", "prev");
-                                    if (total != null) next.set("total", String(total));
-                                    return next;
-                                  },
-                                  { replace: true }
-                                );
-                              }
-                            }}
-                            disabled={!pageInfo.hasPreviousPage}
+                            onClick={() => goToPage("prev")}
+                            disabled={updating || !pageInfo.hasPreviousPage}
                           >
                             前へ
                           </s-button>
                           <span style={{ fontSize: "14px", color: "#666", lineHeight: "1.5", display: "inline-block" }}>
-                            {pageDisplay}
+                            {page !== null ? `ページ ${page}` : ""}
                           </span>
                           <s-button
-                            onClick={() => {
-                              if (pageInfo.hasNextPage && pageInfo.endCursor) {
-                                setSearchParams(
-                                  (prev) => {
-                                    const next = new URLSearchParams(prev);
-                                    next.set("cursor", pageInfo.endCursor!);
-                                    next.set("direction", "next");
-                                    if (total != null) next.set("total", String(total));
-                                    return next;
-                                  },
-                                  { replace: true }
-                                );
-                              }
-                            }}
-                            disabled={!pageInfo.hasNextPage}
+                            onClick={() => goToPage("next")}
+                            disabled={updating || !pageInfo.hasNextPage}
                           >
                             次へ
                           </s-button>
                         </div>
                       )}
                     </div>
-                    {filteredHistories.length === 0 ? (
+                    {updating ? null : histories.length === 0 ? (
             <s-box padding="base">
               <s-text color="subdued">履歴がありません</s-text>
             </s-box>
           ) : (
             <s-stack gap="none">
-              {filteredHistories.map((history) => {
+              {histories.map((history) => {
                 const isSelected = selectedIds.has(history.id);
-                const locationName =
-                  history.type === "outbound"
-                    ? history.originLocationName
-                    : history.destinationLocationName;
                 const date = history.dateCreated
                   ? new Date(history.dateCreated).toISOString().split("T")[0]
                   : "";
-                const originName =
-                  history.type === "outbound"
-                    ? history.originLocationName
-                    : history.destinationLocationName;
-                const destName =
-                  history.type === "outbound"
-                    ? history.destinationLocationName
-                    : history.originLocationName;
+                const originName = history.originLocationName || "-";
+                const destName = history.destinationLocationName || "-";
 
                 return (
                   <div key={history.id}>
