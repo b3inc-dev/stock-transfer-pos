@@ -5,6 +5,7 @@ import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
+import { matchPendingSale } from "../utils/match-pending-sale";
 import { getDateInShopTimezone } from "../utils/timezone";
 import type { AdminGraphQLRequestClient } from "../types";
 
@@ -675,20 +676,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
         orderBy: { orderCreatedAt: "desc" },
       });
-      const prevForMatch = prevAvailable ?? null;
-      const matched =
-        prevForMatch != null
-          ? allPendings.find((p: { quantity: number }) => {
-              const qty = Math.max(1, Number(p.quantity) || 1);
-              return available + qty === prevForMatch;
-            })
-          : allPendings[0] ?? null;
-      const pending = matched ?? allPendings[0] ?? null;
+      const pending = matchPendingSale(allPendings, delta);
       if (pending) {
         const qty = Math.max(1, Number(pending.quantity) || 1);
         pendingOrder = { orderId: pending.orderId, quantity: qty, locationId: pending.locationId ?? "" };
         console.log(
-          `[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, quantity=${qty}, locationId=${pending.locationId ?? ""}, prevAvailable=${prevForMatch ?? "n/a"}, will save as order_sales`
+          `[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, quantity=${qty}, locationId=${pending.locationId ?? ""}, prevAvailable=${prevAvailable ?? "n/a"}, will save as order_sales`
         );
       }
     }
@@ -740,12 +733,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsAgain }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
         orderBy: { orderCreatedAt: "desc" },
       });
-      const prevForAgain = prevAvailable ?? null;
-      const matchedAgain =
-        prevForAgain != null
-          ? allAgain.find((p: { quantity: number }) => available + Math.max(1, Number(p.quantity) || 1) === prevForAgain)
-          : allAgain[0] ?? null;
-      const pendingAgain = matchedAgain ?? allAgain[0] ?? null;
+      const pendingAgain = matchPendingSale(allAgain, delta);
       if (pendingAgain) {
         const qty = Math.max(1, Number(pendingAgain.quantity) || 1);
         pendingOrder = { orderId: pendingAgain.orderId, quantity: qty, locationId: pendingAgain.locationId ?? "" };
@@ -837,12 +825,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsRetry }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
             orderBy: { orderCreatedAt: "desc" },
           });
-          const prevForRetry = prevAvailable ?? null;
-          const matchedRetry =
-            prevForRetry != null
-              ? allRetry.find((p: { quantity: number }) => available + Math.max(1, Number(p.quantity) || 1) === prevForRetry)
-              : allRetry[0] ?? null;
-          const pendingRetry = matchedRetry ?? allRetry[0] ?? null;
+          const pendingRetry = matchPendingSale(allRetry, delta);
           if (pendingRetry) {
             const qty = Math.max(1, Number(pendingRetry.quantity) || 1);
             pendingOrder = { orderId: pendingRetry.orderId, quantity: qty, locationId: pendingRetry.locationId ?? "" };
