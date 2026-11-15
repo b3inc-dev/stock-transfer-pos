@@ -413,6 +413,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                       inventoryItemId: { in: itemIdCandidates },
                       locationId: { in: locationIdCandidates },
                       activity: "admin_webhook",
+                      delta: -g.quantity,
                       timestamp: { gte: searchFrom, lte: searchTo },
                     },
                     orderBy: { timestamp: "asc" },
@@ -550,11 +551,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         // OrderPendingLocation を登録（inventory_levels/update が先に届いた場合でもマッチしやすくする）。同一注文で2ロケーション出荷に対応するため locationId を含める。
         if (db && typeof db.orderPendingLocation !== "undefined") {
+          const orderedQuantities = new Map<number, number>();
           for (const lineItem of order.line_items) {
-            const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
-            if (!lineItem.variant_id || lineItemQty <= 0) continue;
+            const quantity = lineItem.quantity ?? lineItem.current_quantity ?? 1;
+            if (lineItem.variant_id && quantity > 0) {
+              orderedQuantities.set(lineItem.variant_id, (orderedQuantities.get(lineItem.variant_id) ?? 0) + quantity);
+            }
+          }
+          for (const [variant, lineItemQty] of orderedQuantities) {
             try {
-              const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
+              const variantId = `gid://shopify/ProductVariant/${variant}`;
               const variantResp = await admin.request({
                 data: `
                   #graphql
@@ -572,6 +578,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
               if (!inventoryItemId) continue;
               const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+              if (!orderLocationId) {
+                // A repeated order notification can arrive after the matching stock movement was recorded.
+                const confirmed = await db.inventoryChangeLog.findMany({
+                  where: {
+                    shop, sourceId: `order_${order.id}`, activity: "order_sales",
+                    inventoryItemId: { in: [rawItemId, inventoryItemId] },
+                    delta: { lt: 0 },
+                  },
+                  select: { delta: true },
+                });
+                const sold = confirmed.reduce((sum, row) => sum - (row.delta ?? 0), 0);
+                if (sold === lineItemQty) {
+                  await db.orderPendingLocation.deleteMany({
+                    where: { shop, orderId: String(order.id), inventoryItemId: rawItemId, locationId: "", quantity: lineItemQty },
+                  });
+                  continue;
+                }
+              }
               await db.orderPendingLocation.upsert({
                 where: {
                   shop_orderId_inventoryItemId_locationId: { shop, orderId: String(order.id), inventoryItemId: rawItemId, locationId: rawOrderLocId },
@@ -587,7 +611,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 update: { orderCreatedAt: orderCreatedAt, quantity: lineItemQty },
               });
             } catch (e) {
-              console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${lineItem.id}:`, e);
+              console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${variant}:`, e);
             }
           }
         }
@@ -653,6 +677,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                         inventoryItemId: { in: inventoryItemIdCandidates },
                         locationId: { in: locationIdCandidates },
                         activity: "admin_webhook",
+                        delta: -lineItemQty,
                         timestamp: { gte: searchFrom, lte: searchTo },
                       },
                       orderBy: { timestamp: "desc" },
