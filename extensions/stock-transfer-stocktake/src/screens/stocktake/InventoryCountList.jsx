@@ -2367,7 +2367,7 @@ export function InventoryCountList({
     });
 
     setHeader?.(
-      <s-box padding="small">
+      <s-box padding="small" paddingInline="base">
         <s-stack gap="tight">
           <s-stack direction="inline" justifyContent="space-between" alignItems="flex-start" gap="small" style={{ width: "100%", flexWrap: "nowrap" }}>
             <s-stack gap="none" style={{ minWidth: 0, flex: "1 1 auto" }}>
@@ -3075,7 +3075,7 @@ export function InventoryCountList({
             // ✅ 一度も商品グループごとに表示で開いていなくても、グループリストと各グループの「読込」ボタンは表示する（lines=0 のときは早期 return しない）
             if (normalLines.length === 0 && lines.length === 0 && targetProductGroupIds.length === 0 && loadCompletedRef.current) {
               return (
-                <s-box key="inventory_count_list" padding="small">
+                <s-box key="inventory_count_list" padding="small" paddingInline="base">
                   <s-stack gap="small">
                     <s-text emphasis="bold">棚卸リスト</s-text>
                     <s-text tone="subdued">商品がありません</s-text>
@@ -3103,7 +3103,7 @@ export function InventoryCountList({
             }
             
             return (
-              <s-box key="inventory_count_list" padding="small">
+              <s-box key="inventory_count_list" padding="small" paddingInline="base">
                 <s-stack gap="base">
                   <s-text emphasis="bold">棚卸リスト（全グループ）</s-text>
                   {Array.from(linesByGroup.entries()).map(([groupId, groupLines]) => {
@@ -3263,7 +3263,7 @@ export function InventoryCountList({
               const normalLines = lines.filter((l) => !l.isExtra);
               if (normalLines.length === 0 && lines.length === 0 && loadCompletedRef.current) {
                 return (
-                  <s-box key="inventory_count_list" padding="small">
+                  <s-box key="inventory_count_list" padding="small" paddingInline="base">
                     <s-stack gap="small">
                       <s-text emphasis="bold">棚卸リスト</s-text>
                       <s-text tone="subdued">商品がありません</s-text>
@@ -3281,7 +3281,7 @@ export function InventoryCountList({
               const rangeStart = startIdx + 1;
               const rangeEnd = Math.min(startIdx + LIST_ITEMS_PER_PAGE, totalNormal);
               return (
-                <s-box key="inventory_count_list" padding="small">
+                <s-box key="inventory_count_list" padding="small" paddingInline="base">
                   <s-stack gap="small">
                     <s-text emphasis="bold">棚卸リスト</s-text>
                     {showPagination && (
@@ -3353,7 +3353,7 @@ export function InventoryCountList({
             const extraRangeStart = extraStartIdx + 1;
             const extraRangeEnd = Math.min(extraStartIdx + LIST_ITEMS_PER_PAGE, totalExtra);
             return (
-              <s-box key="inventory_count_extra_list" padding="small">
+              <s-box key="inventory_count_extra_list" padding="small" paddingInline="base">
                 <s-stack gap="small">
                   {/* ✅ 入庫リストと同じタイトルスタイル */}
                   <s-text emphasis="bold">予定外リスト（リストにない商品）</s-text>

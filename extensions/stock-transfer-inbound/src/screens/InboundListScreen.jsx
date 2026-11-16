@@ -2107,7 +2107,7 @@ export function InboundListScreen({
     const q = String(addQuery || "");
     const showResults = q.trim().length >= 1;
     return (
-      <s-box padding="small">
+      <s-box padding="small" paddingInline="base">
         <s-stack gap="tight">
           <s-stack
             direction="inline"
@@ -2428,15 +2428,15 @@ export function InboundListScreen({
 
       {/* 2. 入庫リスト（shipment がある場合のみ・REFERENCE と同じ） */}
       {shipment ? (
-        <s-box key="shipment_list" padding="small">
+        <s-box key="shipment_list" padding="small" paddingInline="base">
           <s-stack gap="small">
             <s-text emphasis="bold">入庫リスト</s-text>
             {!linesComplete ? (
-              <s-box padding="base">
+              <s-box padding="base" paddingInline="none">
                 <s-text tone="subdued">明細読込中…（完了後にスキャンを反映します）</s-text>
               </s-box>
             ) : lineItemsPageInfo?.hasNextPage ? (
-              <s-box padding="base">
+              <s-box padding="base" paddingInline="none">
                 <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                   <s-text>未読み込み商品リストがあります。（要読込）</s-text>
                   <s-button kind="secondary" onClick={loadMoreLineItems_} disabled={loadingMore}>
@@ -2551,7 +2551,7 @@ export function InboundListScreen({
 
       {/* 4. 予定外入荷エリア（shipment がある場合のみ・REFERENCE と同じ） */}
       {shipment ? (
-        <s-box key="extras_area" padding="small">
+        <s-box key="extras_area" padding="small" paddingInline="base">
           <s-stack gap="small">
             <s-text emphasis="bold">予定外入荷（リストにない商品）</s-text>
             {renderExtras_({ extras, extrasHistory, showImages, dialog, setExtraQty: (key, value) => setExtraQty_(readOnlyRef, toastReadOnlyOnceRef, toast, extrasRef, setExtras, key, value) })}

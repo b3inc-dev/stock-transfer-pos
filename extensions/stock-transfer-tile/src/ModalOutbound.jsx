@@ -5192,7 +5192,7 @@ function OutboundHistoryDetail({
   }
 
   return (
-    <s-box padding="tight">
+    <s-box padding="tight" paddingInline="base">
       <s-stack gap="tight">
         {detailError ? <s-text tone="critical">{detailError}</s-text> : null}
 
@@ -5203,7 +5203,7 @@ function OutboundHistoryDetail({
           <s-stack gap="none">
             {/* ✅ 未読み込み商品リストがある場合は最上部に表示 */}
             {lineItemsPageInfo?.hasNextPage ? (
-              <s-box padding="base">
+              <s-box padding="base" paddingInline="none">
                 <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                   <s-text tone="subdued" size="small">
                     未読み込み商品リストがあります。（要読込）
@@ -5243,7 +5243,7 @@ function OutboundHistoryDetail({
 
               return (
                 <s-box key={it.key} padding="none">
-                  <s-box padding="base">
+                  <s-box padding="base" paddingInline="none">
                     <s-stack gap="extra-tight">
                       <ItemLeftInline
                         showImages={!!showImages && !liteMode}
