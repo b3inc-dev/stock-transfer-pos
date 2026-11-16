@@ -1,23 +1,12 @@
 // app/export-change-history-csv.server.ts
 // 在庫変動履歴CSVエクスポート（リソースルート用）。Remix が同一ページ POST で HTML を返す問題を避けるため専用ルートから呼ぶ。
+import { HISTORY_PRODUCTS_QUERY, historyProductKey, historyProductKeys, indexHistoryProducts, recoveredHistorySku, type HistoryProduct } from "./utils/change-history-product";
 import { authenticate } from "./shopify.server";
 import { withGraphQLRetry } from "./utils/graphql-with-retry";
 import { formatDateTimeInShopTimezone } from "./utils/timezone";
 import db from "./db.server";
 
-const VARIANTS_FOR_CHANGE_HISTORY_QUERY = `#graphql
-  query VariantsForChangeHistory($ids: [ID!]!) {
-    nodes(ids: $ids) {
-      ... on ProductVariant {
-        id
-        displayName
-        barcode
-        selectedOptions { name value }
-        product { title }
-      }
-    }
-  }
-`;
+
 
 const LOCATIONS_QUERY = `#graphql
   query LocationsForCsv($first: Int!) {
@@ -133,7 +122,7 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
       where: whereClause,
       orderBy: { timestamp: sortOrder },
       take: MAX_EXPORT,
-    }) as Array<{ variantId?: string; sku?: string; timestamp?: string; locationId?: string; locationName?: string; activity?: string; delta?: number | null; quantityAfter?: number | null; sourceId?: string; note?: string }>;
+    }) as Array<{ variantId?: string; inventoryItemId?: string; sku?: string; timestamp?: string; locationId?: string; locationName?: string; activity?: string; delta?: number | null; quantityAfter?: number | null; sourceId?: string; note?: string }>;
 
     const locationNameByLocationId = new Map<string, string>();
     try {
@@ -160,38 +149,23 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
       return locName;
     };
 
-    const variantIds = [...new Set(allLogs.map((l) => l.variantId).filter(Boolean))] as string[];
+    const variantIds = historyProductKeys(allLogs);
     const MAX_VARIANTS_FOR_EXPORT = 5000;
     const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS_FOR_EXPORT);
-    const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
+    const variantInfoMap = new Map<string, HistoryProduct>();
 
     if (limitedVariantIds.length > 0) {
       const CHUNK = 250;
       for (let i = 0; i < limitedVariantIds.length; i += CHUNK) {
         const chunk = limitedVariantIds.slice(i, i + CHUNK);
         try {
-          const resp = await admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
+          const resp = await admin.graphql(HISTORY_PRODUCTS_QUERY, { variables: { ids: chunk } });
           if (!resp || typeof (resp as { json?: () => Promise<unknown> }).json !== "function") continue;
-          const data = (await (resp as { json: () => Promise<{
-            data?: { nodes?: Array<{ id?: string; product?: { title?: string }; displayName?: string; barcode?: string; selectedOptions?: Array<{ name?: string; value?: string }> }> };
-            errors?: unknown[];
-          }> }).json()) as { data?: { nodes?: Array<{ id?: string; product?: { title?: string }; displayName?: string; barcode?: string; selectedOptions?: Array<{ name?: string; value?: string }> }> }; errors?: unknown[] };
+          const data = await resp.json();
           if (data?.errors?.length) {
-            console.warn("[export-change-history-csv] variant batch GraphQL errors (skipping chunk):", data.errors.length);
-            continue;
+            console.warn("[export-change-history-csv] variant batch GraphQL errors:", data.errors.length);
           }
-          const nodes = (data?.data?.nodes ?? []).filter(Boolean);
-          for (const node of nodes) {
-            if (!node?.id) continue;
-            const opts = (node.selectedOptions as Array<{ name?: string; value?: string }>) ?? [];
-            variantInfoMap.set(node.id, {
-              productTitle: (node.product?.title ?? node.displayName ?? "") as string,
-              barcode: (node.barcode as string) ?? "",
-              option1: opts[0]?.value ?? "",
-              option2: opts[1]?.value ?? "",
-              option3: opts[2]?.value ?? "",
-            });
-          }
+          indexHistoryProducts(variantInfoMap, data?.data?.nodes ?? []);
         } catch (e) {
           console.warn("[export-change-history-csv] variant batch failed (skipping chunk):", e instanceof Error ? e.message : String(e));
         }
@@ -226,7 +200,8 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
       "備考",
     ];
     const rows = allLogs.map((log) => {
-      const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
+      const info = variantInfoMap.get(historyProductKey(log));
+      const recoveredSku = recoveredHistorySku(log, info);
       let dateTimeStr = "";
       try {
         dateTimeStr = log.timestamp ? formatDateTimeInShopTimezone(log.timestamp, shopTimezone) : "";
@@ -236,7 +211,7 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
       return [
         dateTimeStr,
         info?.productTitle ?? log.sku ?? "",
-        log.sku || "",
+        log.sku || recoveredSku,
         info?.barcode ?? "",
         info?.option1 ?? "",
         info?.option2 ?? "",
@@ -246,7 +221,7 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
         log.delta !== null ? String(log.delta) : "",
         log.quantityAfter !== null ? String(log.quantityAfter) : "",
         log.sourceId || "",
-        log.note || "",
+        [log.note, recoveredSku ? "SKUは出力時点の商品情報" : ""].filter(Boolean).join(" / "),
       ];
     });
     const csvContent = [headers, ...rows]
