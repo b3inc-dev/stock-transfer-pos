@@ -1,6 +1,6 @@
 // app/routes/app.inventory-info.tsx
 // 在庫情報画面（在庫高表示・変動履歴）
-import { HISTORY_PRODUCTS_QUERY, historyProductKey, historyProductKeys, indexHistoryProducts, recoveredHistorySku, type HistoryProduct } from "../utils/change-history-product";
+import { historyInventoryFilterIds, historyProductBatches, historyProductKey, indexHistoryProducts, recoveredHistorySku, type HistoryProduct } from "../utils/change-history-product";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams, useFetcher, useLocation, data } from "react-router";
 import React, { useState, useEffect, useRef, useMemo } from "react";
@@ -334,7 +334,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
 
         if (inventoryItemIds.length > 0) {
-          whereClause.inventoryItemId = { in: inventoryItemIds };
+          whereClause.inventoryItemId = { in: historyInventoryFilterIds(inventoryItemIds) };
         }
 
         if (activityTypes.length > 0) {
@@ -379,25 +379,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
         };
 
         // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
-        const variantIds = historyProductKeys(changeHistoryLogs);
-        const MAX_VARIANTS = 1500; // 商品名表示用：最大1500バリアントまで取得（制限撤廃に合わせて緩和）
-        const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS);
-        
-        if (limitedVariantIds.length < variantIds.length) {
-          console.warn(`[inventory-info] Variant IDs limited to ${MAX_VARIANTS} out of ${variantIds.length} total variants`);
-        }
-        
+        const batches = historyProductBatches(changeHistoryLogs, 6);
         const variantInfoMap = new Map<string, HistoryProduct>();
-        if (limitedVariantIds.length > 0 && session) {
-          const CHUNK = 250;
-          const MAX_CHUNKS = 6; // 最大6チャンク（1500件）まで処理（件数制限撤廃に合わせて緩和）
-          const chunksToProcess = Math.min(Math.ceil(limitedVariantIds.length / CHUNK), MAX_CHUNKS);
-          
-          for (let i = 0; i < chunksToProcess * CHUNK && i < limitedVariantIds.length; i += CHUNK) {
-            const chunk = limitedVariantIds.slice(i, i + CHUNK);
+        if (batches.length > 0) {
+          for (const { ids, query } of batches) {
             try {
               // タイムアウト対策：各クエリに20秒のタイムアウトを設定（30秒→20秒に短縮）
-              const queryPromise = admin.graphql(HISTORY_PRODUCTS_QUERY, { variables: { ids: chunk } });
+              const queryPromise = admin.graphql(query, { variables: { ids } });
               const timeoutPromise = new Promise((_, reject) => 
                 setTimeout(() => reject(new Error("GraphQL query timeout (20s)")), 20000)
               );
@@ -417,7 +405,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
               
               indexHistoryProducts(variantInfoMap, data?.data?.nodes ?? []);
             } catch (e) {
-              console.error(`[inventory-info] Variant batch ${i / CHUNK + 1} failed:`, e);
+              console.error("[inventory-info] Product lookup batch failed:", e);
               // エラーが発生しても処理を続行（商品名なしで表示）
               // タイムアウトやエラーが発生した場合は、残りのチャンクもスキップして続行
               if (e instanceof Error && (e.message.includes("timeout") || e.message.includes("Timeout"))) {

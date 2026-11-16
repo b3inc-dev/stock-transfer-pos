@@ -8,6 +8,21 @@ export function historyProductKey(row: HistoryRow): string {
   return /^\d+$/.test(id) ? "gid://shopify/InventoryItem/" + id : "";
 }
 
+export function historyInventoryFilterIds(ids: string[]): string[] {
+  const values = new Set<string>();
+  for (const value of ids) {
+    const id = value.trim();
+    const gid = historyProductKey({ inventoryItemId: id });
+    if (gid) {
+      values.add(gid);
+      values.add(gid.slice("gid://shopify/InventoryItem/".length));
+    } else if (id) {
+      values.add(id); // Preserve exact-match semantics for legacy values.
+    }
+  }
+  return [...values];
+}
+
 // Keep previously resolvable variants within the existing query cap before adding fallback lookups.
 export function historyProductKeys(rows: HistoryRow[]): string[] {
   const variants = new Set<string>();
@@ -20,23 +35,41 @@ export function historyProductKeys(rows: HistoryRow[]): string[] {
   return [...variants, ...items];
 }
 
-export const HISTORY_PRODUCTS_QUERY = `#graphql
+const VARIANT_FIELDS = `fragment HistoryVariant on ProductVariant {
+  id displayName barcode sku selectedOptions { name value } product { title }
+}`;
+
+const VARIANTS_QUERY = `#graphql
   query VariantsForChangeHistory($ids: [ID!]!) {
+    nodes(ids: $ids) { ...HistoryVariant }
+  }
+  ${VARIANT_FIELDS}
+`;
+
+const ITEMS_QUERY = `#graphql
+  query ItemsForChangeHistory($ids: [ID!]!) {
     nodes(ids: $ids) {
-      id
-      ... on ProductVariant { ...HistoryVariant }
-      ... on InventoryItem { variant { ...HistoryVariant } }
+      ... on InventoryItem {
+        id
+        variants(first: 2) { nodes { ...HistoryVariant } pageInfo { hasNextPage } }
+      }
     }
   }
-  fragment HistoryVariant on ProductVariant {
-    id
-    displayName
-    barcode
-    sku
-    selectedOptions { name value }
-    product { title }
-  }
+  ${VARIANT_FIELDS}
 `;
+
+export function historyProductBatches(rows: HistoryRow[], maxBatches: number) {
+  const keys = historyProductKeys(rows);
+  const items = keys.filter(key => key.startsWith("gid://shopify/InventoryItem/"));
+  const variants = keys.filter(key => !key.startsWith("gid://shopify/InventoryItem/"));
+  const batches = [];
+  for (const [ids, size, query] of [[variants, 250, VARIANTS_QUERY], [items, 25, ITEMS_QUERY]] as const) {
+    for (let i = 0; i < ids.length && batches.length < maxBatches; i += size) {
+      batches.push({ ids: ids.slice(i, i + size), query });
+    }
+  }
+  return batches;
+}
 
 type Variant = {
   id: string;
@@ -46,7 +79,7 @@ type Variant = {
   selectedOptions?: Array<{ value?: string }> | null;
   product?: { title?: string } | null;
 };
-type HistoryNode = Variant & { variant?: Variant | null };
+type HistoryNode = Variant & { variants?: { nodes: Variant[]; pageInfo: { hasNextPage: boolean } } | null };
 export type HistoryProduct = ReturnType<typeof productFields>;
 
 function productFields(variant: Variant) {
@@ -64,7 +97,12 @@ function productFields(variant: Variant) {
 export function indexHistoryProducts(target: Map<string, HistoryProduct>, nodes: Array<HistoryNode | null>) {
   for (const node of nodes) {
     if (!node?.id) continue;
-    const variant = node.id.startsWith("gid://shopify/InventoryItem/") ? node.variant : node;
+    let variant = node;
+    if (node.id.startsWith("gid://shopify/InventoryItem/")) {
+      const connection = node.variants;
+      if (connection?.nodes?.length !== 1 || connection.pageInfo?.hasNextPage !== false) continue;
+      variant = connection.nodes[0];
+    }
     if (variant?.id.startsWith("gid://shopify/ProductVariant/")) {
       target.set(node.id, productFields(variant));
     }

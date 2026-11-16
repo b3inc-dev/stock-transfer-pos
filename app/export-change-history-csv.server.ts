@@ -1,6 +1,6 @@
 // app/export-change-history-csv.server.ts
 // 在庫変動履歴CSVエクスポート（リソースルート用）。Remix が同一ページ POST で HTML を返す問題を避けるため専用ルートから呼ぶ。
-import { HISTORY_PRODUCTS_QUERY, historyProductKey, historyProductKeys, indexHistoryProducts, recoveredHistorySku, type HistoryProduct } from "./utils/change-history-product";
+import { historyInventoryFilterIds, historyProductBatches, historyProductKey, indexHistoryProducts, recoveredHistorySku, type HistoryProduct } from "./utils/change-history-product";
 import { authenticate } from "./shopify.server";
 import { withGraphQLRetry } from "./utils/graphql-with-retry";
 import { formatDateTimeInShopTimezone } from "./utils/timezone";
@@ -93,7 +93,7 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
     whereClause.locationId = { in: normalizeLocationIdsForQuery(changeHistoryLocationIds) };
   }
   if (inventoryItemIds.length > 0) {
-    whereClause.inventoryItemId = { in: inventoryItemIds };
+    whereClause.inventoryItemId = { in: historyInventoryFilterIds(inventoryItemIds) };
   }
   if (activityTypes.length > 0) {
     whereClause.activity = { in: activityTypes };
@@ -149,17 +149,13 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
       return locName;
     };
 
-    const variantIds = historyProductKeys(allLogs);
-    const MAX_VARIANTS_FOR_EXPORT = 5000;
-    const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS_FOR_EXPORT);
+    const batches = historyProductBatches(allLogs, 20);
     const variantInfoMap = new Map<string, HistoryProduct>();
 
-    if (limitedVariantIds.length > 0) {
-      const CHUNK = 250;
-      for (let i = 0; i < limitedVariantIds.length; i += CHUNK) {
-        const chunk = limitedVariantIds.slice(i, i + CHUNK);
+    if (batches.length > 0) {
+      for (const { ids, query } of batches) {
         try {
-          const resp = await admin.graphql(HISTORY_PRODUCTS_QUERY, { variables: { ids: chunk } });
+          const resp = await admin.graphql(query, { variables: { ids } });
           if (!resp || typeof (resp as { json?: () => Promise<unknown> }).json !== "function") continue;
           const data = await resp.json();
           if (data?.errors?.length) {
