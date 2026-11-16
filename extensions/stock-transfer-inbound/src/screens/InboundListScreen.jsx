@@ -2403,14 +2403,14 @@ export function InboundListScreen({
                   />
                 ))}
                 {addCandidates.length > addCandidatesDisplayLimit ? (
-                  <s-box padding="small">
+                  <s-box padding="small" paddingInline="none">
                     <s-button kind="secondary" onClick={() => handleShowMoreAddCandidates_(setAddCandidatesDisplayLimit)} onPress={() => handleShowMoreAddCandidates_(setAddCandidatesDisplayLimit)}>
                       さらに表示（残り {addCandidates.length - addCandidatesDisplayLimit}件）
                     </s-button>
                   </s-box>
                 ) : null}
                 {addSearchPageInfo?.hasNextPage ? (
-                  <s-box padding="small">
+                  <s-box padding="small" paddingInline="none">
                     <s-button kind="secondary" disabled={loadingMoreAddSearch} onClick={handleLoadMoreAddSearch} onPress={handleLoadMoreAddSearch}>
                       {loadingMoreAddSearch ? "読込中..." : "さらに読み込む"}
                     </s-button>

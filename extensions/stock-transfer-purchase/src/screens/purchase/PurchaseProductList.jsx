@@ -1521,14 +1521,14 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
             })}
             
             {hasMoreCandidates ? (
-              <s-box padding="small">
+              <s-box padding="small" paddingInline="none">
                 <s-button kind="secondary" onClick={handleShowMoreCandidates} onPress={handleShowMoreCandidates}>
                   さらに表示（残り {candidates.length - candidatesDisplayLimit}件）
                 </s-button>
               </s-box>
             ) : null}
             {searchPageInfo?.hasNextPage ? (
-              <s-box padding="small">
+              <s-box padding="small" paddingInline="none">
                 <s-button kind="secondary" disabled={loadingMoreSearch} onClick={handleLoadMoreSearch} onPress={handleLoadMoreSearch}>
                   {loadingMoreSearch ? "読込中..." : "さらに読み込む"}
                 </s-button>

@@ -1688,7 +1688,7 @@ export function PurchaseHistoryList({
           ) : (
             <s-stack gap="base">
               {hasMoreHistory ? (
-                <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
+                <s-box padding="none" style={{ paddingBlock: "4px" }}>
                   <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                     <s-text tone="subdued" size="small">
                       未読み込み一覧リストがあります。（過去分）

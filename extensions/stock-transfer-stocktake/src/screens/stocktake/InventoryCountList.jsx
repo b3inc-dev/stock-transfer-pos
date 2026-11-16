@@ -3243,7 +3243,7 @@ export function InventoryCountList({
                     );
                   })}
                   {hasMoreProducts && (
-                    <s-box padding="small" paddingBlockStart="base">
+                    <s-box padding="small" paddingInline="none" paddingBlockStart="base">
                       <s-button
                         kind="secondary"
                         disabled={loadingMore}
