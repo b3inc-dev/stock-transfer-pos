@@ -4322,7 +4322,7 @@ export default function SettingsPage() {
 
           <s-divider />
           {/* 変更時または保存直後に固定フッターを表示するため、表示時のみ余白を確保 */}
-          {(isDirty || showSavedFeedback) && <div style={{ minHeight: "72px" }} aria-hidden />}
+          {(isDirty || showSavedFeedback) && <div style={{ minHeight: "var(--save-bar-height, calc(72px + env(safe-area-inset-bottom, 0px)))" }} aria-hidden />}
         </s-stack>
       </s-scroll-box>
 

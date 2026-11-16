@@ -89,3 +89,5 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 - [ ] 二重発行・部分成功・timeout 直後の再実行を説明できるか
 - [ ] Transfer 作成と apply-change / 履歴ログを混同していないか
 - [ ] 既存の「条件継ぎ足し」負債を増やしていないか（`DECISIONS.md`）
+
+管理画面と POS の変更には [画面実装ルール](docs/ADMIN_UI_GUIDELINES.md#管理画面と-pos-の画面基準) を適用する。

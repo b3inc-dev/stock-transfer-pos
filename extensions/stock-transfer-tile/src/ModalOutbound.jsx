@@ -3024,7 +3024,7 @@ function OutboundHistoryConditions({
 
           {/* ✅ さらに読み込みボタン（リストが全て表示されていない時だけ表示） */}
           {transfersPageInfo?.hasNextPage ? (
-            <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
+            <s-box padding="none" style={{ paddingBlock: "4px" }}>
               <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                 <s-text tone="subdued" size="small">
                   未読み込み一覧リストがあります。（過去分）
@@ -5192,7 +5192,7 @@ function OutboundHistoryDetail({
   }
 
   return (
-    <s-box padding="tight">
+    <s-box padding="tight" paddingInline="base">
       <s-stack gap="tight">
         {detailError ? <s-text tone="critical">{detailError}</s-text> : null}
 
@@ -5203,7 +5203,7 @@ function OutboundHistoryDetail({
           <s-stack gap="none">
             {/* ✅ 未読み込み商品リストがある場合は最上部に表示 */}
             {lineItemsPageInfo?.hasNextPage ? (
-              <s-box padding="base">
+              <s-box padding="base" paddingInline="none">
                 <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                   <s-text tone="subdued" size="small">
                     未読み込み商品リストがあります。（要読込）
@@ -5243,7 +5243,7 @@ function OutboundHistoryDetail({
 
               return (
                 <s-box key={it.key} padding="none">
-                  <s-box padding="base">
+                  <s-box padding="base" paddingInline="none">
                     <s-stack gap="extra-tight">
                       <ItemLeftInline
                         showImages={!!showImages && !liteMode}
@@ -7835,7 +7835,7 @@ function OutboundList({
             
             {/* 「さらに表示」ボタン（取得済み候補の表示件数増加） */}
             {hasMoreCandidates ? (
-              <s-box padding="small">
+              <s-box padding="small" paddingInline="none">
                 <s-button kind="secondary" onClick={handleShowMoreCandidates} onPress={handleShowMoreCandidates}>
                   さらに表示（残り {candidates.length - candidatesDisplayLimit}件）
                 </s-button>
@@ -7843,7 +7843,7 @@ function OutboundList({
             ) : null}
             {/* サーバー側「さらに読み込む」 */}
             {searchPageInfo?.hasNextPage ? (
-              <s-box padding="small">
+              <s-box padding="small" paddingInline="none">
                 <s-button kind="secondary" disabled={loadingMoreSearch} onClick={handleLoadMoreSearch} onPress={handleLoadMoreSearch}>
                   {loadingMoreSearch ? "読込中..." : "さらに読み込む"}
                 </s-button>

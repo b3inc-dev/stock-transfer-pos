@@ -1,4 +1,4 @@
-import type { CSSProperties, KeyboardEvent, ReactNode } from "react";
+import { useEffect, useRef, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 
 type ChoiceControl = "checkbox" | "radio";
 
@@ -83,8 +83,22 @@ export function AdminSaveBar({
   discardDisabled: boolean;
   saving: boolean;
 }) {
+  const barRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const bar = barRef.current;
+    const page = bar?.closest<HTMLElement>("s-page");
+    if (!bar || !page) return;
+    const sync = () => page.style.setProperty("--save-bar-height", `${bar.offsetHeight}px`);
+    sync();
+    const observer = new ResizeObserver(sync);
+    observer.observe(bar);
+    return () => {
+      observer.disconnect();
+      page.style.removeProperty("--save-bar-height");
+    };
+  }, []);
   return (
-    <div className="admin-save-bar">
+    <div ref={barRef} className="admin-save-bar" role="region" aria-label="設定の保存">
       <span className="admin-save-bar-status">{status}</span>
       <div className="admin-save-bar-actions">
         <button type="button" className="admin-secondary" onClick={onDiscard} disabled={discardDisabled}>

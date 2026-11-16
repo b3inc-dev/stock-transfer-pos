@@ -1211,7 +1211,7 @@ export function PurchaseHistoryList({
       const showResults = String(query || "").trim().length >= 1;
 
       const headerNode = (
-        <s-box padding="small">
+        <s-box padding="small" paddingInline="base">
           <s-stack gap="tight">
             <s-stack
               direction="inline"
@@ -1558,9 +1558,9 @@ export function PurchaseHistoryList({
         ) : null}
 
         {/* 2. 商品リスト（入庫商品リストUI相当。数量操作 + 確定はフッター） */}
-        <StockyRowShell>
+        <s-box paddingInline="base">
           <s-stack gap="small">
-            <s-box paddingInline="small">
+            <s-box>
               <s-text emphasis="bold">仕入リスト</s-text>
             </s-box>
             {lines.length === 0 ? (
@@ -1577,7 +1577,7 @@ export function PurchaseHistoryList({
                   const modalId = toQtyModalId_(l.id);
                   return (
                     <s-box key={l.id} padding="none">
-                      <s-box padding="base">
+                      <s-box padding="base" paddingInline="none">
                         <s-stack gap="extra-tight" inlineSize="100%">
                           <ItemLeftCompact
                             showImages={showImages && !!imageUrl}
@@ -1613,13 +1613,13 @@ export function PurchaseHistoryList({
               </s-stack>
             )}
           </s-stack>
-        </StockyRowShell>
+        </s-box>
 
         {/* 3. 予定外仕入（入庫の「予定外入荷」相当）: 数量発生時のみ表示 */}
         {extrasQtyTotal > 0 && (
-          <StockyRowShell>
+          <s-box paddingInline="base">
             <s-stack gap="small">
-              <s-box paddingInline="small">
+              <s-box>
                 <s-text emphasis="bold">予定外仕入（リストにない商品）</s-text>
               </s-box>
               <s-stack gap="none">
@@ -1633,7 +1633,7 @@ export function PurchaseHistoryList({
                   const modalId = toQtyModalId_(l.id);
                   return (
                     <s-box key={l.id} padding="none">
-                      <s-box padding="base">
+                      <s-box padding="base" paddingInline="none">
                         <s-stack gap="extra-tight" inlineSize="100%">
                           <ItemLeftCompact
                             showImages={showImages && !!imageUrl}
@@ -1672,7 +1672,7 @@ export function PurchaseHistoryList({
                 })}
               </s-stack>
             </s-stack>
-          </StockyRowShell>
+          </s-box>
         )}
       </s-stack>
     );
@@ -1688,7 +1688,7 @@ export function PurchaseHistoryList({
           ) : (
             <s-stack gap="base">
               {hasMoreHistory ? (
-                <s-box padding="none" style={{ paddingBlock: "4px", paddingInline: "16px" }}>
+                <s-box padding="none" style={{ paddingBlock: "4px" }}>
                   <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
                     <s-text tone="subdued" size="small">
                       未読み込み一覧リストがあります。（過去分）
