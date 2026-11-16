@@ -146,3 +146,7 @@ POS → POST /api/log-inventory-change
 - [`SHOPIFY.md`](./SHOPIFY.md) — API 詳細
 - [`OUTBOUND_CONFIRM_FLOWS.md`](./OUTBOUND_CONFIRM_FLOWS.md) — 確定ボタン行列
 - [`OUTBOUND_TRANSFER_VS_SHIPMENT_STATUS.md`](./OUTBOUND_TRANSFER_VS_SHIPMENT_STATUS.md) — ステータス語彙
+
+## 継続開発の手順と課題管理
+
+[開発・mock検証・障害調査手順](DEVELOPMENT.md) と [BACKLOG](BACKLOG.md) を参照する。通常ownerはCodex、GitHubが唯一の正本。Backlogは未実装候補で、依頼範囲外には着手しない。本番反映の承認条件は [DEPLOY.md](DEPLOY.md) に従う。
