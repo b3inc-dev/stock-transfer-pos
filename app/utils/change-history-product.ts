@@ -81,6 +81,10 @@ type Variant = {
 };
 type HistoryNode = Variant & { variants?: { nodes: Variant[]; pageInfo: { hasNextPage: boolean } } | null };
 export type HistoryProduct = ReturnType<typeof productFields>;
+export type HistoryProductsResponse = {
+  data?: { nodes?: Array<HistoryNode | null> } | null;
+  errors?: Array<{ message?: string }>;
+};
 
 function productFields(variant: Variant) {
   const options = variant.selectedOptions ?? [];

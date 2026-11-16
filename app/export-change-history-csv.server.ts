@@ -1,6 +1,6 @@
 // app/export-change-history-csv.server.ts
 // 在庫変動履歴CSVエクスポート（リソースルート用）。Remix が同一ページ POST で HTML を返す問題を避けるため専用ルートから呼ぶ。
-import { historyInventoryFilterIds, historyProductBatches, historyProductKey, indexHistoryProducts, recoveredHistorySku, type HistoryProduct } from "./utils/change-history-product";
+import { historyInventoryFilterIds, historyProductBatches, historyProductKey, indexHistoryProducts, recoveredHistorySku, type HistoryProduct, type HistoryProductsResponse } from "./utils/change-history-product";
 import { authenticate } from "./shopify.server";
 import { withGraphQLRetry } from "./utils/graphql-with-retry";
 import { formatDateTimeInShopTimezone } from "./utils/timezone";
@@ -157,7 +157,7 @@ export async function exportChangeHistoryCsv(request: Request): Promise<Response
         try {
           const resp = await admin.graphql(query, { variables: { ids } });
           if (!resp || typeof (resp as { json?: () => Promise<unknown> }).json !== "function") continue;
-          const data = await resp.json();
+          const data = await resp.json() as HistoryProductsResponse;
           if (data?.errors?.length) {
             console.warn("[export-change-history-csv] variant batch GraphQL errors:", data.errors.length);
           }
