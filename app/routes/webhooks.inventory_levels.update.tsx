@@ -5,6 +5,7 @@ import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
+import { readWebhookShopTimezone } from "../utils/readWebhookShopTimezone.js";
 import { getDateInShopTimezone } from "../utils/timezone";
 import type { AdminGraphQLRequestClient } from "../types";
 
@@ -124,22 +125,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       // タイムゾーン取得（失敗時は UTC にフォールバック）
       try {
-        const shopTimezoneResp = await admin!.request({
-          data: `
-            #graphql
-            query GetShopTimezone {
-              shop {
-                ianaTimezone
-              }
-            }
-          `,
-        });
-        const shopTimezoneData = await shopTimezoneResp.json();
-        if (shopTimezoneData?.errors?.length) {
-          console.warn("[inventory_levels/update] GetShopTimezone GraphQL errors:", shopTimezoneData.errors);
-        } else {
-          shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
-        }
+        shopTimezone = await readWebhookShopTimezone(admin!);
       } catch (tzErr) {
         console.warn(`[inventory_levels/update] タイムゾーン取得失敗、UTC にフォールバック:`, tzErr);
       }
