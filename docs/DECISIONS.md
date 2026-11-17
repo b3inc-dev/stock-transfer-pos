@@ -143,11 +143,32 @@ gap / 原因分析ドキュメントで「未実装」「準備中」と書い�
 - **詳細要件**: 各機能の正本（棚卸は Canon / 39GROUPS / COMPLETE_RETRY、履歴は `HISTORY_WEBHOOK_METAFIELD_REQUIREMENTS.md`）
 - 台帳と詳細が矛盾する場合は **詳細正本 + 現行コード** を優先し、台帳側を更新する
 
-## D9. API 2026-04 `changeFromQuantity`（記録のみ・2026-10-08）
+## D9. API 2026-04 `changeFromQuantity`（段階実装・更新 2026-10-09）
 
-Shopify Inventory API 2026-04 で concurrency 制御として `changeFromQuantity` が必須化される見込み。  
-**本 workstream では実装しない**（Phase E2）。適用対象は apply-change / loss / order / stocktake setQuantities 経路。  
-API バージョンバンプとセットで別 PR。
+Shopify Inventory API は `changeFromQuantity` を **2026-01 で導入**し、**2026-04 で実質必須**（省略時ランタイムエラー）。
+
+### 実装方針（E2 #13 + CAS #19）
+
+| 経路 | `changeFromQuantity` | 根拠 |
+|------|----------------------|------|
+| apply-change → setQuantities（**delta 起源**: ロス・仕入等） | **activate+settle 後の live available（CAS）**。読取失敗時は `null` オプトアウト | activate 前読取 CAS は `inventoryActivate` と不整合。post-activate 再読取で R2 を縮小 |
+| apply-change → setQuantities（**`inventory_count` / `adjustment`**） | **#19 の post-activate live CAS**（本 PR ではフィールドを強制 null しない） | 絶対値上書きと同時売上の last-write 緩和は #19。**#13 が再 null 化しないこと** |
+| Admin 棚卸 `app.inventory-count` / POS stocktake·adjustment 直呼び出し | **`null`** | 計上絶対値を正。apply-change 外は #19 対象外の残存 |
+| inventoryAdjustQuantities（POS/Admin） | **`null`（フィールド明示）** | 相対 delta。期待値未取得のためオプトアウト |
+| setQuantities フォールバック（loss/order: 読取直後 cur+delta） | **読取直後の `cur`** | activate を挟まないため CAS 可能 |
+| ロールバック setQuantities | **`null`** | 復旧優先 |
+| ルート `stock-transfer-loss/.../stocktakeApi.js`（legacy） | **`null`**（主経路に揃え） | `package.json` workspaces は `extensions/*`。Shopify CLI 既定も `extensions/`。統合版ツリーはデプロイ対象外とみなすが同ハンドル残骸のためセマンティクスを揃えた |
+
+### API バージョン
+
+- **現行アプリは `2026-01` のまま**（`shopify.app.toml` / `shopify.server.ts` / 各 route 定数）。
+- `changeFromQuantity` は 2026-01 でも送信可能。フィールド必須化への準備を mutation 側で進める。
+- **`2026-04` バンプは別 PR**。理由: 2026-04 では `inventorySetQuantities` の **`@idempotent` キー必須**も同時に来るため、冪等キー設計とセットで検証する。
+
+### マージ順
+
+1. **#19 first**（棚卸・調整 CAS）→ **#13 rebase**（本 PR は count/adjustment を再 null しない）
+2. または一本化。いずれにせよ count/adjustment の CAS を #13 の null で潰さない。
 
 ## D10. 棚卸確定順と webhook（2026-10-08）
 

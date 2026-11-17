@@ -146,11 +146,18 @@ export type SetInventoryQuantitiesResult = {
 /**
  * 在庫数を指定値に設定（inventorySetQuantities）。250件超はチャンク分割。
  * チャンク N が失敗した場合、適用済みチャンク 1..N-1 を元の数量に戻すロールバックを試みる。
+ *
+ * changeFromQuantity（Admin API 2026-01 導入 / 2026-04 実質必須）:
+ * - number: 期待する更新前数量（CAS）。不一致時は CHANGE_FROM_QUANTITY_STALE
+ * - null / 省略: 意図的オプトアウト（比較スキップ）
+ *
+ * 棚卸・調整の post-activate live CAS（casFromLiveSnapshot）は Draft #19 が担当。
+ * 本ヘルパーは per-item 明示を受け取り、#19 がオプションを載せても再 null 化しない。
  */
 export async function setInventoryQuantitiesServer(
   admin: { graphql: AdminGraphql },
   locationId: string,
-  items: Array<{ inventoryItemId: string; quantity: number }>,
+  items: Array<{ inventoryItemId: string; quantity: number; changeFromQuantity?: number | null }>,
   referenceDocumentUri?: string | null
 ): Promise<SetInventoryQuantitiesResult> {
   const locationGid = toLocationGid(locationId);
@@ -159,7 +166,14 @@ export async function setInventoryQuantitiesServer(
     .map((x) => {
       const gid = toInventoryItemGid(x.inventoryItemId);
       const quantity = Math.floor(Number(x.quantity) ?? 0);
-      return gid ? { valid: true as const, inventoryItemId: gid, quantity } : { valid: false as const };
+      // 明示 null / 省略はオプトアウト。有限数のみ CAS に使う
+      const changeFromQuantity =
+        x.changeFromQuantity == null || !Number.isFinite(Number(x.changeFromQuantity))
+          ? null
+          : Math.floor(Number(x.changeFromQuantity));
+      return gid
+        ? { valid: true as const, inventoryItemId: gid, quantity, changeFromQuantity }
+        : { valid: false as const };
     });
   const validQuantities = quantities.filter((q) => q.valid);
   const invalidCount = quantities.filter((q) => !q.valid).length;
@@ -212,7 +226,8 @@ export async function setInventoryQuantitiesServer(
           inventoryItemId: q.inventoryItemId,
           locationId: locationGid,
           quantity: q.quantity,
-          changeFromQuantity: null,
+          // 2026-04 以降はフィールド省略不可。null は意図的オプトアウト
+          changeFromQuantity: q.changeFromQuantity,
         })),
       };
       if (refUri) input.referenceDocumentUri = refUri;
@@ -410,11 +425,23 @@ export async function fetchCurrentQuantityServer(
   locationId: string,
   inventoryItemId: string
 ): Promise<number> {
+  const qty = await fetchCurrentQuantityServerStrict(admin, locationId, inventoryItemId);
+  return qty ?? 0;
+}
+
+/**
+ * available 取得（失敗・レベル未作成は null。CAS 用に 0 フォールバックしない）
+ */
+export async function fetchCurrentQuantityServerStrict(
+  admin: { graphql: AdminGraphql },
+  locationId: string,
+  inventoryItemId: string
+): Promise<number | null> {
   const locationGid = toLocationGid(locationId);
   const itemGid = toInventoryItemGid(inventoryItemId);
-  if (!itemGid) return 0;
+  if (!itemGid) return null;
   try {
-    const { json } = await graphqlWithRetry(admin, `#graphql
+    const { response, json } = await graphqlWithRetry(admin, `#graphql
         query Cur($id: ID!, $loc: ID!) {
           inventoryItem(id: $id) {
             inventoryLevel(locationId: $loc) {
@@ -423,11 +450,17 @@ export async function fetchCurrentQuantityServer(
           }
         }
       `, { id: itemGid, loc: locationGid });
-    const data = (json as { data?: { inventoryItem?: { inventoryLevel?: { quantities?: QuantityNameValue[] } } } })?.data?.inventoryItem?.inventoryLevel?.quantities;
+    if (!response.ok) return null;
+    const level = (json as {
+      data?: { inventoryItem?: { inventoryLevel?: { quantities?: QuantityNameValue[] } | null } | null };
+    })?.data?.inventoryItem?.inventoryLevel;
+    if (!level) return null;
+    const data = level.quantities;
     const q = Array.isArray(data) ? data.find((x) => x?.name === "available") : null;
-    return Number(q?.quantity ?? 0) || 0;
+    if (q?.quantity == null || !Number.isFinite(Number(q.quantity))) return null;
+    return Math.floor(Number(q.quantity));
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -435,11 +468,13 @@ const INVENTORY_ADJUST_MAX = 250;
 
 /**
  * 相対 delta で在庫を増減（inventoryAdjustQuantities）。ロス・仕入用。
+ * InventoryChangeInput.changeFromQuantity は 2026-04 で実質必須のため明示する。
+ * 呼び出し側が期待値を渡さない場合は null（意図的オプトアウト）。
  */
 export async function adjustInventoryQuantitiesServer(
   admin: { graphql: AdminGraphql },
   locationId: string,
-  changes: Array<{ inventoryItemId: string; delta: number }>,
+  changes: Array<{ inventoryItemId: string; delta: number; changeFromQuantity?: number | null }>,
   referenceDocumentUri?: string | null
 ): Promise<{ ok: boolean; invalidCount?: number; error?: string }> {
   const locationGid = toLocationGid(locationId);
@@ -447,9 +482,14 @@ export async function adjustInventoryQuantitiesServer(
     .filter((c) => c?.inventoryItemId && Number.isFinite(Number(c?.delta)) && Number(c.delta) !== 0)
     .map((c) => {
       const gid = toInventoryItemGid(c.inventoryItemId);
-      return gid ? { inventoryItemId: gid, delta: Math.floor(Number(c.delta)) } : null;
+      if (!gid) return null;
+      const changeFromQuantity =
+        c.changeFromQuantity == null || !Number.isFinite(Number(c.changeFromQuantity))
+          ? null
+          : Math.floor(Number(c.changeFromQuantity));
+      return { inventoryItemId: gid, delta: Math.floor(Number(c.delta)), changeFromQuantity };
     })
-    .filter((x): x is { inventoryItemId: string; delta: number } => x != null);
+    .filter((x): x is { inventoryItemId: string; delta: number; changeFromQuantity: number | null } => x != null);
   const invalidCount = (changes ?? []).length - valid.length;
   if (valid.length === 0) {
     // delta=0 のみ、または有効なアイテムが存在しない場合は変更なしで成功として扱う
@@ -463,7 +503,12 @@ export async function adjustInventoryQuantitiesServer(
     const input: Record<string, unknown> = {
       reason: "correction",
       name: "available",
-      changes: chunk.map((c) => ({ inventoryItemId: c.inventoryItemId, locationId: locationGid, delta: c.delta })),
+      changes: chunk.map((c) => ({
+        inventoryItemId: c.inventoryItemId,
+        locationId: locationGid,
+        delta: c.delta,
+        changeFromQuantity: c.changeFromQuantity,
+      })),
     };
     if (uri) input.referenceDocumentUri = uri;
     try {

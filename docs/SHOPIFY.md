@@ -68,8 +68,8 @@ erDiagram
 |-----------|------|
 | `inventoryActivate` | ロケで追跡開始 |
 | `inventoryItemUpdate` | 追跡フラグ等 |
-| `inventorySetQuantities` | 絶対値セット（棚卸・調整・apply-change） |
-| `inventoryAdjustQuantities` | 相対調整（ロス等） |
+| `inventorySetQuantities` | 絶対値セット（棚卸・調整・apply-change）。各 quantity に `changeFromQuantity`（number=CAS / `null`=意図的オプトアウト）。詳細は `DECISIONS` D9 |
+| `inventoryAdjustQuantities` | 相対調整（ロス等）。各 change に `changeFromQuantity` を明示（現行は主に `null`） |
 
 **入力配列上限**: lineItems 等 **250**（アプリ定数 `SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX`）。
 
