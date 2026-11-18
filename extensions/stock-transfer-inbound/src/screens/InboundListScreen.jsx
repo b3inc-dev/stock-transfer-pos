@@ -52,6 +52,12 @@ import {
 } from "../InboundUiParts.jsx";
 import { logInventoryChangeToApi } from "../../../common/logInventoryChange.js";
 import { buildInboundReceiveLogAppEventId } from "../../../common/buildStableAppEventId.js";
+import {
+  createReceiveGate,
+  markReloaded,
+  runReceiveWithReload,
+  RECEIVE_RELOAD_REQUIRED_MESSAGE,
+} from "../receiveReloadGate.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
 const toast = (m) => SHOPIFY?.toast?.show?.(String(m));
@@ -351,6 +357,8 @@ export function InboundListScreen({
   const [extrasHistoryLoading, setExtrasHistoryLoading] = useState(false);
   const [confirmMemo, setConfirmMemo] = useState(null);
   const [receiveSubmitting, setReceiveSubmitting] = useState(false);
+  // 確定のあとの伝票の読み直しに失敗した。読み直せるまで確定させない（receiveReloadGate.js）
+  const [receiveReloadRequired, setReceiveReloadRequired] = useState(false);
   const [pendingLoading, setPendingLoading] = useState(false);
   const [pendingTransfers, setPendingTransfers] = useState([]);
 
@@ -363,7 +371,8 @@ export function InboundListScreen({
   const scanDisabledRef = useRef(false);
   const readOnlyRef = useRef(false);
   const toastReadOnlyOnceRef = useRef(false);
-  const receiveLockRef = useRef(false);
+  // 確定のロックと「読み直し待ち」。ロックは確定のあとの読み直しが終わるまで外さない
+  const receiveGateRef = useRef(createReceiveGate());
   const linesCompleteRef = useRef(true);
   const linesLoadGenRef = useRef(0);
   const kickProcessScanQueueRef = useRef(null);
@@ -516,8 +525,8 @@ export function InboundListScreen({
   // 先頭ページを表示しつつ、hasNextPage がある間はバックグラウンドで全ページ取得。完了前は予定外禁止（スキャンはキュー保持）
   const loadShipment = async (id, { signal } = {}) => {
     const shipmentId = String(id || "").trim();
-    if (!shipmentId) return toast("Shipment ID が空です");
-    if (!locationGid) return;
+    if (!shipmentId) { toast("Shipment ID が空です"); return { ok: false }; }
+    if (!locationGid) return { ok: false };
 
     const loadGen = ++linesLoadGenRef.current;
     safeSet(mountedRef, () => {
@@ -586,9 +595,9 @@ export function InboundListScreen({
             return { ...r, receiveQty: nextQty };
           })
         : baseRows;
-      if (signal?.aborted) return;
+      if (signal?.aborted) return { ok: true, superseded: true };
       rowsToSet = await repairInboundRowTitles(rowsToSet, { signal });
-      if (signal?.aborted) return;
+      if (signal?.aborted) return { ok: true, superseded: true };
 
       const finalRows = rowsToSet;
       const hasDraft = !!draft;
@@ -638,7 +647,7 @@ export function InboundListScreen({
             after: cursor,
             signal,
           });
-          if (signal?.aborted || loadGen !== linesLoadGenRef.current) return;
+          if (signal?.aborted || loadGen !== linesLoadGenRef.current) return { ok: true, superseded: true };
           const newLineItems = Array.isArray(nextResult?.lineItems) ? nextResult.lineItems : [];
           const nextPageInfo = nextResult?.pageInfo || { hasNextPage: false, endCursor: null };
           let moreRows = newLineItems.map((li) => mapShipmentLineItemToRow_(li, overByInventoryItemId));
@@ -651,7 +660,7 @@ export function InboundListScreen({
             });
           }
           moreRows = await repairInboundRowTitles(moreRows, { signal });
-          if (signal?.aborted || loadGen !== linesLoadGenRef.current) return;
+          if (signal?.aborted || loadGen !== linesLoadGenRef.current) return { ok: true, superseded: true };
           safeSet(mountedRef, () => {
             if (loadGen !== linesLoadGenRef.current) return;
             setRows((prev) => {
@@ -686,12 +695,19 @@ export function InboundListScreen({
           } catch (_) {}
         }
       }
+      // 受領済みの数まで読み直せた。確定の前の「読み直し待ち」を外す（receiveReloadGate.js）
+      if (loadGen === linesLoadGenRef.current) {
+        markReloaded(receiveGateRef.current);
+        safeSet(mountedRef, () => setReceiveReloadRequired(false), signal);
+      }
+      return { ok: true };
     } catch (e) {
-      if (signal?.aborted) return;
+      if (signal?.aborted) return { ok: true, superseded: true };
       safeSet(mountedRef, () => {
         setShipmentError(toUserMessage(e));
         markLinesComplete_(true);
       }, signal);
+      return { ok: false, error: e };
     } finally {
       safeSet(mountedRef, () => setShipmentLoading(false), signal);
     }
@@ -738,7 +754,7 @@ export function InboundListScreen({
 
   const loadMultipleShipments = useCallback(async (shipmentIdsArg, { signal } = {}) => {
     const shipmentIds = Array.isArray(shipmentIdsArg) ? shipmentIdsArg : [];
-    if (shipmentIds.length === 0 || !locationGid) return;
+    if (shipmentIds.length === 0 || !locationGid) return { ok: false };
     const loadGen = ++linesLoadGenRef.current;
     safeSet(mountedRef, () => {
       setShipment(null);
@@ -787,9 +803,9 @@ export function InboundListScreen({
         return (s.lineItems ?? []).map((li) => mapMultiLineItemToRow_(li, s, index, transferName, draft));
       });
 
-      if (signal?.aborted) return;
+      if (signal?.aborted) return { ok: true, superseded: true };
       let multiRowsToSet = await repairInboundRowTitles(allRows, { signal });
-      if (signal?.aborted) return;
+      if (signal?.aborted) return { ok: true, superseded: true };
 
       const hasDraftMulti = !!draft;
       const draftForMulti = draft;
@@ -860,13 +876,13 @@ export function InboundListScreen({
             after: cursor,
             signal,
           });
-          if (signal?.aborted || loadGen !== linesLoadGenRef.current) return;
+          if (signal?.aborted || loadGen !== linesLoadGenRef.current) return { ok: true, superseded: true };
           const sMeta = { id: nextResult?.id || pending.id };
           let moreRows = (nextResult?.lineItems ?? []).map((li) =>
             mapMultiLineItemToRow_(li, sMeta, pending.index, transferName, draft)
           );
           moreRows = await repairInboundRowTitles(moreRows, { signal });
-          if (signal?.aborted || loadGen !== linesLoadGenRef.current) return;
+          if (signal?.aborted || loadGen !== linesLoadGenRef.current) return { ok: true, superseded: true };
           safeSet(mountedRef, () => {
             if (loadGen !== linesLoadGenRef.current) return;
             setRows((prev) => {
@@ -894,7 +910,7 @@ export function InboundListScreen({
       // 二相ロード: 非同期で監査ログ over を反映
       try {
         const audit = await readInboundAuditLog();
-        if (signal?.aborted) return;
+        if (signal?.aborted) return { ok: true, superseded: true };
         let overByInventoryItemId = new Map();
         shipmentIds.forEach((sid) => {
           const itemOver = buildInboundOverItemIndex_(audit, { locationId: locationGid, shipmentId: sid });
@@ -913,13 +929,19 @@ export function InboundListScreen({
           });
         }, signal);
       } catch (_) {}
+      if (loadGen === linesLoadGenRef.current) {
+        markReloaded(receiveGateRef.current);
+        safeSet(mountedRef, () => setReceiveReloadRequired(false), signal);
+      }
+      return { ok: true };
     } catch (e) {
-      if (signal?.aborted) return;
+      if (signal?.aborted) return { ok: true, superseded: true };
       safeSet(mountedRef, () => {
         setShipmentError(toUserMessage(e));
         setShipmentLoading(false);
         markLinesComplete_(true);
       }, signal);
+      return { ok: false, error: e };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   // formatShipmentLabelLocal はモジュールレベルで安定参照のため依存から除外
@@ -1360,7 +1382,7 @@ export function InboundListScreen({
   const receiveTotal = rows.reduce((a, r) => a + Number(r.receiveQty || 0), 0);
 
   // 確定できる条件（Shipmentあり + 処理中でない + スキャン停止でない）
-  const canConfirm = !!shipment?.id && !receiveSubmitting && !scanDisabled && !readOnly;
+  const canConfirm = !!shipment?.id && !receiveSubmitting && !receiveReloadRequired && !scanDisabled && !readOnly;
 
   const warningReady = !hasWarning ? true : !!ackWarning; // 警告がある時だけ確認(ack)必須
 
@@ -1396,9 +1418,32 @@ export function InboundListScreen({
       toast("差異があります。内容を確認してから確定してください。");
       return false;
     }
-    if (receiveLockRef.current) return false;
-    receiveLockRef.current = true;
-    setReceiveSubmitting(true);
+    // 受領済みの数が古い伝票のまま同じ差分を送らないよう、確定のあとの読み直しが終わるまでロックを外さない。
+    const reloadShipmentForReceive = () => {
+      if (!isMultipleMode && shipment?.id) return loadShipmentById(shipment.id);
+      if (isMultipleMode && Array.isArray(inbound?.selectedShipmentIds) && inbound.selectedShipmentIds.length > 0) {
+        return loadMultipleShipments(inbound.selectedShipmentIds);
+      }
+      return Promise.resolve({ ok: false });
+    };
+    return runReceiveWithReload(receiveGateRef.current, {
+      setSubmitting: (busy) => {
+        if (mountedRef.current) setReceiveSubmitting(busy);
+      },
+      setReloadRequired: (blocked) => {
+        if (mountedRef.current) setReceiveReloadRequired(blocked);
+      },
+      onBlocked: (why) => {
+        if (why === "reload_required") toast(RECEIVE_RELOAD_REQUIRED_MESSAGE);
+      },
+      onSubmitError: (e) => {
+        toast(`入庫確定エラー: ${toUserMessage(e)}`);
+      },
+      onReloadFailed: () => {
+        toast(RECEIVE_RELOAD_REQUIRED_MESSAGE);
+      },
+      reload: reloadShipmentForReceive,
+      submit: async () => {
 
     const noteText = String(note || "").trim();
     const overForLog = (overRows || []).map((x) => ({
@@ -1419,7 +1464,7 @@ export function InboundListScreen({
     }).filter((x) => x.inventoryItemId && x.qty > 0);
     const hasSomething = noteText.length > 0 || (Array.isArray(overForLog) && overForLog.length > 0) || (Array.isArray(extrasForLog) && extrasForLog.length > 0);
 
-    try {
+    {
       // メモは確定処理の最後に「予定外＋予定超過＋メモ＋在庫調整履歴」を1回で追記する（2回目追記の失敗で在庫調整履歴が残らない事象を防ぐ）
       let extraDeltasMerged;
       let rejectedDeltas = [];
@@ -1447,7 +1492,7 @@ export function InboundListScreen({
         const hasAnyAction = plannedItems.length > 0 || extraDeltas.length > 0 || rejectedItems.length > 0;
         if (!hasAnyAction) {
           toast(finalize ? "送信する差分がありません" : "一部入庫として送る差分がありません");
-          return false;
+          return { ok: false, reload: false };
         }
         extraDeltasMerged = extraDeltas;
 
@@ -1660,7 +1705,7 @@ export function InboundListScreen({
         const hasAnyAction = hasAnyPlanned || extraDeltas.length > 0 || (finalize && hasAnyRejected);
         if (!hasAnyAction) {
           toast(finalize ? "送信する差分がありません" : "一部入庫として送る差分がありません");
-          return false;
+          return { ok: false, reload: false };
         }
         // 伝票明細はShopifyの在庫移管に含まれるため、通常は入庫先で既に有効化されている想定。受領を先に試し、失敗時のみ有効化してリトライする。
         const allInventoryItemIdsMulti = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
@@ -2037,28 +2082,15 @@ export function InboundListScreen({
           : Promise.resolve(),
         clearInboundDraft({ locationGid, transferId, shipmentId: shipment.id }).catch(() => {}),
         refreshPending().catch(() => {}),
-        !isMultipleMode
-          ? loadShipmentById(shipment.id).catch(() => {})
-          : (Array.isArray(inbound?.selectedShipmentIds) && inbound.selectedShipmentIds.length > 0
-              ? loadMultipleShipments(inbound.selectedShipmentIds)
-              : Promise.resolve()
-            ).catch(() => {}),
+        // 入庫完了は画面を閉じるので、読み直しはこれまでどおり裏で行う
+        finalize ? reloadShipmentForReceive().catch(() => {}) : Promise.resolve(),
       ]).catch(() => {});
 
-      return true;
-    } catch (e) {
-      toast(`入庫確定エラー: ${toUserMessage(e)}`);
-      // エラー後にシップメントをリロードして最新状態を反映（部分成功時にreadOnlyになりボタンをグレーアウトさせるため、再試行による二重在庫調整を防ぐ）
-      if (!isMultipleMode && shipment?.id) {
-        loadShipmentById(shipment.id).catch(() => {});
-      } else if (isMultipleMode && Array.isArray(inbound?.selectedShipmentIds) && inbound.selectedShipmentIds.length > 0) {
-        loadMultipleShipments(inbound.selectedShipmentIds).catch(() => {});
-      }
-      return false;
-    } finally {
-      if (mountedRef.current) setReceiveSubmitting(false);
-      receiveLockRef.current = false;
+      // 一部入庫は画面に残るので、受領済みの数を読み直すまでロックを外さない（runReceiveWithReload）
+      return { ok: true, reload: !finalize };
     }
+      },
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly, shipment && shipment.id, locationGid, hasWarning, ackWarning, rows, extras, overRows, shortageRows, note, reason, transferId, transferForShipment, inbound, onAfterReceive, onBack, isMultipleMode]);
 
