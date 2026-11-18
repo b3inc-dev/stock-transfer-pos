@@ -1043,9 +1043,20 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // 完全失敗（未適用 or ロールバック成功）
-    const errorCode = isNotStockedRetryableError(result.error)
-      ? "not_stocked"
-      : "set_quantities_failed";
+    // 250 件を超える補正で元に戻す用の数を読めなかったときは、1 件も動かしていない。
+    // 送り直してよい失敗（503）にする。イベントは failed なので、同じ ID の次の送信は最初から処理される。
+    const snapshotUnreadable = result.snapshotUnreadable === true;
+    const snapshotRetryable = snapshotUnreadable && result.retryable !== false;
+    const errorCode = snapshotUnreadable
+      ? snapshotRetryable
+        ? "rollback_snapshot_unreadable"
+        : "inventory_item_not_found"
+      : isNotStockedRetryableError(result.error)
+        ? "not_stocked"
+        : "set_quantities_failed";
+    const responseError = snapshotUnreadable
+      ? `${snapshotRetryable ? CURRENT_QUANTITY_UNREADABLE_MESSAGE : INVENTORY_ITEM_NOT_FOUND_MESSAGE}（${result.error ?? ""}）`
+      : errorSummary;
     for (const l of lineRecords) {
       await db.inventoryChangeEventLine.update({
         where: { id: l.id },
@@ -1079,7 +1090,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return new Response(
       JSON.stringify({
         ok: false,
-        error: errorSummary,
+        error: responseError,
         errorCode,
         eventId: event.id,
         appEventId,
@@ -1087,7 +1098,10 @@ export async function action({ request }: ActionFunctionArgs) {
         partiallyApplied: false,
         rolledBack: result.rolledBack ?? false,
       }),
-      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      {
+        status: snapshotRetryable ? 503 : 400,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      }
     );
   } catch (e: unknown) {
     console.error("[api.inventory.apply-change] Error:", e);

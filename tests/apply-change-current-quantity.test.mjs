@@ -116,6 +116,10 @@ describe("apply-change route", () => {
     const body = helper.slice(start, end);
     assert.ok(start > 0);
     assert.doesNotMatch(body, /return 0;/);
-    assert.match(body, /readAvailableFromResponse\(/);
+    assert.match(body, /readAvailableAt\(/);
+    const readStart = helper.indexOf("async function readAvailableAt(");
+    const readBody = helper.slice(readStart, helper.indexOf("\n}\n", readStart));
+    assert.ok(readStart > 0);
+    assert.match(readBody, /readAvailableFromResponse\(/);
   });
 });

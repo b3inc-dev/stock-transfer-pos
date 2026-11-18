@@ -63,6 +63,7 @@
 | ID を手放す時 | サーバーが「完了」を返したとき、またはサーバーがはっきり断ったとき（4xx。401・408・409・429 と `partial_failed` を除く。`finalRejection`）だけ |
 | 一部だけ反映（`partial_failed`） | ID を手放さず、印（`partial: true`）を付けて端末にも残す。押し直しは同じ ID で送る。サーバーは同じ ID の `partial_failed` に在庫を動かさず 400 を返し続ける（残りだけ反映する道は無い。STATE_MACHINE §6）。画面は「もう一度押しても在庫は動かない・管理者が Shopify で直す」と出す。管理者が直したあと、「リセット」でその操作を明細ごと取りやめられる（`canDiscardPendingOperation`。印の無い結果待ちの操作はリセットできないまま） |
 | 今の在庫数を読めない | delta の明細（ロス・仕入れ・取消・入庫補正）で今の在庫数を読めなかったら、0 として扱わず、イベントを作る前に 503（`current_quantity_unreadable`）を返す。在庫は動かない。POS は同じ ID で送り直す。商品そのものが見つからないときは 400（`inventory_item_not_found`） |
+| 250 件超の元に戻す用の控え | `inventorySetQuantities` を 250 件ずつに分けるとき、最後より前のチャンクの今の数を、1 件も動かす前に全部読んで控える（250 件以下は戻すことが無いので読まない）。読み方は上と同じ（`readAvailableFromResponse`。在庫の記録が無いときだけ 0）。1 件でも読めなければ補正を始めず 503（`rollback_snapshot_unreadable`、イベントは `failed`）。戻す処理そのものが失敗したら `partial_failed` |
 | 結果が分からない失敗 | 応答なし（`fetch` が投げた例外すべて: TypeError・AbortError・時間切れ）・5xx・202・確定後のローカル保存の失敗では ID を残す。エラーの文の中身（"fetch" / "Network" / "Load failed"）では判断しない |
 | 1 回の時間の上限 | 90 秒（超えたら AbortError → 応答なしとして同じ ID で送り直す） |
 | 明細の確かめ | 残っている ID の明細（商品と数量）と画面の明細が違えば、送らずに前回の明細へ戻す（`pendingLinesChanged`）。D3b の fingerprint と同じ考え方 |
