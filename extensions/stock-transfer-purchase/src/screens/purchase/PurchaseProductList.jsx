@@ -24,6 +24,8 @@ import {
   settleOperationAfterError,
   PENDING_LINES_RESTORED_MESSAGE,
   PENDING_RESET_BLOCKED_MESSAGE,
+  PARTIAL_OPERATION_DISCARDED_MESSAGE,
+  canDiscardPendingOperation,
 } from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
@@ -1423,13 +1425,16 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
 
   const handleReset = useCallback(async () => {
     const frozen = pendingOpRef.current?.lines;
-    if (Array.isArray(frozen) && frozen.length > 0) {
+    if (!canDiscardPendingOperation(pendingOpRef.current)) {
       setLines(frozen.map((l) => ({ ...l })));
       confirmResetModalRef?.current?.hideOverlay?.();
       confirmResetModalRef?.current?.hide?.();
       toast(PENDING_RESET_BLOCKED_MESSAGE);
       return;
     }
+    // 一部だけ反映と分かった操作は、ここで ID ごと取りやめる（端末の保存は下の clearLocationDraft で消える）。
+    const discardedPartial = pendingOpRef.current?.partial === true;
+    if (discardedPartial) pendingOpRef.current = null;
     setLines([]);
     setQuery("");
     setCandidates([]);
@@ -1441,7 +1446,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     }
     confirmResetModalRef?.current?.hideOverlay?.();
     confirmResetModalRef?.current?.hide?.();
-    toast("商品リストをリセットしました");
+    toast(discardedPartial ? PARTIAL_OPERATION_DISCARDED_MESSAGE : "商品リストをリセットしました");
   }, []);
 
   return (

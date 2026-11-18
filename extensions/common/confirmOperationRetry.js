@@ -5,14 +5,21 @@
  * ID を手放してよいのは、サーバーが「完了」を返したとき（画面側で消す）と、
  * サーバーがはっきり断ったとき（`finalRejection`。同じ ID で送り直しても答えが変わらない）だけ。
  * 応答なし・時間切れ・5xx・処理中・確定後のローカル保存の失敗など、結果が分からない失敗では残す。
+ * 一部だけ反映（partial_failed）も残す。同じ ID ならサーバーは在庫を動かさず、新しい ID だと反映済みの分がもう一度動く。
  */
 export function shouldReuseOperationAfterError(error) {
   if (error && typeof error === "object") {
     if (error.code === "history_incomplete") return true;
     if (error.inventoryApplied === true) return true;
+    if (isPartialApplyError(error)) return true;
     if (error.finalRejection === true) return false;
   }
   return true;
+}
+
+/** サーバーが「一部だけ反映（partial_failed）」と答えた失敗か。 */
+export function isPartialApplyError(error) {
+  return Boolean(error && typeof error === "object" && (error.partiallyApplied === true || error.code === "APPLY_PARTIAL"));
 }
 
 /**
@@ -29,6 +36,7 @@ export function beginConfirmOperation(pending, mint) {
         appEventId,
         locationId: locationIdOf(pending.locationId),
         lines: Array.isArray(pending.lines) ? pending.lines : [],
+        ...(pending.partial === true ? { partial: true } : {}),
       },
       reused: true,
     };
@@ -71,10 +79,16 @@ export function operationToKeepAfterError(operation, error, previousPending = nu
       ? previous
       : null;
   if (!base) return null;
+  // 「一部だけ反映」の印: この送信で言われたか、同じ ID で前に言われていたら残す（そのあとの応答なしでは消さない）。
+  const partial =
+    (base.appEventId === current?.appEventId && isPartialApplyError(error)) ||
+    (base.appEventId === previous?.appEventId && previousPending?.partial === true) ||
+    (base.appEventId === current?.appEventId && operation?.partial === true);
   return {
     ...base,
     locationId: String(operation?.locationId || previousPending?.locationId || "").trim(),
     lines: firstLines(operation?.lines, previousPending?.lines, linesSnapshot),
+    ...(partial ? { partial: true } : {}),
   };
 }
 
@@ -93,6 +107,7 @@ function operationRecord(operation) {
     ...kept,
     locationId: locationIdOf(operation.locationId),
     lines: Array.isArray(operation.lines) ? operation.lines : [],
+    ...(operation.partial === true ? { partial: true } : {}),
   };
 }
 
@@ -159,6 +174,9 @@ export function pendingLinesChanged(operation, currentLines) {
 
 export const PENDING_LINES_RESTORED_MESSAGE =
   "前回の確定の結果がまだ分からないため、前回の明細に戻しました。この明細のまま「確定」をもう一度押してください（同じ確定のため在庫は二重に変わりません）。";
+
+export const PARTIAL_OPERATION_DISCARDED_MESSAGE =
+  "一部だけ反映された前回の確定を取りやめ、明細を消しました（この操作で在庫は変えていません）。同じ明細を入れ直して確定すると、反映済みの分がもう一度動きます。管理者が Shopify の在庫を直してから入力してください。";
 
 export const PENDING_RESET_BLOCKED_MESSAGE =
   "前回の確定がまだ終わっていないため、確定した明細のままもう一度「確定」を押してください（在庫は二重に変わりません）";
@@ -312,4 +330,17 @@ export async function clearLocationDraft(storage, key, locationId) {
     await storage.set(key, next);
     return next;
   });
+}
+
+/**
+ * リセットで、残っている操作 ID を明細ごと取りやめてよいか。
+ * 送った明細が無い・まだ送っていない → よい。
+ * サーバーが「一部だけ反映（partial_failed）」と答えた操作 → よい。サーバーはこの ID の送り直しで在庫を二度と動かさず、
+ * 残りを反映する道も無い（STATE_MACHINE §6）。持ち続けても管理者が直すまで同じ答えが返るだけなので、画面が固まらないよう取りやめを許す。
+ * それ以外（応答なし・処理中・5xx・履歴だけ失敗）は結果が分からないか適用済みなので、取りやめると押し直しで在庫がもう一度動く。
+ */
+export function canDiscardPendingOperation(operation) {
+  if (!operation) return true;
+  if (!Array.isArray(operation.lines) || operation.lines.length === 0) return true;
+  return operation.partial === true;
 }

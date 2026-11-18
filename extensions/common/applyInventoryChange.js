@@ -40,13 +40,15 @@ export function carryInventoryApplied(error, seen) {
 }
 
 /**
- * サーバーがはっきり断った失敗（入力の誤り・別ショップのイベント・一部だけ反映済みなど）。
+ * サーバーがはっきり断った失敗（入力の誤り・別ショップのイベントなど）。在庫は動いていない。
  * 同じ appEventId で送り直しても答えは変わらないので、画面はこの ID を残さなくてよい。
  * 応答なし・時間切れ・401・408・409・429・5xx・処理中は「結果が分からない」なので、ここに入れない。
+ * 一部だけ反映（partial_failed）も入れない。在庫が一部動いている（または動いたか分からない）ので、
+ * ID を手放して押し直すと新しい確定として反映済みの分がもう一度動く。同じ ID ならサーバーは在庫を動かさない。
  */
 export function isFinalApplyRejection(httpStatus, kind, sawApplied) {
   if (sawApplied) return false;
-  if (kind !== "fatal" && kind !== "partial_failed") return false;
+  if (kind !== "fatal") return false;
   const status = Number(httpStatus);
   if (!(status >= 400 && status < 500)) return false;
   return status !== 401 && status !== 408 && status !== 409 && status !== 429;
@@ -82,6 +84,13 @@ function errorWithCode(message, code, extra) {
   err.code = code;
   if (extra) Object.assign(err, extra);
   return err;
+}
+
+/** 一部だけ反映（partial_failed）。同じ ID の送り直しでは在庫は動かないので、ID は残す（finalRejection を付けない）。 */
+function partialAppliedError(res, data) {
+  return errorWithCode(`${APPLY_PARTIAL_MESSAGE}（サーバー: ${buildApiErrorMessage(res, data)}）`, "APPLY_PARTIAL", {
+    partiallyApplied: true,
+  });
 }
 
 /**
@@ -166,10 +175,7 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
         continue;
       }
       if (kind === "partial_failed") {
-        throw carryInventoryApplied(
-          errorWithCode(`${buildApiErrorMessage(res, data)}（${APPLY_PARTIAL_MESSAGE}）`, "APPLY_PARTIAL", { partiallyApplied: true }),
-          sawApplied
-        );
+        throw carryInventoryApplied(partialAppliedError(res, data), sawApplied);
       }
       if (kind !== "pending") {
         const msg = buildApiErrorMessage(res, data);
@@ -349,6 +355,11 @@ export async function applyInventoryChangeToApi({
         continue;
       }
       throw lastError;
+    }
+
+    if (kind === "partial_failed") {
+      // 同じ ID で送り直してもサーバーは同じ 400 を返すだけ（在庫は動かない）。ここでは送り直さない。
+      throw carryInventoryApplied(partialAppliedError(res, data), sawApplied);
     }
 
     // 空 error / Unknown 固定を避け、HTTP 状況と errorCode を POS toast に載せる

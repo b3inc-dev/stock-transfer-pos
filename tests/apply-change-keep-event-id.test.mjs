@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { applyInventoryChangeToApi, isFinalApplyRejection } from "../extensions/common/applyInventoryChange.js";
 import {
   beginConfirmOperation,
+  canDiscardPendingOperation,
   clearLocationDraft,
   operationToKeepAfterError,
   pendingLinesChanged,
@@ -251,6 +252,106 @@ describe("loss confirm keeps the event id until the server answers", () => {
   });
 });
 
+/**
+ * 一部だけ反映（partial_failed）の apply-change の代わり。サーバー（main）と同じく、
+ * 最初の送信で在庫を動かして partial_failed を残し、同じ ID の送り直しには在庫を動かさず 400 を返し続ける。
+ * 新しい ID なら、もう一度在庫を動かす（サーバーは別の確定と見るため）。
+ */
+function partialServer({ partialOn = (n) => n === 1 } = {}) {
+  const server = { stock: 10, events: new Map(), sent: [] };
+  globalThis.shopify = { session: { getSessionToken: async () => "tok" } };
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const n = server.sent.length + 1;
+    server.sent.push(body.appEventId);
+    if (!server.events.has(body.appEventId)) {
+      for (const e of body.entries) server.stock += Number(e.delta || 0);
+      server.events.set(body.appEventId, partialOn(n) ? "partial_failed" : "completed");
+    }
+    if (server.events.get(body.appEventId) === "partial_failed") {
+      return {
+        ok: false,
+        status: 400,
+        statusText: "",
+        json: async () => ({
+          ok: false,
+          error: "fetch failed | application_uncertain",
+          errorCode: "partial_failed",
+          status: "partial_failed",
+          partiallyApplied: true,
+        }),
+      };
+    }
+    return { ok: true, status: 200, statusText: "", json: async () => ({ ok: true, status: "completed" }) };
+  };
+  return server;
+}
+
+describe("一部だけ反映（partial_failed）では ID を手放さない", () => {
+  let storage;
+  beforeEach(() => {
+    storage = memoryStorage();
+  });
+
+  it("押し直しても同じ ID で送り、反映済みの分はもう一度減らない", async () => {
+    const server = partialServer();
+    const screen = openScreen(storage, LINES);
+    assert.equal(await screen.confirm(), "error");
+    assert.equal(server.stock, 8);
+    assert.equal(server.sent.length, 1, "同じ ID の 400 は答えが変わらないので、その場では送り直さない");
+    assert.match(screen.toasts[0], /一部だけ/);
+    assert.match(screen.toasts[0], /在庫は動きません/);
+    assert.equal(screen.pendingRef.current.appEventId, "evt_loss_entry_loss_1");
+    assert.equal(screen.pendingRef.current.partial, true);
+
+    assert.equal(await screen.confirm(), "error");
+    assert.equal(screen.minted, 1);
+    assert.deepEqual(new Set(server.sent), new Set(["evt_loss_entry_loss_1"]));
+    assert.equal(server.stock, 8);
+  });
+
+  it("画面を開き直しても同じ ID と「一部だけ反映」の印が戻る", async () => {
+    const server = partialServer();
+    await openScreen(storage, LINES).confirm();
+    const second = openScreen(storage, []);
+    await second.reopen();
+    assert.equal(second.pendingRef.current.appEventId, "evt_loss_entry_loss_1");
+    assert.equal(second.pendingRef.current.partial, true);
+    assert.equal(await second.confirm(), "error");
+    assert.equal(second.minted, 0);
+    assert.equal(server.stock, 8);
+  });
+
+  it("一部だけ反映のあとに応答なしが来ても、印は消えない", async () => {
+    const server = partialServer();
+    const screen = openScreen(storage, LINES);
+    await screen.confirm();
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new TypeError("Load failed");
+    };
+    assert.equal(await screen.confirm(), "error");
+    globalThis.fetch = realFetch;
+    assert.equal(screen.pendingRef.current.appEventId, "evt_loss_entry_loss_1");
+    assert.equal(screen.pendingRef.current.partial, true);
+    assert.equal(server.stock, 8);
+  });
+
+  it("リセットで取りやめられるのは「一部だけ反映」と分かった操作だけ", async () => {
+    partialServer();
+    const screen = openScreen(storage, LINES);
+    await screen.confirm();
+    assert.equal(canDiscardPendingOperation(screen.pendingRef.current), true);
+
+    // 応答なしで結果が分からない操作は、リセットで ID を捨てられない（押し直しで二重になるため）。
+    fakeServer({ lose: () => true });
+    const other = openScreen(memoryStorage(), LINES);
+    await other.confirm();
+    assert.equal(canDiscardPendingOperation(other.pendingRef.current), false);
+    assert.equal(canDiscardPendingOperation(null), true);
+  });
+});
+
 describe("helpers", () => {
   it("pendingLinesChanged は並び順や表示用の項目では変わらない", () => {
     const op = {
@@ -285,7 +386,7 @@ describe("helpers", () => {
   it("isFinalApplyRejection は 4xx の断りだけを最終とみなす", () => {
     assert.equal(isFinalApplyRejection(400, "fatal", false), true);
     assert.equal(isFinalApplyRejection(403, "fatal", false), true);
-    assert.equal(isFinalApplyRejection(400, "partial_failed", false), true);
+    assert.equal(isFinalApplyRejection(400, "partial_failed", false), false);
     assert.equal(isFinalApplyRejection(400, "fatal", true), false);
     assert.equal(isFinalApplyRejection(401, "auth", false), false);
     assert.equal(isFinalApplyRejection(409, "fatal", false), false);
@@ -306,6 +407,7 @@ describe("helpers", () => {
       assert.ok(remember > 0 && send > remember, `${file}: remember before send`);
       assert.match(src, /reused && pendingLinesChanged\(operation, lines\)/);
       assert.match(src, /settleOperationAfterError\(/);
+      assert.match(src, /!canDiscardPendingOperation\(pendingOpRef\.current\)/);
       assert.doesNotMatch(src, /if \(kept\) await saveAppliedOperation/);
     }
   });

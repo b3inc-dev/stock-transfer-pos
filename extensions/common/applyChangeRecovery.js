@@ -64,6 +64,6 @@ export const APPLY_PENDING_MESSAGE =
 export const APPLY_UNCERTAIN_MESSAGE =
   "在庫APIの応答を受け取れませんでした（通信が途切れた可能性）。数分待ってから「確定」をもう一度押してください（同じ確定のため在庫は二重に変わりません）。";
 export const APPLY_PARTIAL_MESSAGE =
-  "在庫調整が一部だけ反映された可能性があります（partial_failed）。再確定せず管理者に連絡してください。";
+  "在庫が一部だけ反映された可能性があります（partial_failed）。この確定は、もう一度「確定」を押しても在庫は動きません（二重にも、残りの反映にもなりません）。管理者に連絡して、Shopify の在庫を確かめて直してもらってください。";
 export const APPLY_HISTORY_INCOMPLETE_MESSAGE =
   "在庫は反映済みですが、在庫変更履歴の記録に失敗しました。同じ操作でもう一度確定すると履歴だけ再記録されます（在庫は二重に変わりません）。";

@@ -154,6 +154,8 @@ pending → applying → completed
 
 - 同一 `appEventId` が `completed` → 即 OK 返却（冪等）
 - `pending` / `applying` → 202（処理中）
+- `partial_failed` → 400 + `partiallyApplied`（在庫は動かさない。自動で残りを反映しない。管理者が Shopify で直す）
+- delta の明細で今の在庫数を読めない → イベントを作らずに 503 `current_quantity_unreadable`（在庫は動かさない。同じ ID で送り直してよい）
 - サーバー GraphQL は 429/503 を `withGraphQLRetry`（最大 3 回、指数バックオフ）
 
 ---
@@ -174,6 +176,8 @@ pending → applying → completed
 | 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー | 比較的低い |
 | apply-change 再送 | 二重 set | `appEventId` unique | 設計意図どおり |
 | ロス・仕入れ・調整の応答なし | 押し直しで新 ID → 二重 | 送る前に ID を端末へ保存し、完了かはっきりした断りまで同じ ID（D3c） | 2 端末は未カバー |
+| ロス・仕入れ・調整の一部だけ反映 | 押し直しで新 ID → 反映済みの分が二重 | ID を手放さず同じ ID で送る（サーバーは在庫を動かさない）。リセットで取りやめたときだけ ID を捨てる（D3c） | 取りやめ後に同じ明細を入れ直すと二重 |
+| 今の在庫数の読み取り失敗（delta） | 0 + delta で在庫を上書き | イベント前に 503 で止める（D3c） | — |
 
 ### Idempotency の境界
 

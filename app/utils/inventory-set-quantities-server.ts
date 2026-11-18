@@ -11,6 +11,7 @@ import type {
   QuantityNameValue,
 } from "../types/graphql-responses";
 import { isDefiniteUnaappliedRejection } from "./apply-change-outer-catch-guard";
+import { readAvailableFromResponse, type CurrentQuantityRead } from "./current-quantity-read";
 
 const INVENTORY_SET_QUANTITIES_MAX = 250;
 
@@ -403,18 +404,21 @@ export async function setInventoryQuantitiesServer(
 }
 
 /**
- * 1アイテム・1ロケーションの現在の available 数量を取得
+ * 1アイテム・1ロケーションの現在の available 数量を取得する。
+ * 読めなかったとき（通信・HTTP・GraphQL の errors・形の違い）は 0 にせず ok:false を返す。
+ * 0 にすると、delta の明細（ロス・仕入れ）で在庫が「0 からの増減」に書き換わるため。
+ * その店に在庫の記録が無い（inventoryLevel が null）ときだけ 0（このあと在庫を有効にしてから set する）。
  */
 export async function fetchCurrentQuantityServer(
   admin: { graphql: AdminGraphql },
   locationId: string,
   inventoryItemId: string
-): Promise<number> {
+): Promise<CurrentQuantityRead> {
   const locationGid = toLocationGid(locationId);
   const itemGid = toInventoryItemGid(inventoryItemId);
-  if (!itemGid) return 0;
+  if (!itemGid) return { ok: false, retryable: false, error: `inventoryItemId が不正です: ${inventoryItemId}` };
   try {
-    const { json } = await graphqlWithRetry(admin, `#graphql
+    const { response, json } = await graphqlWithRetry(admin, `#graphql
         query Cur($id: ID!, $loc: ID!) {
           inventoryItem(id: $id) {
             inventoryLevel(locationId: $loc) {
@@ -423,11 +427,9 @@ export async function fetchCurrentQuantityServer(
           }
         }
       `, { id: itemGid, loc: locationGid });
-    const data = (json as { data?: { inventoryItem?: { inventoryLevel?: { quantities?: QuantityNameValue[] } } } })?.data?.inventoryItem?.inventoryLevel?.quantities;
-    const q = Array.isArray(data) ? data.find((x) => x?.name === "available") : null;
-    return Number(q?.quantity ?? 0) || 0;
-  } catch {
-    return 0;
+    return readAvailableFromResponse(response.ok, response.status, json);
+  } catch (e: unknown) {
+    return { ok: false, retryable: true, error: e instanceof Error ? e.message : String(e) };
   }
 }
 

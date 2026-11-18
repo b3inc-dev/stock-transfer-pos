@@ -19,6 +19,11 @@ import {
 } from "../utils/ensure-inventory-activated-server";
 import { decideOuterCatchAction } from "../utils/apply-change-outer-catch-guard";
 import {
+  CURRENT_QUANTITY_UNREADABLE_MESSAGE,
+  INVENTORY_ITEM_NOT_FOUND_MESSAGE,
+  normalizeDeltaEntries,
+} from "../utils/current-quantity-read";
+import {
   decideCompletedEventRetry,
   isHistoryReplayOwnedByShop,
   replayCompletedHistory,
@@ -487,22 +492,30 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // delta のみのエントリは現在値を取得して quantityAfter に正規化（ロス・仕入用）
     // 冪等性チェック通過後にのみ実行することで、リトライ時の無駄な API 呼び出しを防ぐ。
-    const entries: ApplyChangeEntry[] = [];
-    for (const e of entriesParsed) {
-      let qtyAfter = e.quantityAfter;
-      let qtyBefore = e.quantityBefore ?? null;
-      if (qtyAfter == null && e.delta != null) {
-        const cur = await fetchCurrentQuantityServer(admin, locationId, e.inventoryItemId);
-        qtyBefore = cur;
-        qtyAfter = cur + e.delta;
-      }
-      if (qtyAfter == null) continue;
-      entries.push({
-        ...e,
-        quantityAfter: qtyAfter,
-        quantityBefore: qtyBefore ?? undefined,
-      });
+    // 今の在庫数を読めなかったら 0 として扱わず、イベントを作る前に返す（在庫は動かさない）。
+    // 503 は POS が同じ appEventId で送り直す（イベントが無いので次の送信は通常どおり処理される）。
+    const normalized = await normalizeDeltaEntries(entriesParsed, (inventoryItemId) =>
+      fetchCurrentQuantityServer(admin, locationId, inventoryItemId)
+    );
+    if (!normalized.ok) {
+      console.warn(
+        `[api.inventory.apply-change] current quantity unreadable; not applying: appEventId=${appEventId} item=${normalized.inventoryItemId} error=${normalized.error}`
+      );
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: `${normalized.retryable ? CURRENT_QUANTITY_UNREADABLE_MESSAGE : INVENTORY_ITEM_NOT_FOUND_MESSAGE}（${normalized.error}）`,
+          errorCode: normalized.retryable ? "current_quantity_unreadable" : "inventory_item_not_found",
+          appEventId,
+          inventoryItemId: normalized.inventoryItemId,
+        }),
+        {
+          status: normalized.retryable ? 503 : 400,
+          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        }
+      );
     }
+    const entries: ApplyChangeEntry[] = normalized.entries;
     if (entries.length === 0) {
       return new Response(
         JSON.stringify({ ok: false, error: "No valid entries after normalization" }),
