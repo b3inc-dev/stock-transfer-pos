@@ -17,8 +17,12 @@ import {
   planDraftRestore,
   resolveConfirmLines,
   clearLocationDraft,
-  saveAppliedOperation,
   saveScreenDraft,
+  pendingLinesChanged,
+  rememberOperationBeforeSend,
+  settleOperationAfterError,
+  PENDING_LINES_RESTORED_MESSAGE,
+  PENDING_RESET_BLOCKED_MESSAGE,
 } from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
@@ -864,13 +868,21 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
     setSubmitting(true);
     const cur = (l) => Number(l.currentQuantity ?? l.available ?? 0);
     const act = (l) => Number(l.qty ?? 0);
-    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
+    const { operation, reused } = beginConfirmOperation(pendingOpRef.current, () => {
       const adjustmentEntryId = generateAdjustmentId();
       return {
         entryId: adjustmentEntryId,
         appEventId: buildStableAppEventId("adjustment", adjustmentEntryId),
       };
     });
+    if (reused && pendingLinesChanged(operation, lines)) {
+      // 前回の確定の結果が分からないまま明細が変わっている。送らずに前回の明細へ戻す。
+      setLines(operation.lines.map((l) => ({ ...l })));
+      toast(PENDING_LINES_RESTORED_MESSAGE);
+      submitLockRef.current = false;
+      setSubmitting(false);
+      return;
+    }
     const adjustmentEntryId = operation.entryId;
     const appEventId = operation.appEventId;
     const sourceLines = resolveConfirmLines(operation, lines);
@@ -886,6 +898,9 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       // 1) Phase1: 在庫変更＋履歴を1本化（apply-change API）
       let adjustmentGroupId = null;
       try {
+        // 送る前に ID と明細を端末に残す。応答が無いまま閉じても、次の確定で同じ ID を使う。
+        pendingOpRef.current = { ...operation, locationId: String(conds.locationId || ""), lines: sourceLines };
+        await rememberOperationBeforeSend(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, pendingOpRef.current);
         const applyResult = await applyInventoryChangeToApi({
           appEventId,
           activity: "adjustment",
@@ -901,7 +916,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       } catch (applyErr) {
         pendingOpRef.current = operationToKeepAfterError(operation, applyErr, pendingOpRef.current, sourceLines);
         if (pendingOpRef.current) pendingOpRef.current.locationId = String(conds?.locationId || "");
-        if (pendingOpRef.current) await saveAppliedOperation(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, pendingOpRef.current);
+        await settleOperationAfterError(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, pendingOpRef.current, conds?.locationId);
         const msg = String(applyErr?.message ?? applyErr);
         toast(`在庫調整エラー: ${msg}`);
         return;
@@ -966,7 +981,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       const kept = operationToKeepAfterError(operation, e, pendingOpRef.current, sourceLines);
       if (kept) kept.locationId = String(conds?.locationId || "");
       pendingOpRef.current = kept;
-      if (kept) await saveAppliedOperation(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, kept);
+      await settleOperationAfterError(SHOPIFY?.storage, ADJUSTMENT_DRAFT_KEY, kept, conds?.locationId);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
@@ -1353,7 +1368,7 @@ export function AdjustmentProductList({ conds, onBack, onAfterConfirm, setHeader
       setLines(frozen.map((l) => ({ ...l })));
       confirmResetModalRef?.current?.hideOverlay?.();
       confirmResetModalRef?.current?.hide?.();
-      toast("在庫反映済みのため、確定した明細のままもう一度確定してください");
+      toast(PENDING_RESET_BLOCKED_MESSAGE);
       return;
     }
     setLines([]);

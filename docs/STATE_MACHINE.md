@@ -173,6 +173,7 @@ pending → applying → completed
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
 | 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー | 比較的低い |
 | apply-change 再送 | 二重 set | `appEventId` unique | 設計意図どおり |
+| ロス・仕入れ・調整の応答なし | 押し直しで新 ID → 二重 | 送る前に ID を端末へ保存し、完了かはっきりした断りまで同じ ID（D3c） | 2 端末は未カバー |
 
 ### Idempotency の境界
 

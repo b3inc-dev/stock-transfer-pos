@@ -29,10 +29,6 @@ const MAX_REQUEST_RETRIES = 3;
 /** リトライ間隔（ミリ秒）。2回目以降は指数バックオフ（1s → 2s） */
 const RETRY_DELAY_MS = 1000;
 
-function isRetryableStatus(status) {
-  return status === 429 || status === 503 || (status >= 500 && status < 600);
-}
-
 /** 一度でも在庫適用済みと分かった失敗は、後続の 503 や通信エラーにもその印を残す。 */
 export function carryInventoryApplied(error, seen) {
   const err = error instanceof Error ? error : new Error(String(error || "applyInventoryChangeToApi: Request failed"));
@@ -41,6 +37,19 @@ export function carryInventoryApplied(error, seen) {
   err.historyIncomplete = true;
   if (!err.code) err.code = "history_incomplete";
   return err;
+}
+
+/**
+ * サーバーがはっきり断った失敗（入力の誤り・別ショップのイベント・一部だけ反映済みなど）。
+ * 同じ appEventId で送り直しても答えは変わらないので、画面はこの ID を残さなくてよい。
+ * 応答なし・時間切れ・401・408・409・429・5xx・処理中は「結果が分からない」なので、ここに入れない。
+ */
+export function isFinalApplyRejection(httpStatus, kind, sawApplied) {
+  if (sawApplied) return false;
+  if (kind !== "fatal" && kind !== "partial_failed") return false;
+  const status = Number(httpStatus);
+  if (!(status >= 400 && status < 500)) return false;
+  return status !== 401 && status !== 408 && status !== 409 && status !== 429;
 }
 
 async function delay(ms) {
@@ -214,7 +223,7 @@ async function applyWithUncertainRecovery({ session, url, body, appEventId, requ
 /**
  * @param {Object} opts
  * @param {boolean} [opts.recoverUncertain] - true のとき通信断/タイムアウト/202 を同一 appEventId の状態照会で解決する（棚卸のみ使用）
- * @param {number} [opts.requestTimeoutMs] - recoverUncertain 時の 1 リクエスト上限
+ * @param {number} [opts.requestTimeoutMs] - 1 リクエストの時間の上限（既定 90 秒。超えたら応答なしとして同じ appEventId で送り直す）
  * @param {number[]} [opts.recoveryDelaysMs] - recoverUncertain 時の状態照会間隔（テスト用）
  */
 export async function applyInventoryChangeToApi({
@@ -274,82 +283,96 @@ export async function applyInventoryChangeToApi({
   let lastError = null;
   let sawApplied = false;
   const waitMsUnit = Number.isFinite(Number(retryDelayMs)) ? Number(retryDelayMs) : RETRY_DELAY_MS;
+  const timeoutMs = Number.isFinite(Number(requestTimeoutMs)) ? Number(requestTimeoutMs) : RECOVER_REQUEST_TIMEOUT_MS;
   for (let attempt = 1; attempt <= MAX_REQUEST_RETRIES; attempt++) {
     const token = await session.getSessionToken();
     if (!token) {
       throw new Error("applyInventoryChangeToApi: Failed to get session token");
     }
+    const retryWaitMs = waitMsUnit * Math.min(attempt, 2);
+
+    let res = null;
+    let data = null;
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      const res = await fetch(url, {
+      res = await fetch(url, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: controller ? controller.signal : undefined,
       });
-      const data = await res.json().catch(() => ({}));
-
-      const kind = classifyApplyChangeResponse(res.status, data);
-      if (kind === "success") {
-        return data;
-      }
-      if (kind === "history_incomplete") {
-        sawApplied = true;
-        if (attempt < MAX_REQUEST_RETRIES) {
-          await delay(waitMsUnit * Math.min(attempt, 2));
-          continue;
-        }
-        throw carryInventoryApplied(
-          errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
-            historyIncomplete: true,
-            inventoryApplied: true,
-          }),
-          true
-        );
-      }
-      if (res.ok && data?.ok !== false) {
-        return data;
-      }
-
-      // 空 error / Unknown 固定を避け、HTTP 状況と errorCode を POS toast に載せる
-      const rawErr = typeof data?.error === "string" ? data.error.trim() : "";
-      const code = typeof data?.errorCode === "string" && data.errorCode.trim() ? data.errorCode.trim() : "";
-      let msg = rawErr;
-      if (!msg || /^unknown(\s+error)?$/i.test(msg)) {
-        msg =
-          res.statusText?.trim() ||
-          `在庫APIリクエストに失敗しました（HTTP ${res.status}${code ? ` / ${code}` : ""}）`;
-      } else if (code && !msg.includes(code)) {
-        msg = `${msg} [${code}]`;
-      }
+      data = await res.json().catch(() => ({}));
+    } catch (err) {
+      // fetch が投げるのは HTTP の応答を受け取れなかったときだけ（TypeError の通信失敗・AbortError・時間切れ）。
+      // エラーの文（"Load failed" / "Failed to fetch" など）は端末ごとに違うので見ない。
+      // サーバーで在庫が動いたかは分からないので、同じ appEventId のまま送り直す。
+      const fetchErr = err instanceof Error ? err : new Error(String(err));
+      const detail = fetchErr.message ? `（${fetchErr.message}）` : "";
       lastError = carryInventoryApplied(
-        new Error(data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`),
+        errorWithCode(`${APPLY_UNCERTAIN_MESSAGE}${detail}`, "APPLY_UNCERTAIN", { cause: fetchErr }),
         sawApplied
       );
-
-      if (res.status === 401 && attempt < MAX_REQUEST_RETRIES) {
-        await delay(attempt === 1 ? 500 : waitMsUnit * Math.min(attempt - 1, 2));
+      if (attempt < MAX_REQUEST_RETRIES) {
+        console.warn(`[applyInventoryChangeToApi] attempt ${attempt}/${MAX_REQUEST_RETRIES}, no response, retrying in ${retryWaitMs}ms: ${fetchErr.message}`);
+        await delay(retryWaitMs);
         continue;
       }
-      if (isRetryableStatus(res.status) && attempt < MAX_REQUEST_RETRIES) {
-        const waitMs = waitMsUnit * Math.min(attempt, 2);
-        if (attempt > 1) {
-          console.warn(`[applyInventoryChangeToApi] attempt ${attempt}/${MAX_REQUEST_RETRIES}, retrying in ${waitMs}ms (status=${res.status})`);
-        }
-        await delay(waitMs);
-        continue;
-      }
-
       throw lastError;
-    } catch (err) {
-      lastError = carryInventoryApplied(err instanceof Error ? err : new Error(String(err)), sawApplied);
-      const isNetworkOrServer = lastError.message.includes("fetch") || lastError.message.includes("Network");
-      if (isNetworkOrServer && attempt < MAX_REQUEST_RETRIES) {
-        const waitMs = waitMsUnit * Math.min(attempt, 2);
-        console.warn(`[applyInventoryChangeToApi] attempt ${attempt}/${MAX_REQUEST_RETRIES}, retrying in ${waitMs}ms: ${lastError.message}`);
-        await delay(waitMs);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    const kind = classifyApplyChangeResponse(res.status, data);
+    if (kind === "success") {
+      return data;
+    }
+    if (kind === "history_incomplete") {
+      sawApplied = true;
+      if (attempt < MAX_REQUEST_RETRIES) {
+        await delay(retryWaitMs);
+        continue;
+      }
+      throw carryInventoryApplied(
+        errorWithCode(APPLY_HISTORY_INCOMPLETE_MESSAGE, "history_incomplete", {
+          historyIncomplete: true,
+          inventoryApplied: true,
+        }),
+        true
+      );
+    }
+    if (kind === "pending") {
+      // 同じ appEventId をサーバーがまだ処理中（前の送信が届いていた）。少し待って同じ ID で聞き直す。
+      lastError = carryInventoryApplied(errorWithCode(APPLY_PENDING_MESSAGE, "APPLY_PENDING"), sawApplied);
+      if (attempt < MAX_REQUEST_RETRIES) {
+        await delay(retryWaitMs);
         continue;
       }
       throw lastError;
     }
+
+    // 空 error / Unknown 固定を避け、HTTP 状況と errorCode を POS toast に載せる
+    const msg = buildApiErrorMessage(res, data);
+    lastError = carryInventoryApplied(
+      new Error(data?.ok === false ? msg : `applyInventoryChangeToApi: ${msg}`),
+      sawApplied
+    );
+
+    if (kind === "auth" && attempt < MAX_REQUEST_RETRIES) {
+      await delay(attempt === 1 ? 500 : waitMsUnit * Math.min(attempt - 1, 2));
+      continue;
+    }
+    if (kind === "retryable" && attempt < MAX_REQUEST_RETRIES) {
+      if (attempt > 1) {
+        console.warn(`[applyInventoryChangeToApi] attempt ${attempt}/${MAX_REQUEST_RETRIES}, retrying in ${retryWaitMs}ms (status=${res.status})`);
+      }
+      await delay(retryWaitMs);
+      continue;
+    }
+    if (isFinalApplyRejection(res.status, kind, sawApplied)) {
+      lastError.finalRejection = true;
+    }
+    throw lastError;
   }
   throw carryInventoryApplied(lastError || new Error("applyInventoryChangeToApi: Request failed"), sawApplied);
 }

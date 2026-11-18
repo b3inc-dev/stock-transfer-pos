@@ -55,6 +55,20 @@
 
 ---
 
+### D3c. ロス・仕入れ・調整の appEventId は答えが出るまで持ち続ける（2026-11-19）
+
+| 層 | 方針 |
+|----|------|
+| ID を残す時 | **送る前**に `SHOPIFY.storage` の下書き（`appliedOperationsByLocation`）へ、ID と明細を店ごとに残す（`rememberOperationBeforeSend`） |
+| ID を手放す時 | サーバーが「完了」を返したとき、またはサーバーがはっきり断ったとき（4xx。401・408・409・429 を除く。`finalRejection`）だけ |
+| 結果が分からない失敗 | 応答なし（`fetch` が投げた例外すべて: TypeError・AbortError・時間切れ）・5xx・202・確定後のローカル保存の失敗では ID を残す。エラーの文の中身（"fetch" / "Network" / "Load failed"）では判断しない |
+| 1 回の時間の上限 | 90 秒（超えたら AbortError → 応答なしとして同じ ID で送り直す） |
+| 明細の確かめ | 残っている ID の明細（商品と数量）と画面の明細が違えば、送らずに前回の明細へ戻す（`pendingLinesChanged`）。D3b の fingerprint と同じ考え方 |
+
+**意図**: 応答が届かないまま新しい ID を発行すると、前の送信が届いていた場合に在庫がもう一度動く。サーバーは同じ ID の completed に 200 を返す（STATE_MACHINE §6）ので、同じ ID で送り直せば在庫は 1 回だけ動く。
+
+**残ギャップ**: 2 台の端末で同じ明細を別々に確定するのは防げない（端末ごとの保存）。`partial_failed`（一部だけ反映）は従来どおり ID を手放し、管理者の確認に任せる。
+
 ## D4. POS GraphQL は短 timeout、サーバーは 429 リトライ
 
 | クライアント | timeout | 429 retry |

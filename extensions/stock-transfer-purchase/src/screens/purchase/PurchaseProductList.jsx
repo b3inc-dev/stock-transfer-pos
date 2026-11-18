@@ -18,8 +18,12 @@ import {
   planDraftRestore,
   resolveConfirmLines,
   clearLocationDraft,
-  saveAppliedOperation,
   saveScreenDraft,
+  pendingLinesChanged,
+  rememberOperationBeforeSend,
+  settleOperationAfterError,
+  PENDING_LINES_RESTORED_MESSAGE,
+  PENDING_RESET_BLOCKED_MESSAGE,
 } from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
@@ -928,13 +932,21 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
     }
     submitLockRef.current = true;
     setSubmitting(true);
-    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
+    const { operation, reused } = beginConfirmOperation(pendingOpRef.current, () => {
       const purchaseEntryId = generatePurchaseId();
       return {
         entryId: purchaseEntryId,
         appEventId: buildStableAppEventId("purchase_entry", purchaseEntryId),
       };
     });
+    if (reused && pendingLinesChanged(operation, lines)) {
+      // 前回の確定の結果が分からないまま明細が変わっている。送らずに前回の明細へ戻す。
+      setLines(operation.lines.map((l) => ({ ...l })));
+      toast(PENDING_LINES_RESTORED_MESSAGE);
+      submitLockRef.current = false;
+      setSubmitting(false);
+      return;
+    }
     const purchaseEntryId = operation.entryId;
     const appEventId = operation.appEventId;
     const sourceLines = resolveConfirmLines(operation, lines);
@@ -950,6 +962,9 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
         }));
 
       if (entriesForApply.length > 0) {
+        // 送る前に ID と明細を端末に残す。応答が無いまま閉じても、次の確定で同じ ID を使う。
+        pendingOpRef.current = { ...operation, locationId: String(conds.locationId || ""), lines: sourceLines };
+        await rememberOperationBeforeSend(SHOPIFY?.storage, PURCHASE_DRAFT_KEY, pendingOpRef.current);
         await applyInventoryChangeToApi({
           appEventId,
           activity: "purchase_entry",
@@ -1029,7 +1044,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       const kept = operationToKeepAfterError(operation, e, pendingOpRef.current, sourceLines);
       if (kept) kept.locationId = String(conds?.locationId || "");
       pendingOpRef.current = kept;
-      if (kept) await saveAppliedOperation(SHOPIFY?.storage, PURCHASE_DRAFT_KEY, kept);
+      await settleOperationAfterError(SHOPIFY?.storage, PURCHASE_DRAFT_KEY, kept, conds?.locationId);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
@@ -1412,7 +1427,7 @@ export function PurchaseProductList({ conds, onBack, onAfterConfirm, setHeader, 
       setLines(frozen.map((l) => ({ ...l })));
       confirmResetModalRef?.current?.hideOverlay?.();
       confirmResetModalRef?.current?.hide?.();
-      toast("在庫反映済みのため、確定した明細のままもう一度確定してください");
+      toast(PENDING_RESET_BLOCKED_MESSAGE);
       return;
     }
     setLines([]);
