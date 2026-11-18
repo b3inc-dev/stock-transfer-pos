@@ -8,7 +8,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { getDateInShopTimezone, readShopTimezone } from "../app/utils/timezone.ts";
 import { planInventoryHistoryDate, prepareFailedEventRetry, shopCalendarDate, utcFallbackShiftsShopDate } from "../extensions/common/shopHistoryDate.js";
-import { decideCompletedEventRetry, repairCompletedHistoryDates, replayCompletedHistory } from "../extensions/common/inventoryLogWrite.js";
+import { decideCompletedEventRetry, replayCompletedHistory } from "../extensions/common/inventoryLogWrite.js";
+import { respondToCompletedEventResend } from "../extensions/common/completedEventResend.js";
+import { classifyApplyChangeResponse } from "../extensions/common/applyChangeRecovery.js";
 
 /** 日本時間 2026-11-13 00:30。UTC ではまだ 2026-11-12。 */
 const TOKYO_BOUNDARY = new Date("2026-11-12T15:30:00.000Z");
@@ -246,15 +248,18 @@ describe("recovery reprocess does not double-apply inventory or history", () => 
     const createAt = route.indexOf("inventoryChangeEvent.create");
     const setAt = route.indexOf("await setInventoryQuantitiesServer(");
     assert.ok(guardAt > 0 && createAt > guardAt && setAt > createAt);
-    const replayAt = route.indexOf('phase: "after_inventory"');
-    assert.ok(replayAt > 0 && replayAt < createAt);
+    // completed の送り直しは共通の respondToCompletedEventResend に任せる（在庫 API を呼ばず、必ず 200）。
+    const completedAt = route.indexOf('existingEvent.status === "completed"');
+    const resendAt = route.indexOf("respondToCompletedEventResend(db");
+    assert.ok(completedAt > 0 && resendAt > completedAt && resendAt < createAt);
     const failedAt = route.indexOf('existingEvent.status === "failed"');
     const prepareAt = route.indexOf("prepareFailedEventRetry(");
     const deleteAt = route.indexOf("inventoryChangeEvent.delete");
     assert.ok(failedAt > 0 && prepareAt > failedAt && deleteAt > prepareAt);
-    const repairAt = route.indexOf("repairCompletedHistoryDates(");
-    assert.ok(repairAt > 0 && repairAt < failedAt);
-    assert.equal(route.includes("history_incomplete: timezone_unavailable:"), false);
+    assert.ok(resendAt < failedAt);
+    const completedBranch = route.slice(completedAt, route.indexOf("const isProcessing", completedAt));
+    assert.equal(completedBranch.includes("503"), false);
+    assert.equal(completedBranch.includes("setInventoryQuantitiesServer"), false);
   });
 });
 
@@ -321,29 +326,22 @@ async function resendCleanCompleted({ db, event, read, inventoryWrites }) {
   if (decision.action !== "return_completed") {
     throw new Error(`expected return_completed, got ${decision.action}`);
   }
-  const plan = planInventoryHistoryDate({
-    phase: "after_inventory",
-    read,
-    timestamp: event.requestedAt,
-  });
-  if (plan.action !== "proceed") {
-    return {
-      status: 503,
-      errorCode: "timezone_unavailable",
-      inventoryWrites,
-      errorSummary: event.errorSummary,
-      statusText: event.status,
-    };
-  }
-  await repairCompletedHistoryDates(db, {
+  // 本番と同じ共通処理を通す。在庫 API はここでは呼ばれない（inventoryWrites は増えない）。
+  const resp = await respondToCompletedEventResend(db, {
+    existingEvent: event,
     shop: event.shop,
     appEventId: APP_EVENT,
-    activity: event.activity,
-    locationId: event.locationId,
-    date: plan.date,
-    lines: event.lines,
+    readTimezone: async () => read,
   });
-  return { status: 200, inventoryWrites, date: db.rows[0]?.date };
+  return {
+    status: resp.status,
+    body: resp.body,
+    errorCode: resp.body.errorCode,
+    inventoryWrites,
+    errorSummary: event.errorSummary,
+    statusText: resp.body.status,
+    date: db.rows[0]?.date,
+  };
 }
 
 describe("completed events repair a UTC history date without another stock write", () => {
@@ -450,7 +448,7 @@ describe("completed events repair a UTC history date without another stock write
     }).date, "2026-11-12");
   });
 
-  it("returns 503 and writes nothing when the timezone read fails", async () => {
+  it("still answers 200 completed and leaves the date for later when the timezone read fails", async () => {
     const failures = [
       { ok: false, reason: "request_failed" },
       { ok: false, reason: "graphql_error" },
@@ -469,8 +467,11 @@ describe("completed events repair a UTC history date without another stock write
         },
       ]);
       const result = await resendCleanCompleted({ db, event, read, inventoryWrites: 0 });
-      assert.equal(result.status, 503);
-      assert.equal(result.errorCode, "timezone_unavailable");
+      // 在庫はもう動いている。日付が直せないだけで失敗を返すと、POS が ID を捨てて二重に動かす。
+      assert.equal(result.status, 200);
+      assert.equal(result.body.ok, true);
+      assert.equal(result.body.historyDateRepairDeferred, true);
+      assert.equal(classifyApplyChangeResponse(result.status, result.body), "success");
       assert.equal(result.inventoryWrites, 0);
       assert.equal(result.errorSummary, null);
       assert.equal(result.statusText, "completed");

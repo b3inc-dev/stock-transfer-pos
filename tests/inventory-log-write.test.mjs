@@ -280,7 +280,8 @@ describe("history replay stays inside the event shop", () => {
   it("does not write shop B history or clear shop A's repair marker", async () => {
     const route = readFileSync(new URL("../app/routes/api.inventory.apply-change.tsx", import.meta.url), "utf8");
     const guardAt = route.indexOf("isHistoryReplayOwnedByShop(existingEvent.shop, shop)");
-    const replayAt = route.indexOf("replayCompletedHistory(");
+    // 履歴の再生は completed の送り直しの共通処理（respondToCompletedEventResend）の中で行う。
+    const replayAt = route.indexOf("respondToCompletedEventResend(");
     assert.ok(guardAt > 0 && replayAt > guardAt);
 
     const db = memoryDb();

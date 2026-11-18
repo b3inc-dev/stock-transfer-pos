@@ -153,6 +153,7 @@ pending → applying → completed
 ```
 
 - 同一 `appEventId` が `completed` → 即 OK 返却（冪等）
+  - 店舗タイムゾーンが読めない・履歴日付の修復に失敗した、という履歴の日付だけの問題でも **5xx を返さない**（POS は 5xx を「在庫未適用」と受け取り ID を捨て、押し直しで二重適用になる）。履歴が書きかけなら `historyIncomplete`（200）で返して同じ ID を残させ、日付の修復だけのときはあとに回す（`extensions/common/completedEventResend.js`）
 - `pending` / `applying` → 202（処理中）
 - サーバー GraphQL は 429/503 を `withGraphQLRetry`（最大 3 回、指数バックオフ）
 

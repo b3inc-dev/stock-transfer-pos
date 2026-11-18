@@ -19,12 +19,8 @@ import {
   verifyInventoryLevelsAtLocation,
 } from "../utils/ensure-inventory-activated-server";
 import { decideOuterCatchAction } from "../utils/apply-change-outer-catch-guard";
-import {
-  decideCompletedEventRetry,
-  isHistoryReplayOwnedByShop,
-  repairCompletedHistoryDates,
-  replayCompletedHistory,
-} from "../../extensions/common/inventoryLogWrite.js";
+import { isHistoryReplayOwnedByShop } from "../../extensions/common/inventoryLogWrite.js";
+import { respondToCompletedEventResend } from "../../extensions/common/completedEventResend.js";
 import {
   formatInventoryApiError,
   isNotStockedRetryableError,
@@ -340,141 +336,19 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
       if (existingEvent.status === "completed") {
-        const retryDecision = decideCompletedEventRetry(existingEvent);
-        if (retryDecision.action === "retry_history_only") {
-          // 在庫は適用済み。再送では setQuantities を呼ばず、保存済み明細から履歴だけ upsert する。
-          // タイムゾーンが読めないときは UTC 日付で帰属を変えず、履歴未完了のまま再試行に残す。
-          const requestedAt = existingEvent.requestedAt ?? new Date();
-          const historyDate = planInventoryHistoryDate({
-            phase: "after_inventory",
-            read: await readShopTimezone(admin),
-            timestamp: requestedAt,
-          });
-          if (historyDate.action !== "proceed") {
-            return new Response(
-              JSON.stringify({
-                ok: false,
-                error: "店舗タイムゾーンを読み取れなかったため、在庫と履歴は変更していません",
-                errorCode: "timezone_unavailable",
-                appEventId,
-                status: "completed",
-                eventId: existingEvent.id,
-              }),
-              { status: 503, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-            );
-          }
-          const replay = await replayCompletedHistory(db, {
-            shop,
-            appEventId,
-            activity: existingEvent.activity,
-            locationId: existingEvent.locationId,
-            locationName: existingEvent.locationName || "",
-            sourceId: existingEvent.sourceId,
-            requestedAt,
-            date: historyDate.date,
-            lines: existingEvent.lines.map((l) => ({
-              inventoryItemId: l.inventoryItemId,
-              variantId: l.variantId,
-              sku: l.sku,
-              delta: l.delta,
-              quantityAfter: l.quantityAfterActual ?? l.quantityAfterExpected,
-            })),
-          });
-          if (replay.ok) {
-            await db.inventoryChangeEvent
-              .update({ where: { id: existingEvent.id }, data: { errorSummary: null } })
-              .catch(() => null);
-            return new Response(
-              JSON.stringify({
-                ok: true,
-                eventId: existingEvent.id,
-                appEventId,
-                status: "completed",
-                appliedCount: existingEvent.lines.length,
-                historyReplayed: true,
-              }),
-              { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-            );
-          }
-          const historyError = replay.error || "history finalize failed";
-          await db.inventoryChangeEvent
-            .update({
-              where: { id: existingEvent.id },
-              data: { errorSummary: `history_incomplete: ${replay.errorCode}: ${historyError}`.slice(0, 500) },
-            })
-            .catch(() => null);
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              eventId: existingEvent.id,
-              appEventId,
-              status: "completed",
-              appliedCount: existingEvent.lines.length,
-              historyIncomplete: true,
-              errorCode: "history_incomplete",
-              historyError,
-            }),
-            { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-          );
-        }
-        // 旧実装が UTC 日付のまま completed にしたものも、マーカーが無くても date だけ直す。
-        const historyTimestamp = existingEvent.requestedAt ?? requestedAt;
-        const repairDate = planInventoryHistoryDate({
-          phase: "after_inventory",
-          read: await readShopTimezone(admin),
-          timestamp: historyTimestamp,
+        // 在庫は適用済み。タイムゾーンや日付の修復の失敗では 5xx を返さない（POS が ID を捨てて二重適用になる）。
+        const resend = await respondToCompletedEventResend(db, {
+          existingEvent,
+          shop,
+          appEventId,
+          readTimezone: () => readShopTimezone(admin),
+          now: requestedAt,
+          warn: (msg: string, detail?: unknown) => console.warn(msg, detail ?? ""),
         });
-        if (repairDate.action !== "proceed") {
-          return new Response(
-            JSON.stringify({
-              ok: false,
-              error: "店舗タイムゾーンを読み取れなかったため、在庫と履歴は変更していません",
-              errorCode: "timezone_unavailable",
-              appEventId,
-              status: "completed",
-              eventId: existingEvent.id,
-            }),
-            { status: 503, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-          );
-        }
-        try {
-          await repairCompletedHistoryDates(db, {
-            shop,
-            appEventId,
-            activity: existingEvent.activity,
-            locationId: existingEvent.locationId,
-            date: repairDate.date,
-            lines: existingEvent.lines.map((l) => ({
-              inventoryItemId: l.inventoryItemId,
-            })),
-          });
-        } catch (repairErr: unknown) {
-          console.warn(
-            "[api.inventory.apply-change] history date repair failed:",
-            formatCaughtError(repairErr)
-          );
-          return new Response(
-            JSON.stringify({
-              ok: false,
-              error: "店舗日付の修復に失敗したため、在庫は変更していません",
-              errorCode: "timezone_unavailable",
-              appEventId,
-              status: "completed",
-              eventId: existingEvent.id,
-            }),
-            { status: 503, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-          );
-        }
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            eventId: existingEvent.id,
-            appEventId,
-            status: "completed",
-            appliedCount: existingEvent.lines.length,
-          }),
-          { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
+        return new Response(JSON.stringify(resend.body), {
+          status: resend.status,
+          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        });
       }
       const isProcessing = existingEvent.status === "pending" || existingEvent.status === "applying";
       if (isProcessing) {
