@@ -6,6 +6,7 @@ import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
 import { getDateInShopTimezone } from "../utils/timezone";
+import { findPreviousQuantity, repairSuccessorDelta } from "../utils/inventory-history-order";
 import type { AdminGraphQLRequestClient } from "../types";
 
 // APIバージョン（shopify.server.tsと同じ値を使用）
@@ -82,6 +83,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const inventoryItemId = inventoryItemIdRaw.startsWith("gid://")
       ? inventoryItemIdRaw
       : `gid://shopify/InventoryItem/${inventoryItemIdRaw}`;
+
+    // 古い通知があとから届いて行を書いた・数量を決めたときに、すぐ後ろの管理の行の差分を出し直す。
+    // 順番どおりに届いた通知では後ろに行が無いので何もしない。失敗しても今回の記録は成功のまま（履歴の数だけの補正）。
+    const historyScope = {
+      shop,
+      inventoryItemIds: [inventoryItemIdRaw, `gid://shopify/InventoryItem/${inventoryItemIdRaw}`],
+      locationIds: [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`],
+    };
+    const repairSuccessorAfter = async (observedAt: Date, excludeId?: string | null) => {
+      try {
+        const repaired = await repairSuccessorDelta(db, historyScope, observedAt, available, excludeId);
+        if (repaired) {
+          console.log(
+            `[inventory_levels/update] Late notification: recomputed next admin_webhook delta from this quantity: id=${repaired.id}, delta=${repaired.delta}, quantityAfter(before)=${available}`
+          );
+        }
+      } catch (e: unknown) {
+        console.warn(
+          "[inventory_levels/update] Failed to recompute next row delta after late notification:",
+          e instanceof Error ? e.message : String(e)
+        );
+      }
+    };
 
     // セッションが無くても最小限の記録は行う（インストール直後・再デプロイ直後に管理画面を開かなくても履歴に残す）
     let shopTimezone = "UTC";
@@ -225,37 +249,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // 直前ログ検索は「数値IDのみ」だと order_sales/refund（GID形式で保存）を拾えず delta が誤計算になるため、両形式を候補にする
         const prevItemCandidates = [inventoryItemIdRaw, `gid://shopify/InventoryItem/${inventoryItemIdRaw}`];
         const prevLocCandidates = [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`];
-        const prevLog = await db.inventoryChangeLog.findFirst({
-          where: {
-            shop,
-            inventoryItemId: { in: prevItemCandidates },
-            locationId: { in: prevLocCandidates },
-          },
-          orderBy: {
-            timestamp: "desc",
-          },
-        });
+        // ひとつ前の行は「この通知の時刻より前」の行だけから選ぶ（通知が逆の順で届いても差分を取り違えない）。
+        // いちばん近い行の quantityAfter が null なら、数量のある行まで遡る（変動数「-」を減らす）。
+        const prev = await findPreviousQuantity(
+          db,
+          { shop, inventoryItemIds: prevItemCandidates, locationIds: prevLocCandidates },
+          updatedAt
+        );
+        prevAvailable = prev.prevAvailable;
 
-        prevAvailable = prevLog?.quantityAfter ?? null;
-
-        // 強固な delta 算出: 直前ログの quantityAfter が null でも、同一商品・ロケーションで
-        // quantityAfter が null でない直近1件を遡って取得し、変動数「-」を減らす
-        if (prevAvailable === null && db && typeof db.inventoryChangeLog !== "undefined") {
-          const prevLogWithQty = await db.inventoryChangeLog.findFirst({
-            where: {
-              shop,
-              inventoryItemId: { in: prevItemCandidates },
-              locationId: { in: prevLocCandidates },
-              quantityAfter: { not: null },
-            },
-            orderBy: { timestamp: "desc" },
-          });
-          if (prevLogWithQty?.quantityAfter != null) {
-            prevAvailable = prevLogWithQty.quantityAfter;
-            console.log(`[inventory_levels/update] Using previous log with quantityAfter for delta: id=${prevLogWithQty.id}, quantityAfter=${prevAvailable}`);
-          }
-        }
-        
         // deltaの計算: 直前のログ（または遡ったログ）があればそれから計算、なければinventory_adjustment_group_idから取得を試みる
         if (prevAvailable !== null) {
           // 直前のログがある場合: 通常の計算
@@ -376,6 +378,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               data: { quantityAfter: available },
             });
             console.log(`[inventory_levels/update] Updated existing admin_webhook log quantityAfter: ${duplicateAdminLog.quantityAfter} -> ${available}`);
+            await repairSuccessorAfter(new Date(duplicateAdminLog.timestamp), duplicateAdminLog.id);
           }
           return new Response("OK", { status: 200 });
         }
@@ -596,6 +599,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 where: { id: recentNonAdminLog.id },
                 data: updateData,
               });
+              await repairSuccessorAfter(new Date(recentNonAdminLog.timestamp), recentNonAdminLog.id);
             } catch (e: unknown) {
               console.error(
                 "[inventory_levels/update] Failed to update existing log (quantityAfter null):",
@@ -647,6 +651,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             where: { id: recentAdminOnly.id },
             data: updateSameEvent,
           });
+          if (recentAdminOnly.quantityAfter !== available) {
+            await repairSuccessorAfter(new Date(recentAdminOnly.timestamp), recentAdminOnly.id);
+          }
           console.log(
             `[inventory_levels/update] Updated recent admin_webhook (same event, avoid duplicate): id=${recentAdminOnly.id}, quantityAfter -> ${available}`
           );
@@ -1058,6 +1065,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           console.log(`[inventory_levels/update] Removed RefundPendingLocation for refund ${pendingRefund.refundId}, item ${inventoryItemIdRaw}, locationId=${pendingRefund.locationId}`);
         }
         
+        await repairSuccessorAfter(updatedAt);
         console.log(`[inventory_levels/update] Log saved successfully`);
       } else {
         console.warn(`[inventory_levels/update] InventoryChangeLog model not found in Prisma client. Please restart the dev server.`);
