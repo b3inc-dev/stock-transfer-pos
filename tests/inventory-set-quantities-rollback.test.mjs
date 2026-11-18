@@ -59,9 +59,23 @@ function fakeShopify({ stock, readFail = () => null, setReply = () => null }) {
       }
       if (query.includes("inventorySetQuantities")) {
         const callNo = calls.sets.length;
-        calls.sets.push(v.input.quantities.map((q) => [q.inventoryItemId, q.quantity]));
+        calls.sets.push(v.input.quantities.map((q) => [q.inventoryItemId, q.quantity, q.changeFromQuantity]));
         const reply = setReply(callNo, v.input);
         if (reply) return reply;
+        // changeFromQuantity が数なら、いまの数と合うときだけ書く（合わなければ 1 件も書かない）
+        const stale = v.input.quantities.some(
+          (q) => q.changeFromQuantity != null && (stock.get(q.inventoryItemId) ?? 0) !== q.changeFromQuantity
+        );
+        if (stale) {
+          return json({
+            data: {
+              inventorySetQuantities: {
+                inventoryAdjustmentGroup: null,
+                userErrors: [{ field: ["input"], message: "The quantity has changed.", code: "CHANGE_FROM_QUANTITY_STALE" }],
+              },
+            },
+          });
+        }
         for (const q of v.input.quantities) stock.set(q.inventoryItemId, q.quantity);
         return json({ data: { inventorySetQuantities: { inventoryAdjustmentGroup: { id: "g" }, userErrors: [] } } });
       }
@@ -202,6 +216,65 @@ describe("setInventoryQuantitiesServer: 元に戻す用の控え", () => {
     assert.equal(r.appliedInventoryItemIds.length, 250);
     assert.equal(r.appliedInventoryItemIds[0], gid(1));
     assert.ok(!r.appliedInventoryItemIds.includes(gid(251)), "戻せたチャンク 1 は入れない");
+  });
+});
+
+describe("setInventoryQuantitiesServer: 戻す書き込みは条件付き（P2-A）", () => {
+  it("戻すときは changeFromQuantity に「さっき書いた数」を入れる（前に進む書き込みは今までどおり null）", async () => {
+    const { admin, calls, items } = setup(251, {
+      setReply: (callNo) => (callNo === 1 ? userErrors("Quantity is invalid") : null),
+    });
+    const r = await setInventoryQuantitiesServer(admin, LOC, items);
+    assert.equal(r.rolledBack, true);
+    assert.deepEqual(calls.sets[0][0], [gid(1), 5, null]);
+    assert.deepEqual(calls.sets[2][0], [gid(1), 10, 5], "戻す: 10 にする。いまが 5 のときだけ");
+  });
+
+  it("書いたあとに売れた商品があると戻さない（売上を消さない）。そのチャンクは入ったままで管理者に回す", async () => {
+    const { admin, items, stock } = setup(251, {
+      setReply: (callNo) => {
+        if (callNo === 1) {
+          stock.set(gid(5), stock.get(gid(5)) - 1); // chunk 0 を書いたあと、店で 1 個売れた
+          return userErrors("Quantity is invalid");
+        }
+        return null;
+      },
+    });
+    const r = await setInventoryQuantitiesServer(admin, LOC, items);
+    assert.equal(r.ok, false);
+    assert.equal(r.rolledBack, false);
+    assert.equal(r.partiallyApplied, true);
+    assert.equal(r.applicationUncertain, false, "断られた＝戻していないとはっきりしている");
+    assert.equal(r.appliedInventoryItemIds.length, 250);
+    assert.match(r.error, /CHANGE_FROM_QUANTITY_STALE/);
+    assert.equal(stock.get(gid(5)), 4, "売れた 1 個が消えない（10 に戻さない）");
+    assert.equal(stock.get(gid(1)), 5, "同じチャンクのほかの商品も戻さない（1 回の書き込みは全部か無しか）");
+  });
+
+  it("戻す書き込みが 5xx なら送り直さない（1 回目が入っていたら 2 回目は STALE になり取り違えるため）→ 不明", async () => {
+    const { admin, calls, items } = setup(251, {
+      setReply: (callNo) => {
+        if (callNo === 1) return userErrors("Quantity is invalid");
+        if (callNo === 2) return json({ errors: [{ message: "Internal" }] }, 503);
+        return null;
+      },
+    });
+    const r = await setInventoryQuantitiesServer(admin, LOC, items);
+    assert.equal(calls.sets.length, 3);
+    assert.equal(r.partiallyApplied, true);
+    assert.equal(r.applicationUncertain, true);
+    assert.deepEqual(r.appliedInventoryItemIds, []);
+  });
+
+  it("同じ商品が 2 つのチャンクにあっても、条件がずれずに元の数へ戻る", async () => {
+    const { admin, items, stock } = setup(501, {
+      setReply: (callNo) => (callNo === 2 ? userErrors("Quantity is invalid") : null),
+    });
+    items[250] = { inventoryItemId: "1", quantity: 7 }; // chunk 1 にも商品 1（chunk 0 では 5）
+    const r = await setInventoryQuantitiesServer(admin, LOC, items);
+    assert.equal(r.rolledBack, true);
+    assert.equal(stock.get(gid(1)), 10);
+    assert.equal(stock.get(gid(250)), 10);
   });
 });
 

@@ -35,7 +35,8 @@ export type AdminGraphql = (query: string, opts?: { variables?: Record<string, u
 async function graphqlWithRetry(
   admin: { graphql: AdminGraphql },
   query: string,
-  variables?: Record<string, unknown>
+  variables?: Record<string, unknown>,
+  shouldRetryStatus: (status: number) => boolean = isRetryableStatus
 ): Promise<{ response: Response; json: unknown }> {
   let lastResp: Response | null = null;
   for (let attempt = 1; attempt <= SHOPIFY_API_RETRY_MAX; attempt++) {
@@ -45,7 +46,7 @@ async function graphqlWithRetry(
       const json = await response.json().catch(() => ({}));
       return { response, json };
     }
-    if (!isRetryableStatus(response.status) || attempt >= SHOPIFY_API_RETRY_MAX) {
+    if (!shouldRetryStatus(response.status) || attempt >= SHOPIFY_API_RETRY_MAX) {
       const json = await response.json().catch(() => ({}));
       return { response, json };
     }
@@ -224,6 +225,11 @@ export async function setInventoryQuantitiesServer(
 
   /** 成功確定したチャンクの inventoryItem GID（rollback 前まで蓄積） */
   const appliedInventoryItemIds: string[] = [];
+  /**
+   * いま Shopify にあるはずの数（このアプリが最後に書いた数）。
+   * 戻すときの changeFromQuantity に入れ、書いたあとにだれかが動かしていたら Shopify に断ってもらう。
+   */
+  const lastWritten = new Map<string, number>();
 
   try {
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
@@ -310,9 +316,13 @@ export async function setInventoryQuantitiesServer(
           };
         }
 
-        // 先に入れたチャンク（0..chunkIndex-1）を、控えた数へ逆順に戻す
+        // 先に入れたチャンク（0..chunkIndex-1）を、控えた数へ逆順に戻す。
+        // 戻す書き込みは「いまが、さっき書いた数のままなら」の条件付き（changeFromQuantity）。
+        // 書いたあとに売れた・入庫した商品があると Shopify が CHANGE_FROM_QUANTITY_STALE で断るので、
+        // そのチャンクは戻さず（入ったまま）partial_failed にして管理者に回す（その売上・入庫を消さない）。
         let rollbackFailedAt = -1;
         let rollbackRefused = false;
+        let rollbackStale = false;
         let rollbackErrorMsg = "";
         for (let ri = chunkIndex - 1; ri >= 0; ri--) {
           const rollbackInput: Record<string, unknown> = {
@@ -322,18 +332,20 @@ export async function setInventoryQuantitiesServer(
               inventoryItemId: q.inventoryItemId,
               locationId: locationGid,
               quantity: q.quantity,
-              changeFromQuantity: null,
+              changeFromQuantity: lastWritten.get(q.inventoryItemId) ?? null,
             })),
           };
           try {
+            // 送り直すのは 429（Shopify が受け付けていない）だけ。5xx のあとに送り直すと、
+            // 1 回目が入っていた場合に 2 回目が STALE で断られ、「戻せなかった」と取り違えるため。
             const { response: rbResp, json: rbJson } = await graphqlWithRetry(admin, `#graphql
                 mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
                   inventorySetQuantities(input: $input) {
                     inventoryAdjustmentGroup { id }
-                    userErrors { field message }
+                    userErrors { field message code }
                   }
                 }
-              `, { input: rollbackInput });
+              `, { input: rollbackInput }, (status) => status === 429);
             const rbErrJson = rbJson as InventorySetQuantitiesJson;
             const rbTopErrors = Array.isArray(rbErrJson?.errors) ? rbErrJson.errors : [];
             const rbData = rbErrJson?.data?.inventorySetQuantities;
@@ -346,7 +358,11 @@ export async function setInventoryQuantitiesServer(
             } else if (rbErrs.length) {
               rollbackErrorMsg = rbErrs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
               rollbackRefused = true;
+              rollbackStale = rbErrs.some(
+                (e) => (e as GraphQLUserError & { code?: string | null }).code === "CHANGE_FROM_QUANTITY_STALE"
+              );
             } else {
+              for (const q of snapshots[ri]) lastWritten.set(q.inventoryItemId, q.quantity);
               continue;
             }
           } catch (rbErr) {
@@ -370,7 +386,10 @@ export async function setInventoryQuantitiesServer(
           );
           return {
             ok: false,
-            error: chunkError,
+            // 書いたあとに在庫が動いていて戻さなかったときは、管理者が分かるように理由を足す
+            error: rollbackStale
+              ? `${chunkError}（元に戻す前に店の在庫が動いていたため、戻していません: CHANGE_FROM_QUANTITY_STALE）`
+              : chunkError,
             rolledBack: false,
             partiallyApplied: true,
             // 入ったと言い切れるのは stillApplied だけ。戻す処理がはっきり断られたのでなければ、
@@ -392,6 +411,7 @@ export async function setInventoryQuantitiesServer(
 
       // チャンク成功: 適用済み GID を記録
       for (const gid of chunkItemGids) appliedInventoryItemIds.push(gid);
+      for (const q of chunk) lastWritten.set(q.inventoryItemId, q.quantity);
     }
     return {
       ok: true,
