@@ -4,6 +4,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
+import { findOrderLinkedReplay, repairInventoryLogMetadata } from "../utils/repairInventoryLogMetadata.js";
 import db from "../db.server";
 import { matchPendingSale } from "../utils/match-pending-sale";
 import { getDateInShopTimezone } from "../utils/timezone";
@@ -330,7 +331,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           },
         });
 
+        if (!existingLog && prevLog && prevLog.timestamp >= updatedAt) {
+          existingLog = await findOrderLinkedReplay(db.inventoryChangeLog, {
+            shop, inventoryItemId: inventoryItemIdRaw, locationId: locationIdRaw,
+            quantityAfter: available, timestamp: updatedAt,
+          });
+        }
+
         if (existingLog) {
+          // 補助情報の取得が復旧した再送では、同じ履歴の欠けた項目だけを補う。
+          // 古い通知や並行処理で補正済みの値・数量・分類を上書きしない。
+          try {
+            await repairInventoryLogMetadata(db.inventoryChangeLog, existingLog, shop, {
+              locationIdRaw, locationName, sku, variantId,
+            });
+          } catch (error) {
+            console.warn("[inventory_levels/update] Could not repair metadata on duplicate event", error);
+          }
           console.log(`Skipping duplicate webhook: ${idempotencyKey}`);
           return new Response("OK", { status: 200 });
         }
