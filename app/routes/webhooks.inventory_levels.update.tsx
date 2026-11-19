@@ -5,6 +5,7 @@ import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
+import { matchPendingSale } from "../utils/match-pending-sale";
 import { getDateInShopTimezone } from "../utils/timezone";
 import type { AdminGraphQLRequestClient } from "../types";
 
@@ -675,20 +676,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
         orderBy: { orderCreatedAt: "desc" },
       });
-      const prevForMatch = prevAvailable ?? null;
-      const matched =
-        prevForMatch != null
-          ? allPendings.find((p: { quantity: number }) => {
-              const qty = Math.max(1, Number(p.quantity) || 1);
-              return available + qty === prevForMatch;
-            })
-          : allPendings[0] ?? null;
-      const pending = matched ?? allPendings[0] ?? null;
+      const pending = matchPendingSale(allPendings, delta);
       if (pending) {
         const qty = Math.max(1, Number(pending.quantity) || 1);
         pendingOrder = { orderId: pending.orderId, quantity: qty, locationId: pending.locationId ?? "" };
         console.log(
-          `[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, quantity=${qty}, locationId=${pending.locationId ?? ""}, prevAvailable=${prevForMatch ?? "n/a"}, will save as order_sales`
+          `[inventory_levels/update] Matched OrderPendingLocation: orderId=${pending.orderId}, quantity=${qty}, locationId=${pending.locationId ?? ""}, prevAvailable=${prevAvailable ?? "n/a"}, will save as order_sales`
         );
       }
     }
@@ -740,12 +733,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsAgain }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
         orderBy: { orderCreatedAt: "desc" },
       });
-      const prevForAgain = prevAvailable ?? null;
-      const matchedAgain =
-        prevForAgain != null
-          ? allAgain.find((p: { quantity: number }) => available + Math.max(1, Number(p.quantity) || 1) === prevForAgain)
-          : allAgain[0] ?? null;
-      const pendingAgain = matchedAgain ?? allAgain[0] ?? null;
+      const pendingAgain = matchPendingSale(allAgain, delta);
       if (pendingAgain) {
         const qty = Math.max(1, Number(pendingAgain.quantity) || 1);
         pendingOrder = { orderId: pendingAgain.orderId, quantity: qty, locationId: pendingAgain.locationId ?? "" };
@@ -837,12 +825,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             where: { shop, inventoryItemId: inventoryItemIdRaw, locationId: { in: orderLocCandsRetry }, orderCreatedAt: { gte: pendingFrom, lte: pendingTo } },
             orderBy: { orderCreatedAt: "desc" },
           });
-          const prevForRetry = prevAvailable ?? null;
-          const matchedRetry =
-            prevForRetry != null
-              ? allRetry.find((p: { quantity: number }) => available + Math.max(1, Number(p.quantity) || 1) === prevForRetry)
-              : allRetry[0] ?? null;
-          const pendingRetry = matchedRetry ?? allRetry[0] ?? null;
+          const pendingRetry = matchPendingSale(allRetry, delta);
           if (pendingRetry) {
             const qty = Math.max(1, Number(pendingRetry.quantity) || 1);
             pendingOrder = { orderId: pendingRetry.orderId, quantity: qty, locationId: pendingRetry.locationId ?? "" };
@@ -895,63 +878,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       );
     }
 
-    // OrderPendingLocation にマッチした場合、既存の admin_webhook 行を order_sales に更新して新規行を作らない（20:11/20:14 型の二重「管理」防止）
-    if (pendingOrder && db && typeof db.inventoryChangeLog !== "undefined") {
-      const searchFrom = new Date(updatedAt.getTime() - 30 * 60 * 1000);
-      const searchTo = new Date(updatedAt.getTime() + 5 * 60 * 1000);
-      const expectedPrevQty = available + pendingOrder.quantity;
-      let existingAdmin = await db.inventoryChangeLog.findFirst({
-        where: {
-          shop,
-          inventoryItemId: inventoryItemIdRaw,
-          locationId: locationIdRaw,
-          activity: "admin_webhook",
-          quantityAfter: expectedPrevQty,
-          timestamp: { gte: searchFrom, lte: searchTo },
-        },
-        orderBy: { timestamp: "desc" },
-      });
-      // 先に届いた Webhook が「売上後」の値で admin_webhook 保存している場合（quantityAfter=available）。その行を order_sales に更新して二重行を防ぐ
-      if (!existingAdmin && available !== expectedPrevQty) {
-        existingAdmin = await db.inventoryChangeLog.findFirst({
-          where: {
-            shop,
-            inventoryItemId: inventoryItemIdRaw,
-            locationId: locationIdRaw,
-            activity: "admin_webhook",
-            quantityAfter: available,
-            timestamp: { gte: searchFrom, lte: searchTo },
-          },
-          orderBy: { timestamp: "desc" },
-        });
-        if (existingAdmin) {
-          console.log(`[inventory_levels/update] Found admin_webhook with quantityAfter=${available} (post-sale value), will update to order_sales to avoid duplicate row`);
-        }
-      }
-      if (existingAdmin) {
-        const orderIdRef = `order_${pendingOrder.orderId}`;
-        // 救済時は idempotencyKey を変更しない（orders/updated 等とキーが被ると P2002 になるため）
-        await db.inventoryChangeLog.update({
-          where: { id: existingAdmin.id },
-          data: {
-            activity: "order_sales",
-            sourceType: "order_sales",
-            sourceId: orderIdRef,
-            delta: -pendingOrder.quantity,
-            quantityAfter: available,
-            note: `注文: #${pendingOrder.orderId}`,
-          },
-        });
-        if (typeof db.orderPendingLocation !== "undefined") {
-          await db.orderPendingLocation.deleteMany({
-            where: { shop, orderId: pendingOrder.orderId, inventoryItemId: inventoryItemIdRaw, locationId: pendingOrder.locationId },
-          });
-        }
-        console.log(`[inventory_levels/update] Updated existing admin_webhook to order_sales (avoid duplicate row): id=${existingAdmin.id}, orderId=${pendingOrder.orderId}, quantityAfter ${existingAdmin.quantityAfter} -> ${available}`);
-        return new Response("OK", { status: 200 });
-      }
-    }
-
+    // A matching order describes this stock movement. An older adjustment with the
+    // same ending balance is a different event and must retain its history.
     // RefundPendingLocation にマッチした場合、既存の admin_webhook 行を refund に更新して新規行を作らない（売上と同様の二重防止）
     if (pendingRefund && db && typeof db.inventoryChangeLog !== "undefined") {
       const searchFrom = new Date(updatedAt.getTime() - 30 * 60 * 1000);
@@ -1040,7 +968,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             sourceType: finalActivity,
             sourceId: finalSourceId,
             adjustmentGroupId,
-            idempotencyKey: pendingOrder ? `${shop}_order_sales_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingOrder.orderId}_${updatedAt.toISOString()}` : pendingRefund ? `${shop}_refund_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingRefund.orderId}_${updatedAt.toISOString()}` : idempotencyKey,
+            idempotencyKey: pendingRefund ? `${shop}_refund_${inventoryItemIdRaw}_${locationIdRaw}_order_${pendingRefund.orderId}_${updatedAt.toISOString()}` : idempotencyKey,
             note: noteForCreate,
           },
         });
