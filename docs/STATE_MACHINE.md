@@ -177,7 +177,7 @@ pending → applying → completed
 | 途中停止（アプリクラッシュ） | 上に同じ | CP + 下書きが残れば再開容易 | Shopify 側の掃除は手動（孤児 Transfer） |
 | 同時実行（2 端末） | 二重 | 端末ローカル lock / CP のみ | **高**（分散ロックなし） |
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
-| 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー | 比較的低い |
+| 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー + **確定のあとの伝票の読み直しが終わるまでロックを外さない**（読み直し失敗時は読み直せるまで確定不可。`receiveReloadGate.js`） | 比較的低い（2 端末同時は残る） |
 | apply-change 再送 | 二重 set | `appEventId` unique | 設計意図どおり |
 | ロス・仕入れ・調整の応答なし | 押し直しで新 ID → 二重 | 送る前に ID を端末へ保存し、完了かはっきりした断りまで同じ ID（D3c） | 2 端末は未カバー |
 | ロス・仕入れ・調整の一部だけ反映 | 押し直しで新 ID → 反映済みの分が二重 | ID を手放さず同じ ID で送る（サーバーは在庫を動かさない）。リセットで取りやめたときだけ ID を捨てる（D3c） | 取りやめ後に同じ明細を入れ直すと二重 |
@@ -222,7 +222,7 @@ pending → applying → completed
 | POS network/timeout | Promise.race / Abort → catch → toast/alert |
 | Server 429/503 | `withGraphQLRetry`（POS クライアントには無い） |
 | apply-change 部分適用 | `partial_failed` + rollback 試行（set quantities サーバー）。控えは 1 件も動かす前に読み、読めなければ始めない。rollback 失敗も `partial_failed` |
-| finally | **必ず** `submitLockRef=false` |
+| finally | **必ず** `submitLockRef=false`（入庫の確定は、エラー・一部入庫のあとの伝票の読み直しを待ってから外す） |
 
 userErrors（ビジネス）はリトライしても同じ結果になりやすい。network / 429 はリトライ候補だが、**出庫作成を盲リトライすると二重発行**になる。
 
