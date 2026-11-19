@@ -17,8 +17,14 @@ import {
   planDraftRestore,
   resolveConfirmLines,
   clearLocationDraft,
-  saveAppliedOperation,
   saveScreenDraft,
+  pendingLinesChanged,
+  rememberOperationBeforeSend,
+  settleOperationAfterError,
+  PENDING_LINES_RESTORED_MESSAGE,
+  PENDING_RESET_BLOCKED_MESSAGE,
+  PARTIAL_OPERATION_DISCARDED_MESSAGE,
+  canDiscardPendingOperation,
 } from "../../../../common/confirmOperationRetry.js";
 import { getListPageSlice } from "../../../../common/listDisplayPagination.js";
 import { ListPageControls } from "../../../../common/ListPageControls.jsx";
@@ -849,10 +855,18 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     }
     submitLockRef.current = true;
     setSubmitting(true);
-    const { operation } = beginConfirmOperation(pendingOpRef.current, () => {
+    const { operation, reused } = beginConfirmOperation(pendingOpRef.current, () => {
       const lossEntryId = generateLossId();
       return { entryId: lossEntryId, appEventId: buildStableAppEventId("loss_entry", lossEntryId) };
     });
+    if (reused && pendingLinesChanged(operation, lines)) {
+      // 前回の確定の結果が分からないまま明細が変わっている。送らずに前回の明細へ戻す。
+      setLines(operation.lines.map((l) => ({ ...l })));
+      toast(PENDING_LINES_RESTORED_MESSAGE);
+      submitLockRef.current = false;
+      setSubmitting(false);
+      return;
+    }
     const lossEntryId = operation.entryId;
     const appEventId = operation.appEventId;
     const sourceLines = resolveConfirmLines(operation, lines);
@@ -871,6 +885,9 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
         return;
       }
 
+      // 送る前に ID と明細を端末に残す。応答が無いまま閉じても、次の確定で同じ ID を使う。
+      pendingOpRef.current = { ...operation, locationId: String(conds.locationId || ""), lines: sourceLines };
+      await rememberOperationBeforeSend(SHOPIFY?.storage, LOSS_DRAFT_KEY, pendingOpRef.current);
       await applyInventoryChangeToApi({
         appEventId,
         activity: "loss_entry",
@@ -938,7 +955,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
       const kept = operationToKeepAfterError(operation, e, pendingOpRef.current, sourceLines);
       if (kept) kept.locationId = String(conds?.locationId || "");
       pendingOpRef.current = kept;
-      if (kept) await saveAppliedOperation(SHOPIFY?.storage, LOSS_DRAFT_KEY, kept);
+      await settleOperationAfterError(SHOPIFY?.storage, LOSS_DRAFT_KEY, kept, conds?.locationId);
       toast(`エラー: ${e?.message ?? e}`);
     } finally {
       submitLockRef.current = false;
@@ -1313,13 +1330,16 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
 
   const handleReset = useCallback(async () => {
     const frozen = pendingOpRef.current?.lines;
-    if (Array.isArray(frozen) && frozen.length > 0) {
+    if (!canDiscardPendingOperation(pendingOpRef.current)) {
       setLines(frozen.map((l) => ({ ...l })));
       confirmResetModalRef?.current?.hideOverlay?.();
       confirmResetModalRef?.current?.hide?.();
-      toast("在庫反映済みのため、確定した明細のままもう一度確定してください");
+      toast(PENDING_RESET_BLOCKED_MESSAGE);
       return;
     }
+    // 一部だけ反映と分かった操作は、ここで ID ごと取りやめる（端末の保存は下の clearLocationDraft で消える）。
+    const discardedPartial = pendingOpRef.current?.partial === true;
+    if (discardedPartial) pendingOpRef.current = null;
     setLines([]);
     setQuery("");
     setCandidates([]);
@@ -1331,7 +1351,7 @@ export function LossProductList({ conds, onBack, onAfterConfirm, setHeader, setF
     }
     confirmResetModalRef?.current?.hideOverlay?.();
     confirmResetModalRef?.current?.hide?.();
-    toast("商品リストをリセットしました");
+    toast(discardedPartial ? PARTIAL_OPERATION_DISCARDED_MESSAGE : "商品リストをリセットしました");
   }, []);
 
   return (

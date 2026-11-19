@@ -13,6 +13,43 @@ import { findWithAdminWebhookRetry } from "../utils/admin-webhook-retry";
 // APIバージョン（shopify.server.tsと同じ値を使用）
 const API_VERSION = "2026-01";
 
+const fulfillmentOrderScopes = new Set([
+  "read_assigned_fulfillment_orders", "write_assigned_fulfillment_orders",
+  "read_merchant_managed_fulfillment_orders", "write_merchant_managed_fulfillment_orders",
+  "read_third_party_fulfillment_orders", "write_third_party_fulfillment_orders",
+  "read_marketplace_fulfillment_orders", "read_buyer_membership_orders",
+]);
+
+async function lookupAssignedLocation(admin: AdminGraphQLRequestClient, orderId: number, scope?: string) {
+  // Older sessions may omit scope. In that case keep the API as the authority.
+  if (scope?.trim() && !scope.split(",").some(value => fulfillmentOrderScopes.has(value.trim()))) {
+    console.info("[orders/updated] Assigned location unavailable with current access scopes");
+    return null;
+  }
+  try {
+    const response = await admin.request({
+      data: `#graphql
+        query GetOrder($id: ID!) {
+          order(id: $id) {
+            fulfillmentOrders(first: 1) {
+              edges { node { assignedLocation { location { id } } } }
+            }
+          }
+        }`,
+      variables: { id: `gid://shopify/Order/${orderId}` },
+    });
+    const result = typeof response?.json === "function" ? await response.json() : response;
+    if (result?.errors?.length) {
+      console.warn("[orders/updated] GraphQL order query errors:", result.errors);
+      return null;
+    }
+    return result?.data?.order?.fulfillmentOrders?.edges?.[0]?.node?.assignedLocation?.location?.id ?? null;
+  } catch (error) {
+    console.error("[orders/updated] Failed to get assigned location:", error);
+    return null;
+  }
+}
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {
     let payload, shop, topic, session;
@@ -135,41 +172,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           : `gid://shopify/Location/${locationIdRawFromFulfillment}`;
       }
       if (!orderLocationId) {
-        try {
-          const orderResp = await admin.request({
-            data: `
-              #graphql
-              query GetOrder($id: ID!) {
-                order(id: $id) {
-                  id
-                  fulfillmentOrders(first: 1) {
-                    edges {
-                      node {
-                        assignedLocation {
-                          location {
-                            id
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            `,
-            variables: { id: `gid://shopify/Order/${order.id}` },
-          });
-          const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
-          if (orderData?.errors?.length) {
-            console.warn("[orders/updated] GraphQL order query errors (cancel flow):", orderData.errors);
-          } else {
-            const fo = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
-            if (fo?.assignedLocation?.location?.id) {
-              orderLocationId = fo.assignedLocation.location.id;
-            }
-          }
-        } catch (e) {
-          console.error(`[orders/updated] Failed to get location for cancelled order ${order.id}:`, e);
-        }
+        orderLocationId = await lookupAssignedLocation(admin, order.id, session.scope);
       }
       const locationIdRaw = orderLocationId?.replace(/^gid:\/\/shopify\/Location\//, "") ?? orderLocationId;
       if (orderLocationId && order.line_items && order.line_items.length > 0 && db && typeof db.inventoryChangeLog !== "undefined") {
@@ -413,6 +416,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                       inventoryItemId: { in: itemIdCandidates },
                       locationId: { in: locationIdCandidates },
                       activity: "admin_webhook",
+                      delta: -g.quantity,
                       timestamp: { gte: searchFrom, lte: searchTo },
                     },
                     orderBy: { timestamp: "asc" },
@@ -510,51 +514,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const searchTo = new Date(orderUpdatedAt.getTime() + 5 * 60 * 1000);
 
         // 注文のデフォルトロケーションを先に取得（OrderPendingLocation に locationId を入れるため）
-        let orderLocationId: string | null = null;
-        try {
-          const orderResp = await admin.request({
-            data: `
-              #graphql
-              query GetOrder($id: ID!) {
-                order(id: $id) {
-                  id
-                  fulfillmentOrders(first: 1) {
-                    edges {
-                      node {
-                        assignedLocation {
-                          location {
-                            id
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            `,
-            variables: { id: `gid://shopify/Order/${order.id}` },
-          });
-          const orderData = orderResp && typeof orderResp.json === "function" ? await orderResp.json() : orderResp;
-          if (!orderData?.errors?.length) {
-            const fulfillmentOrder = orderData?.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
-            if (fulfillmentOrder?.assignedLocation?.location?.id) {
-              orderLocationId = fulfillmentOrder.assignedLocation.location.id;
-            }
-          } else {
-            console.warn("[orders/updated] GraphQL order query errors:", orderData.errors);
-          }
-        } catch (error) {
-          console.error(`[orders/updated] Failed to get order location for order ${order.id}:`, error);
-        }
+        const orderLocationId: string | null = await lookupAssignedLocation(admin, order.id, session.scope);
         const rawOrderLocId = orderLocationId ? (orderLocationId.replace(/^gid:\/\/shopify\/Location\//, "") || orderLocationId) : "";
 
         // OrderPendingLocation を登録（inventory_levels/update が先に届いた場合でもマッチしやすくする）。同一注文で2ロケーション出荷に対応するため locationId を含める。
         if (db && typeof db.orderPendingLocation !== "undefined") {
+          const orderedQuantities = new Map<number, number>();
           for (const lineItem of order.line_items) {
-            const lineItemQty = lineItem.quantity ?? lineItem.current_quantity ?? 1;
-            if (!lineItem.variant_id || lineItemQty <= 0) continue;
+            const quantity = lineItem.quantity ?? lineItem.current_quantity ?? 1;
+            if (lineItem.variant_id && quantity > 0) {
+              orderedQuantities.set(lineItem.variant_id, (orderedQuantities.get(lineItem.variant_id) ?? 0) + quantity);
+            }
+          }
+          for (const [variant, lineItemQty] of orderedQuantities) {
             try {
-              const variantId = `gid://shopify/ProductVariant/${lineItem.variant_id}`;
+              const variantId = `gid://shopify/ProductVariant/${variant}`;
               const variantResp = await admin.request({
                 data: `
                   #graphql
@@ -572,6 +546,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               const inventoryItemId = variantData?.data?.productVariant?.inventoryItem?.id;
               if (!inventoryItemId) continue;
               const rawItemId = inventoryItemId.replace(/^gid:\/\/shopify\/InventoryItem\//, "") || inventoryItemId;
+              if (!orderLocationId) {
+                // A repeated order notification can arrive after the matching stock movement was recorded.
+                const confirmed = await db.inventoryChangeLog.findMany({
+                  where: {
+                    shop, sourceId: `order_${order.id}`, activity: "order_sales",
+                    inventoryItemId: { in: [rawItemId, inventoryItemId] },
+                    delta: { lt: 0 },
+                  },
+                  select: { delta: true },
+                });
+                const sold = confirmed.reduce((sum, row) => sum - (row.delta ?? 0), 0);
+                if (sold === lineItemQty) {
+                  await db.orderPendingLocation.deleteMany({
+                    where: { shop, orderId: String(order.id), inventoryItemId: rawItemId, locationId: "", quantity: lineItemQty },
+                  });
+                  continue;
+                }
+              }
               await db.orderPendingLocation.upsert({
                 where: {
                   shop_orderId_inventoryItemId_locationId: { shop, orderId: String(order.id), inventoryItemId: rawItemId, locationId: rawOrderLocId },
@@ -587,7 +579,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 update: { orderCreatedAt: orderCreatedAt, quantity: lineItemQty },
               });
             } catch (e) {
-              console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${lineItem.id}:`, e);
+              console.error(`[orders/updated] Failed to save OrderPendingLocation for line_item ${variant}:`, e);
             }
           }
         }
@@ -653,6 +645,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                         inventoryItemId: { in: inventoryItemIdCandidates },
                         locationId: { in: locationIdCandidates },
                         activity: "admin_webhook",
+                        delta: -lineItemQty,
                         timestamp: { gte: searchFrom, lte: searchTo },
                       },
                       orderBy: { timestamp: "desc" },
