@@ -55,6 +55,24 @@
 
 ---
 
+### D3c. ロス・仕入れ・調整の appEventId は答えが出るまで持ち続ける（2026-11-19）
+
+| 層 | 方針 |
+|----|------|
+| ID を残す時 | **送る前**に `SHOPIFY.storage` の下書き（`appliedOperationsByLocation`）へ、ID と明細を店ごとに残す（`rememberOperationBeforeSend`） |
+| ID を手放す時 | サーバーが「完了」を返したとき、またはサーバーがはっきり断ったとき（4xx。401・408・409・429 と `partial_failed` を除く。`finalRejection`）だけ |
+| 一部だけ反映（`partial_failed`） | ID を手放さず、印（`partial: true`）を付けて端末にも残す。押し直しは同じ ID で送る。サーバーは同じ ID の `partial_failed` に在庫を動かさず 400 を返し続ける（残りだけ反映する道は無い。STATE_MACHINE §6）。画面は「もう一度押しても在庫は動かない・管理者が Shopify で直す」と出す。管理者が直したあと、「リセット」でその操作を明細ごと取りやめられる（`canDiscardPendingOperation`。印の無い結果待ちの操作はリセットできないまま） |
+| 今の在庫数を読めない | delta の明細（ロス・仕入れ・取消・入庫補正）で今の在庫数を読めなかったら、0 として扱わず、イベントを作る前に 503（`current_quantity_unreadable`）を返す。在庫は動かない。POS は同じ ID で送り直す。商品そのものが見つからないときは 400（`inventory_item_not_found`） |
+| 250 件超の元に戻す用の控え | `inventorySetQuantities` を 250 件ずつに分けるとき、最後より前のチャンクの今の数を、1 件も動かす前に全部読んで控える（250 件以下は戻すことが無いので読まない）。読み方は上と同じ（`readAvailableFromResponse`。在庫の記録が無いときだけ 0）。1 件でも読めなければ補正を始めず 503（`rollback_snapshot_unreadable`、イベントは `failed`）。戻す処理そのものが失敗したら `partial_failed` |
+| 250 件超で元に戻す書き込み | 条件なし（`changeFromQuantity: null`）で控えの数を書くと、書いてから戻すまでの売上・入庫が消える。なので `changeFromQuantity` に「さっき書いた数」を入れる。合わなければ Shopify が `CHANGE_FROM_QUANTITY_STALE` で断る（1 回の書き込みは全部か無し）→ そのチャンクは戻さず `partial_failed`、管理者が Shopify で直す。送り直すのは 429 だけ（5xx は `application_uncertain`）。**選ばなかった案**: 書き込みの返事の増減（`inventoryAdjustmentGroup.changes` の delta）の逆を `inventoryAdjustQuantities` で足す案は、売上をすべて残せるが、増減の書き込みは送り直すと二重になり（このアプリは `@idempotent` をまだ使っていない。D9）、返事の `changes` が欠けると戻せない。STATE_MACHINE の「再実行で二重にしない」「分からないときは管理者に回す」を優先した。**残る危険**: 控えを読んでから前に進む書き込みまでの売上・入庫は、前に進む書き込み（`changeFromQuantity: null`）でもう上書きされているので戻らない（D9 / Phase E2 で前に進む書き込みも条件付きにするときに一緒に直す） |
+| 結果が分からない失敗 | 応答なし（`fetch` が投げた例外すべて: TypeError・AbortError・時間切れ）・5xx・202・確定後のローカル保存の失敗では ID を残す。エラーの文の中身（"fetch" / "Network" / "Load failed"）では判断しない |
+| 1 回の時間の上限 | 90 秒（超えたら AbortError → 応答なしとして同じ ID で送り直す） |
+| 明細の確かめ | 残っている ID の明細（商品と数量）と画面の明細が違えば、送らずに前回の明細へ戻す（`pendingLinesChanged`）。D3b の fingerprint と同じ考え方 |
+
+**意図**: 応答が届かないまま新しい ID を発行すると、前の送信が届いていた場合に在庫がもう一度動く。サーバーは同じ ID の completed に 200 を返す（STATE_MACHINE §6）ので、同じ ID で送り直せば在庫は 1 回だけ動く。
+
+**残ギャップ**: 2 台の端末で同じ明細を別々に確定するのは防げない（端末ごとの保存）。`partial_failed` のあとにリセットして同じ明細を入れ直して確定すると、新しい ID として反映済みの分がもう一度動く（画面の文で止めるだけ）。`applying` のまま止まったイベントなど、印の無い結果待ちの操作は今もリセットできない（片づけはデータベースを直す）。
+
 ## D4. POS GraphQL は短 timeout、サーバーは 429 リトライ
 
 | クライアント | timeout | 429 retry |
