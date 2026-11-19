@@ -333,7 +333,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           },
         });
 
-        if (!existingLog && prevLog && prevLog.timestamp >= updatedAt) {
+        // 売上・返品を注文のキーで記帳した通知の再送も、同じ通知として扱う。
+        // 照合は「同じ時刻・同じ数量・注文の形のキー」の行だけが当たるので、前の行の条件は付けない
+        // （前の行は findPreviousQuantity で「この通知より前」だけから探すため、同じ時刻の行は前の行にならない）。
+        if (!existingLog) {
           existingLog = await findOrderLinkedReplay(db.inventoryChangeLog, {
             shop, inventoryItemId: inventoryItemIdRaw, locationId: locationIdRaw,
             quantityAfter: available, timestamp: updatedAt,
