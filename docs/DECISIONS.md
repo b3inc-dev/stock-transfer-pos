@@ -189,6 +189,12 @@ API バージョンバンプとセットで別 PR。
 - **再現**: 実際の ListPageControls.jsx を同じ設定でビルドし、Preact 10.28 + polyfill 1.5.1、`NODE_ENV=production` で 50→51 件にすると `Cannot read properties of undefined (reading 'nodeType')`。`extensions/common/tsconfig.json` を置くと 0 件。
 - **判断**: `extensions/common/tsconfig.json`（jsxImportSource: preact）を追加し、共通フォルダの JSX を常に Preact でビルドする。`tests/extension-jsx-runtime.test.mjs` で全 POS エントリのバンドルに React の JSX ランタイムが混ざらないことを検査する（esbuild がある環境で実行）。
 
+## D13. 在庫履歴の差分は通知の時刻の順で決める（2026-11-19）
+
+- **症状（監査 P1-2）**: ひとつ前の履歴を時刻の条件なしで「いちばん新しい行」から取っていたため、10 → A(8) → B(7) が B, A の順に届くと A=+1・B=−3 で保存された。#57 の売上の照合はこの差分を使う。
+- **判断**: 前の行は通知の時刻より前の行から選ぶ。古い通知があとから届いたら、すぐ後ろの管理の行だけ差分を出し直す（BUSINESS_RULES §6）。並べ替え用の新しい列や順番待ちの仕組み（キュー）は作らない（D1・D6 と同じく、仕組みを増やさない）。
+- **残り**: 時計のずれ（推測）。すぐ後ろが業務の行のときは、その行の差分は変えない（業務の数を優先）。
+
 ---
 
 ## 関連正本
