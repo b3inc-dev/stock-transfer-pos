@@ -89,3 +89,11 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 - [ ] 二重発行・部分成功・timeout 直後の再実行を説明できるか
 - [ ] Transfer 作成と apply-change / 履歴ログを混同していないか
 - [ ] 既存の「条件継ぎ足し」負債を増やしていないか（`DECISIONS.md`）
+
+## 全アプリ共通の UI ルール（11/20 T・正式）
+
+管理画面とお客様アカウントの画面は、全アプリ共通の UI ルールに従う。正本は Shop Point の [docs/UI_RULES.md「全アプリ共通の UI ルール（11/20 T）」](https://github.com/b3inc-dev/shop-point/blob/claude/admin-block-ui-rule/docs/UI_RULES.md)（今は [shop-point#58](https://github.com/b3inc-dev/shop-point/pull/58) のブランチにある。取り込んだあとは main の同じファイル）。T の原文がいちばん元で、下にある前の決まりと食いちがうときは原文に合わせる。全アプリへの広げ方と進み具合は [shop-point#38](https://github.com/b3inc-dev/shop-point/issues/38)。
+
+- このアプリに当てはまる部分: A（管理画面）のすべて。アプリ自身の上部メニュー（A2）は `app/components/AppNavBar.tsx`。B（お客様アカウント）は、今はお客様アカウントの拡張がないので当てはまらない（作るときに使う）。C（残高や履歴を持つアプリだけ）は、お客様ごとの残高と履歴を出す機能がコードに見当たらないので今は当てはまらない（推測。作るときに使う）。
+- 写して使う見本: [docs/templates/AdminBlock.tsx](https://github.com/b3inc-dev/shop-point/blob/claude/admin-block-ui-rule/docs/templates/AdminBlock.tsx)（アプリの中に同じ役目の部品があるときは、そちらを直して使う）
+- 画面を直す PR には、PC 幅（1280px）と iPhone 幅（390px）の写真を付ける。日付欄があるときは iPhone の Safari（実機）も確かめる。
