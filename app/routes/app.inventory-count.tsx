@@ -13,6 +13,7 @@ import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone
 import db from "../db.server";
 import type { InventoryCountLike, InventoryCountEntryLike, InputLikeEvent } from "../types";
 import type { GraphQLUserError } from "../types/graphql-responses";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -2505,6 +2506,8 @@ type InventoryCountActionMeta = { actionType: string; detail: string };
 async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta: InventoryCountActionMeta) {
   let { admin, session } = await authenticate.admin(request);
   admin = withGraphQLRetry(admin);
+  const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "stocktake");
+  if (planRedirect) return planRedirect;
   const formData = await request.formData();
   const actionType = (formData.get("action") ?? formData.get("actionType")) as string;
   const expectedVersionRaw = formData.get("inventoryCountsVersion");

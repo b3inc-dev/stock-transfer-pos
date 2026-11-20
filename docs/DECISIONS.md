@@ -195,6 +195,29 @@ API バージョンバンプとセットで別 PR。
 - **判断**: 前の行は通知の時刻より前の行から選ぶ。古い通知があとから届いたら、すぐ後ろの管理の行だけ差分を出し直す（BUSINESS_RULES §6）。並べ替え用の新しい列や順番待ちの仕組み（キュー）は作らない（D1・D6 と同じく、仕組みを増やさない）。
 - **残り**: 時計のずれ（推測）。すぐ後ろが業務の行のときは、その行の差分は変えない（業務の数を優先）。
 
+## D14. 未契約の店は公開用で何も使えない。止めるのは画面とサーバーの両方（2026-11-21）
+
+- **症状（#73 の B5 / G3）**: 公開用（`pos-stock`）で、契約していない店（`plan = null`）でも、管理画面の入出庫・設定と、POS の全タイル（ロス・棚卸・仕入・発注・調整を含む）と POS 用 API が使えた。開発ストアは契約なしで Pro 扱いだった。
+- **原因**: プランを見ていたのは管理画面のレイアウトの loader だけで、しかも「Pro 専用の画面」だけを料金プランへ回していた（未契約は入出庫・設定を開けた）。画面の action は親の loader を通らないので、URL を直接送れば Pro の処理も動いた。POS 拡張と POS 用 API（apply-change・log-inventory-change・pos-stocktake-complete）はプランを全く見ていなかった。
+- **判断**:
+  - 決まりは `extensions/common/planAccess.js` の 1 か所（サーバーと POS 拡張が同じものを使う）。未契約＝何も使えない（ホームと料金プランだけ）。Lite＝設定・入出庫（管理画面の履歴と POS の出庫・入庫）。Pro＝すべて。
+  - 判定は `app/utils/shop-plan.server.ts`（元の `getShopPlan` を移した。名前で Pro/Lite を読む決まりは `billing.ts` のまま）。
+  - 開発ストアも契約で決める（Shopify App Pricing のテスト課金。請求はされない）。審査も課金の流れを通る。
+  - 契約を Shopify から読めなかったときは「未契約」と言わず `plan_check_failed`（もう一度試す）にする。新しく在庫を動かす処理は止め、在庫が動いた後の記録（log-inventory-change）と棚卸の完了通知（pos-stocktake-complete）は通す（記録を落とさない）。
+  - 有効な契約があるのに名前に Pro も Lite も無いときは Lite にする（払っている店を止めない）。
+  - 自社用は今まで通り全機能。サーバーは GraphQL を呼ばずに通す。足した条件: `APP_DISTRIBUTION` が空でも、`SHOPIFY_API_KEY` が公開用の client_id と違えば自社用（`app/utils/plan-distribution.ts`）。POS 拡張は `appUrl.js` の `APP_MODE = "inhouse"` のとき確認しない。
+- **止め口**:
+
+| 経路 | 止め方 |
+|---|---|
+| 管理画面の画面 | `app.tsx` の loader で料金プランへ（`featureForAdminPath`） |
+| 管理画面の action | 各 action の先頭で `adminPlanRedirect`（CSV は理由の入った CSV） |
+| POS のタイル | `extensions/common/PlanGate.jsx` が開いたときに `/api/pos-plan` に聞き、止めたら理由と案内を出す |
+| apply-change | イベントを作る前に 402（`plan_required`）/ 503（`plan_check_failed`）。在庫も DB も変わらない。completed の再送・処理中・一部反映は今まで通り答える |
+| log-inventory-change / pos-stocktake-complete | 未契約とはっきり分かったときだけ 402。読めなかったときは通す |
+
+- **残り（サーバーで止められないもの）**: 出庫の Transfer 作成・入庫の受領は POS から Shopify へ直接送る（D1）。ここはタイルの `PlanGate` だけが止め口。古い版の拡張が端末に残っている間は止まらない（推測。次の `shopify app deploy` で入れ替わる）。ロケーション数とプランの不一致は今まで通り管理画面だけで扱う。
+
 ---
 
 ## 関連正本

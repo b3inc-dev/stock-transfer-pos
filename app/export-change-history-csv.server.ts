@@ -5,6 +5,8 @@ import { authenticate } from "./shopify.server";
 import { withGraphQLRetry } from "./utils/graphql-with-retry";
 import { formatDateTimeInShopTimezone } from "./utils/timezone";
 import db from "./db.server";
+import { checkShopFeatureAccess } from "./utils/shop-plan.server";
+import { buildPlanBlockMessage } from "../extensions/common/planAccess.js";
 
 
 
@@ -66,6 +68,12 @@ function csvExportErrorAsCsv(message: string): Response {
 export async function exportChangeHistoryCsv(request: Request): Promise<Response> {
   let { admin, session } = await authenticate.admin(request);
   admin = withGraphQLRetry(admin);
+  // 在庫情報（Pro）の CSV。料金プランで使えないときは書き出さず、理由を返す（画面を隠すだけにしない）
+  const planCheck = await checkShopFeatureAccess({ shop: session?.shop ?? "", feature: "inventoryInfo", getAdmin: () => admin });
+  if (planCheck.access !== "allowed") {
+    const msg = buildPlanBlockMessage(planCheck.access, "inventoryInfo", planCheck.shopPlan.plan);
+    return csvExportErrorAsCsv(msg ? `${msg.heading}。アプリの「料金プラン」を開いてください。` : "この機能は今のプランでは使えません。");
+  }
   const formData = await request.formData();
 
   const startDate = String(formData.get("startDate") || "").trim();

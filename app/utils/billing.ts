@@ -49,6 +49,8 @@ export type ActiveSubscription = {
  * アクティブなサブスクリプション一覧からプランを判定する。
  * 名前に "Pro" を含む → pro、"Lite" を含む → lite。
  * 複数ある場合は Pro を優先。
+ * 有効な契約はあるが名前から読めないとき → lite（払っている店を「未契約」として止めない。下限の Lite に倒す）。
+ * 開発ストアのテスト課金（test: true）も Shopify は ACTIVE で返すので、同じく契約として数える。
  */
 export function getPlanFromActiveSubscriptions(subscriptions: ActiveSubscription[]): PlanType | null {
   if (!Array.isArray(subscriptions) || subscriptions.length === 0) return null;
@@ -58,7 +60,11 @@ export function getPlanFromActiveSubscriptions(subscriptions: ActiveSubscription
   const hasLite = active.some((s) => /lite/i.test(String(s?.name || "")));
   if (hasPro) return "pro";
   if (hasLite) return "lite";
-  return null;
+  console.warn(
+    "[billing] active subscription name has neither Pro nor Lite; treating as lite:",
+    active.map((s) => String(s?.name || "")).join(", ")
+  );
+  return "lite";
 }
 
 /**
