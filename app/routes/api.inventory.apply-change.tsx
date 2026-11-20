@@ -34,7 +34,7 @@ import {
 } from "../utils/format-inventory-api-error";
 import { planBlockedPosResponse } from "../utils/plan-gate.server";
 import type { PlanFeature } from "../utils/shop-plan.server";
-import { featureForActivity } from "../../extensions/common/planAccess.js";
+import { applyChangeFailsOpenOnPlanCheckError, featureForActivity } from "../../extensions/common/planAccess.js";
 
 /** 一時的な障害とみなしてリトライするか（429/5xx/ネットワーク系） */
 function isTransientError(errorSummary: string | undefined): boolean {
@@ -336,12 +336,15 @@ export async function action({ request }: ActionFunctionArgs) {
     // 新しく在庫を動かすとき（イベントが無い／failed を消して作り直すとき）だけ止める。
     // completed の再送（履歴だけ書き直す）・処理中・一部反映済みは在庫を新しく動かさないので、今まで通り答える。
     // 止めるのはイベントを作る前なので、在庫も DB も変わらない。同じ appEventId で契約後に送り直せる。
+    // 契約を読めなかったとき（plan_check_failed）は、入出庫の戻し（Shopify の操作のあと）だけ通す。
     if (!existingEvent || (existingEvent.shop === shop && existingEvent.status === "failed")) {
       const planBlocked = await planBlockedPosResponse({
         shop,
         feature: featureForActivity(activity) as PlanFeature,
         getAdmin: () => admin,
         headers: CORS_HEADERS,
+        // 入出庫は Shopify でキャンセル・拒否・受領を済ませたあとの在庫の戻しなので、契約を読めなかっただけなら通す。
+        failOpenOnCheckError: applyChangeFailsOpenOnPlanCheckError(activity),
       });
       if (planBlocked) return planBlocked;
     }

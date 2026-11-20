@@ -203,9 +203,10 @@ API バージョンバンプとセットで別 PR。
   - 決まりは `extensions/common/planAccess.js` の 1 か所（サーバーと POS 拡張が同じものを使う）。未契約＝何も使えない（ホームと料金プランだけ）。Lite＝設定・入出庫（管理画面の履歴と POS の出庫・入庫）。Pro＝すべて。
   - 判定は `app/utils/shop-plan.server.ts`（元の `getShopPlan` を移した。名前で Pro/Lite を読む決まりは `billing.ts` のまま）。
   - 開発ストアも契約で決める（Shopify App Pricing のテスト課金。請求はされない）。審査も課金の流れを通る。
-  - 契約を Shopify から読めなかったときは「未契約」と言わず `plan_check_failed`（もう一度試す）にする。新しく在庫を動かす処理は止め、在庫が動いた後の記録（log-inventory-change）と棚卸の完了通知（pos-stocktake-complete）は通す（記録を落とさない）。
+  - 契約を Shopify から読めなかったときは「未契約」と言わず `plan_check_failed`（もう一度試す）にする。新しく在庫を動かす処理は止め、在庫が動いた後の記録（log-inventory-change）と棚卸の完了通知（pos-stocktake-complete）は通す（記録を落とさない）。apply-change の入出庫（`outbound_transfer`・`inbound_transfer`）も通す。POS が Shopify で出庫のキャンセル・入庫の拒否・受領を済ませたあとに、出庫元の在庫を戻す・過不足を合わせるために呼ぶため（止めると「キャンセルは済んだのに在庫は戻らない」で終わる。`applyChangeFailsOpenOnPlanCheckError`）。未契約（`plan_required`）は止めたまま。
   - 有効な契約があるのに名前に Pro も Lite も無いときは Lite にする（払っている店を止めない）。
-  - 自社用は今まで通り全機能。サーバーは GraphQL を呼ばずに通す。足した条件: `APP_DISTRIBUTION` が空でも、`SHOPIFY_API_KEY` が公開用の client_id と違えば自社用（`app/utils/plan-distribution.ts`）。POS 拡張は `appUrl.js` の `APP_MODE = "inhouse"` のとき確認しない。
+  - 自社用は今まで通り全機能。サーバーは GraphQL を呼ばずに通す。POS 拡張は `appUrl.js` の `APP_MODE = "inhouse"` のとき確認しない。
+  - 公開用／自社用の決まりは `app/utils/plan-distribution.ts` の `detectServerDistribution` の 1 つだけ（料金プランの門番と shop/redact の判断が同じものを使う）。順に: (1) `SHOPIFY_API_KEY` が自社用の client_id（`shopify.app.toml`）と同じなら、ほかの値に関係なく自社用（Ciara を止めない） (2) `APP_DISTRIBUTION=inhouse` か `CUSTOM_APP_STORE_IDS` → 自社用 (3) `APP_DISTRIBUTION=public` → 公開用 (4) `SHOPIFY_API_KEY` が公開用の client_id → 公開用 (5) キーが公開用とはっきり違う → 自社用 (6) それ以外は「分からない」。分からないときだけ、料金プランは公開用（今まで通り）、shop/redact は自社用（消さない）に倒す。client_id は cwd と、ビルドしたファイルの場所から上へたどって探す（起動する場所が違っても読めるように）。
 - **止め口**:
 
 | 経路 | 止め方 |
@@ -213,7 +214,7 @@ API バージョンバンプとセットで別 PR。
 | 管理画面の画面 | `app.tsx` の loader で料金プランへ（`featureForAdminPath`） |
 | 管理画面の action | 各 action の先頭で `adminPlanRedirect`（CSV は理由の入った CSV） |
 | POS のタイル | `extensions/common/PlanGate.jsx` が開いたときに `/api/pos-plan` に聞き、止めたら理由と案内を出す |
-| apply-change | イベントを作る前に 402（`plan_required`）/ 503（`plan_check_failed`）。在庫も DB も変わらない。completed の再送・処理中・一部反映は今まで通り答える |
+| apply-change | イベントを作る前に 402（`plan_required`）/ 503（`plan_check_failed`）。在庫も DB も変わらない。completed の再送・処理中・一部反映は今まで通り答える。入出庫の activity は、契約を読めなかっただけなら通す（Shopify の操作のあとの在庫の戻し） |
 | log-inventory-change / pos-stocktake-complete | 未契約とはっきり分かったときだけ 402。読めなかったときは通す |
 
 - **残り（サーバーで止められないもの）**: 出庫の Transfer 作成・入庫の受領は POS から Shopify へ直接送る（D1）。ここはタイルの `PlanGate` だけが止め口。古い版の拡張が端末に残っている間は止まらない（推測。次の `shopify app deploy` で入れ替わる）。ロケーション数とプランの不一致は今まで通り管理画面だけで扱う。

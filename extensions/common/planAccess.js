@@ -94,6 +94,20 @@ export function featureForActivity(activity) {
   }
 }
 
+/**
+ * apply-change で、契約の状態を読めなかったとき（plan_check_failed。未契約ではない）でも通す activity か。
+ * 入出庫（outbound_transfer / inbound_transfer）の apply-change は、POS が Shopify で出庫のキャンセル・入庫の拒否・受領を
+ * 済ませたあとに、出庫元の在庫を戻す・過不足を合わせるために呼ぶ（ModalOutbound.jsx の outbound_cancel_restore など、
+ * adjustInventoryViaApplyChange.js）。ここで止めると「Shopify では済んだのに在庫は戻らない」で終わるので通す
+ * （log-inventory-change・pos-stocktake-complete と同じ）。未契約（plan_required）は今まで通り止める。
+ * ロス・仕入・調整・棚卸は apply-change そのものが在庫を動かす最初の操作なので、読めなければ今まで通り止める。
+ * @param {string} activity
+ * @returns {boolean}
+ */
+export function applyChangeFailsOpenOnPlanCheckError(activity) {
+  return featureForActivity(activity) === "transfer";
+}
+
 /** 管理画面の URL がどの機能か。null は誰でも開ける（ホーム・料金プラン・接続維持）。 */
 const ADMIN_PATH_FEATURES = [
   ["/app/settings", "settings"],

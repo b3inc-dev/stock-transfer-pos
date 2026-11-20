@@ -69,31 +69,4 @@ export function parseClientIdFromToml(toml: string | null | undefined): string |
   return m ? m[1].trim() : null;
 }
 
-/**
- * サーバーが公開用のアプリとして動いているか。shop/redact で消してよいかの判断に使う。
- * 元に戻せない処理なので、迷ったときは自社用（消さない）へ倒す。
- * - 自社用: APP_DISTRIBUTION=inhouse、または店が CUSTOM_APP_STORE_IDS にある
- * - 公開用: 上に当たらず、APP_DISTRIBUTION=public がはっきり入っているか、
- *   SHOPIFY_API_KEY が公開用アプリの client_id（shopify.app.public.toml）と同じ
- * - それ以外（環境変数が無い・つづりが違う・toml が読めない）: 自社用
- * （POS 拡張の APP_MODE は extensions/common/appUrl.js の中の値で、サーバーの環境変数ではないので見ない）
- */
-export function resolveServerDistribution(
-  env: Record<string, string | undefined>,
-  shop: string | null | undefined,
-  publicClientId: string | null | undefined,
-): "public" | "inhouse" {
-  const dist = (env.APP_DISTRIBUTION ?? "").trim().toLowerCase();
-  if (dist === "inhouse") return "inhouse";
-  const shopNormalized = (shop ?? "").trim().toLowerCase();
-  const custom = (env.CUSTOM_APP_STORE_IDS ?? "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  if (shopNormalized && custom.includes(shopNormalized)) return "inhouse";
-  if (dist === "public") return "public";
-  const apiKey = (env.SHOPIFY_API_KEY ?? "").trim();
-  const publicId = (publicClientId ?? "").trim();
-  if (apiKey && publicId && apiKey === publicId) return "public";
-  return "inhouse";
-}
+// 公開用／自社用の決まり（resolveServerDistribution）は plan-distribution.ts の 1 か所（料金プランの門番と同じもの）。

@@ -5,8 +5,8 @@ import {
   isNotInstalledError,
   parseClientIdFromToml,
   probeShopStillInstalled,
-  resolveServerDistribution,
 } from "../app/utils/shop-install-probe.ts";
+import { resolveServerDistribution } from "../app/utils/plan-distribution.ts";
 import { readFileSync } from "node:fs";
 
 // 既定は「公開用・入れ直していない」。テストごとに上書きする。

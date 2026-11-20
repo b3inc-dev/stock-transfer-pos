@@ -9,7 +9,7 @@ import {
   reportUsageRecord,
 } from "./billing";
 import { resolvePlanDistribution } from "./plan-distribution";
-import { getPublicClientId } from "./shop-install-probe.server";
+import { getInhouseClientId, getPublicClientId } from "./shop-install-probe.server";
 import {
   decideFeatureAccess,
   featuresForPlanState,
@@ -59,7 +59,7 @@ export type ShopPlan = {
 
 /** このサーバー・この店が自社用か公開用か（GraphQL を呼ばない） */
 export function getPlanDistribution(shop?: string | null) {
-  return resolvePlanDistribution(process.env, shop, getPublicClientId());
+  return resolvePlanDistribution(process.env, shop, getPublicClientId(), getInhouseClientId());
 }
 
 /** 自社用（全機能）の ShopPlan。GraphQL を呼ばずに返せるときに使う */

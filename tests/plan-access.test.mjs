@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ALL_FEATURES,
+  applyChangeFailsOpenOnPlanCheckError,
   buildPlanBlockMessage,
   decideFeatureAccess,
   featureForActivity,
@@ -14,7 +15,12 @@ import {
 } from "../extensions/common/planAccess.js";
 import { checkPosPlanAccess } from "../extensions/common/posPlanGate.js";
 import { interpretLogChunkResponse } from "../extensions/common/inventoryLogWrite.js";
-import { resolvePlanDistribution } from "../app/utils/plan-distribution.ts";
+import {
+  detectServerDistribution,
+  resolvePlanDistribution,
+  resolveServerDistribution,
+} from "../app/utils/plan-distribution.ts";
+import { parseClientIdFromToml } from "../app/utils/shop-install-probe.ts";
 import { getPlanFromActiveSubscriptions } from "../app/utils/billing.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -136,6 +142,98 @@ describe("resolvePlanDistribution: 自社用を守る", () => {
   });
   test("何も分からないときは今まで通り公開用", () => {
     assert.equal(resolvePlanDistribution({}, "a.myshopify.com", null).distribution, "public");
+  });
+});
+
+describe("公開用／自社用の決まりは 1 つ（レビュー #78 の P2）", () => {
+  const PUBLIC_ID = "public-client-id";
+  const INHOUSE_ID = "inhouse-client-id";
+  const shop = "a.myshopify.com";
+  const both = (env, pub = PUBLIC_ID, inh = INHOUSE_ID) => [
+    resolvePlanDistribution(env, shop, pub, inh).distribution,
+    resolveServerDistribution(env, shop, pub, inh),
+  ];
+
+  test("SHOPIFY_API_KEY が自社用の client_id なら、ほかの値に関係なく自社用（料金プランも shop/redact も）", () => {
+    assert.deepEqual(both({ SHOPIFY_API_KEY: INHOUSE_ID }), ["inhouse", "inhouse"]);
+    assert.deepEqual(both({ SHOPIFY_API_KEY: INHOUSE_ID, APP_DISTRIBUTION: "public" }), ["inhouse", "inhouse"]);
+    // 公開用の toml が読めない（起動する場所が違う）ときも、Ciara は止めない。
+    assert.deepEqual(both({ SHOPIFY_API_KEY: INHOUSE_ID }, null), ["inhouse", "inhouse"]);
+    assert.equal(detectServerDistribution({ SHOPIFY_API_KEY: INHOUSE_ID }, shop, null, INHOUSE_ID).reason, "inhouse_client_id");
+  });
+
+  test("はっきり分かるときは 2 つの答えがそろう", () => {
+    for (const [env, want] of [
+      [{ APP_DISTRIBUTION: "inhouse" }, "inhouse"],
+      [{ APP_DISTRIBUTION: "public", CUSTOM_APP_STORE_IDS: shop }, "inhouse"],
+      [{ APP_DISTRIBUTION: "public", SHOPIFY_API_KEY: "other" }, "public"],
+      [{ SHOPIFY_API_KEY: PUBLIC_ID }, "public"],
+      [{ SHOPIFY_API_KEY: "other" }, "inhouse"],
+    ]) {
+      assert.deepEqual(both(env), [want, want], JSON.stringify(env));
+    }
+  });
+
+  test("分からないときだけ倒す向きが違う（料金プランは公開用、shop/redact は消さない自社用）", () => {
+    for (const env of [{}, { APP_DISTRIBUTION: "pubilc" }, { SHOPIFY_API_KEY: PUBLIC_ID }]) {
+      const pub = env.SHOPIFY_API_KEY ? null : PUBLIC_ID;
+      assert.equal(detectServerDistribution(env, shop, pub, INHOUSE_ID).distribution, null, JSON.stringify(env));
+      assert.deepEqual(both(env, pub), ["public", "inhouse"], JSON.stringify(env));
+    }
+  });
+
+  test("リポジトリの toml: 自社用と公開用の client_id は違い、どちらも読める", () => {
+    const inhouse = parseClientIdFromToml(read("shopify.app.toml"));
+    const pub = parseClientIdFromToml(read("shopify.app.public.toml"));
+    assert.ok(inhouse && pub && inhouse !== pub);
+    assert.equal(resolvePlanDistribution({ SHOPIFY_API_KEY: inhouse, APP_DISTRIBUTION: "public" }, shop, pub, inhouse).distribution, "inhouse");
+    assert.equal(resolvePlanDistribution({ SHOPIFY_API_KEY: pub }, shop, pub, inhouse).distribution, "public");
+  });
+
+  test("サーバーの 2 か所は同じ関数を使い、client_id は cwd 以外からも探す", () => {
+    const plan = read("app/utils/shop-plan.server.ts");
+    const probe = read("app/utils/shop-install-probe.server.ts");
+    assert.match(plan, /resolvePlanDistribution\(process\.env, shop, getPublicClientId\(\), getInhouseClientId\(\)\)/);
+    assert.match(probe, /resolveServerDistribution\(process\.env, shop, getPublicClientId\(\), getInhouseClientId\(\)\)/);
+    assert.match(probe, /from "\.\/plan-distribution"/);
+    assert.match(probe, /import\.meta\.url/);
+    assert.doesNotMatch(read("app/utils/shop-install-probe.ts"), /export function resolveServerDistribution/, "決まりを 2 つ書かない");
+  });
+});
+
+describe("apply-change: 契約を読めなかったとき（レビュー #78 の P1）", () => {
+  test("入出庫の戻し（Shopify の操作のあと）だけ通す。ロス・仕入・調整・棚卸は今まで通り止める", () => {
+    assert.equal(applyChangeFailsOpenOnPlanCheckError("outbound_transfer"), true);
+    assert.equal(applyChangeFailsOpenOnPlanCheckError("inbound_transfer"), true);
+    for (const a of ["loss_entry", "purchase_entry", "purchase_cancel", "adjustment", "inventory_count", "", "unknown"]) {
+      assert.equal(applyChangeFailsOpenOnPlanCheckError(a), false, a);
+    }
+  });
+
+  test("ルートは activity で failOpenOnCheckError を決める（未契約は止めたまま）", () => {
+    const src = read("app/routes/api.inventory.apply-change.tsx");
+    assert.match(src, /failOpenOnCheckError: applyChangeFailsOpenOnPlanCheckError\(activity\)/);
+    const gate = read("app/utils/plan-gate.server.ts");
+    assert.match(gate, /access === "plan_check_failed" && args\.failOpenOnCheckError/, "通すのは読めなかったときだけ");
+  });
+
+  test("POS の入出庫の在庫の戻しは、すべて入出庫の activity で apply-change を呼ぶ", () => {
+    const helper = read("extensions/common/adjustInventoryViaApplyChange.js");
+    assert.match(helper, /activity = "outbound_transfer"/);
+    const callers = [
+      "extensions/stock-transfer-tile/src/ModalOutbound.jsx",
+      "extensions/stock-transfer-inbound/src/screens/InboundListScreen.jsx",
+    ];
+    let calls = 0;
+    for (const p of callers) {
+      const src = read(p);
+      for (const m of src.matchAll(/adjustInventoryAtLocationWithFallback\(\{([\s\S]*?)\}\);/g)) {
+        calls += 1;
+        const activity = /activity:\s*"([^"]+)"/.exec(m[1])?.[1] ?? "outbound_transfer";
+        assert.equal(applyChangeFailsOpenOnPlanCheckError(activity), true, `${p}: ${activity}`);
+      }
+    }
+    assert.ok(calls >= 8, `呼び出しを見つけた数: ${calls}`);
   });
 });
 
