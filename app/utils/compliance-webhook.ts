@@ -35,6 +35,8 @@ export type ComplianceResult = {
   status: number;
   handled: string | null;
   deleted: Record<string, number>;
+  /** 消さなかった理由（no_shop / inhouse / reinstalled） */
+  skipped?: string;
 };
 
 type CustomersRedactPayload = {
@@ -49,6 +51,10 @@ export async function handleComplianceWebhook(args: {
   shop?: string | null;
   payload?: unknown;
   db: ComplianceDb;
+  /** サーバーが公開用か自社用か（resolveServerDistribution）。shop/redact は public のときだけ消す */
+  distribution: "public" | "inhouse";
+  /** true = 店にまだアプリが入っている（shop/redact で消さない）。確かめられないときは投げる */
+  isShopStillInstalled: (shop: string) => Promise<boolean>;
   log?: (...items: unknown[]) => void;
 }): Promise<ComplianceResult> {
   const { shop, db } = args;
@@ -85,7 +91,17 @@ export async function handleComplianceWebhook(args: {
       const shopDomain = body.shop_domain || shop || "";
       if (!shopDomain) {
         log("[compliance] shop/redact without shop domain; nothing deleted");
-        return { status: 200, handled: normalized, deleted };
+        return { status: 200, handled: normalized, deleted, skipped: "no_shop" };
+      }
+      // 自社用（Ciara）のアプリでは消さない（T が決めるまでの既定）。必須 webhook が要るのは App Store のアプリ。
+      if (args.distribution !== "public") {
+        log(`[compliance] shop/redact for ${shopDomain}: in-house app; skipped delete`);
+        return { status: 200, handled: normalized, deleted, skipped: "inhouse" };
+      }
+      // 48 時間のうちに入れ直した店なら、入れ直したあとのデータを消さない。
+      if (await args.isShopStillInstalled(shopDomain)) {
+        log(`[compliance] shop/redact for ${shopDomain}: app is installed again; skipped delete`);
+        return { status: 200, handled: normalized, deleted, skipped: "reinstalled" };
       }
       const where = { shop: shopDomain };
       deleted.inventoryChangeEvent = (await db.inventoryChangeEvent.deleteMany({ where })).count;

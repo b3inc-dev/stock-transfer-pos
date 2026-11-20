@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { handleComplianceWebhook, normalizeWebhookTopic } from "../app/utils/compliance-webhook.ts";
+import { handleComplianceWebhook as rawHandle, normalizeWebhookTopic } from "../app/utils/compliance-webhook.ts";
+import {
+  isNotInstalledError,
+  probeShopStillInstalled,
+  resolveServerDistribution,
+} from "../app/utils/shop-install-probe.ts";
+
+// 既定は「公開用・入れ直していない」。テストごとに上書きする。
+const notInstalled = async () => false;
+function handleComplianceWebhook(args) {
+  return rawHandle({ distribution: "public", isShopStillInstalled: notInstalled, ...args });
+}
 
 const TABLES = [
   "session",
@@ -130,5 +141,141 @@ describe("customers/data_request and unknown topics", () => {
     assert.equal(res.status, 200);
     assert.equal(res.handled, null);
     assert.deepEqual(db.calls, []);
+  });
+});
+
+describe("shop/redact guards", () => {
+  test("skips the delete when the shop has installed the app again", async () => {
+    const db = fakeDb();
+    const seen = [];
+    const res = await handleComplianceWebhook({
+      topic: "SHOP_REDACT",
+      shop: "a.myshopify.com",
+      payload: {},
+      db,
+      isShopStillInstalled: async (s) => {
+        seen.push(s);
+        return true;
+      },
+      log: quiet,
+    });
+    assert.deepEqual(seen, ["a.myshopify.com"]);
+    assert.equal(res.status, 200);
+    assert.equal(res.skipped, "reinstalled");
+    assert.deepEqual(db.calls, []);
+  });
+
+  test("throws (route answers 500) when the install check cannot decide", async () => {
+    const db = fakeDb();
+    await assert.rejects(
+      handleComplianceWebhook({
+        topic: "SHOP_REDACT",
+        shop: "a.myshopify.com",
+        db,
+        isShopStillInstalled: async () => {
+          throw new Error("network down");
+        },
+        log: quiet,
+      }),
+      /network down/,
+    );
+    assert.deepEqual(db.calls, []);
+  });
+
+  test("in-house (Ciara) app logs and skips without calling the install check", async () => {
+    const db = fakeDb();
+    let probed = false;
+    const res = await handleComplianceWebhook({
+      topic: "shop/redact",
+      shop: "a.myshopify.com",
+      db,
+      distribution: "inhouse",
+      isShopStillInstalled: async () => {
+        probed = true;
+        return false;
+      },
+      log: quiet,
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.skipped, "inhouse");
+    assert.equal(probed, false);
+    assert.deepEqual(db.calls, []);
+  });
+});
+
+describe("resolveServerDistribution", () => {
+  test("APP_DISTRIBUTION=inhouse or APP_MODE=inhouse is in-house", () => {
+    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: "inhouse" }, "a.myshopify.com"), "inhouse");
+    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: " InHouse " }, "a.myshopify.com"), "inhouse");
+    assert.equal(resolveServerDistribution({ APP_MODE: "inhouse" }, "a.myshopify.com"), "inhouse");
+  });
+  test("a shop in CUSTOM_APP_STORE_IDS is in-house", () => {
+    assert.equal(
+      resolveServerDistribution({ CUSTOM_APP_STORE_IDS: "x.myshopify.com, A.myshopify.com" }, "a.myshopify.com"),
+      "inhouse",
+    );
+  });
+  test("otherwise public (same as getShopPlan)", () => {
+    assert.equal(resolveServerDistribution({}, "a.myshopify.com"), "public");
+    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: "public", APP_MODE: "public" }, "a.myshopify.com"), "public");
+    assert.equal(resolveServerDistribution({ CUSTOM_APP_STORE_IDS: "x.myshopify.com" }, "a.myshopify.com"), "public");
+  });
+});
+
+describe("probeShopStillInstalled", () => {
+  test("false when there is no offline session (no API call)", async () => {
+    let queried = false;
+    const res = await probeShopStillInstalled({
+      shop: "a.myshopify.com",
+      findOfflineSession: async () => null,
+      runProbeQuery: async () => {
+        queried = true;
+      },
+    });
+    assert.equal(res, false);
+    assert.equal(queried, false);
+  });
+
+  test("true when the Admin API call works", async () => {
+    const res = await probeShopStillInstalled({
+      shop: "a.myshopify.com",
+      findOfflineSession: async () => ({ id: "offline_a.myshopify.com" }),
+      runProbeQuery: async () => ({ data: { shop: { id: "gid://shopify/Shop/1" } } }),
+    });
+    assert.equal(res, true);
+  });
+
+  for (const err of [
+    Object.assign(new Error("Unauthorized"), { response: { code: 401 } }),
+    Object.assign(new Error("Forbidden"), { response: { code: 403 } }),
+    new Response(null, { status: 401 }),
+    new Error("[API] Invalid API key or access token (unrecognized login or wrong password)"),
+    new Error("invalid_grant"),
+  ]) {
+    test(`false when the token is rejected (${err instanceof Response ? "Response 401" : err.message})`, async () => {
+      const res = await probeShopStillInstalled({
+        shop: "a.myshopify.com",
+        findOfflineSession: async () => ({ id: "offline" }),
+        runProbeQuery: async () => {
+          throw err;
+        },
+      });
+      assert.equal(res, false);
+    });
+  }
+
+  test("rethrows other failures (5xx / network)", async () => {
+    const err = Object.assign(new Error("Bad gateway"), { response: { code: 502 } });
+    assert.equal(isNotInstalledError(err), false);
+    await assert.rejects(
+      probeShopStillInstalled({
+        shop: "a.myshopify.com",
+        findOfflineSession: async () => ({ id: "offline" }),
+        runProbeQuery: async () => {
+          throw err;
+        },
+      }),
+      /Bad gateway/,
+    );
   });
 });

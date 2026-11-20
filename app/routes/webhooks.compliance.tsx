@@ -9,6 +9,8 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { handleComplianceWebhook, type ComplianceDb } from "../utils/compliance-webhook";
+import { resolveServerDistribution } from "../utils/shop-install-probe";
+import { isShopStillInstalled } from "../utils/shop-install-probe.server";
 
 export const loader = async () => {
   return new Response("Method Not Allowed", { status: 405 });
@@ -36,10 +38,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       payload: webhook.payload,
       // Prisma の deleteMany は引数の型が細かいので、この処理で使う形（ComplianceDb）として渡す。
       db: db as unknown as ComplianceDb,
+      distribution: resolveServerDistribution(process.env, webhook.shop),
+      isShopStillInstalled,
     });
     return new Response(null, { status });
   } catch (err) {
-    // DB の失敗など。500 を返して Shopify にもう一度送ってもらう（消すだけなので何度でも安全）。
+    // DB の失敗・入っているか確かめられないときなど。500 を返して Shopify にもう一度送ってもらう（消すだけなので何度でも安全）。
     console.error("[webhooks.compliance] handler error:", err);
     return new Response("Internal Server Error", { status: 500 });
   }
