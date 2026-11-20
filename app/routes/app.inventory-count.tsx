@@ -67,6 +67,7 @@ const ALLOWED_ACTION_TYPES = new Set([
   "sort_counts_by_count_name",
   "save_product_group",
   "delete_product_group",
+  "delete_product_groups",
   "preview_csv_inventory_count",
   "import_product_groups_csv",
   "create_inventory_count",
@@ -5979,6 +5980,14 @@ export default function InventoryCountPage() {
   useEffect(() => {
     if (loadError) return; // 読込失敗時は productGroups が空になるため選択を消さない
     const existing = new Set(productGroups.map((g) => g.id));
+    // 編集中のグループが削除された場合は編集状態を解除（そのまま保存すると削除したグループが再作成されるため）
+    if (editingGroupId && !existing.has(editingGroupId)) {
+      setEditingGroupId(null);
+      setGroupName("");
+      setSelectedCollectionIds([]);
+      setCollectionConfigs(new Map());
+      setEditingSkuOnlyPreservedIds([]);
+    }
     setBulkDeleteGroupIds((prev) => {
       let changed = false;
       const next = new Set<string>();
@@ -5992,7 +6001,7 @@ export default function InventoryCountPage() {
       const next = prev.filter((id) => existing.has(id));
       return next.length === prev.length ? prev : next;
     });
-  }, [productGroups, loadError]);
+  }, [productGroups, loadError, editingGroupId]);
 
   const handleCsvImportClick = () => {
     csvFileInputRef.current?.click();
@@ -7408,7 +7417,7 @@ export default function InventoryCountPage() {
                           </div>
                         );
                       })()}
-                      {fetcher.data && (fetcher.data as { ok?: boolean; deletedGroups?: number }).ok === true && typeof (fetcher.data as { deletedGroups?: number }).deletedGroups === "number" && (
+                      {fetcher.data && (fetcher.data as { ok?: boolean; deletedGroups?: number }).ok === true && ((fetcher.data as { deletedGroups?: number }).deletedGroups ?? 0) > 0 && (
                         <s-text tone="success">
                           {(fetcher.data as { deletedGroups: number }).deletedGroups}件の商品グループを削除しました
                         </s-text>
