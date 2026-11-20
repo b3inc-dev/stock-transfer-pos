@@ -9,8 +9,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { handleComplianceWebhook, type ComplianceDb } from "../utils/compliance-webhook";
-import { resolveServerDistribution } from "../utils/shop-install-probe";
-import { isShopStillInstalled } from "../utils/shop-install-probe.server";
+import { getServerDistribution, isShopStillInstalled } from "../utils/shop-install-probe.server";
 
 export const loader = async () => {
   return new Response("Method Not Allowed", { status: 405 });
@@ -38,7 +37,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       payload: webhook.payload,
       // Prisma の deleteMany は引数の型が細かいので、この処理で使う形（ComplianceDb）として渡す。
       db: db as unknown as ComplianceDb,
-      distribution: resolveServerDistribution(process.env, webhook.shop),
+      getDistribution: getServerDistribution,
       isShopStillInstalled,
     });
     return new Response(null, { status });

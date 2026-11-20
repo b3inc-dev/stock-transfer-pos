@@ -3,14 +3,16 @@ import { describe, test } from "node:test";
 import { handleComplianceWebhook as rawHandle, normalizeWebhookTopic } from "../app/utils/compliance-webhook.ts";
 import {
   isNotInstalledError,
+  parseClientIdFromToml,
   probeShopStillInstalled,
   resolveServerDistribution,
 } from "../app/utils/shop-install-probe.ts";
+import { readFileSync } from "node:fs";
 
 // 既定は「公開用・入れ直していない」。テストごとに上書きする。
 const notInstalled = async () => false;
 function handleComplianceWebhook(args) {
-  return rawHandle({ distribution: "public", isShopStillInstalled: notInstalled, ...args });
+  return rawHandle({ getDistribution: () => "public", isShopStillInstalled: notInstalled, ...args });
 }
 
 const TABLES = [
@@ -189,7 +191,7 @@ describe("shop/redact guards", () => {
       topic: "shop/redact",
       shop: "a.myshopify.com",
       db,
-      distribution: "inhouse",
+      getDistribution: () => "inhouse",
       isShopStillInstalled: async () => {
         probed = true;
         return false;
@@ -204,21 +206,71 @@ describe("shop/redact guards", () => {
 });
 
 describe("resolveServerDistribution", () => {
-  test("APP_DISTRIBUTION=inhouse or APP_MODE=inhouse is in-house", () => {
-    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: "inhouse" }, "a.myshopify.com"), "inhouse");
-    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: " InHouse " }, "a.myshopify.com"), "inhouse");
-    assert.equal(resolveServerDistribution({ APP_MODE: "inhouse" }, "a.myshopify.com"), "inhouse");
+  const PUBLIC_ID = "public-client-id";
+  const shop = "a.myshopify.com";
+
+  test("public only when APP_DISTRIBUTION=public is set explicitly", () => {
+    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: "public" }, shop, PUBLIC_ID), "public");
+    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: " Public " }, shop, null), "public");
   });
-  test("a shop in CUSTOM_APP_STORE_IDS is in-house", () => {
+
+  test("public when SHOPIFY_API_KEY equals the public app client_id", () => {
+    assert.equal(resolveServerDistribution({ SHOPIFY_API_KEY: PUBLIC_ID }, shop, PUBLIC_ID), "public");
+  });
+
+  test("missing or misspelled settings fall back to in-house (no delete)", () => {
+    assert.equal(resolveServerDistribution({}, shop, PUBLIC_ID), "inhouse");
+    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: "pubilc" }, shop, PUBLIC_ID), "inhouse");
+    assert.equal(resolveServerDistribution({ SHOPIFY_API_KEY: "ciara-client-id" }, shop, PUBLIC_ID), "inhouse");
+    assert.equal(resolveServerDistribution({ SHOPIFY_API_KEY: PUBLIC_ID }, shop, null), "inhouse");
+    assert.equal(resolveServerDistribution({ SHOPIFY_API_KEY: "" }, shop, ""), "inhouse");
+  });
+
+  test("APP_DISTRIBUTION=inhouse or CUSTOM_APP_STORE_IDS wins over public signals", () => {
     assert.equal(
-      resolveServerDistribution({ CUSTOM_APP_STORE_IDS: "x.myshopify.com, A.myshopify.com" }, "a.myshopify.com"),
+      resolveServerDistribution({ APP_DISTRIBUTION: "inhouse", SHOPIFY_API_KEY: PUBLIC_ID }, shop, PUBLIC_ID),
+      "inhouse",
+    );
+    assert.equal(
+      resolveServerDistribution({ APP_DISTRIBUTION: "public", CUSTOM_APP_STORE_IDS: "x.myshopify.com, A.myshopify.com" }, shop, PUBLIC_ID),
       "inhouse",
     );
   });
-  test("otherwise public (same as getShopPlan)", () => {
-    assert.equal(resolveServerDistribution({}, "a.myshopify.com"), "public");
-    assert.equal(resolveServerDistribution({ APP_DISTRIBUTION: "public", APP_MODE: "public" }, "a.myshopify.com"), "public");
-    assert.equal(resolveServerDistribution({ CUSTOM_APP_STORE_IDS: "x.myshopify.com" }, "a.myshopify.com"), "public");
+
+  test("APP_MODE (a POS extension value) is not read on the server", () => {
+    assert.equal(resolveServerDistribution({ APP_MODE: "public" }, shop, PUBLIC_ID), "inhouse");
+  });
+});
+
+describe("parseClientIdFromToml", () => {
+  test("reads client_id from the real shopify.app.public.toml", () => {
+    const id = parseClientIdFromToml(readFileSync(new URL("../shopify.app.public.toml", import.meta.url), "utf8"));
+    assert.match(id ?? "", /^[0-9a-f]{32}$/);
+  });
+  test("ignores commented lines and returns null when missing", () => {
+    assert.equal(parseClientIdFromToml('# client_id = "x"\nname = "a"'), null);
+    assert.equal(parseClientIdFromToml('client_id = "abc"\n'), "abc");
+    assert.equal(parseClientIdFromToml(null), null);
+  });
+});
+
+describe("in-house check uses the same shop as the delete", () => {
+  test("getDistribution gets payload.shop_domain (the shop that would be deleted)", async () => {
+    const db = fakeDb();
+    const seen = [];
+    await handleComplianceWebhook({
+      topic: "SHOP_REDACT",
+      shop: "header.myshopify.com",
+      payload: { shop_domain: "payload.myshopify.com" },
+      db,
+      getDistribution: (s) => {
+        seen.push(s);
+        return "inhouse";
+      },
+      log: quiet,
+    });
+    assert.deepEqual(seen, ["payload.myshopify.com"]);
+    assert.deepEqual(db.calls, []);
   });
 });
 
@@ -247,7 +299,6 @@ describe("probeShopStillInstalled", () => {
 
   for (const err of [
     Object.assign(new Error("Unauthorized"), { response: { code: 401 } }),
-    Object.assign(new Error("Forbidden"), { response: { code: 403 } }),
     new Response(null, { status: 401 }),
     new Error("[API] Invalid API key or access token (unrecognized login or wrong password)"),
     new Error("invalid_grant"),
@@ -263,6 +314,21 @@ describe("probeShopStillInstalled", () => {
       assert.equal(res, false);
     });
   }
+
+  test("403 is not treated as not installed (rethrown, so nothing is deleted)", async () => {
+    const err = Object.assign(new Error("Forbidden"), { response: { code: 403 } });
+    assert.equal(isNotInstalledError(err), false);
+    await assert.rejects(
+      probeShopStillInstalled({
+        shop: "a.myshopify.com",
+        findOfflineSession: async () => ({ id: "offline" }),
+        runProbeQuery: async () => {
+          throw err;
+        },
+      }),
+      /Forbidden/,
+    );
+  });
 
   test("rethrows other failures (5xx / network)", async () => {
     const err = Object.assign(new Error("Bad gateway"), { response: { code: 502 } });
