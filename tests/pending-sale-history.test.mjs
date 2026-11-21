@@ -6,6 +6,7 @@ import ts from "typescript";
 import { matchPendingSale } from "../app/utils/match-pending-sale.ts";
 import * as inventoryHistoryOrder from "../app/utils/inventory-history-order.ts";
 import * as repairInventoryLogMetadata from "../app/utils/repairInventoryLogMetadata.js";
+import * as readWebhookShopTimezone from "../app/utils/readWebhookShopTimezone.js";
 
 test("a sale preserves a previous adjustment ending at the sale's starting quantity", async () => {
   const timestamp = new Date("2026-01-15T12:00:00Z");
@@ -58,6 +59,7 @@ test("a sale preserves a previous adjustment ending at the sale's starting quant
     "../utils/match-pending-sale": { matchPendingSale },
     "../utils/inventory-history-order": inventoryHistoryOrder,
     "../utils/repairInventoryLogMetadata.js": repairInventoryLogMetadata,
+    "../utils/readWebhookShopTimezone.js": readWebhookShopTimezone,
   };
   const source = readFileSync(new URL("../app/routes/webhooks.inventory_levels.update.tsx", import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, {
