@@ -8,9 +8,9 @@ import type {
   GraphQLUserError,
   InventorySetQuantitiesJson,
   InventoryAdjustQuantitiesJson,
-  QuantityNameValue,
 } from "../types/graphql-responses";
 import { isDefiniteUnaappliedRejection } from "./apply-change-outer-catch-guard";
+import { readAvailableFromResponse, type CurrentQuantityRead } from "./current-quantity-read";
 
 const INVENTORY_SET_QUANTITIES_MAX = 250;
 
@@ -35,7 +35,8 @@ export type AdminGraphql = (query: string, opts?: { variables?: Record<string, u
 async function graphqlWithRetry(
   admin: { graphql: AdminGraphql },
   query: string,
-  variables?: Record<string, unknown>
+  variables?: Record<string, unknown>,
+  shouldRetryStatus: (status: number) => boolean = isRetryableStatus
 ): Promise<{ response: Response; json: unknown }> {
   let lastResp: Response | null = null;
   for (let attempt = 1; attempt <= SHOPIFY_API_RETRY_MAX; attempt++) {
@@ -45,7 +46,7 @@ async function graphqlWithRetry(
       const json = await response.json().catch(() => ({}));
       return { response, json };
     }
-    if (!isRetryableStatus(response.status) || attempt >= SHOPIFY_API_RETRY_MAX) {
+    if (!shouldRetryStatus(response.status) || attempt >= SHOPIFY_API_RETRY_MAX) {
       const json = await response.json().catch(() => ({}));
       return { response, json };
     }
@@ -85,44 +86,54 @@ function toInventoryItemGid(inventoryItemId: string): string | null {
 }
 
 /**
- * 指定チャンクの inventoryItemId について、locationId の現在の available 数量を一括取得する。
- * 返り値: quantities（取得成功分）と failedGids（取得失敗分）を分離して返す。
- * 失敗分を 0 にフォールバックしないことで、ロールバック時に在庫が誤って 0 にリセットされる
- * 問題を防ぐ。
+ * 1 商品・1 店の今の available を読む（この file で今の在庫数を読むのはここだけ）。
+ * 読み方は `readAvailableFromResponse` に合わせる:
+ * その店に在庫の記録が無い（inventoryLevel が null）ときだけ 0、それ以外の失敗は「読めなかった」。
  */
-async function fetchChunkQuantities(
+async function readAvailableAt(
+  admin: { graphql: AdminGraphql },
+  locationGid: string,
+  itemGid: string
+): Promise<CurrentQuantityRead> {
+  try {
+    const { response, json } = await graphqlWithRetry(admin, `#graphql
+        query Cur($id: ID!, $loc: ID!) {
+          inventoryItem(id: $id) {
+            inventoryLevel(locationId: $loc) {
+              quantities(names: ["available"]) { name quantity }
+            }
+          }
+        }
+      `, { id: itemGid, loc: locationGid });
+    return readAvailableFromResponse(response.ok, response.status, json);
+  } catch (e: unknown) {
+    return { ok: false, retryable: true, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+type ChunkSnapshot = Array<{ inventoryItemId: string; quantity: number }>;
+
+/**
+ * 元に戻す用に、チャンクの商品の今の数を控える。
+ * 1 件でも読めなければ、0 にせず失敗を返す（0 で控えると、戻すときにその商品が 0 に書き換わる）。
+ */
+async function readChunkSnapshot(
   admin: { graphql: AdminGraphql },
   locationGid: string,
   inventoryItemGids: string[]
-): Promise<{ quantities: Map<string, number>; failedGids: string[] }> {
-  const quantities = new Map<string, number>();
-  const failedGids: string[] = [];
-  // 1件ずつ取得（既存の fetchCurrentQuantityServer と同じ方式）
+): Promise<
+  | { ok: true; snapshot: ChunkSnapshot }
+  | { ok: false; retryable: boolean; error: string; inventoryItemId: string }
+> {
+  const snapshot: ChunkSnapshot = [];
   for (const itemGid of inventoryItemGids) {
-    try {
-      const { json } = await graphqlWithRetry(admin, `#graphql
-          query FetchQty($id: ID!, $loc: ID!) {
-            inventoryItem(id: $id) {
-              inventoryLevel(locationId: $loc) {
-                quantities(names: ["available"]) { name quantity }
-              }
-            }
-          }
-        `, { id: itemGid, loc: locationGid });
-      const quantitiesArr = (json as { data?: { inventoryItem?: { inventoryLevel?: { quantities?: QuantityNameValue[] } } } })?.data?.inventoryItem?.inventoryLevel?.quantities;
-      const q = Array.isArray(quantitiesArr) ? quantitiesArr.find((x) => x?.name === "available") : null;
-      if (q?.quantity != null) {
-        quantities.set(itemGid, Number(q.quantity));
-      } else {
-        // inventoryLevel が未設定のアイテム（ロケーションに紐付いていない）は 0 として扱う
-        quantities.set(itemGid, 0);
-      }
-    } catch {
-      // ネットワーク障害等で取得不能な場合はロールバック不可として扱う
-      failedGids.push(itemGid);
+    const read = await readAvailableAt(admin, locationGid, itemGid);
+    if (!read.ok) {
+      return { ok: false, retryable: read.retryable, error: read.error, inventoryItemId: itemGid };
     }
+    snapshot.push({ inventoryItemId: itemGid, quantity: read.quantity });
   }
-  return { quantities, failedGids };
+  return { ok: true, snapshot };
 }
 
 export type SetInventoryQuantitiesResult = {
@@ -141,6 +152,12 @@ export type SetInventoryQuantitiesResult = {
   appliedInventoryItemIds?: string[];
   /** 失敗したチャンク index（0-based）。部分失敗時のみ */
   failedChunkIndex?: number;
+  /**
+   * true: 250 件を超える補正で、元に戻す用の今の数を読めなかったので、在庫を 1 件も動かさずに止めた。
+   * retryable が true なら、同じ内容で送り直してよい（在庫は動いていない）。
+   */
+  snapshotUnreadable?: boolean;
+  retryable?: boolean;
 };
 
 /**
@@ -173,37 +190,51 @@ export async function setInventoryQuantitiesServer(
         ? referenceDocumentUri.trim()
         : `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`;
 
-  // チャンクごとの適用前スナップショット（ロールバック用）
-  // canRollback: false のチャンクが存在する場合はロールバックを中断し、呼び出し元に通知する
-  const beforeStates: Array<{
-    chunkIndex: number;
-    quantities: Array<{ inventoryItemId: string; quantity: number }>;
-    canRollback: boolean;
-  }> = [];
+  const chunks: Array<typeof validQuantities> = [];
+  for (let i = 0; i < validQuantities.length; i += INVENTORY_SET_QUANTITIES_MAX) {
+    chunks.push(validQuantities.slice(i, i + INVENTORY_SET_QUANTITIES_MAX));
+  }
+
+  // 元に戻す用の控え（250 件を超えるときだけ）。
+  // あとのチャンクがはっきり断られたら、先に入れたチャンクをこの数に戻す。
+  // 戻すことがあるのは最後より前のチャンクだけなので、その分を「1 件も動かす前に」全部読む。
+  // 1 件でも読めなければ補正を始めない（0 で控えると、戻すときにその商品が 0 に書き換わるため）。
+  const snapshots: ChunkSnapshot[] = [];
+  for (let ci = 0; ci < chunks.length - 1; ci++) {
+    const read = await readChunkSnapshot(
+      admin,
+      locationGid,
+      chunks[ci].map((q) => q.inventoryItemId)
+    );
+    if (!read.ok) {
+      console.warn(
+        `[inventory-set-quantities-server] 元に戻す用の数を読めないため補正を始めません（在庫は動かしていません）: ` +
+          `chunk${ci} item=${read.inventoryItemId} error=${read.error}`
+      );
+      return {
+        ok: false,
+        error: read.error,
+        rolledBack: false,
+        snapshotUnreadable: true,
+        retryable: read.retryable,
+        appliedInventoryItemIds: [],
+      };
+    }
+    snapshots.push(read.snapshot);
+  }
+
   /** 成功確定したチャンクの inventoryItem GID（rollback 前まで蓄積） */
   const appliedInventoryItemIds: string[] = [];
+  /**
+   * いま Shopify にあるはずの数（このアプリが最後に書いた数）。
+   * 戻すときの changeFromQuantity に入れ、書いたあとにだれかが動かしていたら Shopify に断ってもらう。
+   */
+  const lastWritten = new Map<string, number>();
 
   try {
-    for (let i = 0; i < validQuantities.length; i += INVENTORY_SET_QUANTITIES_MAX) {
-      const chunk = validQuantities.slice(i, i + INVENTORY_SET_QUANTITIES_MAX);
-      const chunkIndex = Math.floor(i / INVENTORY_SET_QUANTITIES_MAX);
-
-      // 適用前の数量を取得してスナップショットを保存
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+      const chunk = chunks[chunkIndex];
       const chunkItemGids = chunk.map((q) => q.inventoryItemId);
-      const { quantities: beforeMap, failedGids } = await fetchChunkQuantities(admin, locationGid, chunkItemGids);
-      if (failedGids.length > 0) {
-        console.warn(
-          `[inventory-set-quantities-server] チャンク${chunkIndex}のスナップショット取得失敗 (${failedGids.length}件): ${failedGids.join(", ")} ` +
-          `― このチャンクが失敗した場合のロールバックは安全に実行できません`
-        );
-      }
-      beforeStates.push({
-        chunkIndex,
-        quantities: chunkItemGids
-          .filter((gid) => !failedGids.includes(gid))
-          .map((gid) => ({ inventoryItemId: gid, quantity: beforeMap.get(gid) ?? 0 })),
-        canRollback: failedGids.length === 0,
-      });
 
       const input: Record<string, unknown> = {
         name: "available",
@@ -256,9 +287,6 @@ export async function setInventoryQuantitiesServer(
       if (chunkFailed) {
         // userErrors 以外はすべて ambiguous（キーワード漏れで failed→再 set しない）
         const ambiguous = !isDefiniteUnaappliedRejection({ hadUserErrors: chunkHadUserErrors });
-        // チャンク N の失敗 — 適用済みチャンク（beforeStates の最後のエントリを除く）をロールバック
-        const appliedSnapshots = beforeStates.slice(0, -1); // 現在のチャンクは適用されていないので除外
-
         // 成否不明: 自動再 set を避けるため partial 扱い。ロールバックもしない
         // （成功済み先行チャンクを戻すと、失敗チャンクが実は適用済みだった場合に更に壊れる）
         if (ambiguous) {
@@ -277,7 +305,7 @@ export async function setInventoryQuantitiesServer(
           };
         }
 
-        if (appliedSnapshots.length === 0) {
+        if (chunkIndex === 0) {
           // 最初のチャンクが確定失敗（userErrors 等）— ロールバック不要
           return {
             ok: false,
@@ -288,79 +316,86 @@ export async function setInventoryQuantitiesServer(
           };
         }
 
-        // スナップショット取得が失敗していたチャンクがある場合、安全にロールバックできないため中断する
-        const nonRollbackable = appliedSnapshots.filter((s) => !s.canRollback);
-        if (nonRollbackable.length > 0) {
-          const msg =
-            `[inventory-set-quantities-server] チャンク${nonRollbackable.map((s) => s.chunkIndex).join(",")}の` +
-            `スナップショット取得が失敗しているためロールバック不可 — 手動復旧が必要です。` +
-            ` 元のエラー: ${chunkError}。` +
-            ` スナップショット: ${JSON.stringify(appliedSnapshots)}`;
-          console.error(msg);
-          return {
-            ok: false,
-            error: chunkError,
-            rolledBack: false,
-            partiallyApplied: true,
-            appliedInventoryItemIds: [...appliedInventoryItemIds],
-            failedChunkIndex: chunkIndex,
-          };
-        }
-
-        let rollbackOk = true;
+        // 先に入れたチャンク（0..chunkIndex-1）を、控えた数へ逆順に戻す。
+        // 戻す書き込みは「いまが、さっき書いた数のままなら」の条件付き（changeFromQuantity）。
+        // 書いたあとに売れた・入庫した商品があると Shopify が CHANGE_FROM_QUANTITY_STALE で断るので、
+        // そのチャンクは戻さず（入ったまま）partial_failed にして管理者に回す（その売上・入庫を消さない）。
+        let rollbackFailedAt = -1;
+        let rollbackRefused = false;
+        let rollbackStale = false;
         let rollbackErrorMsg = "";
-        // 逆順でロールバック
-        for (let ri = appliedSnapshots.length - 1; ri >= 0; ri--) {
-          const snapshot = appliedSnapshots[ri];
+        for (let ri = chunkIndex - 1; ri >= 0; ri--) {
           const rollbackInput: Record<string, unknown> = {
             name: "available",
             reason: "correction",
-            quantities: snapshot.quantities.map((q) => ({
+            quantities: snapshots[ri].map((q) => ({
               inventoryItemId: q.inventoryItemId,
               locationId: locationGid,
               quantity: q.quantity,
-              changeFromQuantity: null,
+              changeFromQuantity: lastWritten.get(q.inventoryItemId) ?? null,
             })),
           };
           try {
+            // 送り直すのは 429（Shopify が受け付けていない）だけ。5xx のあとに送り直すと、
+            // 1 回目が入っていた場合に 2 回目が STALE で断られ、「戻せなかった」と取り違えるため。
             const { response: rbResp, json: rbJson } = await graphqlWithRetry(admin, `#graphql
                 mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
                   inventorySetQuantities(input: $input) {
                     inventoryAdjustmentGroup { id }
-                    userErrors { field message }
+                    userErrors { field message code }
                   }
                 }
-              `, { input: rollbackInput });
+              `, { input: rollbackInput }, (status) => status === 429);
+            const rbErrJson = rbJson as InventorySetQuantitiesJson;
+            const rbTopErrors = Array.isArray(rbErrJson?.errors) ? rbErrJson.errors : [];
+            const rbData = rbErrJson?.data?.inventorySetQuantities;
+            const rbErrs = rbData?.userErrors ?? [];
             if (!rbResp.ok) {
-              rollbackOk = false;
-              const rbErrJson = rbJson as InventorySetQuantitiesJson;
-              rollbackErrorMsg = rbErrJson?.errors?.[0]?.message ?? rbResp.statusText ?? `HTTP ${rbResp.status}`;
+              rollbackErrorMsg = rbTopErrors[0]?.message ?? rbResp.statusText ?? `HTTP ${rbResp.status}`;
+            } else if (rbTopErrors.length > 0 && !rbData) {
+              rollbackErrorMsg =
+                rbTopErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "GraphQL errors";
+            } else if (rbErrs.length) {
+              rollbackErrorMsg = rbErrs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
+              rollbackRefused = true;
+              rollbackStale = rbErrs.some(
+                (e) => (e as GraphQLUserError & { code?: string | null }).code === "CHANGE_FROM_QUANTITY_STALE"
+              );
             } else {
-              const rbData = (rbJson as InventorySetQuantitiesJson)?.data?.inventorySetQuantities;
-              const rbErrs = rbData?.userErrors ?? [];
-              if (rbErrs.length) {
-                rollbackOk = false;
-                rollbackErrorMsg = rbErrs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
-              }
+              for (const q of snapshots[ri]) lastWritten.set(q.inventoryItemId, q.quantity);
+              continue;
             }
           } catch (rbErr) {
-            rollbackOk = false;
             rollbackErrorMsg = rbErr instanceof Error ? rbErr.message : String(rbErr);
           }
-          if (!rollbackOk) break;
+          rollbackFailedAt = ri;
+          break;
         }
-        if (!rollbackOk) {
+        if (rollbackFailedAt >= 0) {
+          // 戻す途中で失敗: まだ戻していないチャンクは入ったまま。戻せたチャンクは元の数。
+          // 失敗したチャンクは、はっきり断られた（userErrors）なら入ったまま、それ以外は戻ったか分からない。
+          // 一部だけ反映（partial_failed）にして、同じ ID でも自動で在庫を動かさない（STATE_MACHINE §6）。
+          const stillAppliedChunks = rollbackRefused ? rollbackFailedAt + 1 : rollbackFailedAt;
+          const stillApplied = chunks
+            .slice(0, stillAppliedChunks)
+            .flatMap((c) => c.map((q) => q.inventoryItemId));
           console.error(
             `[inventory-set-quantities-server] ロールバック失敗 — 手動復旧が必要です。` +
-            ` 元のエラー: ${chunkError}。ロールバックエラー: ${rollbackErrorMsg}。` +
-            ` スナップショット: ${JSON.stringify(appliedSnapshots)}`
+            ` 元のエラー: ${chunkError}。ロールバックエラー（chunk${rollbackFailedAt}）: ${rollbackErrorMsg}。` +
+            ` スナップショット: ${JSON.stringify(snapshots.slice(0, chunkIndex))}`
           );
           return {
             ok: false,
-            error: chunkError,
+            // 書いたあとに在庫が動いていて戻さなかったときは、管理者が分かるように理由を足す
+            error: rollbackStale
+              ? `${chunkError}（元に戻す前に店の在庫が動いていたため、戻していません: CHANGE_FROM_QUANTITY_STALE）`
+              : chunkError,
             rolledBack: false,
             partiallyApplied: true,
-            appliedInventoryItemIds: [...appliedInventoryItemIds],
+            // 入ったと言い切れるのは stillApplied だけ。戻す処理がはっきり断られたのでなければ、
+            // そのチャンクは戻ったか分からないので「不明」（行を failed にしない）
+            applicationUncertain: !rollbackRefused,
+            appliedInventoryItemIds: stillApplied,
             failedChunkIndex: chunkIndex,
           };
         }
@@ -376,6 +411,7 @@ export async function setInventoryQuantitiesServer(
 
       // チャンク成功: 適用済み GID を記録
       for (const gid of chunkItemGids) appliedInventoryItemIds.push(gid);
+      for (const q of chunk) lastWritten.set(q.inventoryItemId, q.quantity);
     }
     return {
       ok: true,
@@ -403,32 +439,20 @@ export async function setInventoryQuantitiesServer(
 }
 
 /**
- * 1アイテム・1ロケーションの現在の available 数量を取得
+ * 1アイテム・1ロケーションの現在の available 数量を取得する。
+ * 読めなかったとき（通信・HTTP・GraphQL の errors・形の違い）は 0 にせず ok:false を返す。
+ * 0 にすると、delta の明細（ロス・仕入れ）で在庫が「0 からの増減」に書き換わるため。
+ * その店に在庫の記録が無い（inventoryLevel が null）ときだけ 0（このあと在庫を有効にしてから set する）。
  */
 export async function fetchCurrentQuantityServer(
   admin: { graphql: AdminGraphql },
   locationId: string,
   inventoryItemId: string
-): Promise<number> {
+): Promise<CurrentQuantityRead> {
   const locationGid = toLocationGid(locationId);
   const itemGid = toInventoryItemGid(inventoryItemId);
-  if (!itemGid) return 0;
-  try {
-    const { json } = await graphqlWithRetry(admin, `#graphql
-        query Cur($id: ID!, $loc: ID!) {
-          inventoryItem(id: $id) {
-            inventoryLevel(locationId: $loc) {
-              quantities(names: ["available"]) { name quantity }
-            }
-          }
-        }
-      `, { id: itemGid, loc: locationGid });
-    const data = (json as { data?: { inventoryItem?: { inventoryLevel?: { quantities?: QuantityNameValue[] } } } })?.data?.inventoryItem?.inventoryLevel?.quantities;
-    const q = Array.isArray(data) ? data.find((x) => x?.name === "available") : null;
-    return Number(q?.quantity ?? 0) || 0;
-  } catch {
-    return 0;
-  }
+  if (!itemGid) return { ok: false, retryable: false, error: `inventoryItemId が不正です: ${inventoryItemId}` };
+  return readAvailableAt(admin, locationGid, itemGid);
 }
 
 const INVENTORY_ADJUST_MAX = 250;

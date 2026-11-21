@@ -1,5 +1,6 @@
 // app/routes/app.inventory-info.tsx
 // 在庫情報画面（在庫高表示・変動履歴）
+import { historyInventoryFilterIds, historyProductBatches, historyProductKey, indexHistoryProducts, recoveredHistorySku, type HistoryProduct } from "../utils/change-history-product";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams, useFetcher, useLocation, data } from "react-router";
 import React, { useState, useEffect, useRef, useMemo } from "react";
@@ -16,6 +17,7 @@ import {
   fetchAndSaveSnapshotsForDate,
   saveSnapshotsForDate,
 } from "../utils/inventory-snapshot";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 // 型の再エクスポート（他ルートで参照している場合に備える）
 export type { DailyInventorySnapshot, InventorySnapshotsData };
@@ -33,19 +35,7 @@ const LOCATIONS_QUERY = `#graphql
 `;
 
 // 変動履歴一覧用：バリアントの商品名・オプション・JANを一括取得（最大250件/回）
-const VARIANTS_FOR_CHANGE_HISTORY_QUERY = `#graphql
-  query VariantsForChangeHistory($ids: [ID!]!) {
-    nodes(ids: $ids) {
-      ... on ProductVariant {
-        id
-        displayName
-        barcode
-        selectedOptions { name value }
-        product { title }
-      }
-    }
-  }
-`;
+
 
 // 在庫変動履歴のアクティビティ種別ラベル（一覧・CSV・フィルターで共通）
 // 仕入キャンセル・キャンセル戻りは「仕入」「返品」に振り分けて表示
@@ -304,7 +294,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const changeHistoryPage = Math.max(1, parseInt(url.searchParams.get("changeHistoryPage") ?? "1", 10) || 1);
     const CHANGE_HISTORY_PAGE_SIZE = 5000;
 
-    let changeHistoryLogs: Array<{ variantId?: string | null; id?: string; date?: string; sku?: string; locationId?: string; locationName?: string; activity?: string; delta?: number | null; quantityAfter?: number | null; sourceType?: string; sourceId?: string | null; idempotencyKey?: string; note?: string | null; timestamp?: string; [key: string]: unknown }> = [];
+    let changeHistoryLogs: Array<{ variantId?: string | null; inventoryItemId?: string; recoveredSku?: string; id?: string; date?: string; sku?: string; locationId?: string; locationName?: string; activity?: string; delta?: number | null; quantityAfter?: number | null; sourceType?: string; sourceId?: string | null; idempotencyKey?: string; note?: string | null; timestamp?: string; [key: string]: unknown }> = [];
     let changeHistoryPagination: {
       total: number;
       startIndex: number;
@@ -345,7 +335,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         }
 
         if (inventoryItemIds.length > 0) {
-          whereClause.inventoryItemId = { in: inventoryItemIds };
+          whereClause.inventoryItemId = { in: historyInventoryFilterIds(inventoryItemIds) };
         }
 
         if (activityTypes.length > 0) {
@@ -390,25 +380,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
         };
 
         // 商品名・オプションをバリアントから一括取得して付与（一覧・CSVを他リストと同等にする）
-        const variantIds = [...new Set(changeHistoryLogs.map((l) => l.variantId).filter(Boolean))] as string[];
-        const MAX_VARIANTS = 1500; // 商品名表示用：最大1500バリアントまで取得（制限撤廃に合わせて緩和）
-        const limitedVariantIds = variantIds.slice(0, MAX_VARIANTS);
-        
-        if (limitedVariantIds.length < variantIds.length) {
-          console.warn(`[inventory-info] Variant IDs limited to ${MAX_VARIANTS} out of ${variantIds.length} total variants`);
-        }
-        
-        const variantInfoMap = new Map<string, { productTitle: string; barcode: string; option1: string; option2: string; option3: string }>();
-        if (limitedVariantIds.length > 0 && session) {
-          const CHUNK = 250;
-          const MAX_CHUNKS = 6; // 最大6チャンク（1500件）まで処理（件数制限撤廃に合わせて緩和）
-          const chunksToProcess = Math.min(Math.ceil(limitedVariantIds.length / CHUNK), MAX_CHUNKS);
-          
-          for (let i = 0; i < chunksToProcess * CHUNK && i < limitedVariantIds.length; i += CHUNK) {
-            const chunk = limitedVariantIds.slice(i, i + CHUNK);
+        const batches = historyProductBatches(changeHistoryLogs, 6);
+        const variantInfoMap = new Map<string, HistoryProduct>();
+        if (batches.length > 0) {
+          for (const { ids, query } of batches) {
             try {
               // タイムアウト対策：各クエリに20秒のタイムアウトを設定（30秒→20秒に短縮）
-              const queryPromise = admin.graphql(VARIANTS_FOR_CHANGE_HISTORY_QUERY, { variables: { ids: chunk } });
+              const queryPromise = admin.graphql(query, { variables: { ids } });
               const timeoutPromise = new Promise((_, reject) => 
                 setTimeout(() => reject(new Error("GraphQL query timeout (20s)")), 20000)
               );
@@ -423,24 +401,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
                   : String(data.errors);
                 console.error("[inventory-info] GraphQL error fetching variants:", errorMessages);
                 // エラーが発生しても処理を続行（商品名なしで表示）
-                break; // エラーが発生したら残りもスキップ
+                if (!data?.data?.nodes) break;
               }
               
-              const nodes = (data?.data?.nodes ?? []).filter(Boolean);
-              for (const node of nodes) {
-                if (!node?.id) continue;
-                const opts = (node.selectedOptions as Array<{ name?: string; value?: string }>) ?? [];
-                const productTitle = (node.product?.title ?? node.displayName ?? "") as string;
-                variantInfoMap.set(node.id, {
-                  productTitle,
-                  barcode: (node.barcode as string) ?? "",
-                  option1: opts[0]?.value ?? "",
-                  option2: opts[1]?.value ?? "",
-                  option3: opts[2]?.value ?? "",
-                });
-              }
+              indexHistoryProducts(variantInfoMap, data?.data?.nodes ?? []);
             } catch (e) {
-              console.error(`[inventory-info] Variant batch ${i / CHUNK + 1} failed:`, e);
+              console.error("[inventory-info] Product lookup batch failed:", e);
               // エラーが発生しても処理を続行（商品名なしで表示）
               // タイムアウトやエラーが発生した場合は、残りのチャンクもスキップして続行
               if (e instanceof Error && (e.message.includes("timeout") || e.message.includes("Timeout"))) {
@@ -451,9 +417,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
           }
         }
         changeHistoryLogs = changeHistoryLogs.map((log) => {
-          const info = log.variantId ? variantInfoMap.get(log.variantId) : null;
+          const info = variantInfoMap.get(historyProductKey(log));
           return {
             ...log,
+            recoveredSku: recoveredHistorySku(log, info),
             productTitle: info?.productTitle ?? null,
             barcode: info?.barcode ?? null,
             option1: info?.option1 ?? null,
@@ -577,6 +544,8 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     let { admin, session } = await authenticate.admin(request);
     admin = withGraphQLRetry(admin);
+    const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "inventoryInfo");
+    if (planRedirect) return planRedirect;
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();
 
@@ -2290,7 +2259,7 @@ export default function InventoryInfoPage() {
                                         {formatDateTimeInShopTimezone(log.timestamp, shopTimezone)}
                                       </td>
                                       <td style={{ padding: "12px 16px" }}>{log.productTitle || log.sku || "-"}</td>
-                                      <td style={{ padding: "12px 16px" }}>{log.sku || "-"}</td>
+                                      <td style={{ padding: "12px 16px" }}>{log.sku || (log.recoveredSku ? log.recoveredSku + "（現在）" : "-")}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.barcode || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.option1 || "-"}</td>
                                       <td style={{ padding: "12px 16px" }}>{log.option2 || "-"}</td>

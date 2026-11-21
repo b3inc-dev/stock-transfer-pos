@@ -13,6 +13,7 @@ import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone
 import db from "../db.server";
 import type { InventoryCountLike, InventoryCountEntryLike, InputLikeEvent } from "../types";
 import type { GraphQLUserError } from "../types/graphql-responses";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 const NS = "stock_transfer_pos";
 const PRODUCT_GROUPS_KEY = "product_groups_v1";
@@ -67,6 +68,7 @@ const ALLOWED_ACTION_TYPES = new Set([
   "sort_counts_by_count_name",
   "save_product_group",
   "delete_product_group",
+  "delete_product_groups",
   "preview_csv_inventory_count",
   "import_product_groups_csv",
   "create_inventory_count",
@@ -712,6 +714,19 @@ function splitCountIntoParts(count: InventoryCount): CountPart[] {
   return parts;
 }
 
+function stocktakeWriteResult(json: Record<string, unknown> | null): { userErrors: Array<{ message?: string }> } {
+  const result = json?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } } | undefined;
+  const errors = json?.errors;
+  if (Array.isArray(errors) && errors.length > 0) {
+    return { userErrors: [{ message: "棚卸の保存を確認できませんでした（GraphQLエラー）。" }] };
+  }
+  const userErrors = result?.metafieldsSet?.userErrors;
+  if (!Array.isArray(userErrors)) {
+    return { userErrors: [{ message: "棚卸の保存結果を取得できませんでした。" }] };
+  }
+  return { userErrors };
+}
+
 /**
  * メタフィールド書き込みをリトライ付きで実行する。
  * HTTP エラー・例外発生時のみリトライ。userErrors はリトライせず呼び出し元に委ねる。
@@ -974,8 +989,7 @@ export async function writeInventoryCountsChunked(
     const emptyMutation = `#graphql mutation SetInventoryCounts($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`;
     const emptyVars = { metafields };
     const emptyJson = await metafieldSetWithRetry(admin, emptyMutation, emptyVars, gql);
-    const data = (emptyJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
-    return { userErrors: data?.userErrors ?? [] };
+    return stocktakeWriteResult(emptyJson);
   }
 
   if (payloads.length === 1 && payloads[0].length === 1 && !(payloads[0][0] as CountPart)._part) {
@@ -989,8 +1003,7 @@ export async function writeInventoryCountsChunked(
         ],
       };
       const singleJson = await metafieldSetWithRetry(admin, singleMutation, singleVars, gql);
-      const data = (singleJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
-      return { userErrors: data?.userErrors ?? [] };
+      return stocktakeWriteResult(singleJson);
     }
   }
 
@@ -1012,8 +1025,8 @@ export async function writeInventoryCountsChunked(
     const batch = metafields.slice(i, i + METAFIELDS_SET_MAX);
     const chunkVars = { metafields: batch };
     const chunkJson = await metafieldSetWithRetry(admin, chunkMutation, chunkVars, gql);
-    const data = (chunkJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
-    if (data?.userErrors?.length) return { userErrors: data.userErrors };
+    const result = stocktakeWriteResult(chunkJson);
+    if (result.userErrors.length) return result;
   }
 
   const listItems = arr.map(toMinimalCountForList);
@@ -1053,8 +1066,8 @@ export async function writeInventoryCountsChunked(
     const batch = listMetafields.slice(i, i + METAFIELDS_SET_MAX);
     const listVars = { metafields: batch };
     const listJson = await metafieldSetWithRetry(admin, listChunkMutation, listVars, gql);
-    const data = (listJson?.data as { metafieldsSet?: { userErrors?: Array<{ message?: string }> } })?.metafieldsSet;
-    if (data?.userErrors?.length) return { userErrors: data.userErrors };
+    const result = stocktakeWriteResult(listJson);
+    if (result.userErrors.length) return result;
   }
   const nextNum = arr.reduce((max, c) => Math.max(max, parseCountNameNumber(c?.countName)), 0) + 1;
   const setNextMutation = `#graphql mutation SetNext($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { message } } }`;
@@ -1064,11 +1077,8 @@ export async function writeInventoryCountsChunked(
       { ownerId, namespace: NS, key: INVENTORY_COUNTS_VERSION_KEY, type: "single_line_text_field", value: String(currentVersion + 1) },
     ],
   };
-  // setNext は棚卸ID連番カウンタとバージョン更新。失敗しても本体データは保存済みのため非クリティカル扱い
-  await metafieldSetWithRetry(admin, setNextMutation, setNextVars, gql).catch((e) => {
-    console.warn("[writeInventoryCountsChunked] setNext write failed (non-critical):", (e as Error)?.message ?? e);
-  });
-  return { userErrors: [] };
+  const nextJson = await metafieldSetWithRetry(admin, setNextMutation, setNextVars, gql);
+  return stocktakeWriteResult(nextJson);
 }
 
 export type LocationNode = { id: string; name: string };
@@ -2496,6 +2506,8 @@ type InventoryCountActionMeta = { actionType: string; detail: string };
 async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta: InventoryCountActionMeta) {
   let { admin, session } = await authenticate.admin(request);
   admin = withGraphQLRetry(admin);
+  const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "stocktake");
+  if (planRedirect) return planRedirect;
   const formData = await request.formData();
   const actionType = (formData.get("action") ?? formData.get("actionType")) as string;
   const expectedVersionRaw = formData.get("inventoryCountsVersion");
@@ -3604,6 +3616,62 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
     }
 
     return { ok: true };
+  }
+
+  // 商品グループの複数選択一括削除（1回の metafieldsSet で保存。存在しない id は無視するため再実行しても安全）
+  if (actionTypeNorm === "delete_product_groups") {
+    const idsStr = formData.get("ids") as string | null;
+    if (!idsStr) {
+      return { ok: false, error: "削除する商品グループを選択してください" as const };
+    }
+    if (idsStr.length > MAX_JSON_PAYLOAD_LENGTH) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "ids の長さが上限を超えています" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    let ids: string[] = [];
+    try {
+      const parsed = JSON.parse(idsStr);
+      ids = Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string" && v.length > 0 && v.length <= MAX_ID_FIELD_LENGTH) : [];
+    } catch {
+      return { ok: false, error: "ids は JSON 配列で指定してください" as const };
+    }
+    if (ids.length === 0) {
+      return { ok: false, error: "削除する商品グループを選択してください" as const };
+    }
+    const idSet = new Set(ids);
+    const before = productGroups.length;
+    productGroups = productGroups.filter((g) => !idSet.has(g.id));
+    const deletedGroups = before - productGroups.length;
+    if (deletedGroups === 0) {
+      // 既に削除済み（再実行・二重送信）。保存不要
+      return { ok: true, deletedGroups: 0 };
+    }
+
+    const saveResp = await admin.graphql(
+      `#graphql
+        mutation SaveProductGroups($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key type }
+            userErrors { field message }
+          }
+        }
+      `,
+      {
+        variables: {
+          metafields: productGroupsMetafields(ownerId, productGroups),
+        },
+      }
+    );
+
+    const saveJson = await saveResp.json();
+    const errs = saveJson?.data?.metafieldsSet?.userErrors ?? [];
+    if (errs.length) {
+      return { ok: false, error: errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ") };
+    }
+
+    return { ok: true, deletedGroups };
   }
 
   // CSVプレビュー: パースのみ行い、行リストを返す（保存しない）。仕入同様アップロード後にリスト表示してからグループを追加する用
@@ -5213,6 +5281,22 @@ export default function InventoryCountPage() {
   const [createLocationSearchQuery, setCreateLocationSearchQuery] = useState("");
   const [createProductGroupId, setCreateProductGroupId] = useState("");
   const [createProductGroupIds, setCreateProductGroupIds] = useState<string[]>([]);
+  /** 棚卸ID発行タブ: 商品グループ選択リストの検索キーワード（グループ名の部分一致） */
+  const [createGroupSearchQuery, setCreateGroupSearchQuery] = useState("");
+  /** 商品グループ設定タブ: 一括削除用に選択中のグループID */
+  const [bulkDeleteGroupIds, setBulkDeleteGroupIds] = useState<Set<string>>(new Set());
+  const filteredCreateProductGroups = useMemo(() => {
+    const q = createGroupSearchQuery.trim().normalize("NFKC").toLowerCase();
+    if (!q) return productGroups;
+    const terms = q.split(/\s+/).filter(Boolean);
+    return productGroups.filter((g) => {
+      const name = String(g.name ?? "").normalize("NFKC").toLowerCase();
+      return terms.every((t) => name.includes(t));
+    });
+  }, [productGroups, createGroupSearchQuery]);
+  const allCreateVisibleSelected =
+    filteredCreateProductGroups.length > 0 &&
+    filteredCreateProductGroups.every((g) => createProductGroupIds.includes(g.id));
 
   // イベントから値を読み取るヘルパー関数
   const readValue = (e: InputLikeEvent) => String(e?.currentTarget?.value ?? e?.currentValue?.value ?? e ?? "");
@@ -5872,6 +5956,56 @@ export default function InventoryCountPage() {
     fetcher.submit(formData, { method: "post" });
   };
 
+  const toggleBulkDeleteGroup = (id: string) => {
+    setBulkDeleteGroupIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleBulkDeleteGroups = () => {
+    const targets = productGroups.filter((g) => bulkDeleteGroupIds.has(g.id));
+    if (targets.length === 0) return;
+    const PREVIEW_MAX = 10;
+    const names = targets.slice(0, PREVIEW_MAX).map((g) => `・${g.name}`).join("\n");
+    const more = targets.length > PREVIEW_MAX ? `\n…ほか${targets.length - PREVIEW_MAX}件` : "";
+    if (!confirm(`選択した${targets.length}件の商品グループを削除しますか？\nこの操作は元に戻せません。\n\n${names}${more}`)) return;
+
+    const formData = new FormData();
+    formData.append("action", "delete_product_groups");
+    formData.append("ids", JSON.stringify(targets.map((g) => g.id)));
+    fetcher.submit(formData, { method: "post" });
+  };
+
+  // 削除・再読込で消えたグループを選択状態から外す（一括削除の選択／棚卸ID発行の選択）
+  useEffect(() => {
+    if (loadError) return; // 読込失敗時は productGroups が空になるため選択を消さない
+    const existing = new Set(productGroups.map((g) => g.id));
+    // 編集中のグループが削除された場合は編集状態を解除（そのまま保存すると削除したグループが再作成されるため）
+    if (editingGroupId && !existing.has(editingGroupId)) {
+      setEditingGroupId(null);
+      setGroupName("");
+      setSelectedCollectionIds([]);
+      setCollectionConfigs(new Map());
+      setEditingSkuOnlyPreservedIds([]);
+    }
+    setBulkDeleteGroupIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (existing.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+    setCreateProductGroupIds((prev) => {
+      const next = prev.filter((id) => existing.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [productGroups, loadError, editingGroupId]);
+
   const handleCsvImportClick = () => {
     csvFileInputRef.current?.click();
   };
@@ -6035,6 +6169,15 @@ export default function InventoryCountPage() {
 
   /** Phase B3: 棚卸ID発行タブ用。登録済み全グループを一括選択／解除（履歴 CSV の selectedIds とは別） */
   const selectAllCreateProductGroups = () => {
+    // 検索で絞り込み中は表示中のグループだけを既存の選択に追加する
+    if (createGroupSearchQuery.trim()) {
+      setCreateProductGroupIds((prev) => {
+        const set = new Set(prev);
+        const added = filteredCreateProductGroups.filter((g) => !set.has(g.id)).map((g) => g.id);
+        return added.length > 0 ? [...prev, ...added] : prev;
+      });
+      return;
+    }
     setCreateProductGroupIds(productGroups.map((g) => g.id));
   };
   const clearCreateProductGroups = () => {
@@ -7223,6 +7366,65 @@ export default function InventoryCountPage() {
                           </s-text>
                         )}
                       </s-stack>
+                      {productGroups.length > 0 && (() => {
+                        const selectedCount = productGroups.filter((g) => bulkDeleteGroupIds.has(g.id)).length;
+                        const allChecked = selectedCount === productGroups.length;
+                        const deleteDisabled = selectedCount === 0 || fetcher.state !== "idle";
+                        return (
+                          <div
+                            style={{
+                              display: "flex",
+                              flexWrap: "wrap",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "8px",
+                              padding: "8px 12px",
+                              border: "1px solid #e1e3e5",
+                              borderRadius: "8px",
+                              background: "#f9fafb",
+                            }}
+                          >
+                            <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontSize: "14px" }}>
+                              <input
+                                type="checkbox"
+                                checked={allChecked}
+                                ref={(el) => {
+                                  if (el) el.indeterminate = selectedCount > 0 && !allChecked;
+                                }}
+                                onChange={() =>
+                                  setBulkDeleteGroupIds(allChecked ? new Set() : new Set(productGroups.map((g) => g.id)))
+                                }
+                                style={{ width: "18px", height: "18px" }}
+                              />
+                              すべて選択（{selectedCount}/{productGroups.length}）
+                            </label>
+                            <button
+                              type="button"
+                              onClick={handleBulkDeleteGroups}
+                              disabled={deleteDisabled}
+                              style={{
+                                padding: "6px 12px",
+                                fontSize: "13px",
+                                borderRadius: "6px",
+                                border: "1px solid " + (deleteDisabled ? "#d1d5db" : "#d72c0d"),
+                                background: deleteDisabled ? "#f3f4f6" : "#fff",
+                                color: deleteDisabled ? "#9ca3af" : "#d72c0d",
+                                cursor: deleteDisabled ? "not-allowed" : "pointer",
+                                fontWeight: 600,
+                              }}
+                            >
+                              {fetcher.state !== "idle" && fetcher.formData?.get("action") === "delete_product_groups"
+                                ? "削除中..."
+                                : `選択した${selectedCount}件を削除`}
+                            </button>
+                          </div>
+                        );
+                      })()}
+                      {fetcher.data && (fetcher.data as { ok?: boolean; deletedGroups?: number }).ok === true && ((fetcher.data as { deletedGroups?: number }).deletedGroups ?? 0) > 0 && (
+                        <s-text tone="success">
+                          {(fetcher.data as { deletedGroups: number }).deletedGroups}件の商品グループを削除しました
+                        </s-text>
+                      )}
                       {productGroups.length === 0 ? (
                         <s-box padding="base" background="subdued">
                           <s-text color="subdued">商品グループが登録されていません</s-text>
@@ -7254,6 +7456,13 @@ export default function InventoryCountPage() {
                                 <s-stack gap="base">
                                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+                                      <input
+                                        type="checkbox"
+                                        aria-label={`${g.name} を一括削除の対象にする`}
+                                        checked={bulkDeleteGroupIds.has(g.id)}
+                                        onChange={() => toggleBulkDeleteGroup(g.id)}
+                                        style={{ width: "18px", height: "18px", flexShrink: 0, cursor: "pointer" }}
+                                      />
                                       <s-text type="strong">{g.name}</s-text>
                                       <s-text color="subdued">
                                         {isSkuOnly ? `SKU指定: ${skuCount}件` : `合計: 選択 ${groupSelectedTotal} / ${groupTotalTotal}`}
@@ -7544,8 +7753,8 @@ export default function InventoryCountPage() {
                                   type="button"
                                   onClick={selectAllCreateProductGroups}
                                   disabled={
-                                    productGroups.length === 0 ||
-                                    createProductGroupIds.length === productGroups.length
+                                    filteredCreateProductGroups.length === 0 ||
+                                    allCreateVisibleSelected
                                   }
                                   style={{
                                     padding: "6px 12px",
@@ -7553,21 +7762,21 @@ export default function InventoryCountPage() {
                                     borderRadius: "6px",
                                     border: "1px solid #2563eb",
                                     background:
-                                      createProductGroupIds.length === productGroups.length
+                                      allCreateVisibleSelected
                                         ? "#f3f4f6"
                                         : "#fff",
                                     color:
-                                      createProductGroupIds.length === productGroups.length
+                                      allCreateVisibleSelected
                                         ? "#9ca3af"
                                         : "#2563eb",
                                     cursor:
-                                      createProductGroupIds.length === productGroups.length
+                                      allCreateVisibleSelected
                                         ? "not-allowed"
                                         : "pointer",
                                     fontWeight: 600,
                                   }}
                                 >
-                                  すべて選択
+                                  {createGroupSearchQuery.trim() ? "表示中をすべて選択" : "すべて選択"}
                                 </button>
                                 <button
                                   type="button"
@@ -7589,15 +7798,57 @@ export default function InventoryCountPage() {
                               </div>
                               <s-text color="subdued">
                                 選択中: {createProductGroupIds.length}/{productGroups.length}
+                                {createGroupSearchQuery.trim() ? `（表示中: ${filteredCreateProductGroups.length}件）` : ""}
                               </s-text>
                             </div>
                           ) : null}
+                          {productGroups.length > 0 && (
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              <input
+                                type="search"
+                                value={createGroupSearchQuery}
+                                onChange={(e) => setCreateGroupSearchQuery(e.target.value)}
+                                placeholder="グループ名で検索（スペース区切りでAND検索）"
+                                aria-label="商品グループを検索"
+                                style={{
+                                  flex: 1,
+                                  minWidth: 0,
+                                  padding: "8px 10px",
+                                  fontSize: "14px",
+                                  border: "1px solid #c9cccf",
+                                  borderRadius: "6px",
+                                }}
+                              />
+                              {createGroupSearchQuery && (
+                                <button
+                                  type="button"
+                                  onClick={() => setCreateGroupSearchQuery("")}
+                                  style={{
+                                    padding: "6px 12px",
+                                    fontSize: "13px",
+                                    borderRadius: "6px",
+                                    border: "1px solid #6b7280",
+                                    background: "#fff",
+                                    color: "#374151",
+                                    cursor: "pointer",
+                                    fontWeight: 600,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  クリア
+                                </button>
+                              )}
+                            </div>
+                          )}
                           <div style={{ maxHeight: "240px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "8px" }}>
                             {productGroups.length === 0 ? (
                               <s-text color="subdued">商品グループがありません。先に「商品グループ設定」で作成してください。</s-text>
                             ) : (
                               <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-                                {productGroups.map((g) => {
+                                {filteredCreateProductGroups.length === 0 && (
+                                  <s-text color="subdued">「{createGroupSearchQuery.trim()}」に一致する商品グループはありません。</s-text>
+                                )}
+                                {filteredCreateProductGroups.map((g) => {
                                   const isSelected = createProductGroupIds.includes(g.id);
                                   const skuCount = g.skus?.length ?? g.inventoryItemIds?.length ?? 0;
                                   const isSkuOnly = (g.collectionIds?.length ?? 0) === 0 && skuCount > 0;

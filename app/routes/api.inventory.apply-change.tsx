@@ -19,6 +19,11 @@ import {
 } from "../utils/ensure-inventory-activated-server";
 import { decideOuterCatchAction } from "../utils/apply-change-outer-catch-guard";
 import {
+  CURRENT_QUANTITY_UNREADABLE_MESSAGE,
+  INVENTORY_ITEM_NOT_FOUND_MESSAGE,
+  normalizeDeltaEntries,
+} from "../utils/current-quantity-read";
+import {
   decideCompletedEventRetry,
   isHistoryReplayOwnedByShop,
   replayCompletedHistory,
@@ -27,6 +32,9 @@ import {
   formatInventoryApiError,
   isNotStockedRetryableError,
 } from "../utils/format-inventory-api-error";
+import { planBlockedPosResponse } from "../utils/plan-gate.server";
+import type { PlanFeature } from "../utils/shop-plan.server";
+import { applyChangeFailsOpenOnPlanCheckError, featureForActivity } from "../../extensions/common/planAccess.js";
 
 /** 一時的な障害とみなしてリトライするか（429/5xx/ネットワーク系） */
 function isTransientError(errorSummary: string | undefined): boolean {
@@ -323,6 +331,24 @@ export async function action({ request }: ActionFunctionArgs) {
       where: { appEventId },
       include: { lines: true },
     }).catch(() => null);
+
+    // 料金プランの門番（公開用のみ。自社用は GraphQL を呼ばずに通る）。
+    // 新しく在庫を動かすとき（イベントが無い／failed を消して作り直すとき）だけ止める。
+    // completed の再送（履歴だけ書き直す）・処理中・一部反映済みは在庫を新しく動かさないので、今まで通り答える。
+    // 止めるのはイベントを作る前なので、在庫も DB も変わらない。同じ appEventId で契約後に送り直せる。
+    // 契約を読めなかったとき（plan_check_failed）は、入出庫の戻し（Shopify の操作のあと）だけ通す。
+    if (!existingEvent || (existingEvent.shop === shop && existingEvent.status === "failed")) {
+      const planBlocked = await planBlockedPosResponse({
+        shop,
+        feature: featureForActivity(activity) as PlanFeature,
+        getAdmin: () => admin,
+        headers: CORS_HEADERS,
+        // 入出庫は Shopify でキャンセル・拒否・受領を済ませたあとの在庫の戻しなので、契約を読めなかっただけなら通す。
+        failOpenOnCheckError: applyChangeFailsOpenOnPlanCheckError(activity),
+      });
+      if (planBlocked) return planBlocked;
+    }
+
     if (existingEvent) {
       // statusOnly と同じく、書き込み前にイベントの所属ショップを確認する。
       if (!isHistoryReplayOwnedByShop(existingEvent.shop, shop)) {
@@ -487,22 +513,30 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // delta のみのエントリは現在値を取得して quantityAfter に正規化（ロス・仕入用）
     // 冪等性チェック通過後にのみ実行することで、リトライ時の無駄な API 呼び出しを防ぐ。
-    const entries: ApplyChangeEntry[] = [];
-    for (const e of entriesParsed) {
-      let qtyAfter = e.quantityAfter;
-      let qtyBefore = e.quantityBefore ?? null;
-      if (qtyAfter == null && e.delta != null) {
-        const cur = await fetchCurrentQuantityServer(admin, locationId, e.inventoryItemId);
-        qtyBefore = cur;
-        qtyAfter = cur + e.delta;
-      }
-      if (qtyAfter == null) continue;
-      entries.push({
-        ...e,
-        quantityAfter: qtyAfter,
-        quantityBefore: qtyBefore ?? undefined,
-      });
+    // 今の在庫数を読めなかったら 0 として扱わず、イベントを作る前に返す（在庫は動かさない）。
+    // 503 は POS が同じ appEventId で送り直す（イベントが無いので次の送信は通常どおり処理される）。
+    const normalized = await normalizeDeltaEntries(entriesParsed, (inventoryItemId) =>
+      fetchCurrentQuantityServer(admin, locationId, inventoryItemId)
+    );
+    if (!normalized.ok) {
+      console.warn(
+        `[api.inventory.apply-change] current quantity unreadable; not applying: appEventId=${appEventId} item=${normalized.inventoryItemId} error=${normalized.error}`
+      );
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: `${normalized.retryable ? CURRENT_QUANTITY_UNREADABLE_MESSAGE : INVENTORY_ITEM_NOT_FOUND_MESSAGE}（${normalized.error}）`,
+          errorCode: normalized.retryable ? "current_quantity_unreadable" : "inventory_item_not_found",
+          appEventId,
+          inventoryItemId: normalized.inventoryItemId,
+        }),
+        {
+          status: normalized.retryable ? 503 : 400,
+          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        }
+      );
     }
+    const entries: ApplyChangeEntry[] = normalized.entries;
     if (entries.length === 0) {
       return new Response(
         JSON.stringify({ ok: false, error: "No valid entries after normalization" }),
@@ -1030,9 +1064,20 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // 完全失敗（未適用 or ロールバック成功）
-    const errorCode = isNotStockedRetryableError(result.error)
-      ? "not_stocked"
-      : "set_quantities_failed";
+    // 250 件を超える補正で元に戻す用の数を読めなかったときは、1 件も動かしていない。
+    // 送り直してよい失敗（503）にする。イベントは failed なので、同じ ID の次の送信は最初から処理される。
+    const snapshotUnreadable = result.snapshotUnreadable === true;
+    const snapshotRetryable = snapshotUnreadable && result.retryable !== false;
+    const errorCode = snapshotUnreadable
+      ? snapshotRetryable
+        ? "rollback_snapshot_unreadable"
+        : "inventory_item_not_found"
+      : isNotStockedRetryableError(result.error)
+        ? "not_stocked"
+        : "set_quantities_failed";
+    const responseError = snapshotUnreadable
+      ? `${snapshotRetryable ? CURRENT_QUANTITY_UNREADABLE_MESSAGE : INVENTORY_ITEM_NOT_FOUND_MESSAGE}（${result.error ?? ""}）`
+      : errorSummary;
     for (const l of lineRecords) {
       await db.inventoryChangeEventLine.update({
         where: { id: l.id },
@@ -1066,7 +1111,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return new Response(
       JSON.stringify({
         ok: false,
-        error: errorSummary,
+        error: responseError,
         errorCode,
         eventId: event.id,
         appEventId,
@@ -1074,7 +1119,10 @@ export async function action({ request }: ActionFunctionArgs) {
         partiallyApplied: false,
         rolledBack: result.rolledBack ?? false,
       }),
-      { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+      {
+        status: snapshotRetryable ? 503 : 400,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      }
     );
   } catch (e: unknown) {
     console.error("[api.inventory.apply-change] Error:", e);

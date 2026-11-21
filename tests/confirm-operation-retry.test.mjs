@@ -85,7 +85,7 @@ describe("confirm button retry after history_incomplete", () => {
     assert.equal(minted, 2);
   });
 
-  it("mints a new id when the previous failure did not apply inventory", () => {
+  it("mints a new id only when the server clearly rejected the previous send", () => {
     const state = { pending: null };
     let minted = 0;
     const mint = () => {
@@ -93,7 +93,10 @@ describe("confirm button retry after history_incomplete", () => {
       return { entryId: `purchase_${minted}`, appEventId: `evt_purchase_${minted}` };
     };
     const first = pressConfirm(state, mint);
-    state.pending = operationToKeepAfterError(first.operation, new Error("validation"));
+    state.pending = operationToKeepAfterError(
+      first.operation,
+      Object.assign(new Error("validation"), { finalRejection: true })
+    );
     assert.equal(state.pending, null);
     const second = pressConfirm(state, mint);
     assert.equal(second.reused, false);
