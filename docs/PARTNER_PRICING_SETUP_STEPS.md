@@ -89,10 +89,19 @@
 
 | プラン | 月額（USD）目安 | トライアル | 備考 |
 |--------|-----------------|------------|------|
-| Lite   | $40             | 7日        | 10ロケーションまで。超えた分はアプリ側で Usage 報告の実装あり |
-| Pro    | $120            | 14日       | 同上 |
+| Lite   | $40             | 7日        | 10ロケーションまで。超えた分は 1 か所 $4（使用量のメーター） |
+| Pro    | $120            | 14日       | 10ロケーションまで。超えた分は 1 か所 $12（使用量のメーター） |
 
-※ 10ロケーション超の従量課金は、Managed pricing の「月額」とは別に、アプリ側の Billing API（Usage）で報告している場合はそのまま運用できます。Managed で設定するのは「基本の月額」と「トライアル日数」です。
+### 5.1 10 か所を超えた分（使用量のメーター。2026-11-21 T 決定・DECISIONS D15）
+
+Billing API の従量（appUsageRecordCreate）は App Pricing の契約には使えないので消しました。超えた分はアプリが **App Events API** で 1 請求期間に 1 回だけ送ります。Partner Dashboard でやること:
+
+1. 10 ロケーションの Lite プランに使用量のメーターを足す: handle `extra_location_lite`、Fixed（1 単位 $4）
+2. 10 ロケーションの Pro プランに使用量のメーターを足す: handle `extra_location_pro`、Fixed（1 単位 $12）
+3. 3 ロケーションのプランにはメーターを付けない（アプリも送らない）
+4. 使用量のあるプランは **月額だけ**（年額だけのプランとは組み合わせられない）。Shopify 側に上限（cap）は無い
+
+handle を変えたいときは、環境変数 `APP_EVENTS_HANDLE_LITE` / `APP_EVENTS_HANDLE_PRO` を同じ値にしてください。送った結果（請求に載ったか）は Dev Dashboard の **Logs**（Type: App billing event）で見ます。API の 202 は「受け取った」だけです。
 
 ---
 
@@ -103,6 +112,18 @@
 - **設定場所**: Render など、アプリのバックエンドの環境変数
 - **値**: パートナーダッシュボードの **アプリのハンドル**（URL や設定画面に表示される英数字の識別子）
 - 未設定の場合は `app` が使われます。本番ではパートナーで確認したハンドルを設定してください。
+
+### 6.1 使用量（App Events API）の環境変数（公開用の Render だけ）
+
+| 名前 | 値 | 既定 |
+|---|---|---|
+| `APP_EVENTS_USAGE_ENABLED` | `1` で Shopify へ送る。それ以外は送らず、数だけ DB（`AppUsageReport`）に `disabled` で残す | 未設定＝オフ |
+| `APP_EVENTS_CLIENT_ID` / `APP_EVENTS_CLIENT_SECRET` | Dev Dashboard で作った API キー（client_credentials でトークンを取る） | なし（無いと `failed` で理由を残す） |
+| `APP_EVENTS_API_VERSION` | App Events API の版 | `2026-10` |
+| `APP_EVENTS_HANDLE_LITE` / `APP_EVENTS_HANDLE_PRO` | メーターの handle | `extra_location_lite` / `extra_location_pro` |
+| `APP_EVENTS_USAGE_MAX_UNITS` | アプリ側の上限（1 期間に送る「超えた か所」）。超えたら送らず `over_limit` で残す | `50` |
+
+自社用（Ciara）の Render には入れません（自社用は送る処理に来ません）。
 
 ---
 

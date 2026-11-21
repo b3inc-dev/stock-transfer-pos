@@ -7,6 +7,8 @@ import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getShopPlan } from "../utils/shop-plan.server";
 import { buildManagedPricingPlansUrl } from "../utils/billing";
+import { describeUsageReportForMerchant } from "../utils/app-events-usage.server";
+import prisma from "../db.server";
 import { ALL_FEATURES, FEATURE_LABELS } from "../../extensions/common/planAccess.js";
 
 type NoticeTone = "critical" | "warning" | "info";
@@ -68,8 +70,25 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const pricingPlansUrl = buildManagedPricingPlansUrl(session?.shop);
     const requiredRaw = new URL(request.url).searchParams.get("required") ?? "";
     const required = (ALL_FEATURES as readonly string[]).includes(requiredRaw) ? requiredRaw : null;
+    // 10 か所を超えた分の報告の状態（App Events API）。読めなくても画面は出す
+    let usageReportNote: string | null = null;
+    const usage = shopPlan.extraLocationUsage;
+    if (usage && session?.shop) {
+      try {
+        const row = usage.periodEnd
+          ? await prisma.appUsageReport.findUnique({
+              where: { shop_periodEnd: { shop: session.shop.trim().toLowerCase(), periodEnd: usage.periodEnd } },
+              select: { status: true },
+            })
+          : null;
+        usageReportNote = describeUsageReportForMerchant(row);
+      } catch (e) {
+        console.warn("[app.plan] usage report read failed:", e instanceof Error ? e.message : String(e));
+        usageReportNote = "報告の状態を読めませんでした。少し待ってから再読み込みしてください。";
+      }
+    }
     return data(
-      { shopPlan, pricingPlansUrl, required },
+      { shopPlan, pricingPlansUrl, required, usageReportNote },
       { headers: { "Cache-Control": "private, no-store" } }
     );
   } catch (e) {
@@ -107,7 +126,8 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function PlanPage() {
-  const { shopPlan, pricingPlansUrl, required } = useLoaderData<typeof loader>();
+  const { shopPlan, pricingPlansUrl, required, usageReportNote } = useLoaderData<typeof loader>();
+  const extraUsage = shopPlan.extraLocationUsage;
   const { plan, locationsCount, distribution, isDevelopmentStore, locationPlanMismatch, maxLocationsForPlan } = shopPlan;
   const planNotice = buildPlanPageNotice({
     plan,
@@ -251,6 +271,29 @@ export default function PlanPage() {
               pricingPlansUrl={pricingPlansUrl}
             />
           </div>
+          {extraUsage && extraUsage.units > 0 ? (
+            <div
+              style={{
+                marginTop: "16px",
+                padding: "12px 16px",
+                background: "#fff",
+                border: "1px solid #e1e3e5",
+                borderRadius: "8px",
+                fontSize: "14px",
+                color: "#202223",
+                lineHeight: 1.5,
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: "4px" }}>10 ロケーションを超えた分</div>
+              <div>
+                ロケーション {locationsCount} か所のうち、10 か所を超えた <strong>{extraUsage.units} か所</strong> × ${extraUsage.unitPriceUsd} ＝{" "}
+                <strong>${extraUsage.amountUsd}</strong>／請求期間（基本料金とは別に、Shopify の請求に載ります）
+              </div>
+              <div style={{ marginTop: "4px", fontSize: "13px", color: "#6d7175" }}>
+                請求期間ごとに 1 回、その時点のロケーション数で数えます。{usageReportNote ?? ""}
+              </div>
+            </div>
+          ) : null}
           <div style={{ marginTop: "12px", fontSize: "13px", color: "#6d7175", lineHeight: 1.5 }}>
             プランの選択・承認・辞退・再インストール後の再承認は Shopify の料金プラン画面で行います。アプリの再インストールは不要です。
           </div>

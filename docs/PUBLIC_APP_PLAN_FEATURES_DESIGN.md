@@ -39,7 +39,8 @@
 - **10ロケーション以上（1ロケーションあたりの課金）**：**要件確定**。**Usage-based billing**（使用量に応じた請求）で **「基本料金＋(ロケーション数−10)×単価」** により課金する。
   - **基本料金**：Lite は 10ロケーションまで $40/月、Pro は 10ロケーションまで $120/月（上記の 10 loc プランと同額）。
   - **単価**：Lite は 11 loc 目以降 $4/ロケーション、Pro は 11 loc 目以降 $12/ロケーション。
-  - **計算式**：Lite は `$40 + max(0, locationsCount - 10) × $4`、Pro は `$120 + max(0, locationsCount - 10) × $12`。実装時は Shopify の Usage-based billing API の仕様に合わせて、基本料（Recurring）＋従量分（Usage charge）の形で請求を作成する。
+  - **計算式**：Lite は `$40 + max(0, locationsCount - 10) × $4`、Pro は `$120 + max(0, locationsCount - 10) × $12`。
+  - **（2026-11-21 変更。DECISIONS D15）** 基本料は App Pricing の月額プラン、超えた分は App Pricing の使用量メーター（`extra_location_lite` $4 / `extra_location_pro` $12）。アプリは `app/utils/app-events-usage.server.ts` で 1 請求期間に 1 回、`max(0, locationsCount - 10)` を App Events API で送る。Billing API（appSubscriptionCreate・appUsageRecordCreate）は使わない。
 
 ---
 
@@ -70,7 +71,7 @@
 - **本番ストア**：**Shopify Billing API** で、そのショップの「現在の Recurring Application Charge」を取得する。
 - パートナーで作成するプラン名（例: `Lite - up to 3 locations`, `Pro - up to 10 locations`）と、アプリ内の **Lite / Pro** を対応させる。
 - 取得したプラン名から **`lite` または `pro`** を判定し、機能の ON/OFF に使う。
-- **10ロケーション以上**：本番ストアでロケーション数が 10 を超える場合は、**Usage-based billing** で「基本料金＋(ロケーション数−10)×単価」（Lite: 基本 $40＋$4/ loc、Pro: 基本 $120＋$12/ loc）により請求する。実装時は Recurring Application Charge（基本料）と Usage charge（従量分）を組み合わせる。
+- **10ロケーション以上**：本番ストアでロケーション数が 10 を超える場合は、**Usage-based billing** で「基本料金＋(ロケーション数−10)×単価」（Lite: 基本 $40＋$4/ loc、Pro: 基本 $120＋$12/ loc）により請求する。（2026-11-21 から）基本料は App Pricing の月額、超えた分は App Events API の使用量（D15）。
 
 **補足**
 
@@ -163,7 +164,7 @@
 | **共通コード** | カスタム・公開で同じリポジトリを使い、`APP_DISTRIBUTION` で振る舞いを切り替える。 |
 | **カスタム** | `APP_DISTRIBUTION=inhouse` にすると、現状のまま全機能が使える。 |
 | **公開** | `APP_DISTRIBUTION=public`（または未設定）で、Lite は ② のみ、Pro は ①②③④⑤⑥ に制御する。 |
-| **課金** | 公開アプリのみ。3/10 loc は Managed pricing（Recurring）。10 loc 超は **Usage-based billing** で「基本料金＋(ロケーション数−10)×単価」（要件確定）。開発ストアは請求しない。 |
+| **課金** | 公開アプリのみ。3/10 loc は Managed pricing（Recurring）。10 loc 超は App Pricing の使用量メーターへ App Events API で「(ロケーション数−10)」を 1 期間 1 回送る（D15）。開発ストアはテスト課金（請求なし）。 |
 | **管理画面** | ナビとルートでプランに応じて表示・リダイレクト。TOP・設定・料金プランの構成はセクション7参照。 |
 | **POS** | 出庫・入庫は Lite も利用可。仕入・ロス・発注・棚卸は Pro のみ（API で制御し、非 Pro 時はアップグレード案内を表示）。 |
 
@@ -251,5 +252,5 @@ TOP の「はじめての設定」に載せる文言のたたき台です。必�
 ## 8. 課金まわり実装メモ（2026-02 反映）
 
 - **プラン取得**: `getShopPlan`（`app/routes/app.tsx`）で `currentAppInstallation.activeSubscriptions` を取得し、サブスク名から `lite` / `pro` を判定。開発ストアは課金せず `plan = "pro"`。
-- **サブスク作成**: `app/utils/billing.ts` の `createAppSubscription(admin, plan, returnUrl)` で `appSubscriptionCreate` を実行。基本料（Recurring $40/$120）＋10 loc 超用の従量（Usage、キャップ $200/$500）の 2 本立て。料金プランページ（`app.plan.tsx`）の「このプランを選択する」は POST で action を呼び、承認用 `confirmationUrl` へリダイレクト。
-- **10ロケーション超の従量課金**: `getShopPlan` 内で、公開・本番・Lite/Pro・`locationsCount > 10` のとき `reportUsageRecord` を呼ぶ。同一請求期間の重複防止に `idempotencyKey = usage-{subscriptionId}-{currentPeriodEnd}` を使用。応答をブロックしないよう fire-and-forget。
+- **サブスク作成**: アプリは作らない（App Pricing。店は Shopify の pricing_plans で選ぶ）。`createAppSubscription` は 2026-11-21 に消した。
+- **10ロケーション超の従量課金**（D15）: `getShopPlan` で、公開用・Lite/Pro・3 か所プランの不一致でない・`locationsCount > 10` のとき、`reportExtraLocationUsage` を待たずに呼ぶ。1 店・1 請求期間（`currentPeriodEnd`）に 1 行（`AppUsageReport`）と、Shopify の `idempotency_key = pstk-xloc-{店の番号}-{currentPeriodEnd}` で 1 回だけ。送るのは `APP_EVENTS_USAGE_ENABLED=1` のときだけ。数は料金プラン画面に出す。
