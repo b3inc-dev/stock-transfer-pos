@@ -1,6 +1,7 @@
 // POS DOM ポリフィルの兄弟リンク不具合を render より前に補修（common/remoteDomSiblingFix.js）
 import "../../common/remoteDomSiblingFix.js";
 import { render, Component } from "preact";
+import { PlanGate } from "../../common/PlanGate.jsx";
 import { useState, useCallback, useEffect, useRef, useMemo } from "preact/hooks";
 import { getStateSlice, setStateSlice, toUserMessage, getStatusBadgeTone, readValue } from "./inboundHelpers.js";
 import { useSessionLocationId, useOriginLocationGid, useLocationsIndex, getLocationName_ } from "./inboundHooks.js";
@@ -826,7 +827,7 @@ export default async (rootArg, apiArg) => {
     if (rootArg !== undefined && apiArg?.navigation) posModalApi = apiArg;
     const root = document.body;
     render(null, root);
-    render(<ErrorBoundary><Extension /></ErrorBoundary>, root);
+    render(<ErrorBoundary><PlanGate feature="transfer" heading="入庫" getModalApi={() => posModalApi}><Extension /></PlanGate></ErrorBoundary>, root);
   } catch (e) {
     SHOPIFY?.toast?.show?.(`Render Error: ${e?.message ?? e}`);
   }

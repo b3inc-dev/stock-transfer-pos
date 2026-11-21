@@ -7,6 +7,7 @@ import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone, extractDateFromISO, getShopTimezone } from "../utils/timezone";
 import type { LocationNode, LossEntryItem, LossEntry } from "../types";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 const LOSS_NS = "stock_transfer_pos";
 const LOSS_KEY = "loss_entries_v1";
@@ -216,7 +217,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    const { admin, session } = await authenticate.admin(request);
+    const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "loss");
+    if (planRedirect) return planRedirect;
     const formData = await request.formData();
     const entryId = String(formData.get("entryId") || "").trim();
 

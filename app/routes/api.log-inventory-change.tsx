@@ -18,6 +18,9 @@ import {
   resolveSameActivityAction,
   summarizeLogWriteBatch,
 } from "../../extensions/common/inventoryLogWrite.js";
+import { planBlockedPosResponse } from "../utils/plan-gate.server";
+import type { PlanFeature } from "../utils/shop-plan.server";
+import { featureForActivity } from "../../extensions/common/planAccess.js";
 
 const API_VERSION = "2026-01";
 
@@ -212,6 +215,26 @@ export async function action({ request }: ActionFunctionArgs) {
       });
       const shopTimezoneData = await shopTimezoneResp.json();
       shopTimezone = shopTimezoneData?.data?.shop?.ianaTimezone || "UTC";
+    }
+
+    // 料金プランの門番（公開用のみ。自社用は GraphQL を呼ばずに通る）。
+    // この API は Shopify で在庫が動いた「後」の記録なので、契約を読めなかっただけなら通す（記録を落とさない）。
+    // 未契約・プラン外とはっきり分かったときだけ、何も書かずに 402（plan_required・送り直さない）を返す。
+    const planFeatures = Array.from(
+      new Set(entries.map((e: unknown) => featureForActivity((e as { activity?: string })?.activity) as PlanFeature))
+    );
+    for (const feature of planFeatures) {
+      const planBlocked = await planBlockedPosResponse({
+        shop,
+        feature,
+        getAdmin: () => {
+          if (!admin) throw new Error("No offline session for plan check");
+          return admin as unknown as { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> };
+        },
+        headers: CORS_HEADERS,
+        failOpenOnCheckError: true,
+      });
+      if (planBlocked) return planBlocked;
     }
 
     const results: Array<{ ok: boolean; id?: string | number; updated?: boolean; message?: string; error?: string; errorCode?: string }> = [];
