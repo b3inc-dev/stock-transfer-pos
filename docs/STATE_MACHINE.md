@@ -155,6 +155,12 @@ pending → applying → completed
 - 同一 `appEventId` が `completed` → 即 OK 返却（冪等）
   - 店舗タイムゾーンが読めない・履歴日付の修復に失敗した、という履歴の日付だけの問題でも **5xx を返さない**（POS は 5xx を「在庫未適用」と受け取り ID を捨て、押し直しで二重適用になる）。履歴が書きかけなら `historyIncomplete`（200）で返して同じ ID を残させ、日付の修復だけのときはあとに回す（`extensions/common/completedEventResend.js`）
 - `pending` / `applying` → 202（処理中）
+- `partial_failed` → 400 + `partiallyApplied`（在庫は動かさない。自動で残りを反映しない。管理者が Shopify で直す）
+- delta の明細で今の在庫数を読めない → イベントを作らずに 503 `current_quantity_unreadable`（在庫は動かさない。同じ ID で送り直してよい）
+- 250 件を超える補正で、元に戻す用の今の数（控え）を読めない → 1 件も動かさずに 503 `rollback_snapshot_unreadable`（イベントは `failed`。同じ ID の次の送信は最初から処理される）。控えは 0 にしない（0 で控えると、あとのチャンクが断られて戻すときにその商品が 0 に書き換わる）
+- 250 件を超える補正で、元に戻す処理そのものが失敗 → `partial_failed`（在庫は自動で動かさない。管理者が Shopify で直す）。まだ戻していないチャンクだけを「入った」とし、戻す処理がはっきり断られた（userErrors）のでなければ `application_uncertain`
+- 250 件を超える補正で元に戻すときの危険: 控えの数を「その数にする」で条件なしに書くと、書いてから戻すまでに店で売れた・入庫した分が消える。なので戻す書き込みは `changeFromQuantity` に「さっきこのアプリが書いた数」を入れた条件付きにする。合わなければ Shopify が `CHANGE_FROM_QUANTITY_STALE`（userErrors）で 1 件も書かずに断るので、そのチャンクは戻さず（入ったまま）`partial_failed` にして管理者に回す（errorSummary に `CHANGE_FROM_QUANTITY_STALE` が入る）。戻す書き込みは 429 のときだけ送り直す（5xx のあとに送り直すと、1 回目が入っていたときに 2 回目が STALE で断られ「戻せなかった」と取り違えるため。5xx・応答なしは `application_uncertain`）
+- 残る危険: 控えを読んでから前に進む書き込み（`changeFromQuantity: null`、D9）までに売れた・入庫した分は、前に進む書き込みでもう上書きされているので、戻しても戻らない
 - サーバー GraphQL は 429/503 を `withGraphQLRetry`（最大 3 回、指数バックオフ）
 
 ---
@@ -172,8 +178,13 @@ pending → applying → completed
 | 途中停止（アプリクラッシュ） | 上に同じ | CP + 下書きが残れば再開容易 | Shopify 側の掃除は手動（孤児 Transfer） |
 | 同時実行（2 端末） | 二重 | 端末ローカル lock / CP のみ | **高**（分散ロックなし） |
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
-| 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー | 比較的低い |
+| 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー + **確定のあとの伝票の読み直しが終わるまでロックを外さない**（読み直し失敗時は読み直せるまで確定不可。`receiveReloadGate.js`） | 比較的低い（2 端末同時は残る） |
 | apply-change 再送 | 二重 set | `appEventId` unique | 設計意図どおり |
+| ロス・仕入れ・調整の応答なし | 押し直しで新 ID → 二重 | 送る前に ID を端末へ保存し、完了かはっきりした断りまで同じ ID（D3c） | 2 端末は未カバー |
+| ロス・仕入れ・調整の一部だけ反映 | 押し直しで新 ID → 反映済みの分が二重 | ID を手放さず同じ ID で送る（サーバーは在庫を動かさない）。リセットで取りやめたときだけ ID を捨てる（D3c） | 取りやめ後に同じ明細を入れ直すと二重 |
+| 今の在庫数の読み取り失敗（delta） | 0 + delta で在庫を上書き | イベント前に 503 で止める（D3c） | — |
+| 250 件超の補正で元に戻す用の数を読めない | 戻すときに 0 で上書き | 1 件も動かす前に全部控え、読めなければ 503 で止める（D3c） | — |
+| 250 件超の補正で、書いてから戻すまでに在庫が動く | 戻すと売上・入庫が消える | 戻す書き込みを `changeFromQuantity`（さっき書いた数）で条件付きにし、合わなければ戻さず `partial_failed`（D3c） | 控えを読んでから前に進む書き込みまでの動きは消える（D9） |
 
 ### Idempotency の境界
 
@@ -211,8 +222,8 @@ pending → applying → completed
 | GraphQL `userErrors` | `assertNoUserErrors` で throw |
 | POS network/timeout | Promise.race / Abort → catch → toast/alert |
 | Server 429/503 | `withGraphQLRetry`（POS クライアントには無い） |
-| apply-change 部分適用 | `partial_failed` + rollback 試行（set quantities サーバー） |
-| finally | **必ず** `submitLockRef=false` |
+| apply-change 部分適用 | `partial_failed` + rollback 試行（set quantities サーバー）。控えは 1 件も動かす前に読み、読めなければ始めない。rollback 失敗も `partial_failed` |
+| finally | **必ず** `submitLockRef=false`（入庫の確定は、エラー・一部入庫のあとの伝票の読み直しを待ってから外す） |
 
 userErrors（ビジネス）はリトライしても同じ結果になりやすい。network / 429 はリトライ候補だが、**出庫作成を盲リトライすると二重発行**になる。
 

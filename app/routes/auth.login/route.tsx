@@ -1,49 +1,19 @@
-import { AppProvider } from "@shopify/shopify-app-react-router/react";
-import { useState } from "react";
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, useActionData, useLoaderData } from "react-router";
+import type { LoaderFunctionArgs } from "react-router";
 
 import { login } from "../../shopify.server";
-import { loginErrorMessage } from "./error.server";
+import { OpenFromShopifyAdmin } from "../../components/OpenFromShopifyAdmin";
 
+// ライブラリが店を特定できないときにここへ来る。
+// ?shop= があれば login() が Shopify のインストール／認証へ移す（throw redirect）。
+// 無いとき・正しくないときは、ドメインの入力欄は出さずに案内だけを出す（App Store 要件 2.3.1）。
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const errors = loginErrorMessage(await login(request));
-
-  return { errors };
+  const url = new URL(request.url);
+  if (url.searchParams.get("shop")) {
+    await login(request);
+  }
+  return null;
 };
 
-export const action = async ({ request }: ActionFunctionArgs) => {
-  const errors = loginErrorMessage(await login(request));
-
-  return {
-    errors,
-  };
-};
-
-export default function Auth() {
-  const loaderData = useLoaderData<typeof loader>();
-  const actionData = useActionData<typeof action>();
-  const [shop, setShop] = useState("");
-  const { errors } = actionData || loaderData;
-
-  return (
-    <AppProvider embedded={false}>
-      <s-page>
-        <Form method="post">
-        <s-section heading="Log in">
-          <s-text-field
-            name="shop"
-            label="Shop domain"
-            details="example.myshopify.com"
-            value={shop}
-            onChange={(e) => setShop(e.currentTarget.value)}
-            autocomplete="on"
-            error={errors.shop}
-          ></s-text-field>
-          <s-button type="submit">Log in</s-button>
-        </s-section>
-        </Form>
-      </s-page>
-    </AppProvider>
-  );
+export default function AuthLogin() {
+  return <OpenFromShopifyAdmin />;
 }

@@ -8,6 +8,7 @@ import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import type { SettingsV1, OrderCsvColumn, OrderDestinationOption, LocationNode, OrderRequestItem, OrderRequestEntry, PurchaseEntry } from "../types";
 import type { GraphQLUserError } from "../types/graphql-responses";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 const ORDER_NS = "stock_transfer_pos";
 const ORDER_KEY = "order_request_entries_v1";
@@ -554,7 +555,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    const { admin } = await authenticate.admin(request);
+    const { admin, session } = await authenticate.admin(request);
+    const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "order");
+    if (planRedirect) return planRedirect;
     const formData = await request.formData();
 
     const intentRaw = String(formData.get("intent") || "loadItems").trim();

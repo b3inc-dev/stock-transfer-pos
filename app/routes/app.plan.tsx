@@ -5,8 +5,60 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, data } from "react-router";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
-import { getShopPlan } from "./app";
+import { getShopPlan } from "../utils/shop-plan.server";
 import { buildManagedPricingPlansUrl } from "../utils/billing";
+import { ALL_FEATURES, FEATURE_LABELS } from "../../extensions/common/planAccess.js";
+
+type NoticeTone = "critical" | "warning" | "info";
+const NOTICE_STYLES: Record<NoticeTone, { background: string; border: string }> = {
+  critical: { background: "#fff4f4", border: "#e0a3a3" },
+  warning: { background: "#fff4e5", border: "#e0b252" },
+  info: { background: "#eaf4ff", border: "#a4c8f0" },
+};
+
+/**
+ * 料金プラン画面のお知らせ（1 画面に 1 つ。失敗 → 注意 → 案内の順。docs/UI_RULES.md 5章）。
+ * ロケーション数の不一致は別の枠で出すので、ここでは見ない。
+ */
+function buildPlanPageNotice(args: {
+  plan: "lite" | "pro" | null;
+  planCheckFailed: boolean;
+  isDevelopmentStore: boolean;
+  required: string | null;
+}): { tone: NoticeTone; heading: string; body: string } | null {
+  const label = args.required ? (FEATURE_LABELS as Record<string, string>)[args.required] : null;
+  if (args.planCheckFailed) {
+    return {
+      tone: "critical",
+      heading: "契約の状態を確認できませんでした",
+      body: "Shopify から料金プランの情報を読めませんでした。少し待ってからこのページを再読み込みしてください。",
+    };
+  }
+  if (!args.plan) {
+    return {
+      tone: "warning",
+      heading: "料金プランの契約が必要です",
+      body: `${label ? `${label}を使うには、` : ""}下の Lite か Pro を選んでください。契約するまで、設定・入出庫・POS のタイルは使えません。${
+        args.isDevelopmentStore ? "開発ストアはテスト課金のため請求されません。" : ""
+      }`,
+    };
+  }
+  if (args.plan === "lite" && label) {
+    return {
+      tone: "warning",
+      heading: `${label}は Pro プランで使えます`,
+      body: "今のプランは Lite です。下の Pro を選ぶと使えるようになります。",
+    };
+  }
+  if (args.isDevelopmentStore) {
+    return {
+      tone: "info",
+      heading: "開発ストアはテスト課金です",
+      body: "プランを選んでも請求はされません。本番の店では下の料金がかかります。",
+    };
+  }
+  return null;
+}
 
 export async function loader({ request }: LoaderFunctionArgs) {
   try {
@@ -14,8 +66,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     admin = withGraphQLRetry(admin);
     const shopPlan = await getShopPlan(admin, session?.shop);
     const pricingPlansUrl = buildManagedPricingPlansUrl(session?.shop);
+    const requiredRaw = new URL(request.url).searchParams.get("required") ?? "";
+    const required = (ALL_FEATURES as readonly string[]).includes(requiredRaw) ? requiredRaw : null;
     return data(
-      { shopPlan, pricingPlansUrl },
+      { shopPlan, pricingPlansUrl, required },
       { headers: { "Cache-Control": "private, no-store" } }
     );
   } catch (e) {
@@ -53,8 +107,14 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function PlanPage() {
-  const { shopPlan, pricingPlansUrl } = useLoaderData<typeof loader>();
+  const { shopPlan, pricingPlansUrl, required } = useLoaderData<typeof loader>();
   const { plan, locationsCount, distribution, isDevelopmentStore, locationPlanMismatch, maxLocationsForPlan } = shopPlan;
+  const planNotice = buildPlanPageNotice({
+    plan,
+    planCheckFailed: shopPlan.planCheckFailed === true,
+    isDevelopmentStore,
+    required,
+  });
   const isInhouse = distribution === "inhouse";
   const canOpenPricing = Boolean(pricingPlansUrl) && !isInhouse;
 
@@ -130,24 +190,21 @@ export default function PlanPage() {
           </div>
         )}
 
-        {isDevelopmentStore && (
+        {!locationPlanMismatch && planNotice && (
           <div
+            role={planNotice.tone === "critical" ? "alert" : "status"}
             style={{
               marginBottom: "16px",
               padding: "12px 16px",
-              background: "#e3f1df",
+              background: NOTICE_STYLES[planNotice.tone].background,
+              border: `1px solid ${NOTICE_STYLES[planNotice.tone].border}`,
               borderRadius: "8px",
-              borderLeft: "4px solid #008060",
             }}
           >
-            {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-            <s-text type="strong">開発ストアのため課金は発生しません</s-text>
-            <div style={{ marginTop: "4px" }}>
-              {/* @ts-expect-error s-text は App Bridge の Web コンポーネント */}
-              <s-text color="subdued">
-                全機能をご利用いただけます。本番ストアでは下記の料金が適用されます。
-              </s-text>
+            <div style={{ fontSize: "14px", fontWeight: 700, color: "#202223", marginBottom: "4px" }}>
+              {planNotice.heading}
             </div>
+            <div style={{ fontSize: "14px", color: "#202223", lineHeight: 1.5 }}>{planNotice.body}</div>
           </div>
         )}
 

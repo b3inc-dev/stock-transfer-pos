@@ -3,7 +3,7 @@
  * s-app-nav が表示されない環境でもメニューを提供する。
  */
 import { Link, useLocation } from "react-router";
-import type { ShopPlan } from "../routes/app";
+import type { ShopPlan } from "../utils/shop-plan.server";
 
 type AppNavBarProps = {
   shopPlan: ShopPlan;
@@ -14,14 +14,16 @@ export function AppNavBar({ shopPlan }: AppNavBarProps) {
   const search = location.search || "";
   const { features, distribution } = shopPlan;
 
-  const items: { path: string; label: string }[] = [
-    { path: "/app", label: "ホーム" },
-    { path: "/app/settings", label: "設定" },
-  ];
+  const items: { path: string; label: string }[] = [{ path: "/app", label: "ホーム" }];
+  if (features.settings) {
+    items.push({ path: "/app/settings", label: "設定" });
+  }
   if (features.inventoryInfo) {
     items.push({ path: "/app/inventory-info", label: "在庫情報" });
   }
-  items.push({ path: "/app/history", label: "入出庫" });
+  if (features.history) {
+    items.push({ path: "/app/history", label: "入出庫" });
+  }
   if (features.purchase) {
     items.push({ path: "/app/purchase", label: "仕入" });
   }

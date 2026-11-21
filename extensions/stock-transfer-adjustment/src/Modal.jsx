@@ -1,6 +1,7 @@
 // POS DOM ポリフィルの兄弟リンク不具合を render より前に補修（common/remoteDomSiblingFix.js）
 import "../../common/remoteDomSiblingFix.js";
 import { render, Component } from "preact";
+import { PlanGate } from "../../common/PlanGate.jsx";
 import { useState, useCallback, useEffect, useRef } from "preact/hooks";
 import { AdjustmentScreen } from "./screens/AdjustmentScreen.jsx";
 
@@ -108,7 +109,9 @@ export default async (rootArg, apiArg) => {
     render(null, root);
     render(
       <ErrorBoundary>
-        <Extension />
+        <PlanGate feature="adjustment" heading="調整" getModalApi={() => posModalApi}>
+          <Extension />
+        </PlanGate>
       </ErrorBoundary>,
       root
     );

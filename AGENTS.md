@@ -32,6 +32,7 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 2. **再実行安全性を最優先**（二重 Transfer、API 成功後のログ失敗、250 分割の途中失敗）
 3. **コード変更は依頼範囲のみ**。docs-only 依頼ではアプリコードを触らない
 4. **推測は推測と明記**。コード・設定に無い「ロケーション単位ジョブキュー」等を前提にしない
+5. 管理画面・POS の UI は [`docs/UI_RULES.md`](docs/UI_RULES.md)（確定版 v1.0）に従う。画面を作る・直す PR は、12章の確認項目を PR 本文で確かめる。ルールと違う作りにするときは先に T に確認する
 
 ## 必読ドキュメント
 
@@ -43,6 +44,7 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 | [`docs/STATE_MACHINE.md`](docs/STATE_MACHINE.md) | 状態遷移・retry/timeout・冪等 |
 | [`docs/SHOPIFY.md`](docs/SHOPIFY.md) | Location/Inventory/Transfer API |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | 設計判断・負債・優先度 |
+| [`docs/UI_RULES.md`](docs/UI_RULES.md) | 管理画面の UI ルール（確定版 v1.0。正本は T の Doc） |
 
 既存の詳細調査（差分・原因分析）は `docs/` 配下に多数ある。**正本の状態遷移は本セットを優先**し、古いギャップ文書（例: add-shipment 未実装と書かれたもの）は `ModalOutbound.jsx` の現行実装で再確認すること。
 
