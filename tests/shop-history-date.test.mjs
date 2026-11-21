@@ -252,7 +252,8 @@ describe("recovery reprocess does not double-apply inventory or history", () => 
     const completedAt = route.indexOf('existingEvent.status === "completed"');
     const resendAt = route.indexOf("respondToCompletedEventResend(db");
     assert.ok(completedAt > 0 && resendAt > completedAt && resendAt < createAt);
-    const failedAt = route.indexOf('existingEvent.status === "failed"');
+    // 料金プランの門番の条件にも同じ文字があるので、failed の分岐そのものを探す。
+    const failedAt = route.indexOf('if (existingEvent.status === "failed")');
     const prepareAt = route.indexOf("prepareFailedEventRetry(");
     const deleteAt = route.indexOf("inventoryChangeEvent.delete");
     assert.ok(failedAt > 0 && prepareAt > failedAt && deleteAt > prepareAt);

@@ -258,8 +258,10 @@ describe("completed resend with an unreadable timezone does not move stock twice
   it("why: the old 503 + status completed answer made POS drop the id (regression guard)", () => {
     const old = { ok: false, errorCode: "timezone_unavailable", status: "completed" };
     assert.equal(classifyApplyChangeResponse(503, old), "retryable");
-    const dropped = operationToKeepAfterError({ entryId: "op_1", appEventId: "evt_1" }, new Error("店舗タイムゾーンを読み取れなかった"), null);
-    assert.equal(dropped, null);
+    // main の 4a5eaa4（返事が来るまで同じ ID で送り直す）以降、POS は 5xx のあとも ID を残す。
+    // サーバー側の「completed の送り直しは必ず 200」と合わせて、二重に在庫が動かないことを守る。
+    const kept = operationToKeepAfterError({ entryId: "op_1", appEventId: "evt_1" }, new Error("店舗タイムゾーンを読み取れなかった"), null);
+    assert.equal(kept?.appEventId, "evt_1");
     assert.equal(
       buildInventoryLogIdempotencyKey({ shop: SHOP, appEventId: "evt_1", activity: "loss_entry", inventoryItemId: ITEM, locationId: LOCATION }).includes("evt_1"),
       true
