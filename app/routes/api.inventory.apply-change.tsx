@@ -7,7 +7,8 @@ import { authenticate, sessionStorage } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import db from "../db.server";
 import type { SessionStorageWithFindByShop } from "../types";
-import { getDateInShopTimezone, getShopTimezone } from "../utils/timezone";
+import { readShopTimezone } from "../utils/timezone";
+import { planInventoryHistoryDate, prepareFailedEventRetry } from "../../extensions/common/shopHistoryDate.js";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import {
   setInventoryQuantitiesServer,
@@ -23,11 +24,8 @@ import {
   INVENTORY_ITEM_NOT_FOUND_MESSAGE,
   normalizeDeltaEntries,
 } from "../utils/current-quantity-read";
-import {
-  decideCompletedEventRetry,
-  isHistoryReplayOwnedByShop,
-  replayCompletedHistory,
-} from "../../extensions/common/inventoryLogWrite.js";
+import { isHistoryReplayOwnedByShop } from "../../extensions/common/inventoryLogWrite.js";
+import { respondToCompletedEventResend } from "../../extensions/common/completedEventResend.js";
 import {
   formatInventoryApiError,
   isNotStockedRetryableError,
@@ -331,6 +329,7 @@ export async function action({ request }: ActionFunctionArgs) {
       where: { appEventId },
       include: { lines: true },
     }).catch(() => null);
+    let shopDateFromFailedRetry: string | null = null;
 
     // 料金プランの門番（公開用のみ。自社用は GraphQL を呼ばずに通る）。
     // 新しく在庫を動かすとき（イベントが無い／failed を消して作り直すとき）だけ止める。
@@ -363,75 +362,19 @@ export async function action({ request }: ActionFunctionArgs) {
         );
       }
       if (existingEvent.status === "completed") {
-        const retryDecision = decideCompletedEventRetry(existingEvent);
-        if (retryDecision.action === "retry_history_only") {
-          // 在庫は適用済み。再送では setQuantities を呼ばず、保存済み明細から履歴だけ upsert する。
-          const shopTimezone = await getShopTimezone(admin).catch(() => "UTC");
-          const requestedAt = existingEvent.requestedAt ?? new Date();
-          const replay = await replayCompletedHistory(db, {
-            shop,
-            appEventId,
-            activity: existingEvent.activity,
-            locationId: existingEvent.locationId,
-            locationName: existingEvent.locationName || "",
-            sourceId: existingEvent.sourceId,
-            requestedAt,
-            date: getDateInShopTimezone(requestedAt, shopTimezone),
-            lines: existingEvent.lines.map((l) => ({
-              inventoryItemId: l.inventoryItemId,
-              variantId: l.variantId,
-              sku: l.sku,
-              delta: l.delta,
-              quantityAfter: l.quantityAfterActual ?? l.quantityAfterExpected,
-            })),
-          });
-          if (replay.ok) {
-            await db.inventoryChangeEvent
-              .update({ where: { id: existingEvent.id }, data: { errorSummary: null } })
-              .catch(() => null);
-            return new Response(
-              JSON.stringify({
-                ok: true,
-                eventId: existingEvent.id,
-                appEventId,
-                status: "completed",
-                appliedCount: existingEvent.lines.length,
-                historyReplayed: true,
-              }),
-              { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-            );
-          }
-          const historyError = replay.error || "history finalize failed";
-          await db.inventoryChangeEvent
-            .update({
-              where: { id: existingEvent.id },
-              data: { errorSummary: `history_incomplete: ${replay.errorCode}: ${historyError}`.slice(0, 500) },
-            })
-            .catch(() => null);
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              eventId: existingEvent.id,
-              appEventId,
-              status: "completed",
-              appliedCount: existingEvent.lines.length,
-              historyIncomplete: true,
-              errorCode: "history_incomplete",
-              historyError,
-            }),
-            { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-          );
-        }
-        return new Response(
-          JSON.stringify({
-            ok: true,
-            eventId: existingEvent.id,
-            appEventId,
-            status: "completed",
-            appliedCount: existingEvent.lines.length,
-          }),
-          { status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
-        );
+        // 在庫は適用済み。タイムゾーンや日付の修復の失敗では 5xx を返さない（POS が ID を捨てて二重適用になる）。
+        const resend = await respondToCompletedEventResend(db, {
+          existingEvent,
+          shop,
+          appEventId,
+          readTimezone: () => readShopTimezone(admin),
+          now: requestedAt,
+          warn: (msg: string, detail?: unknown) => console.warn(msg, detail ?? ""),
+        });
+        return new Response(JSON.stringify(resend.body), {
+          status: resend.status,
+          headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        });
       }
       const isProcessing = existingEvent.status === "pending" || existingEvent.status === "applying";
       if (isProcessing) {
@@ -465,6 +408,24 @@ export async function action({ request }: ActionFunctionArgs) {
       // failed: 安定 appEventId での再確定を許可するため、失敗イベントを削除して続行
       // （以前は errorSummary「Unknown error」等が sticky になり、棚卸確定が永久に失敗していた）
       if (existingEvent.status === "failed") {
+        const failedGate = prepareFailedEventRetry({
+          read: await readShopTimezone(admin),
+          timestamp: requestedAt,
+        });
+        if (!failedGate.clear || typeof failedGate.shopDate !== "string") {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: "店舗タイムゾーンを読み取れなかったため、在庫は変更していません",
+              errorCode: failedGate.errorCode ?? "timezone_unavailable",
+              appEventId,
+              status: existingEvent.status,
+              eventId: existingEvent.id,
+            }),
+            { status: 503, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+          );
+        }
+        shopDateFromFailedRetry = failedGate.shopDate;
         console.warn(
           `[api.inventory.apply-change] clearing failed event for retry: appEventId=${appEventId} prevError=${existingEvent.errorSummary ?? "(none)"}`
         );
@@ -544,6 +505,29 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
+    // 店舗日付が取れないまま在庫数量を変えると、境界付近の履歴が UTC の暦日に付く。
+    // failed の再試行で先に確定した日付があれば、削除のあとに取り直して失敗させない。
+    let shopDate = shopDateFromFailedRetry;
+    if (!shopDate) {
+      const historyDate = planInventoryHistoryDate({
+        phase: "before_inventory",
+        read: await readShopTimezone(admin),
+        timestamp: requestedAt,
+      });
+      if (historyDate.action !== "proceed") {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "店舗タイムゾーンを読み取れなかったため、在庫は変更していません",
+            errorCode: "timezone_unavailable",
+            appEventId,
+          }),
+          { status: 503, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+        );
+      }
+      shopDate = historyDate.date;
+    }
+
     const event = await db.inventoryChangeEvent.create({
       data: {
         appEventId,
@@ -598,8 +582,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const rawLocIdEarly = toRawId(locationId);
     const resolvedLocationNameEarly = locationName || rawLocIdEarly || locationId;
-    const shopTimezoneEarly = await getShopTimezone(admin).catch(() => "UTC");
-    const shopDateEarly = getDateInShopTimezone(requestedAt, shopTimezoneEarly);
     const idempotencyKeyBaseEarly = `${shop}_app_${appEventId}`;
     cleanupIdempotencyKeys = lineRecords.map(
       (l) => `${idempotencyKeyBaseEarly}_${toRawId(l.inventoryItemId)}_${rawLocIdEarly}`
@@ -616,7 +598,7 @@ export async function action({ request }: ActionFunctionArgs) {
           create: {
             shop,
             timestamp: requestedAt,
-            date: shopDateEarly,
+            date: shopDate,
             inventoryItemId: rawItemId,
             variantId: l.variantId,
             sku: l.sku,
@@ -632,6 +614,7 @@ export async function action({ request }: ActionFunctionArgs) {
           },
           update: {
             delta: l.delta,
+            date: shopDate,
             activity,
             sourceType: activity,
             sourceId,
@@ -812,9 +795,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const rawLocId = toRawId(locationId);
     const resolvedLocationName = locationName || rawLocId || locationId;
-    // ショップのタイムゾーンで日付を計算（UTC固定だと日本など非UTCショップで日付がずれる）
-    const shopTimezone = await getShopTimezone(admin).catch(() => "UTC");
-    const shopDate = getDateInShopTimezone(requestedAt, shopTimezone);
 
     const appliedRawIds = new Set(
       (result.appliedInventoryItemIds ?? []).map((id) => toRawId(id)).filter(Boolean)
@@ -853,6 +833,7 @@ export async function action({ request }: ActionFunctionArgs) {
             update: {
               delta: l.delta,
               quantityAfter: l.quantityAfter,
+              date: shopDate,
               locationName: resolvedLocationName,
               sourceId,
               note: `appEventId:${appEventId}${noteSuffix}`,

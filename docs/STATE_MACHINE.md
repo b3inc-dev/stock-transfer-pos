@@ -153,6 +153,7 @@ pending → applying → completed
 ```
 
 - 同一 `appEventId` が `completed` → 即 OK 返却（冪等）
+  - 店舗タイムゾーンが読めない・履歴日付の修復に失敗した、という履歴の日付だけの問題でも **5xx を返さない**（POS は 5xx を「在庫未適用」と受け取り ID を捨て、押し直しで二重適用になる）。履歴が書きかけなら `historyIncomplete`（200）で返して同じ ID を残させ、日付の修復だけのときはあとに回す（`extensions/common/completedEventResend.js`）
 - `pending` / `applying` → 202（処理中）
 - `partial_failed` → 400 + `partiallyApplied`（在庫は動かさない。自動で残りを反映しない。管理者が Shopify で直す）
 - delta の明細で今の在庫数を読めない → イベントを作らずに 503 `current_quantity_unreadable`（在庫は動かさない。同じ ID で送り直してよい）
