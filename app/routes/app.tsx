@@ -10,205 +10,11 @@ import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { isInventoryCountReadOnlySubmission } from "../utils/inventory-count-revalidation";
 import { AppNavBar } from "../components/AppNavBar";
-import type { ActiveSubscription } from "../utils/billing";
-import {
-  getPlanFromActiveSubscriptions,
-  getMaxLocationsFromSubscriptionName,
-  getUsageLineItemId,
-  calculateUsageAmount,
-  reportUsageRecord,
-} from "../utils/billing";
+import type { ShopPlan } from "../utils/shop-plan.server";
+import { accessForShopPlan, fallbackShopPlan, getShopPlan } from "../utils/shop-plan.server";
+import { featureForAdminPath } from "../../extensions/common/planAccess.js";
 
-export type ShopPlanFeatures = {
-  inventoryInfo: boolean;
-  history: boolean;
-  purchase: boolean;
-  loss: boolean;
-  order: boolean;
-  stocktake: boolean;
-  adjustment: boolean;
-};
-
-export type ShopPlan = {
-  distribution: "inhouse" | "public";
-  plan: "lite" | "pro" | null;
-  features: ShopPlanFeatures;
-  locationsCount: number;
-  /** 開発ストア（partnerDevelopment）のとき true。開発ストアには請求しない方針で全機能を利用可能にする */
-  isDevelopmentStore: boolean;
-  /** ロケーション数が契約プラン（3 or 10）を超えている場合 true。プラン変更案内を表示し機能を制限する */
-  locationPlanMismatch?: boolean;
-  /** 現在のプランが対象とする最大ロケーション数（3 or 10）。locationPlanMismatch 時のみ意味を持つ */
-  maxLocationsForPlan?: 3 | 10;
-  /** 要因特定用。ENABLE_PLAN_DEBUG=1 のときのみ付与。本番では設定しないこと */
-  planDebug?: {
-    shop: string | undefined;
-    appDistributionValue: string;
-    distributionResult: "inhouse" | "public";
-    shopInCustomList: boolean;
-    customStoreIdsCount: number;
-  };
-};
-
-/**
- * カスタムアプリとして扱うストアのショップドメイン一覧（カンマ区切り）。
- * 例: CUSTOM_APP_STORE_IDS=my-store.myshopify.com,other.myshopify.com
- * ここに含まれるストアでは常に全機能を解放する（APP_DISTRIBUTION が public でも inhouse 扱い）。
- */
-function getCustomAppStoreIds(): string[] {
-  const raw = process.env.CUSTOM_APP_STORE_IDS ?? "";
-  return raw.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
-export async function getShopPlan(
-  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
-  currentShop?: string
-): Promise<ShopPlan> {
-  // カスタムアプリ: APP_DISTRIBUTION=inhouse または 現在のストアが CUSTOM_APP_STORE_IDS に含まれる場合は全機能解放
-  const customStoreIds = getCustomAppStoreIds();
-  const shopNormalized = currentShop?.trim().toLowerCase();
-  const forceInhouse = Boolean(shopNormalized && customStoreIds.some((id) => id.trim().toLowerCase() === shopNormalized));
-  const distEnv = (process.env.APP_DISTRIBUTION ?? "").trim().toLowerCase();
-  const distribution = (distEnv === "inhouse" || forceInhouse ? "inhouse" : "public") as "inhouse" | "public";
-
-  let locationsCount = 0;
-  let isDevelopmentStore = false;
-  let planFromBilling: "lite" | "pro" | null = null;
-  let activeSubscriptions: Array<{ id?: string; name?: string; status?: string; currentPeriodEnd?: string | null; lineItems?: Array<{ id: string; plan?: { pricingDetails?: { __typename?: string } } }> }> = [];
-  try {
-    const resp = await admin.graphql(
-      `#graphql
-        query ShopPlanAndLocations($first: Int!) {
-          shop {
-            plan {
-              partnerDevelopment
-            }
-          }
-          locations(first: $first) { nodes { id } }
-          currentAppInstallation {
-            activeSubscriptions {
-              id
-              name
-              status
-              currentPeriodEnd
-              lineItems {
-                id
-                plan {
-                  pricingDetails {
-                    __typename
-                  }
-                }
-              }
-            }
-          }
-        }
-      `,
-      { variables: { first: 250 } }
-    );
-    const text = typeof resp?.text === "function" ? await resp.text() : "";
-    if (text && String(text).trim()) {
-      try {
-        const data = JSON.parse(text) as { data?: { locations?: { nodes?: unknown[] }; shop?: { plan?: { partnerDevelopment?: boolean } }; currentAppInstallation?: { activeSubscriptions?: unknown[] } } };
-        locationsCount = data?.data?.locations?.nodes?.length ?? 0;
-        isDevelopmentStore = data?.data?.shop?.plan?.partnerDevelopment === true;
-        activeSubscriptions = data?.data?.currentAppInstallation?.activeSubscriptions ?? [];
-        planFromBilling = getPlanFromActiveSubscriptions(activeSubscriptions);
-      } catch {
-        // ignore parse error (syntax error, unexpected end of file 等を出さない)
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  // プラン: カスタムアプリ（inhouse）では全ての機能を解放。開発ストアは請求しないで全機能。public 本番は Billing から取得
-  let plan: "lite" | "pro" | null = null;
-  if (distribution === "inhouse") {
-    plan = "pro"; // カスタムアプリは常に全機能利用可能
-  } else if (isDevelopmentStore) {
-    plan = "pro"; // 開発ストアには請求しない。全機能を利用可能にする
-  } else {
-    plan = planFromBilling; // 公開アプリ本番: activeSubscriptions から判定。未課金なら null（Lite 相当）
-  }
-
-  // カスタムアプリ（inhouse）のときは全ての機能を true。公開アプリは plan に応じて制御
-  const features: ShopPlanFeatures = {
-    inventoryInfo: distribution === "inhouse" || plan === "pro",
-    history: true, // 全配布で利用可能
-    purchase: distribution === "inhouse" || plan === "pro",
-    loss: distribution === "inhouse" || plan === "pro",
-    order: distribution === "inhouse" || plan === "pro",
-    stocktake: distribution === "inhouse" || plan === "pro",
-    adjustment: distribution === "inhouse" || plan === "pro",
-  };
-
-  // 公開・本番・Lite/Pro・10ロケーション超のとき、従量課金を 1 回だけ報告（同一期間は idempotencyKey で重複防止）
-  // ※ 引数名は admin。未定義の adminApi 参照で layout loader が 500 になる事故を防ぐ
-  if (
-    distribution === "public" &&
-    !isDevelopmentStore &&
-    (plan === "lite" || plan === "pro") &&
-    locationsCount > 10
-  ) {
-    try {
-      const active = activeSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
-      const sub = active.find((s) => getUsageLineItemId(s as ActiveSubscription) && s.currentPeriodEnd) as (ActiveSubscription & { currentPeriodEnd?: string | null }) | undefined;
-      const usageLineItemId = sub ? getUsageLineItemId(sub) : null;
-      const periodEnd = sub?.currentPeriodEnd;
-      if (usageLineItemId && periodEnd && sub?.id) {
-        const { amountUsd, extraLocations } = calculateUsageAmount(plan, locationsCount);
-        if (amountUsd > 0) {
-          const idempotencyKey = `usage-${sub.id}-${periodEnd}`;
-          const description = `${extraLocations} extra location(s) (${locationsCount} total): $${amountUsd.toFixed(2)}`;
-          reportUsageRecord(admin, usageLineItemId, amountUsd, description, idempotencyKey).catch(() => {
-            // ローダーの応答をブロックしない。失敗時は次回アクセス時に再試行される
-          });
-        }
-      }
-    } catch {
-      // Usage 報告失敗で設定・ホーム等の loader を落とさない
-    }
-  }
-
-  // ロケーション数とプラン（3/10）の一致チェック。公開アプリ・Lite/Pro のときのみ
-  let locationPlanMismatch = false;
-  let maxLocationsForPlan: 3 | 10 | undefined;
-  if (distribution === "public" && !forceInhouse && (plan === "lite" || plan === "pro")) {
-    const active = activeSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
-    let maxFromPlans: 3 | 10 | null = null;
-    for (const s of active) {
-      const m = getMaxLocationsFromSubscriptionName(String(s?.name || ""));
-      if (m !== null) {
-        if (maxFromPlans === null || m > maxFromPlans) maxFromPlans = m;
-      }
-    }
-    if (maxFromPlans !== null && locationsCount > maxFromPlans) {
-      locationPlanMismatch = true;
-      maxLocationsForPlan = maxFromPlans;
-    }
-  }
-
-  const planDebug =
-    process.env.ENABLE_PLAN_DEBUG === "1"
-      ? {
-          shop: currentShop,
-          appDistributionValue: process.env.APP_DISTRIBUTION ?? "(未設定)",
-          distributionResult: distribution,
-          shopInCustomList: forceInhouse,
-          customStoreIdsCount: customStoreIds.length,
-        }
-      : undefined;
-
-  return {
-    distribution,
-    plan,
-    features,
-    locationsCount,
-    isDevelopmentStore,
-    ...(locationPlanMismatch ? { locationPlanMismatch: true, maxLocationsForPlan } : {}),
-    planDebug,
-  };
-}
+export type { ShopPlan, ShopPlanFeatures } from "../utils/shop-plan.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   try {
@@ -218,25 +24,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     try {
       shopPlan = await getShopPlan(adminApi, session?.shop);
     } catch (planErr) {
-      // getShopPlan 失敗で設定・全 /app が 500 にならないようフォールバック（審査 2.1.1）
+      // getShopPlan 失敗で設定・全 /app が 500 にならないようフォールバック（審査 2.1.1）。公開用は「読めなかった」として止める
       console.error("[app layout] getShopPlan failed:", planErr instanceof Error ? planErr.message : planErr);
-      const distEnv = (process.env.APP_DISTRIBUTION ?? "").trim().toLowerCase();
-      const distribution = distEnv === "inhouse" ? "inhouse" : "public";
-      shopPlan = {
-        distribution,
-        plan: distribution === "inhouse" ? "pro" : null,
-        features: {
-          inventoryInfo: distribution === "inhouse",
-          history: true,
-          purchase: distribution === "inhouse",
-          loss: distribution === "inhouse",
-          order: distribution === "inhouse",
-          stocktake: distribution === "inhouse",
-          adjustment: distribution === "inhouse",
-        },
-        locationsCount: 0,
-        isDevelopmentStore: false,
-      };
+      shopPlan = fallbackShopPlan(session?.shop);
     }
     const storeHandle =
       session?.shop?.replace(/\.myshopify\.com$/i, "") ?? "";
@@ -250,24 +40,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }
     }
 
-    // 公開アプリで Pro 未加入の場合は、Pro 専用画面への直接アクセスを禁止し料金プランへリダイレクト
+    // 公開用で、この画面の機能を今のプランで使えないときは料金プランへ回す（未契約・Lite で Pro の画面・契約を読めなかった）。
+    // 画面の action は親の loader を通らないので、各 action でも adminPlanRedirect（app/utils/plan-gate.server.ts）で止めている。
     const url = new URL(request.url);
-    const path = url.pathname;
-    const proOnlyPaths = [
-      "/app/inventory-info",
-      "/app/purchase",
-      "/app/loss",
-      "/app/order",
-      "/app/inventory-count",
-      "/app/adjustment",
-    ];
-    const isProOnlyPath = proOnlyPaths.some((p) => path === p || path.startsWith(`${p}/`));
-    if (
-      shopPlan.distribution === "public" &&
-      shopPlan.plan !== "pro" &&
-      isProOnlyPath
-    ) {
-      return redirect("/app/plan");
+    const feature = featureForAdminPath(url.pathname);
+    if (feature && accessForShopPlan(shopPlan, feature) !== "allowed") {
+      return redirect(`/app/plan?required=${encodeURIComponent(feature)}`);
     }
 
     // eslint-disable-next-line no-undef
@@ -357,9 +135,9 @@ export default function App() {
       <s-app-nav>
         {/* @ts-expect-error s-link は App Bridge の Web コンポーネント */}
         <s-link href="/app" rel="home">ホーム</s-link>
-        <s-link href="/app/settings">設定</s-link>
+        {features.settings && <s-link href="/app/settings">設定</s-link>}
         {features.inventoryInfo && <s-link href="/app/inventory-info">在庫情報</s-link>}
-        <s-link href="/app/history">入出庫</s-link>
+        {features.history && <s-link href="/app/history">入出庫</s-link>}
         {features.purchase && <s-link href="/app/purchase">仕入</s-link>}
         {features.order && <s-link href="/app/order">発注</s-link>}
         {features.loss && <s-link href="/app/loss">ロス</s-link>}

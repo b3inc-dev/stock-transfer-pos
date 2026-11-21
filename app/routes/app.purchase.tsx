@@ -10,6 +10,7 @@ import type { PurchaseEntry, OrderRequestItem, LocationNode } from "../types";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 import { logInventoryChangesFromAdjustment } from "../utils/inventory-change-log";
 import db from "../db.server";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 const PURCHASE_NS = "stock_transfer_pos";
 const PURCHASE_KEY = "purchase_entries_v1";
@@ -398,6 +399,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   try {
     const { admin, session } = await authenticate.admin(request);
+    const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "purchase");
+    if (planRedirect) return planRedirect;
     const shop = session?.shop || "";
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();

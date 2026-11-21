@@ -57,6 +57,14 @@ export const DEV_URL = DEV_APP_URL;
  */
 export const PROD_URL = PROD_APP_URL;
 
+/**
+ * 拡張がどちらのアプリ用にビルドされたか（"public" | "inhouse"）。
+ * 料金プランの確認（posPlanGate.js）は "inhouse" のとき行わない（自社用は全機能）。
+ */
+export function getAppMode() {
+  return APP_MODE;
+}
+
 // デフォルトエクスポート（後方互換性のため）
 export default {
   getAppUrl,

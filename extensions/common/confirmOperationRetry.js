@@ -1,13 +1,25 @@
 /**
- * 確定ボタンの再押下で、在庫適用済みの操作IDを使い回す。
- * 履歴だけ失敗したあとに新しい ID を発行すると、別イベントとして在庫がもう一度動く。
+ * 確定ボタンの再押下で、結果がまだ分からない・在庫適用済みの操作IDを使い回す。
+ * 応答なしのあとや履歴だけ失敗したあとに新しい ID を発行すると、別イベントとして在庫がもう一度動く。
+ *
+ * ID を手放してよいのは、サーバーが「完了」を返したとき（画面側で消す）と、
+ * サーバーがはっきり断ったとき（`finalRejection`。同じ ID で送り直しても答えが変わらない）だけ。
+ * 応答なし・時間切れ・5xx・処理中・確定後のローカル保存の失敗など、結果が分からない失敗では残す。
+ * 一部だけ反映（partial_failed）も残す。同じ ID ならサーバーは在庫を動かさず、新しい ID だと反映済みの分がもう一度動く。
  */
-
 export function shouldReuseOperationAfterError(error) {
-  if (!error || typeof error !== "object") return false;
-  if (error.code === "history_incomplete") return true;
-  if (error.inventoryApplied === true) return true;
-  return false;
+  if (error && typeof error === "object") {
+    if (error.code === "history_incomplete") return true;
+    if (error.inventoryApplied === true) return true;
+    if (isPartialApplyError(error)) return true;
+    if (error.finalRejection === true) return false;
+  }
+  return true;
+}
+
+/** サーバーが「一部だけ反映（partial_failed）」と答えた失敗か。 */
+export function isPartialApplyError(error) {
+  return Boolean(error && typeof error === "object" && (error.partiallyApplied === true || error.code === "APPLY_PARTIAL"));
 }
 
 /**
@@ -24,6 +36,7 @@ export function beginConfirmOperation(pending, mint) {
         appEventId,
         locationId: locationIdOf(pending.locationId),
         lines: Array.isArray(pending.lines) ? pending.lines : [],
+        ...(pending.partial === true ? { partial: true } : {}),
       },
       reused: true,
     };
@@ -57,14 +70,25 @@ function firstLines(...candidates) {
 }
 
 export function operationToKeepAfterError(operation, error, previousPending = null, linesSnapshot = null) {
+  const current = keptOperation(operation);
+  const previous = keptOperation(previousPending);
+  // はっきり断られた ID は手放す。別の ID の修復待ちが前から残っていれば、そちらは残す。
   const base = shouldReuseOperationAfterError(error)
-    ? keptOperation(operation) || keptOperation(previousPending)
-    : keptOperation(previousPending);
+    ? current || previous
+    : previous && previous.appEventId !== current?.appEventId
+      ? previous
+      : null;
   if (!base) return null;
+  // 「一部だけ反映」の印: この送信で言われたか、同じ ID で前に言われていたら残す（そのあとの応答なしでは消さない）。
+  const partial =
+    (base.appEventId === current?.appEventId && isPartialApplyError(error)) ||
+    (base.appEventId === previous?.appEventId && previousPending?.partial === true) ||
+    (base.appEventId === current?.appEventId && operation?.partial === true);
   return {
     ...base,
     locationId: String(operation?.locationId || previousPending?.locationId || "").trim(),
     lines: firstLines(operation?.lines, previousPending?.lines, linesSnapshot),
+    ...(partial ? { partial: true } : {}),
   };
 }
 
@@ -83,6 +107,7 @@ function operationRecord(operation) {
     ...kept,
     locationId: locationIdOf(operation.locationId),
     lines: Array.isArray(operation.lines) ? operation.lines : [],
+    ...(operation.partial === true ? { partial: true } : {}),
   };
 }
 
@@ -120,7 +145,58 @@ export function planDraftRestore(saved, currentLocationId) {
   return { restore: true, operation: null, lines };
 }
 
-/** 修復待ちの再確定は、最初に在庫へ出した明細だけを使う。 */
+/**
+ * 送る中身の目印（商品と数量）。並び順・表示用の項目・在庫数の読み直しでは変わらない。
+ * 出庫のチェックポイントの fingerprint（D3b）と同じ考え方。
+ */
+function lineKey(line) {
+  return String(line?.variantId || line?.inventoryItemId || "").trim();
+}
+
+export function confirmLinesSignature(lines) {
+  return (Array.isArray(lines) ? lines : [])
+    .filter((l) => lineKey(l))
+    .map((l) => `${lineKey(l)}:${Number(l?.qty ?? l?.quantity ?? 0) || 0}`)
+    .sort()
+    .join("|");
+}
+
+/**
+ * 残っている操作の明細と、いま画面にある明細が違うか。
+ * 違うまま同じ ID で送ると、サーバーは前の中身で「完了」を返し、画面の変更が黙って消える。
+ * 新しい ID で送ると、前の送信が届いていた場合に在庫がもう一度動く。どちらも避けるため、送らずに明細を戻す。
+ */
+export function pendingLinesChanged(operation, currentLines) {
+  const frozen = Array.isArray(operation?.lines) ? operation.lines : [];
+  if (frozen.length === 0) return false;
+  return confirmLinesSignature(frozen) !== confirmLinesSignature(currentLines);
+}
+
+export const PENDING_LINES_RESTORED_MESSAGE =
+  "前回の確定の結果がまだ分からないため、前回の明細に戻しました。この明細のまま「確定」をもう一度押してください（同じ確定のため在庫は二重に変わりません）。";
+
+export const PARTIAL_OPERATION_DISCARDED_MESSAGE =
+  "一部だけ反映された前回の確定を取りやめ、明細を消しました（この操作で在庫は変えていません）。同じ明細を入れ直して確定すると、反映済みの分がもう一度動きます。管理者が Shopify の在庫を直してから入力してください。";
+
+export const PENDING_RESET_BLOCKED_MESSAGE =
+  "前回の確定がまだ終わっていないため、確定した明細のままもう一度「確定」を押してください（在庫は二重に変わりません）";
+
+/**
+ * 送る前に、操作 ID を明細と一緒に端末へ残す。
+ * 応答が無いまま画面を閉じても、次に開いたときに同じ ID で送り直せる。
+ * 保存に失敗しても確定は止めない（ID は画面のメモリに残っている）。
+ */
+export async function rememberOperationBeforeSend(storage, key, operation) {
+  try {
+    await saveAppliedOperation(storage, key, operation);
+    return true;
+  } catch (e) {
+    console.warn("[confirmOperationRetry] failed to save operation before send:", e?.message ?? e);
+    return false;
+  }
+}
+
+/** 修復待ち・結果待ちの再確定は、最初に送った明細だけを使う。 */
 export function resolveConfirmLines(operation, currentLines) {
   if (Array.isArray(operation?.lines) && operation.lines.length > 0) return operation.lines;
   return Array.isArray(currentLines) ? currentLines : [];
@@ -196,6 +272,37 @@ export async function saveAppliedOperation(storage, key, operation) {
   });
 }
 
+/** この店舗の残っている操作 ID だけを外す（明細の下書きは残す）。サーバーがはっきり断ったとき用。 */
+export async function forgetOperation(storage, key, locationId) {
+  return enqueueDraftWrite(key, async () => {
+    if (!storage?.get || !storage?.set) return null;
+    const saved = (await storage.get(key)) || null;
+    if (!saved) return null;
+    const map = appliedOperationsByLocation(saved);
+    const current = locationIdOf(locationId) || locationIdOf(saved?.conds?.locationId);
+    if (!current || !map[current]) return saved;
+    delete map[current];
+    const next = writeOperationMap(saved, map);
+    await storage.set(key, next);
+    return next;
+  });
+}
+
+/**
+ * 確定が失敗したあと、端末の保存を画面のメモリと揃える。
+ * 残す ID があれば保存し、無ければ（はっきり断られた）送る前に残した ID を消す。
+ * 消し忘れると、開き直したときに断られた ID と明細が戻り、確定もリセットもできなくなる。
+ */
+export async function settleOperationAfterError(storage, key, kept, locationId) {
+  try {
+    if (kept) return await saveAppliedOperation(storage, key, kept);
+    return await forgetOperation(storage, key, locationId);
+  } catch (e) {
+    console.warn("[confirmOperationRetry] failed to update operation after error:", e?.message ?? e);
+    return null;
+  }
+}
+
 /** この店舗の下書きと修復待ちだけを外し、他店舗の修復待ちは残す。 */
 export async function clearLocationDraft(storage, key, locationId) {
   return enqueueDraftWrite(key, async () => {
@@ -223,4 +330,17 @@ export async function clearLocationDraft(storage, key, locationId) {
     await storage.set(key, next);
     return next;
   });
+}
+
+/**
+ * リセットで、残っている操作 ID を明細ごと取りやめてよいか。
+ * 送った明細が無い・まだ送っていない → よい。
+ * サーバーが「一部だけ反映（partial_failed）」と答えた操作 → よい。サーバーはこの ID の送り直しで在庫を二度と動かさず、
+ * 残りを反映する道も無い（STATE_MACHINE §6）。持ち続けても管理者が直すまで同じ答えが返るだけなので、画面が固まらないよう取りやめを許す。
+ * それ以外（応答なし・処理中・5xx・履歴だけ失敗）は結果が分からないか適用済みなので、取りやめると押し直しで在庫がもう一度動く。
+ */
+export function canDiscardPendingOperation(operation) {
+  if (!operation) return true;
+  if (!Array.isArray(operation.lines) || operation.lines.length === 0) return true;
+  return operation.partial === true;
 }

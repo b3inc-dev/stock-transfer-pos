@@ -2,7 +2,7 @@
 import type { HeadersFunction } from "react-router";
 import { Link, useOutletContext } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
-import type { ShopPlan } from "./app";
+import type { ShopPlan } from "../utils/shop-plan.server";
 
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
@@ -24,13 +24,17 @@ export default function HomePage() {
   const showPlanStep = !isInhouse;
   const showBillingNote = !isInhouse && isDevelopmentStore;
   const isPro = isInhouse || plan === "pro";
+  /** 公開用で契約が無い（または読めない）。料金プラン以外の手順は、契約するまで開けないので出さない */
+  const isLocked = !isInhouse && !plan;
 
   const planLabel =
     plan === "pro"
       ? "Pro"
       : plan === "lite"
-        ? "Lite（7日間トライアル中）"
-        : "プランが選択されていません";
+        ? "Lite"
+        : shopPlan.planCheckFailed
+          ? "確認できませんでした"
+          : "未契約";
 
   // 導入ステップ: 1.料金 2.アプリ設定 3.出庫 4.入庫 [Lite: 10.POS] [Pro: 5〜9 仕入・発注・ロス・棚卸・調整] 10.POS
   const steps: Array<{ num: number; title: string; description: string; to: string; buttonLabel: string; highlight?: boolean; stepId?: "pos" }> = [];
@@ -40,87 +44,91 @@ export default function HomePage() {
     steps.push({
       num,
       title: "料金プランを選択する",
-      description: "Lite または Pro を選択し、利用を開始しましょう。",
+      description: isLocked
+        ? "プランを選ぶまで、設定・入出庫・POS のタイルは使えません。Lite か Pro を選んでください。"
+        : "Lite または Pro を選択し、利用を開始しましょう。",
       to: "/app/plan",
       buttonLabel: "料金プランを選択する",
       highlight: !plan,
     });
   }
-  num++;
-  steps.push({
-    num,
-    title: "アプリ設定",
-    description: "設定できる項目：表示ロケーションの選択、履歴一覧の表示件数、商品リスト・検索リストの表示件数。",
-    to: "/app/settings",
-    buttonLabel: "設定を開く",
-  });
-  num++;
-  steps.push({
-    num,
-    title: "出庫設定",
-    description: "設定できる項目：出庫履歴の初回件数、配送情報の必須/任意、配送業者プリセット、到着予定日ボタン（日数・ラベル）、「その他（配送会社入力）」の表示、強制キャンセル許可。",
-    to: "/app/settings?tab=outbound",
-    buttonLabel: "出庫設定を開く",
-  });
-  num++;
-  steps.push({
-    num,
-    title: "入庫設定",
-    description: "設定できる項目：入出庫履歴のCSV出力項目（並び・ON/OFF）、過剰入庫許可、予定外入庫許可、入庫リストの初回件数。",
-    to: "/app/settings?tab=inbound",
-    buttonLabel: "入庫設定を開く",
-  });
-  if (isPro) {
+  if (!isLocked) {
     num++;
     steps.push({
       num,
-      title: "仕入設定",
-      description: "設定できる項目：仕入先マスタ（名称・コード・並び順）、「その他（仕入先入力）」の表示、仕入履歴のCSV出力項目。",
-      to: "/app/settings?tab=purchase",
-      buttonLabel: "仕入設定を開く",
+      title: "アプリ設定",
+      description: "設定できる項目：表示ロケーションの選択、履歴一覧の表示件数、商品リスト・検索リストの表示件数。",
+      to: "/app/settings",
+      buttonLabel: "設定を開く",
     });
     num++;
     steps.push({
       num,
-      title: "発注設定",
-      description: "設定できる項目：発注先マスタ（名称・コード・並び順）、希望納品日の表示ON/OFF、希望納品日ボタンの日数・ラベル、発注履歴のCSV出力項目。",
-      to: "/app/settings?tab=order",
-      buttonLabel: "発注設定を開く",
+      title: "出庫設定",
+      description: "設定できる項目：出庫履歴の初回件数、配送情報の必須/任意、配送業者プリセット、到着予定日ボタン（日数・ラベル）、「その他（配送会社入力）」の表示、強制キャンセル許可。",
+      to: "/app/settings?tab=outbound",
+      buttonLabel: "出庫設定を開く",
     });
     num++;
     steps.push({
       num,
-      title: "ロス設定",
-      description: "設定できる項目：ロス区分（破損・紛失など）の登録・並び順、「その他（理由入力）」の表示、ロス履歴のCSV出力項目。",
-      to: "/app/settings?tab=loss",
-      buttonLabel: "ロス設定を開く",
+      title: "入庫設定",
+      description: "設定できる項目：入出庫履歴のCSV出力項目（並び・ON/OFF）、過剰入庫許可、予定外入庫許可、入庫リストの初回件数。",
+      to: "/app/settings?tab=inbound",
+      buttonLabel: "入庫設定を開く",
     });
+    if (isPro) {
+      num++;
+      steps.push({
+        num,
+        title: "仕入設定",
+        description: "設定できる項目：仕入先マスタ（名称・コード・並び順）、「その他（仕入先入力）」の表示、仕入履歴のCSV出力項目。",
+        to: "/app/settings?tab=purchase",
+        buttonLabel: "仕入設定を開く",
+      });
+      num++;
+      steps.push({
+        num,
+        title: "発注設定",
+        description: "設定できる項目：発注先マスタ（名称・コード・並び順）、希望納品日の表示ON/OFF、希望納品日ボタンの日数・ラベル、発注履歴のCSV出力項目。",
+        to: "/app/settings?tab=order",
+        buttonLabel: "発注設定を開く",
+      });
+      num++;
+      steps.push({
+        num,
+        title: "ロス設定",
+        description: "設定できる項目：ロス区分（破損・紛失など）の登録・並び順、「その他（理由入力）」の表示、ロス履歴のCSV出力項目。",
+        to: "/app/settings?tab=loss",
+        buttonLabel: "ロス設定を開く",
+      });
+      num++;
+      steps.push({
+        num,
+        title: "棚卸設定",
+        description: "設定できる項目：棚卸履歴のCSV出力項目（並び・ON/OFF）、予定外棚卸の許可/不許可。",
+        to: "/app/settings?tab=stocktake",
+        buttonLabel: "棚卸設定を開く",
+      });
+      num++;
+      steps.push({
+        num,
+        title: "調整設定",
+        description: "設定できる項目：調整（簡易棚卸）履歴のCSV出力項目（並び・ON/OFF、差分列など）。",
+        to: "/app/settings?tab=adjustment",
+        buttonLabel: "調整設定を開く",
+      });
+    }
     num++;
     steps.push({
       num,
-      title: "棚卸設定",
-      description: "設定できる項目：棚卸履歴のCSV出力項目（並び・ON/OFF）、予定外棚卸の許可/不許可。",
-      to: "/app/settings?tab=stocktake",
-      buttonLabel: "棚卸設定を開く",
-    });
-    num++;
-    steps.push({
-      num,
-      title: "調整設定",
-      description: "設定できる項目：調整（簡易棚卸）履歴のCSV出力項目（並び・ON/OFF、差分列など）。",
-      to: "/app/settings?tab=adjustment",
-      buttonLabel: "調整設定を開く",
+      title: "POSアプリタイル追加",
+      description: "POSで出庫・入庫・ロス・棚卸などのタイルを使うには、Shopify管理画面の「販売チャネル」の「Point of Sale」でアプリを追加してください。POSチャネルがまだない場合は販売チャネル一覧から追加できます。",
+      to: "/app/settings",
+      buttonLabel: "POSの設定を開く",
+      stepId: "pos",
     });
   }
-  num++;
-  steps.push({
-    num,
-    title: "POSアプリタイル追加",
-    description: "POSで出庫・入庫・ロス・棚卸などのタイルを使うには、Shopify管理画面の「販売チャネル」の「Point of Sale」でアプリを追加してください。POSチャネルがまだない場合は販売チャネル一覧から追加できます。",
-    to: "/app/settings",
-    buttonLabel: "POSの設定を開く",
-    stepId: "pos",
-  });
 
   const summaryBlock = (
     <div className="HomePage-summary">
@@ -145,7 +153,7 @@ export default function HomePage() {
         )}
         {showBillingNote && (
           <span style={{ fontSize: "14px", color: "#6d7175" }}>
-            開発ストアのため課金は発生しません
+            開発ストアはテスト課金のため請求されません
           </span>
         )}
       </SummaryCard>

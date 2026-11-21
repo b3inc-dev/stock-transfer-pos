@@ -2,6 +2,7 @@
 // POS DOM ポリフィルの兄弟リンク不具合を render より前に補修（common/remoteDomSiblingFix.js）
 import "../../common/remoteDomSiblingFix.js";
 import { render, Component } from "preact";
+import { PlanGate } from "../../common/PlanGate.jsx";
 import { memo } from "preact/compat";
 import { useEffect, useMemo, useRef, useState, useCallback } from "preact/hooks";
 import {
@@ -72,7 +73,9 @@ export default async (rootArg, apiArg) => {
 
     render(
       <ErrorBoundary>
-        <Extension />
+        <PlanGate feature="transfer" heading="出庫" getModalApi={() => posModalApi}>
+          <Extension />
+        </PlanGate>
       </ErrorBoundary>,
       root
     );
