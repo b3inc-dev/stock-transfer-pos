@@ -344,11 +344,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
       } else {
         console.warn("InventoryChangeLog model not found in Prisma client. Please restart the dev server.");
-        return new Response("OK", { status: 200 }); // Webhookは成功として返す（ログは保存されない）
+        return new Response("Inventory history unavailable", { status: 503 });
       }
     } catch (error) {
       console.error("Error checking previous log:", error);
-      // エラーが発生しても続行（deltaはnullのまま）
+      // A failed read is not an empty history. Do not acknowledge or write an uncertain observation.
+      return new Response("Inventory history unavailable", { status: 503 });
     }
 
     // 変動がない（delta が 0）場合はログを保存しない（「0」の行が履歴に並ばないようにする）
