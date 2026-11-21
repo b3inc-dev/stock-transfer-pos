@@ -7,6 +7,7 @@ import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getDateInShopTimezone } from "../utils/timezone";
 import type { LocationNode, TransferLineItem, GroupedLineItemsEntry, TransferHistory } from "../types";
 import { buildTransferSearch, changeHistoryCriteria, resetHistoryPage, TRANSFER_STATUSES, type HistoryFilter } from "../utils/transfer-history-filters";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 type TransferEndpoint = { name?: string; location?: LocationNode | null };
 type HistoryTransferNode = {
@@ -421,8 +422,10 @@ const LINE_ITEMS_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    let { admin } = await authenticate.admin(request);
+    let { admin, session } = await authenticate.admin(request);
     admin = withGraphQLRetry(admin);
+    const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "history");
+    if (planRedirect) return planRedirect;
     const formData = await request.formData();
     const transferId = String(formData.get("transferId") || "").trim();
 

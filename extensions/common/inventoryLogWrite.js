@@ -226,6 +226,10 @@ export function interpretLogChunkResponse(httpStatus, data) {
   if (status >= 200 && status < 300 && body.ok !== false && !entryFailed) {
     return { success: true, retryable: false, errorCode: null };
   }
+  if (code === "plan_required" || status === 402) {
+    // 料金プランの契約が無い・プラン外。送り直しても答えは変わらない（何も書いていない）
+    return { success: false, retryable: false, errorCode: "plan_required" };
+  }
   if (code === "auth_failed" || status === 401 || status === 403) {
     return { success: false, retryable: true, errorCode: "auth_failed" };
   }

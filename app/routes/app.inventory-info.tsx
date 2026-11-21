@@ -17,6 +17,7 @@ import {
   fetchAndSaveSnapshotsForDate,
   saveSnapshotsForDate,
 } from "../utils/inventory-snapshot";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 // 型の再エクスポート（他ルートで参照している場合に備える）
 export type { DailyInventorySnapshot, InventorySnapshotsData };
@@ -543,6 +544,8 @@ export async function action({ request }: ActionFunctionArgs) {
   try {
     let { admin, session } = await authenticate.admin(request);
     admin = withGraphQLRetry(admin);
+    const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "inventoryInfo");
+    if (planRedirect) return planRedirect;
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();
 

@@ -1,32 +1,60 @@
 // probeShopStillInstalled を本物のセッション保存先と Admin API につなぐ。
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { sessionStorage, unauthenticated } from "../shopify.server";
 import {
   INSTALL_PROBE_QUERY,
   parseClientIdFromToml,
   probeShopStillInstalled,
-  resolveServerDistribution,
 } from "./shop-install-probe";
+import { resolveServerDistribution } from "./plan-distribution";
 
-let cachedPublicClientId: string | null | undefined;
+const clientIdCache = new Map<string, string | null>();
 
-/** 公開用アプリの client_id（shopify.app.public.toml）。読めないときは null（＝自社用と見る） */
-export function getPublicClientId(): string | null {
-  if (cachedPublicClientId !== undefined) return cachedPublicClientId;
+/**
+ * toml の client_id を読む。起動する場所（process.cwd()）が違っても読めるように、
+ * cwd と、このファイル（ビルド後は build/server/）から上へたどったところを順に探す。
+ */
+function readClientIdFromToml(fileName: string): string | null {
+  if (clientIdCache.has(fileName)) return clientIdCache.get(fileName) ?? null;
+  const dirs = [process.cwd()];
   try {
-    const toml = readFileSync(resolve(process.cwd(), "shopify.app.public.toml"), "utf8");
-    cachedPublicClientId = parseClientIdFromToml(toml);
-  } catch (err) {
-    console.warn("[compliance] could not read shopify.app.public.toml; treating server as in-house", err);
-    cachedPublicClientId = null;
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 5; i += 1) {
+      dirs.push(dir);
+      dir = dirname(dir);
+    }
+  } catch {
+    // import.meta.url が使えないときは cwd だけ
   }
-  return cachedPublicClientId;
+  let id: string | null = null;
+  for (const dir of dirs) {
+    try {
+      id = parseClientIdFromToml(readFileSync(resolve(dir, fileName), "utf8"));
+      if (id) break;
+    } catch {
+      // 次の場所を見る
+    }
+  }
+  if (!id) console.warn(`[distribution] could not read client_id from ${fileName}`);
+  clientIdCache.set(fileName, id);
+  return id;
 }
 
-/** この店について、サーバーが公開用か自社用か */
+/** 公開用アプリの client_id（shopify.app.public.toml）。読めないときは null */
+export function getPublicClientId(): string | null {
+  return readClientIdFromToml("shopify.app.public.toml");
+}
+
+/** 自社用アプリ（Ciara）の client_id（shopify.app.toml）。SHOPIFY_API_KEY がこれと同じなら、いつも自社用。 */
+export function getInhouseClientId(): string | null {
+  return readClientIdFromToml("shopify.app.toml");
+}
+
+/** この店について、サーバーが公開用か自社用か（分からなければ自社用＝消さない） */
 export function getServerDistribution(shop: string): "public" | "inhouse" {
-  return resolveServerDistribution(process.env, shop, getPublicClientId());
+  return resolveServerDistribution(process.env, shop, getPublicClientId(), getInhouseClientId());
 }
 
 export async function isShopStillInstalled(shop: string): Promise<boolean> {

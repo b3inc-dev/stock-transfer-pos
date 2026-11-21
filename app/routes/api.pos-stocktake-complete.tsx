@@ -19,6 +19,7 @@ import {
   type PendingCompleteBackup,
   type PendingCompleteGroup,
 } from "../utils/stocktake-pending-complete.server";
+import { planBlockedPosResponse } from "../utils/plan-gate.server";
 
 const API_VERSION = "2026-01";
 /** POS client Abort は 120s。サーバ自動リトライ合計がそれを超えないよう間隔を抑える */
@@ -175,6 +176,17 @@ export async function action({ request }: ActionFunctionArgs) {
     },
   };
   admin = withGraphQLRetry(admin);
+
+  // 料金プランの門番（公開用のみ。自社用は GraphQL を呼ばずに通る）。棚卸は Pro。
+  // 完了の通知は在庫の確定（apply-change）の後に来るので、契約を読めなかっただけなら通す。
+  const planBlocked = await planBlockedPosResponse({
+    shop,
+    feature: "stocktake",
+    getAdmin: () => admin,
+    headers: CORS_HEADERS,
+    failOpenOnCheckError: true,
+  });
+  if (planBlocked) return planBlocked;
 
   let ownerId: string;
   try {

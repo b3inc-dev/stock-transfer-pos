@@ -28,6 +28,7 @@ export type {
   OrderCsvColumn,
   SettingsV1,
 } from "../types";
+import { adminPlanRedirect } from "../utils/plan-gate.server";
 
 const NS = "stock_transfer_pos";
 const KEY = "settings_v1";
@@ -750,8 +751,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   try {
-    let { admin } = await authenticate.admin(request);
+    let { admin, session } = await authenticate.admin(request);
     admin = withGraphQLRetry(admin);
+    const planRedirect = await adminPlanRedirect(request, admin, session?.shop, "settings");
+    if (planRedirect) return planRedirect;
     const form = await request.formData();
 
     const raw = String(form.get("settings") ?? "");
