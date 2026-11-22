@@ -9,9 +9,11 @@ import {
   describeUsageReportForMerchant,
   getEventHandle,
   reportExtraLocationUsage,
+  resolveAppEventsCredentials,
   PERIOD_END_MARGIN_MS,
   RETRY_AFTER_MS,
 } from "../app/utils/app-events-usage.server.ts";
+import { findUnderscorePlanHandles, getMaxLocationsFromSubscriptionName } from "../app/utils/billing.ts";
 
 const SHOP = "demo.myshopify.com";
 const GID = "gid://shopify/Shop/12345678";
@@ -264,5 +266,58 @@ describe("つなぎ方（ソースの確認）", () => {
     const src = read("app/utils/shop-plan.server.ts");
     assert.match(src, /distribution === "public" && !forceInhouse && \(plan === "lite" \|\| plan === "pro"\) && !locationPlanMismatch/);
     assert.match(src, /void import\("\.\.\/db\.server"\)/);
+  });
+});
+
+describe("App Events API の鍵（公開用アプリ自身の client ID / secret）", () => {
+  test("APP_EVENTS_CLIENT_* があればそれを使う", () => {
+    assert.deepEqual(
+      resolveAppEventsCredentials({ APP_EVENTS_CLIENT_ID: "a", APP_EVENTS_CLIENT_SECRET: "b", SHOPIFY_API_KEY: "k", SHOPIFY_API_SECRET: "s" }),
+      { clientId: "a", clientSecret: "b", source: "app_events_env" }
+    );
+  });
+  test("無ければ SHOPIFY_API_KEY / SHOPIFY_API_SECRET を使う", () => {
+    assert.deepEqual(resolveAppEventsCredentials({ SHOPIFY_API_KEY: "k", SHOPIFY_API_SECRET: "s" }), {
+      clientId: "k",
+      clientSecret: "s",
+      source: "shopify_api_key",
+    });
+  });
+  test("片方だけはエラー（黙って SHOPIFY_API_KEY と混ぜない）", () => {
+    assert.ok("error" in resolveAppEventsCredentials({ APP_EVENTS_CLIENT_ID: "a", SHOPIFY_API_KEY: "k", SHOPIFY_API_SECRET: "s" }));
+  });
+  test("自社用（APP_DISTRIBUTION=inhouse）は鍵を返さない", () => {
+    const r = resolveAppEventsCredentials({ APP_DISTRIBUTION: "inhouse", SHOPIFY_API_KEY: "k", SHOPIFY_API_SECRET: "s", APP_EVENTS_CLIENT_ID: "a", APP_EVENTS_CLIENT_SECRET: "b" });
+    assert.match(r.error, /inhouse/);
+  });
+  test("SHOPIFY_API_KEY の鍵でトークンを取って送る", async () => {
+    __resetAppEventsTokenForTest();
+    const store = fakeStore();
+    const fetchImpl = fakeFetch([202]);
+    const env = { APP_EVENTS_USAGE_ENABLED: "1", SHOPIFY_API_KEY: "pub-key", SHOPIFY_API_SECRET: "pub-sec" };
+    const r = await reportExtraLocationUsage(input(), { store, env, fetchImpl });
+    assert.equal(r.outcome, "sent");
+  });
+});
+
+describe("プランの handle はハイフン（lite-3 / pro-10）", () => {
+  test("ハイフンは読める", () => {
+    assert.equal(getMaxLocationsFromSubscriptionName("lite-3"), 3);
+    assert.equal(getMaxLocationsFromSubscriptionName("pro-10"), 10);
+  });
+  test("アンダースコアは受け付けずログを出す", () => {
+    const orig = console.error;
+    const logs = [];
+    console.error = (...a) => logs.push(a.join(" "));
+    try {
+      assert.equal(getMaxLocationsFromSubscriptionName("pro_10"), null);
+      assert.equal(getMaxLocationsFromSubscriptionName("lite_3"), null);
+    } finally {
+      console.error = orig;
+    }
+    assert.equal(logs.length, 2);
+    assert.match(logs[0], /pro_10.*pro-10/);
+    assert.deepEqual(findUnderscorePlanHandles("Lite_3 pro-10"), ["Lite_3"]);
+    assert.deepEqual(findUnderscorePlanHandles("Pro - 10ロケーション"), []);
   });
 });
