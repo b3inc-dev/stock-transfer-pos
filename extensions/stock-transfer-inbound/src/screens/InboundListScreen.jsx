@@ -22,6 +22,7 @@ import {
   receiveShipmentWithFallbackV2,
   buildShipmentReceiveOperation,
   INBOUND_RECEIVE_KIND,
+  isShipmentReceivePartialError,
   appendInventoryTransferNote_,
   buildInboundNoteLine_,
   transferNoteAlreadyRestoredOrigin,
@@ -1504,11 +1505,16 @@ export function InboundListScreen({
         // 確定のあとは伝票を読み直すまでロックを外さないので、読み直さずに同じ中身を送り直すときだけ同じキーになる
         const receiveOp = buildShipmentReceiveOperation({ kind: INBOUND_RECEIVE_KIND, shipmentId: shipment.id, readLines: rows });
         let receivedItemsForLog = [];
+        // 250 件を超えて 2 つ目以降のチャンクで断られた（前のチャンクはもう入っている）。代わりの道へ進まず、
+        // 入った分だけ履歴に残して投げ直す → 伝票を読み直させる（docs/STATE_MACHINE.md §7）
+        let partialReceiveError = null;
         if (plannedItems.length > 0) {
+          try {
           try {
             await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: plannedItems, op: receiveOp, stage: "receive_v2" });
             receivedItemsForLog = plannedItems;
           } catch (e) {
+            if (isShipmentReceivePartialError(e)) throw e;
             const msg = String(e?.message || e || "");
             const isNotStockedAtDest = /配送先|not stocked|inventory.*location|アイテムの在庫がありません|no inventory at/i.test(msg);
             if (isNotStockedAtDest && allInventoryItemIds.length > 0) {
@@ -1582,8 +1588,14 @@ export function InboundListScreen({
             }
             }
           }
+          } catch (e) {
+            if (!isShipmentReceivePartialError(e)) throw e;
+            partialReceiveError = e;
+            receivedItemsForLog = e.receivedItems || [];
+          }
         }
         if (receivedItemsForLog.length > 0) {
+          try {
           const transferIdStr = String(transferId || "").trim();
           const transferIdMatch = transferIdStr.match(/(\d+)$/);
           const transferIdForUri = transferIdMatch ? transferIdMatch[1] : transferIdStr;
@@ -1607,7 +1619,14 @@ export function InboundListScreen({
               }),
             });
           }
+          } catch (logErr) {
+            // 一部だけ入ったときは、履歴の失敗より「一部だけ入った」を先に知らせる（読み直しは必ずさせる）
+            if (!partialReceiveError) throw logErr;
+            console.warn("[inbound] 一部入庫の履歴の記録に失敗", logErr);
+          }
         }
+        // 一部だけ入った: 拒否・メモ・確定の続きには進まない。投げ直して伝票を読み直させる
+        if (partialReceiveError) throw partialReceiveError;
 
         if (finalize && rejectedItems.length > 0) {
           await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: rejectedItems, op: receiveOp, stage: "reject" });
@@ -1722,10 +1741,14 @@ export function InboundListScreen({
         byShipment.forEach((sRows, sid) => {
           receiveOpByShip.set(sid, buildShipmentReceiveOperation({ kind: INBOUND_RECEIVE_KIND, shipmentId: sid, readLines: sRows }));
         });
+        // 250 件を超えて 2 つ目以降のチャンクで断られた（前のチャンクはもう入っている）。代わりの道へ進まず、
+        // 入った分だけ履歴に残して投げ直す → 伝票を読み直させる（docs/STATE_MACHINE.md §7）
+        let partialReceiveErrorMulti = null;
         for (const [sid, sRows] of byShipment) {
           const plannedItems = plannedByShip.get(sid) || [];
           if (plannedItems.length === 0) continue;
           const receiveOp = receiveOpByShip.get(sid);
+          try {
           try {
             await receiveShipmentWithFallbackV2({ shipmentId: sid, items: plannedItems, op: receiveOp, stage: "receive_v2" });
             for (const p of plannedItems) {
@@ -1733,6 +1756,7 @@ export function InboundListScreen({
               if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
             }
           } catch (e) {
+            if (isShipmentReceivePartialError(e)) throw e;
             const msg = String(e?.message || e || "");
             const isNotStockedAtDest = /配送先|not stocked|inventory.*location|アイテムの在庫がありません|no inventory at/i.test(msg);
             if (isNotStockedAtDest && allInventoryItemIdsMulti.length > 0) {
@@ -1795,8 +1819,19 @@ export function InboundListScreen({
             }
             }
           }
+          } catch (e) {
+            if (!isShipmentReceivePartialError(e)) throw e;
+            partialReceiveErrorMulti = e;
+            for (const p of e.receivedItems || []) {
+              const row = rowByLineId.get(String(p.shipmentLineItemId || "").trim());
+              if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
+            }
+            // 残りの配送にも進まない（読み直してから、もう一度確定してもらう）
+            break;
+          }
         }
         if (multiReceivedDeltas.length > 0 && locationGid) {
+          try {
           const merged = new Map();
           multiReceivedDeltas.forEach((d) => {
             if (!d.inventoryItemId || d.delta <= 0) return;
@@ -1823,7 +1858,12 @@ export function InboundListScreen({
               }),
             });
           }
+          } catch (logErr) {
+            if (!partialReceiveErrorMulti) throw logErr;
+            console.warn("[inbound] 一部入庫の履歴の記録に失敗", logErr);
+          }
         }
+        if (partialReceiveErrorMulti) throw partialReceiveErrorMulti;
         for (const [sid, rejItems] of rejectedByShip) {
           if (!finalize || rejItems.length === 0) continue;
           await receiveShipmentWithFallbackV2({ shipmentId: sid, items: rejItems, op: receiveOpByShip.get(sid), stage: "reject" });

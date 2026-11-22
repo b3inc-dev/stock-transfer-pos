@@ -234,6 +234,98 @@ describe("受け取り（receiveShipmentIdempotent）", () => {
   });
 });
 
+describe("250 件を超える受け取りの途中失敗（ShipmentReceivePartialError）", () => {
+  const many = (n, prefix = "gid://shopify/InventoryShipmentLineItem/") =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`${prefix}${String(i).padStart(4, "0")}`, { quantity: 5, accepted: 0, rejected: 0 }]));
+  const itemsOf = (lines, q = 1) => Object.keys(lines).map((id) => ({ shipmentLineItemId: id, quantity: q }));
+  // 入庫の画面（InboundListScreen.jsx）が代わりの道へ進むかを決める文
+  const NOT_STOCKED = /配送先|not stocked|inventory.*location|アイテムの在庫がありません|no inventory at/i;
+  const TOO_MANY = /quantity|unreceived|exceed|max|greater|less/i;
+
+  for (const [label, reply] of [
+    ["在庫が無い", userErr("INVALID", "Item is not stocked at the destination location")],
+    ["数が多すぎる", userErr("INVALID", "quantity exceeds the unreceived quantity")],
+  ]) {
+    it(`1 つ目が通り 2 つ目が「${label}」で断られる → 別のエラー・1 つ目は二度と送らない・入った分を持つ`, async () => {
+      const lines = many(300);
+      const s = fakeShopify({ lines, reply: (n) => (n === 1 ? reply : null) });
+      const o = op(s.readLines());
+      const err = await sr
+        .receiveShipmentIdempotent({ adminGraphql: s.adminGraphql, shipmentId: SHIP, items: itemsOf(lines), op: o })
+        .then(() => null, (e) => e);
+      assert.ok(sr.isShipmentReceivePartialError(err), String(err));
+      assert.ok(err instanceof sr.ShipmentReceivePartialError);
+      assert.equal(err.completedChunks, 1);
+      assert.equal(err.totalChunks, 2);
+      assert.equal(err.receivedItems.length, 250);
+      assert.deepEqual(err.receivedItems.map((x) => x.shipmentLineItemId), s.calls[0].variables.lineItems.map((x) => x.shipmentLineItemId));
+      assert.match(err.causeMessage, label === "在庫が無い" ? /not stocked/ : /exceeds/);
+      // 画面の見分けの文に当たらない（代わりの道へ進まない）
+      assert.doesNotMatch(err.message, NOT_STOCKED);
+      assert.doesNotMatch(err.message, TOO_MANY);
+      // 送ったのは 1 つ目のチャンク 1 回と、断られた 2 つ目の 1 回だけ
+      assert.equal(s.calls.length, 2);
+      const sentTwice = Object.values(lines).filter((l) => l.accepted > 1);
+      assert.equal(sentTwice.length, 0);
+      assert.equal(Object.values(lines).filter((l) => l.accepted === 1).length, 250);
+    });
+  }
+
+  it("2 つ目が例外（応答なし）でも別のエラー。@idempotent の返事は idempotencyIssue に残る", async () => {
+    const lines = many(260);
+    const s1 = fakeShopify({ lines, reply: (n) => (n === 1 ? new Error("timeout 20000ms") : null) });
+    const e1 = await sr.receiveShipmentIdempotent({ adminGraphql: s1.adminGraphql, shipmentId: SHIP, items: itemsOf(lines), op: op(s1.readLines()) }).then(() => null, (e) => e);
+    assert.ok(sr.isShipmentReceivePartialError(e1));
+    assert.match(e1.causeMessage, /timeout/);
+
+    const lines2 = many(260);
+    const s2 = fakeShopify({ lines: lines2, reply: (n) => (n === 1 ? userErr("IDEMPOTENCY_KEY_PARAMETER_MISMATCH") : null) });
+    const e2 = await sr.receiveShipmentIdempotent({ adminGraphql: s2.adminGraphql, shipmentId: SHIP, items: itemsOf(lines2), op: op(s2.readLines()) }).then(() => null, (e) => e);
+    assert.ok(sr.isShipmentReceivePartialError(e2));
+    assert.equal(e2.idempotencyIssue, "mismatch");
+  });
+
+  it("1 つ目のチャンクの失敗は今までどおりそのまま投げる（まだ何も入っていない）", async () => {
+    const lines = many(300);
+    const s = fakeShopify({ lines, reply: (n) => (n === 0 ? userErr("INVALID", "Item is not stocked at the destination location") : null) });
+    const err = await sr.receiveShipmentIdempotent({ adminGraphql: s.adminGraphql, shipmentId: SHIP, items: itemsOf(lines), op: op(s.readLines()) }).then(() => null, (e) => e);
+    assert.ok(err && !sr.isShipmentReceivePartialError(err));
+    assert.match(err.message, NOT_STOCKED);
+    assert.equal(s.calls.length, 1);
+  });
+
+  it("読み直して押し直すと、残りの分だけが新しいキーで入る（1 つ目は二重にならない）", async () => {
+    const lines = many(300);
+    let failSecond = true;
+    const s = fakeShopify({ lines, reply: (n) => (failSecond && n === 1 ? userErr("INVALID", "Item is not stocked at the destination location") : null) });
+    const want = 1;
+    const run = () => {
+      const read = s.readLines();
+      const items = read.map((l) => ({ shipmentLineItemId: l.id, quantity: Math.max(0, want - l.acceptedQuantity) }));
+      return sr.receiveShipmentIdempotent({ adminGraphql: s.adminGraphql, shipmentId: SHIP, items, op: op(read) });
+    };
+    await assert.rejects(run(), (e) => sr.isShipmentReceivePartialError(e));
+    failSecond = false;
+    await run();
+    assert.ok(Object.values(lines).every((l) => l.accepted === 1));
+  });
+
+  it("分ける前に明細を並べる: 読んだ順が違っても、チャンクの中身とキーが同じ", async () => {
+    const lines = many(300);
+    const items = itemsOf(lines);
+    const shuffled = [...items].reverse();
+    const a = fakeShopify({ lines: many(300) });
+    const b = fakeShopify({ lines: many(300) });
+    const o = op(a.readLines());
+    await sr.receiveShipmentIdempotent({ adminGraphql: a.adminGraphql, shipmentId: SHIP, items, op: o });
+    await sr.receiveShipmentIdempotent({ adminGraphql: b.adminGraphql, shipmentId: SHIP, items: shuffled, op: o });
+    assert.deepEqual(a.calls.map((c) => c.key), b.calls.map((c) => c.key));
+    assert.deepEqual(a.calls.map((c) => c.variables.lineItems), b.calls.map((c) => c.variables.lineItems));
+    const ids = a.calls.flatMap((c) => c.variables.lineItems.map((x) => x.shipmentLineItemId));
+    assert.deepEqual(ids, [...ids].sort());
+  });
+});
+
 describe("有効化のキー（buildActivateKeyForPos）", () => {
   it("同じ呼び出し・同じ商品・同じ回 → 同じキー。断られた回・置き場所・商品・呼び出しが違えば違うキー", () => {
     const base = { shop: SHOP, operationId: "op-1", locationId: "gid://shopify/Location/2", inventoryItemId: "gid://shopify/InventoryItem/5" };
@@ -262,6 +354,21 @@ describe("画面の配線（文の照らし合わせ）", () => {
     assert.equal(calls.filter((c) => /stage: "receive_capped"/.test(c)).length, 2);
     assert.equal(calls.filter((c) => /stage: "reject"/.test(c)).length, 2);
     assert.equal((src.match(/buildShipmentReceiveOperation\(\{ kind: INBOUND_RECEIVE_KIND/g) ?? []).length, 2);
+  });
+  it("入庫: 一部だけ入ったエラー（ShipmentReceivePartialError）は代わりの道より先に見て、入った分を履歴に残してから投げ直す（1 店・多配送）", () => {
+    const src = read("extensions/stock-transfer-inbound/src/screens/InboundListScreen.jsx");
+    // 代わりの道の見分け（在庫が無い）より前に、一部だけのエラーを投げ直す
+    const guards = [...src.matchAll(/if \(isShipmentReceivePartialError\(e\)\) throw e;\s*const msg = String\(e\?\.message \|\| e \|\| ""\);\s*const isNotStockedAtDest/g)];
+    assert.equal(guards.length, 2, "1 店・多配送の 2 か所");
+    assert.match(src, /partialReceiveError = e;\s*receivedItemsForLog = e\.receivedItems \|\| \[\];/);
+    assert.match(src, /if \(partialReceiveError\) throw partialReceiveError;\s*\n\s*if \(finalize && rejectedItems\.length > 0\)/);
+    assert.match(src, /partialReceiveErrorMulti = e;/);
+    assert.match(src, /if \(partialReceiveErrorMulti\) throw partialReceiveErrorMulti;\s*for \(const \[sid, rejItems\] of rejectedByShip\)/);
+    // 投げたものは runReceiveWithReload が「読み直しが要る失敗」として伝票を読み直す
+    const gate = read("extensions/stock-transfer-inbound/src/receiveReloadGate.js");
+    assert.match(gate, /catch \(error\) \{\s*opts\.onSubmitError\?\.\(error\);\s*result = \{ ok: false, reload: true \};/);
+    const doc = read("docs/STATE_MACHINE.md");
+    assert.match(doc, /入庫の受け取りの 250 分割の途中失敗/);
   });
   it("出庫の全部拒否は outbound_reject_all・段 reject。入庫と出庫で受け取りの部品は 1 つ（重ねて書かない）", () => {
     const tile = read("extensions/stock-transfer-tile/src/ModalOutbound.jsx");

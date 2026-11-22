@@ -21,6 +21,15 @@
  *   ShipmentReceiveIdempotencyError（issue: "concurrent"）
  * - IDEMPOTENCY_KEY_PARAMETER_MISMATCH: 送り直さない。ShipmentReceiveIdempotencyError（issue: "mismatch"）
  *   どちらも「結果が分からない」。呼び出し側の「在庫が無い」「数が多すぎる」の見分けの文に当たらない文にしてある
+ *
+ * 250 件を超えるとき（チャンクが 2 つ以上）:
+ * - 分ける前に明細を shipmentLineItemId の順に並べる。読んだ順が変わっても、チャンクの中身とキーが同じになる。
+ * - 2 つ目以降のチャンクで失敗したら（断り・@idempotent の返事・例外のどれでも）、ShipmentReceivePartialError を投げる。
+ *   前のチャンクはもう Shopify に入っているので、呼び出し側は「在庫が無い」「数が多すぎる」の代わりの道へ進んではいけない
+ *   （段か回が違う新しいキーで 1 つ目のチャンクをもう一度送り、一部入庫だと二重に受け取られる）。
+ *   文はその見分けの文に当たらない日本語だけにしてあり、元の失敗は cause に入れる。
+ *   呼び出し側は、入った分（receivedItems）を履歴に残し、投げ直して伝票を読み直させる（receiveReloadGate.js）。
+ *   docs/STATE_MACHINE.md §7「入庫の受け取りの 250 分割の途中失敗」。
  */
 import { buildIdempotencyKey, formatIdempotencyChunk } from "./idempotencyKey.js";
 
@@ -121,6 +130,34 @@ export class ShipmentReceiveIdempotencyError extends Error {
   }
 }
 
+/**
+ * 250 件ずつのうち、2 つ目以降のチャンクで失敗した（前のチャンクはもう入っている）。
+ * message は入庫の画面の見分けの文（「在庫が無い」「数が多すぎる」）に当たらない日本語だけにする。元の失敗は cause。
+ */
+export class ShipmentReceivePartialError extends Error {
+  /**
+   * @param {{ completedChunks: number, totalChunks: number, receivedItems: Array<{shipmentLineItemId: string, quantity: number, reason?: string}>, cause?: unknown }} p
+   */
+  constructor({ completedChunks, totalChunks, receivedItems, cause }) {
+    super(
+      `入庫の一部だけが入りました（${totalChunks} 回に分けて送るうち ${completedChunks} 回目まで）。` +
+        "残りは入っていません。二重にならないよう伝票を読み直してから、受け取った数を確かめて、もう一度確定してください。"
+    );
+    this.name = "ShipmentReceivePartialError";
+    this.completedChunks = completedChunks;
+    this.totalChunks = totalChunks;
+    this.receivedItems = Array.isArray(receivedItems) ? receivedItems : [];
+    this.cause = cause;
+    this.causeMessage = String(cause?.message ?? cause ?? "");
+    if (cause instanceof ShipmentReceiveIdempotencyError) this.idempotencyIssue = cause.idempotencyIssue;
+  }
+}
+
+/** 拡張ごとに別に束ねられても見分けられるよう、名前でも見る */
+export function isShipmentReceivePartialError(e) {
+  return e instanceof ShipmentReceivePartialError || e?.name === "ShipmentReceivePartialError";
+}
+
 /** userErrors（と、投げられた文）に @idempotent の返事があるか。中身の違いを先に見る */
 export function classifyReceiveIdempotencyIssue(userErrors, thrownMessage) {
   const texts = [
@@ -205,37 +242,55 @@ export async function receiveShipmentIdempotent({
       // 新しめのスキーマでは reason が必須になる場合があるため保険（ACCEPTED / REJECTED）
       reason: String(x.reason || "ACCEPTED").trim().toUpperCase(),
     }))
-    .filter((x) => x.shipmentLineItemId && x.quantity > 0);
+    .filter((x) => x.shipmentLineItemId && x.quantity > 0)
+    // チャンクに分ける前に並べる（読んだ順が変わっても、チャンクの中身とキーが同じになる）
+    .sort((a, b) => compareText(a.shipmentLineItemId, b.shipmentLineItemId) || compareText(a.reason, b.reason) || a.quantity - b.quantity);
   if (clean.length === 0) return null;
 
   const operation = op ?? { shop: currentShopDomain(), kind: INBOUND_RECEIVE_KIND, operationId: newAdhocOperationId() };
   const total = Math.ceil(clean.length / SHIPMENT_RECEIVE_LINE_ITEMS_MAX);
   const startedAt = Date.now();
   let last = null;
+  /** もう入ったチャンクの明細（2 つ目以降で失敗したとき、呼び出し側が履歴に残す） */
+  const received = [];
   for (let ci = 0; ci < total; ci++) {
     const slice = clean.slice(ci * SHIPMENT_RECEIVE_LINE_ITEMS_MAX, (ci + 1) * SHIPMENT_RECEIVE_LINE_ITEMS_MAX);
     const chunk = formatIdempotencyChunk(ci, total);
     const common = { adminGraphql, assertNoUserErrors, shipmentId, delaysMs: concurrentDelaysMs, budgetMs, startedAt };
     try {
-      last = await sendOne({
-        ...common,
-        lineItems: slice,
-        key: buildShipmentReceiveKey(operation, { stage, chunk, items: slice, round }),
-      });
-    } catch (e) {
-      // reason が未対応の API の版なら、reason 無しで送り直す（中身が違うので段を分ける）
-      const msg = String(e?.message ?? e);
-      if (!(e instanceof ShipmentReceiveIdempotencyError) && /reason/i.test(msg) && /(not defined by type|Unknown field|invalid)/i.test(msg)) {
-        const noReason = slice.map(({ shipmentLineItemId, quantity }) => ({ shipmentLineItemId, quantity }));
+      try {
         last = await sendOne({
           ...common,
-          lineItems: noReason,
-          key: buildShipmentReceiveKey(operation, { stage: noReasonStage(stage), chunk, items: noReason, round }),
+          lineItems: slice,
+          key: buildShipmentReceiveKey(operation, { stage, chunk, items: slice, round }),
         });
-        continue;
+      } catch (e) {
+        // reason が未対応の API の版なら、reason 無しで送り直す（中身が違うので段を分ける）
+        const msg = String(e?.message ?? e);
+        if (!(e instanceof ShipmentReceiveIdempotencyError) && /reason/i.test(msg) && /(not defined by type|Unknown field|invalid)/i.test(msg)) {
+          const noReason = slice.map(({ shipmentLineItemId, quantity }) => ({ shipmentLineItemId, quantity }));
+          last = await sendOne({
+            ...common,
+            lineItems: noReason,
+            key: buildShipmentReceiveKey(operation, { stage: noReasonStage(stage), chunk, items: noReason, round }),
+          });
+        } else {
+          throw e;
+        }
       }
-      throw e;
+    } catch (e) {
+      // 1 つ目のチャンクの失敗は今までどおり（まだ何も入っていないので、呼び出し側の代わりの道へ進んでよい）
+      if (ci === 0) throw e;
+      // 2 つ目以降: 前のチャンクはもう入っている。代わりの道へ進ませない別のエラーにする
+      throw new ShipmentReceivePartialError({ completedChunks: ci, totalChunks: total, receivedItems: received.slice(), cause: e });
     }
+    for (const x of slice) received.push({ ...x });
   }
   return last;
+}
+
+function compareText(a, b) {
+  const x = String(a ?? "");
+  const y = String(b ?? "");
+  return x < y ? -1 : x > y ? 1 : 0;
 }

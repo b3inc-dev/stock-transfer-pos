@@ -342,7 +342,7 @@ export async function receiveShipmentWithFallbackV2({ shipmentId, items, op, sta
   return receiveShipmentIdempotent({ adminGraphql, assertNoUserErrors, shipmentId, items, op, stage, round });
 }
 
-export { buildShipmentReceiveOperation, INBOUND_RECEIVE_KIND } from "../../common/shipmentReceive.js";
+export { buildShipmentReceiveOperation, INBOUND_RECEIVE_KIND, isShipmentReceivePartialError } from "../../common/shipmentReceive.js";
 
 export {
   buildTransferAdjustAppEventId,
