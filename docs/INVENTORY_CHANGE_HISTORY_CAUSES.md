@@ -65,7 +65,8 @@
 - **orders/updated** と **refunds/create** は、Shopify の「保護された顧客データ」を含む Webhook に該当します。
 - アプリが **保護された顧客データへのアクセス承認** を受けていない場合、`shopify app deploy` 時に **「This app is not approved to subscribe to webhook topics containing protected customer data」** でバージョン作成に失敗します。
 - そのため **shopify.app.public.toml** では両方の subscription をコメントアウトしており、デプロイは通るが売上・返品は「管理」のまま記録されます。
-- **承認後**に売上・返品を「売上」「返品」で記録したい場合は、[Protected customer data](https://shopify.dev/docs/apps/launch/protected-customer-data) の手順で承認を取得し、TOML の該当コメントを外してから再度 `shopify app deploy` してください。
+- **2026-11-22 T の決定（DECISIONS D18）**: 公開用では保護された顧客データを申請せず、`read_orders` も公開用の toml から外した。**公開版の在庫の履歴では、売上・返品は分けない**（「管理画面・その他」に入る）。これは不具合ではなく決まり。自社用（Ciara）は今まで通り分ける。
+- もし公開版でも分けたくなったら: [Protected customer data](https://shopify.dev/docs/apps/launch/protected-customer-data) の Level 1 を申請して承認 → 公開用 toml の scopes に `read_orders` を足す → `app/utils/default-scopes.ts` の `PUBLIC_DEFAULT_SCOPES` も直す → TOML の該当コメントを外す → `scripts/verify-app-mode.js` の見張り（`checkPublicScopes`）を直す → `npm run deploy:public`。T の承認が要る。
 
 **確認するとよいこと**
 

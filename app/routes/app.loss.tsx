@@ -1113,7 +1113,7 @@ export default function LossPage() {
                   合計: {modalItems.length}件
                 </div>
                 <div style={{ maxHeight: "400px", overflowY: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
+                  <table className="History-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
                     <thead>
                       <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
                         <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
@@ -1128,25 +1128,25 @@ export default function LossPage() {
                     <tbody>
                       {modalItems.map((item, idx) => (
                         <tr key={item.id || idx} style={{ borderBottom: "1px solid #eee" }}>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                          <td data-label="商品名" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                             {item.title || "（商品名なし）"}
                           </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                          <td data-label="SKU" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                             {item.sku || "（SKUなし）"}
                           </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                          <td data-label="JAN" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                             {item.barcode || "（JANなし）"}
                           </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                          <td data-label="オプション1" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                             {item.option1 || "-"}
                           </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                          <td data-label="オプション2" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                             {item.option2 || "-"}
                           </td>
-                          <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                          <td data-label="オプション3" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                             {item.option3 || "-"}
                           </td>
-                          <td style={{ padding: "8px", textAlign: "right" }}>{item.quantity || "-"}</td>
+                          <td data-label="数量" style={{ padding: "8px", textAlign: "right" }}>{item.quantity || "-"}</td>
                         </tr>
                       ))}
                     </tbody>

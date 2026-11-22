@@ -167,6 +167,20 @@ Shopify Inventory API 2026-04 で concurrency 制御として `changeFromQuantit
 **本 workstream では実装しない**（Phase E2）。適用対象は apply-change / loss / order / stocktake setQuantities 経路。  
 API バージョンバンプとセットで別 PR。
 
+**2026-11-22 追記（棚卸の確定だけ先に入れる。#19 の引き継ぎ）**: 棚卸の確定（apply-change の `activity: "inventory_count"`）は、在庫を有効にしたあと、各チャンクを書く直前に今の数を読み（50 件ずつ `nodes` でまとめて）、その数を `changeFromQuantity` に入れて書く（`setInventoryQuantitiesServer` の `compareWithLive`）。
+
+| 場合 | どうするか |
+|------|------------|
+| 今の数がもう数えた数 | 書かない（入った扱い） |
+| 読んでから書くまでに売れた・入庫した | Shopify が `CHANGE_FROM_QUANTITY_STALE` で 1 件も書かずに断る → 書こうとした商品だけ 1 回読み直し、2 回の読みで数が変わった商品は**上書きしない**。残りを書き直す。動いた商品が 1 件でもあれば `partial_failed`（成否不明ではない。動いた商品の行は `failed`）。同じ ID で押し直しても在庫は動かない。その商品はもう一度数えるか、管理者が Shopify で直す |
+| 読み直しのあとも断られた | そのチャンクは書かない（はっきりした失敗）。1 チャンク目なら在庫は動いていない（`failed`）。2 チャンク目以降は D3c と同じく先のチャンクを戻す |
+| 今の数を読めない | 0 にしない。1 チャンク目なら 1 件も書かずに 503 `current_quantity_unreadable`（同じ ID で送り直してよい）。2 チャンク目以降は先のチャンクを戻す |
+| 250 件超で戻すとき | このアプリが書いた商品だけを戻す（書かなかった・残した商品は戻さない） |
+
+- ほかの activity（ロス・仕入・調整・入庫補正）と管理画面の棚卸（`app.inventory-count.tsx` の `adjustInventoryQuantitiesServer`）・POS の `adjustInventoryToActual` は、これまでどおり `changeFromQuantity: null`（別の PR で判断）。
+- **選ばなかった案**: POS が送る `quantityBefore`（一覧を開いたときの在庫数）を `changeFromQuantity` にする案。数えている途中の売上まで守れるが、一覧を開いてから数え終わるまでの売上（数えた数にもう入っている）でも断られ、在庫を読めなかった行は 0 が入っているので、忙しい店では確定がほとんど通らなくなる。
+- **残る危険**: 一覧で在庫を読んでから、確定で今の数を読むまでの売上（数えたあと・確定の前）は、これまでどおり数えた数で上書きされる（棚卸の決まりとして、数え終わったらすぐ確定する）。
+
 ## D10. 棚卸確定順と webhook（2026-10-08）
 
 - 差異あり確定: **apply-change → metafield**（履歴先行で webhook が early-returnしやすくする）
@@ -232,6 +246,18 @@ API バージョンバンプとセットで別 PR。
   - 呼ぶのは `getShopPlan`（管理画面と POS の API）。待たない。同じ店・同じ期間の DB 確認は 1 つのサーバーで 10 分に 1 回まで。自社用（Ciara）は来ない。開発ストアはテスト課金なので送ってよい。
   - 3 か所プランでロケーションが多い店（`locationPlanMismatch`）には送らない（機能が止まっている。プラン変更の案内のまま）。
 - **残り**: 期間の途中で増えた分は取らない。アプリの uninstall のあと 24 時間で期間が閉じる（送り損ねた `failed` はそこで失う）。shop/redact で `AppUsageReport` を消すかは未決（個人情報は入っていない）。
+
+## D18. 公開用は read_orders を持たない（2026-11-22 T の決定・#79）
+
+- **事実（main e8a4ddf で調べた。#79 のコメント）**: `read_orders` を使うのは注文の Webhook `orders/updated` と返品の Webhook `refunds/create` だけ（在庫の履歴で「売上」「返品」を分けるため）。公開用の toml では、どちらも保護された顧客データの承認が無いためコメントアウトしていた。ほかに Shopify の注文を読むところは無い（「発注」「仕入」はアプリの DB の書類。POS 拡張にも注文の query は無い）。
+- **判断**: 公開用（`shopify.app.public.toml`）の scopes から `read_orders` を外す。保護された顧客データ（Level 1）は申請しない。自社用（Ciara・`shopify.app.toml`）は scopes も Webhook も変えない。
+- **影響**: **公開版の在庫の履歴は、売上・返品に分けない**（売上で減った分・返品で増えた分は `inventory_levels/update` だけで記録され、「管理画面・その他」に入る）。公開版はまだ店がいないので、困る店はいない。
+- **合わせたところ**:
+  - SCOPES の環境変数が無いときの既定（`app/utils/default-scopes.ts`）を公開用・自社用で分けた。どちらのサーバーかは料金プランと同じ `detectServerDistribution`（分からないときは自社用＝今まで通り）。toml の client_id を読むところは `app/utils/app-toml.server.ts` へ移した（`shopify.server.ts` から使うため。`shop-install-probe.server.ts` は出し直すだけ）。
+  - `npm run deploy:public` の見張り（`scripts/verify-app-mode.js` の `checkPublicScopes`）: 公開用の toml に `read_orders`・`write_orders`・`read_all_orders` か、コメントでない `orders/*`・`refunds/*` の Webhook があると止める。
+  - 試験: `tests/public-scopes.test.mjs`（toml と既定のスコープが同じ・見張りが止める）。
+- **戻すとき**: Level 1 を申請して承認 → 公開用 toml に `read_orders` → `PUBLIC_DEFAULT_SCOPES` → Webhook のコメントを外す → 見張りを直す。T の承認が要る（`docs/INVENTORY_CHANGE_HISTORY_CAUSES.md`）。
+- **残り（推測）**: Render の公開用に `SCOPES` の環境変数を `read_orders` 入りで入れていると、toml と食い違う。入っているかは T が確かめる（`docs/listing/partner-dashboard-steps.md`）。
 
 ---
 

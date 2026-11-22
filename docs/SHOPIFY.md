@@ -10,7 +10,7 @@ API version・エンティティ関係・エラー分類。設定の正: `shopif
 | バージョン | **2026-01**（webhooks `api_version`, サーバー GraphQL URL） |
 | POS | `shopify:admin/api/graphql.json`（埋め込み Direct API） |
 | REST | Webhook ペイロード形状・OAuth トークン更新程度。業務 mutation は GraphQL |
-| スコープ（抜粋） | `read/write_inventory`, `read/write_inventory_transfers`, `write_inventory_shipments*`, `read_locations`, `read_products`, `read_orders` |
+| スコープ（抜粋） | `read/write_inventory`, `read/write_inventory_transfers`, `write_inventory_shipments*`, `read_locations`, `read_products`。`read_orders` は**自社用（`shopify.app.toml`）だけ**。公開用（`shopify.app.public.toml`）には無い（DECISIONS D18） |
 
 ## 2. エンティティ関係
 

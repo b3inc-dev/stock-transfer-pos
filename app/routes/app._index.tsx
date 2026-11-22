@@ -1,6 +1,7 @@
 // app/routes/app._index.tsx - 導入（ホーム）ページ
 import type { HeadersFunction } from "react-router";
-import { Link, useOutletContext } from "react-router";
+import { useOutletContext } from "react-router";
+import { PrimaryLink, SecondaryLink } from "../components/admin-ui";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import type { ShopPlan } from "../utils/shop-plan.server";
 
@@ -131,42 +132,46 @@ export default function HomePage() {
   }
 
   const summaryBlock = (
-    <div className="HomePage-summary">
-      <SummaryCard title="現在の料金プラン" style={{ marginBottom: "16px" }}>
-        <div style={{ marginBottom: "8px", fontSize: "18px", fontWeight: 700, color: "#202223" }}>
+    <div className="Admin-home-side">
+      <SummaryCard title="現在の料金プラン">
+        <div className="Admin-figure" style={{ marginBottom: "8px" }}>
           {planLabel}
         </div>
+        {/* 文字だけのリンクにせず、白いボタンにする（UI ルール v1.1 4章） */}
         {!isInhouse && !plan && (
-          <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
-            料金プランを選択する
-          </Link>
+          <div className="Admin-actions" style={{ marginTop: 0 }}>
+            <SecondaryLink to="/app/plan">料金プランを選ぶ</SecondaryLink>
+          </div>
         )}
         {!isInhouse && plan === "lite" && (
-          <Link to="/app/plan" style={{ fontSize: "14px", color: "#2c6ecb" }}>
-            アップグレードして全機能を使いましょう
-          </Link>
+          <>
+            <p className="Admin-note" style={{ margin: "0 0 8px" }}>アップグレードすると全機能を使えます。</p>
+            <div className="Admin-actions" style={{ marginTop: 0 }}>
+              <SecondaryLink to="/app/plan">料金プランを見る</SecondaryLink>
+            </div>
+          </>
         )}
         {isInhouse && (
-          <span style={{ fontSize: "14px", color: "#6d7175" }}>
+          <span className="Admin-note">
             全機能をご利用いただけます
           </span>
         )}
         {showBillingNote && (
-          <span style={{ fontSize: "14px", color: "#6d7175" }}>
+          <span className="Admin-note">
             開発ストアはテスト課金のため請求されません
           </span>
         )}
       </SummaryCard>
 
       <SummaryCard title="ロケーション数">
-        <span style={{ fontSize: "18px", fontWeight: 700, color: "#202223" }}>{locationsCount}</span>
-        <span style={{ marginLeft: "4px", fontSize: "14px", color: "#6d7175" }}>ロケーション</span>
+        <span className="Admin-figure">{locationsCount}</span>
+        <span className="Admin-note" style={{ marginLeft: "4px" }}>ロケーション</span>
       </SummaryCard>
     </div>
   );
 
   const stepsBlock = (
-    <div className="HomePage-steps">
+    <div className="Admin-home-main">
       {steps.map((step) =>
         step.stepId === "pos" && storeHandle ? (
           <StepCardPos
@@ -190,29 +195,12 @@ export default function HomePage() {
 
   return (
     <s-page heading="ホーム">
-      <style>{`
-        .HomePage-layout {
-          padding: 16px;
-          display: flex;
-          gap: 24px;
-          flex-wrap: wrap;
-          max-width: 1200px;
-        }
-        .HomePage-summary { flex: 0 1 320px; min-width: 260px; }
-        .HomePage-steps { flex: 1 1 60%; min-width: 280px; }
-        @media (max-width: 767px) {
-          .HomePage-layout { flex-direction: column; }
-          .HomePage-summary { order: 1; flex: 1 1 100%; min-width: 0; width: 100%; }
-          .HomePage-steps { order: 2; flex: 1 1 100%; min-width: 0; width: 100%; }
-        }
-        @media (min-width: 768px) {
-          .HomePage-steps { order: 1; }
-          .HomePage-summary { order: 2; }
-        }
-      `}</style>
-      <div className="HomePage-layout">
-        {summaryBlock}
-        {stepsBlock}
+      {/* 画面の形2（左に主な内容、右に要約。スマホは要約が上）。UI ルール v1.1 2章 */}
+      <div className="Admin-body">
+        <div className="Admin-home">
+          {stepsBlock}
+          {summaryBlock}
+        </div>
       </div>
     </s-page>
   );
@@ -233,36 +221,13 @@ function StepCard({
 }) {
   return (
     <div
-      style={{
-        marginBottom: "16px",
-        padding: "16px",
-        background: "#fff",
-        borderRadius: "8px",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-        borderLeft: highlight ? "4px solid #2c6ecb" : undefined,
-      }}
+      className="Admin-home-card"
+      style={{ borderLeft: highlight ? "4px solid #2c6ecb" : undefined }}
     >
-      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
-        {title}
-      </div>
-      <div style={{ marginBottom: "12px", fontSize: "14px", color: "#6d7175", lineHeight: 1.4 }}>
-        {description}
-      </div>
-      <Link
-        to={to}
-        style={{
-          display: "inline-block",
-          padding: "8px 16px",
-          background: "#2c6ecb",
-          color: "#fff",
-          borderRadius: "6px",
-          fontSize: "14px",
-          textDecoration: "none",
-          fontWeight: 500,
-        }}
-      >
-        {buttonLabel}
-      </Link>
+      <div className="Admin-kicker">{title}</div>
+      <p className="Admin-note" style={{ margin: "0 0 12px", fontSize: "14px" }}>{description}</p>
+      {/* 主ボタン（黒）は今やる手順の1つだけ。ほかは白いボタン（UI ルール v1.1 4章） */}
+      {highlight ? <PrimaryLink to={to}>{buttonLabel}</PrimaryLink> : <SecondaryLink to={to}>{buttonLabel}</SecondaryLink>}
     </div>
   );
 }
@@ -277,39 +242,21 @@ function StepCardPos({
 }) {
   const posUrl = getPosChannelUrl(storeHandle);
   const channelsUrl = getChannelsUrl(storeHandle);
-  const linkStyle = {
-    display: "inline-block",
-    padding: "8px 16px",
-    background: "#2c6ecb",
-    color: "#fff",
-    borderRadius: "6px",
-    fontSize: "14px",
-    textDecoration: "none" as const,
-    fontWeight: 500,
-  };
-  const secondaryStyle = { fontSize: "14px", color: "#2c6ecb", marginLeft: "12px" };
   return (
-    <div
-      style={{
-        marginBottom: "16px",
-        padding: "16px",
-        background: "#fff",
-        borderRadius: "8px",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-      }}
-    >
-      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
+    <div className="Admin-home-card">
+      <div className="Admin-kicker">
         {step.num}. {step.title}
       </div>
-      <div style={{ marginBottom: "12px", fontSize: "14px", color: "#6d7175", lineHeight: 1.4 }}>
-        {step.description}
+      <p className="Admin-note" style={{ margin: "0 0 12px", fontSize: "14px" }}>{step.description}</p>
+      {/* Shopify 管理画面の別の画面を開くので、ふつうの a のままボタンの見た目にする（文字だけのリンクにしない） */}
+      <div className="Admin-actions" style={{ marginTop: 0 }}>
+        <a href={posUrl} target="_blank" rel="noopener noreferrer" className="Admin-secondary">
+          POSの設定を開く
+        </a>
+        <a href={channelsUrl} target="_blank" rel="noopener noreferrer" className="Admin-secondary">
+          販売チャネル一覧を開く
+        </a>
       </div>
-      <a href={posUrl} target="_blank" rel="noopener noreferrer" style={linkStyle}>
-        POSの設定を開く
-      </a>
-      <a href={channelsUrl} target="_blank" rel="noopener noreferrer" style={secondaryStyle}>
-        販売チャネル一覧を開く
-      </a>
     </div>
   );
 }
@@ -317,25 +264,13 @@ function StepCardPos({
 function SummaryCard({
   title,
   children,
-  style,
 }: {
   title: string;
   children: React.ReactNode;
-  style?: React.CSSProperties;
 }) {
   return (
-    <div
-      style={{
-        padding: "16px",
-        background: "#fff",
-        borderRadius: "8px",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-        ...style,
-      }}
-    >
-      <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: 600, color: "#6d7175" }}>
-        {title}
-      </div>
+    <div className="Admin-home-card">
+      <div className="Admin-kicker">{title}</div>
       {children}
     </div>
   );

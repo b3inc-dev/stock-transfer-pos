@@ -24,7 +24,7 @@
 | **2** | 公開用のデプロイ先（Render 等の別サービス）を用意する | 10〜30分 | 自社用と別URLにすること |
 | **3** | `shopify.app.public.toml` の `client_id`・`application_url`・`redirect_urls` を書き換える | 2分 | 2で決めたURLを入れる |
 | **4** | 公開用環境の環境変数 `SHOPIFY_API_KEY`（Client ID）と `SHOPIFY_API_SECRET`（Client Secret）を設定する | 2分 | Render なら Dashboard → Environment |
-| **5** | `shopify app config use public` → `shopify app deploy` でデプロイし、インストール〜動作確認 | 10分 | ここで「公開用として動く」ことを確認 |
+| **5** | `npm run deploy:public` でデプロイし、インストール〜動作確認 | 10分 | ここで「公開用として動く」ことを確認 |
 | **6** | 本番前のコード整理（server の `console.log` 削除など） | 30分〜 | REQUIREMENTS_FINAL.md の任意項目 |
 | **7** | リスティング用アセットを用意する（アイコン・スクショ・紹介文・プライバシーポリシー） | 1〜2時間 | アイコン1200×1200、スクショ1600×900 など |
 | **8** | パートナーダッシュボードでリスティングを入力し、デモ動画・テスト用認証情報・緊急連絡先を登録 | 30分〜 | 審査提出の前提 |
@@ -166,11 +166,10 @@ Render の「New +」→「Web Service」で**同じリポジトリ**を選び�
 
 （Client ID / Client Secret は TOML には書かず、デプロイ先の環境変数 `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` で渡します。TOML の `client_id` は CLI やリンク用です。）
 
-デプロイ前に以下で公開用に切り替えてデプロイ:
+公開用のデプロイは次の 1 つで行います（`shopify app deploy` / `npm run deploy` を直接打たない。`docs/DEPLOY.md` §3）:
 
 ```bash
-shopify app config use public
-shopify app deploy
+npm run deploy:public
 ```
 
 ---
@@ -363,7 +362,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 3. ⬜ 公開用デプロイ先（例: Render の別サービス）を用意
 4. ⬜ `shopify.app.public.toml` の `client_id` / `application_url` / `redirect_urls` を反映
 5. ⬜ 公開用環境に `SHOPIFY_API_KEY`（Client ID）と `SHOPIFY_API_SECRET`（Client Secret）を設定
-6. ⬜ `shopify app config use public` → `shopify app deploy` でデプロイし、インストール〜基本動作を確認
+6. ⬜ `npm run deploy:public` でデプロイし、インストール〜基本動作を確認
 
 ### Phase B: リスティング・アセット
 
@@ -405,7 +404,7 @@ REQUIREMENTS_FINAL.md に記載の「任意」項目も、公開前に済ませ�
 - **`application_url`**: `https://pos-stock.onrender.com` → 実際の公開用本番URLと一致させる
 - **`[auth] redirect_urls`**: 上記と同じURLであることを確認
 
-上記を反映したうえで、`shopify app config use public` と `shopify app deploy` を実行し、公開用としてデプロイ・動作確認を行ってから、リスティング作成と審査提出に進むとスムーズです。
+上記を反映したうえで、`npm run deploy:public` を実行し、公開用としてデプロイ・動作確認を行ってから、リスティング作成と審査提出に進むとスムーズです。
 
 ---
 

@@ -19,5 +19,5 @@
 
 1. POS で開いているアプリが **「POS Stock」**（公開用）か **「POS Stock - Ciara」**（自社用）か確認する。URL 変更後は公開用の App URL が pos-stock.onrender.com になっているので、どちらのアプリで開いているかで読み込まれる拡張が変わる。
 2. **Dev Dashboard → POS Stock（または該当アプリ）→ 拡張** で、発注・入庫・棚卸の拡張が「リリース済み」で含まれているか確認する。
-3. 公開用でデプロイした場合は `shopify app config use public` のあと `shopify app deploy` を実行し、自社用で使う場合は自社用 toml でデプロイする。**POS で使うアプリと、いまデプロイしているアプリを一致させる**。
+3. 公開用は `npm run deploy:public`、自社用は `npm run deploy:inhouse` でデプロイする（`shopify app deploy` / `npm run deploy` を直接打たない。`docs/DEPLOY.md` §3）。**POS で使うアプリと、いまデプロイしているアプリを一致させる**。
 4. POS アプリを完全に終了してから起動し直し、タイルを再度試す。

@@ -1128,6 +1128,7 @@ export default function InventoryInfoPage() {
                         <div style={{ flex: "1 1 0", minWidth: 0, overflow: "hidden" }}>
                           <input
                             type="date"
+                            className="Admin-input"
                             value={dateValue}
                             onChange={handleDateChange}
                             min={firstSnapshotDate}
@@ -1518,10 +1519,9 @@ export default function InventoryInfoPage() {
                     onWheel={handleTableScrollWheel}
                     style={{ marginTop: "16px", width: "100%", overflowX: "auto", overflowY: "visible" }}
                   >
-                    <table
+                    <table className="History-table"
                       style={{
                         width: "100%",
-                        minWidth: "600px",
                         borderCollapse: "collapse",
                         fontSize: "14px",
                       }}
@@ -1603,17 +1603,17 @@ export default function InventoryInfoPage() {
                               borderBottom: index < snapshots.length - 1 ? "1px solid #e1e3e5" : "none",
                             }}
                           >
-                            <td style={{ padding: "12px 16px", whiteSpace: "nowrap" }}>{snapshot.locationName}</td>
-                            <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
+                            <td data-label="ロケーション" style={{ padding: "12px 16px", whiteSpace: "nowrap" }}>{snapshot.locationName}</td>
+                            <td data-label="合計数量" style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                               {snapshot.totalQuantity.toLocaleString()}
                             </td>
-                            <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
+                            <td data-label="販売価格合計" style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                               ¥{Math.round(snapshot.totalRetailValue).toLocaleString()}
                             </td>
-                            <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
+                            <td data-label="割引前価格合計" style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                               ¥{Math.round(snapshot.totalCompareAtPriceValue).toLocaleString()}
                             </td>
-                            <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
+                            <td data-label="原価合計" style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                               ¥{Math.round(snapshot.totalCostValue).toLocaleString()}
                             </td>
                           </tr>
@@ -1716,6 +1716,7 @@ export default function InventoryInfoPage() {
                               <label style={{ fontSize: "14px", fontWeight: 500, flexShrink: 0, minWidth: "70px" }}>開始日:</label>
                               <input
                                 type="date"
+                                className="Admin-input"
                                 value={changeHistoryStartDate}
                                 onChange={(e) => setChangeHistoryStartDate(e.target.value)}
                                 min={firstChangeHistoryDate || todayInShopTimezone}
@@ -1735,6 +1736,7 @@ export default function InventoryInfoPage() {
                               <label style={{ fontSize: "14px", fontWeight: 500, flexShrink: 0, minWidth: "70px" }}>終了日:</label>
                               <input
                                 type="date"
+                                className="Admin-input"
                                 value={changeHistoryEndDate}
                                 onChange={(e) => setChangeHistoryEndDate(e.target.value)}
                                 min={changeHistoryStartDate}
@@ -2234,7 +2236,7 @@ export default function InventoryInfoPage() {
                             </div>
                             </div>
                             <div style={{ maxHeight: "600px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px" }}>
-                              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
+                              <table className="History-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
                                 <thead>
                                   <tr style={{ backgroundColor: "#f6f6f7", borderBottom: "2px solid #e1e3e5" }}>
                                     <th style={{ padding: "12px 16px", textAlign: "left", fontWeight: 600, fontSize: "12px", color: "#202223" }}>発生日時</th>
@@ -2255,27 +2257,27 @@ export default function InventoryInfoPage() {
                                 <tbody>
                                   {changeHistoryLogs.map((log) => (
                                     <tr key={log.id} style={{ borderBottom: "1px solid #e1e3e5" }}>
-                                      <td style={{ padding: "12px 16px" }}>
+                                      <td data-label="発生日時" style={{ padding: "12px 16px" }}>
                                         {formatDateTimeInShopTimezone(log.timestamp, shopTimezone)}
                                       </td>
-                                      <td style={{ padding: "12px 16px" }}>{log.productTitle || log.sku || "-"}</td>
-                                      <td style={{ padding: "12px 16px" }}>{log.sku || (log.recoveredSku ? log.recoveredSku + "（現在）" : "-")}</td>
-                                      <td style={{ padding: "12px 16px" }}>{log.barcode || "-"}</td>
-                                      <td style={{ padding: "12px 16px" }}>{log.option1 || "-"}</td>
-                                      <td style={{ padding: "12px 16px" }}>{log.option2 || "-"}</td>
-                                      <td style={{ padding: "12px 16px" }}>{log.option3 || "-"}</td>
-                                      <td style={{ padding: "12px 16px" }}>{getChangeHistoryLocationDisplayName(log)}</td>
-                                      <td style={{ padding: "12px 16px" }}>{getActivityDisplayLabel(log.activity)}</td>
-                                      <td style={{ padding: "12px 16px", textAlign: "right", color: log.delta != null && log.delta > 0 ? "#008060" : log.delta != null && log.delta < 0 ? "#d72c0d" : "#202223" }}>
+                                      <td data-label="商品名" style={{ padding: "12px 16px" }}>{log.productTitle || log.sku || "-"}</td>
+                                      <td data-label="SKU" style={{ padding: "12px 16px" }}>{log.sku || (log.recoveredSku ? log.recoveredSku + "（現在）" : "-")}</td>
+                                      <td data-label="JAN" style={{ padding: "12px 16px" }}>{log.barcode || "-"}</td>
+                                      <td data-label="オプション1" style={{ padding: "12px 16px" }}>{log.option1 || "-"}</td>
+                                      <td data-label="オプション2" style={{ padding: "12px 16px" }}>{log.option2 || "-"}</td>
+                                      <td data-label="オプション3" style={{ padding: "12px 16px" }}>{log.option3 || "-"}</td>
+                                      <td data-label="ロケーション" style={{ padding: "12px 16px" }}>{getChangeHistoryLocationDisplayName(log)}</td>
+                                      <td data-label="アクティビティ" style={{ padding: "12px 16px" }}>{getActivityDisplayLabel(log.activity)}</td>
+                                      <td data-label="変動数" style={{ padding: "12px 16px", textAlign: "right", color: log.delta != null && log.delta > 0 ? "#008060" : log.delta != null && log.delta < 0 ? "#d72c0d" : "#202223" }}>
                                         {log.delta !== null ? (log.delta > 0 ? `+${log.delta}` : String(log.delta)) : "-"}
                                       </td>
-                                      <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                                      <td data-label="変動後在庫数" style={{ padding: "12px 16px", textAlign: "right" }}>
                                         {log.quantityAfter !== null ? String(log.quantityAfter) : "-"}
                                       </td>
-                                      <td style={{ padding: "12px 16px", fontSize: "12px", color: "#666" }}>
+                                      <td data-label="参照ID" style={{ padding: "12px 16px", fontSize: "12px", color: "#666" }}>
                                         {log.sourceId ? (log.sourceId.length > 30 ? `${log.sourceId.substring(0, 30)}...` : log.sourceId) : "-"}
                                       </td>
-                                      <td style={{ padding: "12px 16px", fontSize: "11px", color: "#666", maxWidth: "200px" }}>
+                                      <td data-label="備考" style={{ padding: "12px 16px", fontSize: "11px", color: "#666", maxWidth: "200px" }}>
                                         {log.note ? (log.note.length > 50 ? `${log.note.substring(0, 50)}...` : log.note) : "-"}
                                       </td>
                                     </tr>

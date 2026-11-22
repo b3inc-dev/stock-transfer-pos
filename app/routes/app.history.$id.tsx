@@ -1,6 +1,8 @@
 // app/routes/app.history.$id.tsx
 import type { LoaderFunctionArgs } from "react-router";
-import { useLoaderData, useNavigate, useRouteError, data } from "react-router";
+import { useLoaderData, useRouteError, data } from "react-router";
+import { BackAction, StateBadge } from "../components/admin-ui";
+import { transferStatusLabel, transferStatusTone } from "../utils/transfer-status";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import type { TransferLineItem } from "../types";
@@ -183,7 +185,6 @@ export function ErrorBoundary() {
 
 export default function HistoryDetailPage() {
   const { transfer, lineItems } = useLoaderData<typeof loader>();
-  const navigate = useNavigate();
 
   const date = transfer.dateCreated
     ? new Date(transfer.dateCreated).toISOString().split("T")[0]
@@ -191,6 +192,8 @@ export default function HistoryDetailPage() {
 
   return (
     <s-page heading={`${transfer.type === "outbound" ? "出庫" : "入庫"}履歴詳細`}>
+      {/* 下の階層の画面なので、画面の中の左上に「←」を出す（UI ルール v1.1 3章） */}
+      <BackAction to="/app/history" label="入出庫へ戻る" />
       <s-scroll-box padding="base">
         <s-stack gap="base">
           {/* 履歴情報 */}
@@ -204,9 +207,11 @@ export default function HistoryDetailPage() {
                 <s-text color="subdued">
                   日付: {date}
                 </s-text>
-                <s-text color="subdued">
-                  ステータス: {transfer.status}
-                </s-text>
+                {transfer.status ? (
+                  <div>
+                    <StateBadge label={transferStatusLabel(transfer.status)} tone={transferStatusTone(transfer.status)} />
+                  </div>
+                ) : null}
               </s-stack>
             </s-box>
           </s-section>
@@ -254,11 +259,6 @@ export default function HistoryDetailPage() {
               </s-stack>
             )}
           </s-section>
-
-          {/* 戻るボタン */}
-          <s-box padding="base">
-            <s-button onClick={() => navigate("/app/history")}>戻る</s-button>
-          </s-box>
         </s-stack>
       </s-scroll-box>
     </s-page>

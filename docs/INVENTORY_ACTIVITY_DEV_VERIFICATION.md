@@ -145,7 +145,7 @@
 
 ## 5. 開発ストアで「今」ステータス振り分けができているか確認する手順（推奨）
 
-**前提**: アプリのURLを本番（Render）に切り替え済み（`shopify app deploy` 済み）。開発ストアからアプリを開くと **本番URL**（例: https://stock-transfer-pos.onrender.com）で開く状態。
+**前提**: アプリのURLを本番（Render）に切り替え済み（`npm run deploy:inhouse` / `npm run deploy:public` 済み）。開発ストアからアプリを開くと **本番URL**（例: https://stock-transfer-pos.onrender.com）で開く状態。
 
 この状態なら、Webhook も POS の API も本番サーバーに向くため、**開発ストアで振り分けが正しく動いているか**をそのまま確認できます。
 
@@ -179,7 +179,7 @@
 ### 5.4 うまくいかないとき
 
 - **全部「管理」になる**  
-  → アプリがまだトンネルURLのままの可能性があります。`shopify app deploy` を実行して本番URLに切り替え、開発ストアからアプリを開き直してください（`docs/DEV_TO_PRODUCTION_SWITCH.md` 参照）。
+  → アプリがまだトンネルURLのままの可能性があります。`npm run deploy:inhouse`（公開用は `npm run deploy:public`）を実行して本番URLに切り替え、開発ストアからアプリを開き直してください（`docs/DEV_TO_PRODUCTION_SWITCH.md` 参照）。
 - **売上・返品だけ「管理」**  
   → Webhook（orders/updated, refunds/create）が本番サーバーに届いていない可能性。パートナーダッシュボードで Webhook の送信先URLが本番と一致しているか確認してください。
 - **POS の処理だけ「管理」**  

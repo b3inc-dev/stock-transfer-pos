@@ -2,7 +2,7 @@
 
 ## 発生するエラー
 
-`npm run deploy:inhouse` または `shopify app deploy` 実行時に、次のエラーでバージョン作成に失敗することがあります。
+`npm run deploy:inhouse` / `npm run deploy:public`（中で `shopify app deploy` を呼ぶ）の実行時に、次のエラーでバージョン作成に失敗することがあります。
 
 ```
 Version couldn't be created.
