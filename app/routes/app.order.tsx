@@ -9,6 +9,16 @@ import type { SettingsV1, OrderCsvColumn, OrderDestinationOption, LocationNode, 
 import type { GraphQLUserError } from "../types/graphql-responses";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 import { adminPlanRedirect } from "../utils/plan-gate.server";
+import { createOrderTransferIdempotent } from "../utils/admin-order-transfer.server";
+import {
+  ADMIN_IDEMPOTENCY_KIND,
+  ADMIN_UNCERTAIN_MESSAGE,
+  buildAdminIdempotency,
+  readAdminOpKey,
+  readRevertRound,
+  type AdminOpKeyInput,
+} from "../utils/admin-op-key.server";
+import { useAdminOpKey } from "../utils/use-admin-op-key";
 
 const ORDER_NS = "stock_transfer_pos";
 const ORDER_KEY = "order_request_entries_v1";
@@ -45,7 +55,17 @@ function normalizeInventoryItemGid(inventoryItemId: string): string {
 }
 
 type AdminGraphQL = { graphql: (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> };
-async function createTransferForOrder(admin: AdminGraphQL, entry: OrderRequestEntry, approvedItems: OrderRequestItem[]): Promise<{ transferId: string | null; error: string | null }> {
+/**
+ * 発注の承認から Transfer を作る。@idempotent のキーは画面の opKey + 発注の ID + approve、
+ * 回は「承認を取り消した回数」（entry.idempotencyRevertRound）+ 画面の opRound（docs/IDEMPOTENT_MIGRATION.md 4.6 の L）。
+ */
+async function createTransferForOrder(
+  admin: AdminGraphQL,
+  entry: OrderRequestEntry,
+  approvedItems: OrderRequestItem[],
+  shop: string,
+  adminOp: AdminOpKeyInput
+): Promise<{ transferId: string | null; error: string | null; uncertain?: boolean }> {
   try {
     const lineItems =
       Array.isArray(approvedItems) && approvedItems.length > 0
@@ -73,129 +93,17 @@ async function createTransferForOrder(admin: AdminGraphQL, entry: OrderRequestEn
       return { transferId: null, error: "ロケーションIDが不正です" };
     }
 
-    // まず inventoryTransferCreateAsReadyToShip を試す
-    try {
-      const resp = await admin.graphql(
-        `#graphql
-          mutation CreateTransferReadyForOrder($input: InventoryTransferCreateAsReadyToShipInput!) {
-            inventoryTransferCreateAsReadyToShip(input: $input) {
-              inventoryTransfer { id status name }
-              userErrors { field message }
-            }
-          }
-        `,
-        {
-          variables: {
-            input: {
-              destinationLocationId,
-              lineItems,
-              note: entry.note || undefined,
-            },
-          },
-        }
-      );
-
-      const data = await resp.json();
-      
-      // GraphQL エラー（ネットワークエラーなど）
-      if (data.errors && data.errors.length > 0) {
-        const errorMessages = data.errors.map((e: { message?: string }) => e.message || String(e)).join(" / ");
-        return { transferId: null, error: `GraphQLエラー: ${errorMessages}` };
-      }
-
-      const payload = data?.data?.inventoryTransferCreateAsReadyToShip;
-      const userErrors = payload?.userErrors ?? [];
-      if (userErrors.length) {
-        const errorMessages = userErrors.map((e: GraphQLUserError) => `${e.field ?? ""}: ${e.message ?? ""}`).join(" / ");
-        return { transferId: null, error: `Transfer作成エラー: ${errorMessages}` };
-      }
-      
-      const transferId = payload?.inventoryTransfer?.id ?? null;
-      if (!transferId) {
-        return { transferId: null, error: "Transfer ID が取得できませんでした" };
-      }
-      
-      return { transferId, error: null };
-    } catch (e) {
-      // inventoryTransferCreateAsReadyToShip が使えない場合（APIバージョンが古いなど）、
-      // Draft を作成してから ReadyToShip にマークする方法を試す
-      try {
-        // 1. Draft を作成
-        const draftResp = await admin.graphql(
-          `#graphql
-            mutation CreateTransferDraft($input: InventoryTransferCreateInput!) {
-              inventoryTransferCreate(input: $input) {
-                inventoryTransfer { id status }
-                userErrors { field message }
-              }
-            }
-          `,
-          {
-            variables: {
-              input: {
-                destinationLocationId,
-                lineItems,
-                note: entry.note || undefined,
-              },
-            },
-          }
-        );
-
-        const draftData = await draftResp.json();
-        if (draftData.errors && draftData.errors.length > 0) {
-          const errorMessages = draftData.errors.map((e: { message?: string }) => e.message || String(e)).join(" / ");
-          return { transferId: null, error: `Draft作成エラー: ${errorMessages}` };
-        }
-
-        const draftPayload = draftData?.data?.inventoryTransferCreate;
-        const draftUserErrors = draftPayload?.userErrors ?? [];
-        if (draftUserErrors.length) {
-          const errorMessages = draftUserErrors.map((e: GraphQLUserError) => `${e.field ?? ""}: ${e.message ?? ""}`).join(" / ");
-          return { transferId: null, error: `Draft作成エラー: ${errorMessages}` };
-        }
-
-        const draftId = draftPayload?.inventoryTransfer?.id;
-        if (!draftId) {
-          return { transferId: null, error: "Draft Transfer ID が取得できませんでした" };
-        }
-
-        // 2. ReadyToShip にマーク
-        const markResp = await admin.graphql(
-          `#graphql
-            mutation MarkAsReadyToShip($id: ID!) {
-              inventoryTransferMarkAsReadyToShip(id: $id) {
-                inventoryTransfer { id status }
-                userErrors { field message }
-              }
-            }
-          `,
-          {
-            variables: {
-              id: draftId,
-            },
-          }
-        );
-
-        const markData = await markResp.json();
-        if (markData.errors && markData.errors.length > 0) {
-          const errorMessages = markData.errors.map((e: { message?: string }) => e.message || String(e)).join(" / ");
-          return { transferId: null, error: `ReadyToShipマークエラー: ${errorMessages}` };
-        }
-
-        const markPayload = markData?.data?.inventoryTransferMarkAsReadyToShip;
-        const markUserErrors = markPayload?.userErrors ?? [];
-        if (markUserErrors.length) {
-          const errorMessages = markUserErrors.map((e: GraphQLUserError) => `${e.field ?? ""}: ${e.message ?? ""}`).join(" / ");
-          return { transferId: null, error: `ReadyToShipマークエラー: ${errorMessages}` };
-        }
-
-        const finalTransferId = markPayload?.inventoryTransfer?.id ?? draftId;
-        return { transferId: finalTransferId, error: null };
-      } catch (fallbackError) {
-        const errorMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-        return { transferId: null, error: `フォールバック処理エラー: ${errorMessage}` };
-      }
-    }
+    return await createOrderTransferIdempotent(
+      admin,
+      { destinationLocationId, lineItems, note: entry.note || undefined },
+      buildAdminIdempotency({
+        shop,
+        kind: ADMIN_IDEMPOTENCY_KIND.orderTransfer,
+        op: adminOp,
+        parts: [entry.id, "approve"],
+        revertRound: readRevertRound(entry.idempotencyRevertRound),
+      })
+    );
   } catch (e) {
     const errorMessage = e instanceof Error ? e.message : String(e);
     return { transferId: null, error: `予期しないエラー: ${errorMessage}` };
@@ -787,6 +695,8 @@ export async function action({ request }: ActionFunctionArgs) {
               ...e,
               status: "pending",
               approvedItems: undefined, // 承認済み商品をクリア
+              // 承認を取り消した回数。次の承認（同じ商品でも）は新しい @idempotent のキーにする（docs/IDEMPOTENT_MIGRATION.md 4.6 の L）
+              idempotencyRevertRound: readRevertRound(e.idempotencyRevertRound) + 1,
               arrivalDate: arrivalDate || e.arrivalDate,
               inspectionDate: inspectionDate || e.inspectionDate,
             }
@@ -822,6 +732,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ok: true,
         entryId,
         status: "pending" as const,
+        opKeyResult: "done" as const,
       };
     }
 
@@ -860,9 +771,16 @@ export async function action({ request }: ActionFunctionArgs) {
       const reflectToPurchase = formData.get("reflectToPurchase") === "true";
 
       // Shopify Transfer（発注書）を作成（失敗しても承認自体は続行）
-      const transferResult = await createTransferForOrder(admin, entry, approvedItems);
+      const transferResult = await createTransferForOrder(admin, entry, approvedItems, session?.shop ?? "", readAdminOpKey(formData));
       const transferId = transferResult.transferId;
       const transferError = transferResult.error;
+
+      // 作れたか分からない（@idempotent の返事）ときは承認を止める。opKey を残して押し直せば、同じキーで送り、
+      // 前の送信で作れていれば Shopify はその Transfer を返す（二重に作らない）
+      if (transferResult.uncertain) {
+        console.error("[createTransferForOrder] Transfer作成の結果が分からない:", transferError);
+        return { error: `${transferError ?? "Transfer作成の結果が分かりません"}。${ADMIN_UNCERTAIN_MESSAGE}`, opKeyResult: "uncertain" as const };
+      }
 
       // Transfer作成エラーがある場合はログに記録（承認自体は続行）
       if (transferError) {
@@ -936,6 +854,7 @@ export async function action({ request }: ActionFunctionArgs) {
         purchaseId: purchaseId ?? null,
         purchaseName: purchaseName ?? null,
         purchaseError: purchaseError ?? null,
+        opKeyResult: "done" as const,
       };
     }
 
@@ -961,6 +880,8 @@ export async function action({ request }: ActionFunctionArgs) {
               ...e,
               status: "pending",
               approvedItems: undefined, // 承認済み商品をクリア
+              // 承認を取り消した回数。次の承認（同じ商品でも）は新しい @idempotent のキーにする（docs/IDEMPOTENT_MIGRATION.md 4.6 の L）
+              idempotencyRevertRound: readRevertRound(e.idempotencyRevertRound) + 1,
               arrivalDate: arrivalDate || e.arrivalDate,
               inspectionDate: inspectionDate || e.inspectionDate,
             }
@@ -996,6 +917,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ok: true,
         entryId,
         status: "pending" as const,
+        opKeyResult: "done" as const,
       };
     }
 
@@ -1091,6 +1013,8 @@ export default function OrderPage() {
   // entriesをuseStateで管理（承認取り消し後の状態更新のため）
   const [entries, setEntries] = useState<OrderRequestEntry[]>(initialEntries || []);
   const fetcher = useFetcher<typeof action>();
+  // 発注の承認（Transfer を作る）に付ける opKey（docs/IDEMPOTENT_MIGRATION.md 4.6 の L）
+  const orderOpKey = useAdminOpKey(fetcher.data);
 
   // loaderDataが更新されたらentriesも更新（ページリロード時など）
   useEffect(() => {
@@ -1452,6 +1376,7 @@ export default function OrderPage() {
     formData.set("reflectToPurchase", reflectToPurchase ? "true" : "false");
     formData.set("arrivalDate", arrivalDate);
     formData.set("inspectionDate", inspectionDate);
+    orderOpKey.append(formData);
     fetcher.submit(formData, { method: "post" });
   };
 

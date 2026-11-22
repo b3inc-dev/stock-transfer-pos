@@ -39,6 +39,7 @@
 | 二重タップ | `submitLockRef` |
 | 履歴 | `buildStableAppEventId` + DB unique |
 | 数量調整 | `InventoryChangeEvent.appEventId`。サーバーの Shopify への書き込み（`inventorySetQuantities`・`inventoryActivate`）には `@idempotent` も付ける（D3d） |
+| 管理画面の棚卸・発注・仕入れ | 画面の `opKey` から作る `@idempotent` のキー（D3e） |
 
 **意図**: 履歴・調整の再送安全性を先に固めた（Phase0/1）。
 
@@ -92,6 +93,28 @@
 **守りは足すだけ**: `appEventId`・`InventoryChangeEvent` の状態・`partial_failed` で止める決まりはそのまま（キーは 24 時間しか効かないため）。元に戻す書き込みの送り直しは今のまま 429 だけ（5xx も送り直すのは後の PR で決める）。
 
 **まだ付けていない所**: 管理画面（2 段目）・POS 入庫（3 段目）・POS 出庫（4 段目）・使っていないコード（5 段目）。`tests/idempotent-directive-guard.test.mjs` の `PENDING` に、ファイルごとの残りの数を持つ（付けたら減らす）。
+
+### D3e. 管理画面の在庫の書き込みに `@idempotent` を付ける（2026-11-23・2 段目）
+
+設計 [`IDEMPOTENT_MIGRATION.md`](./IDEMPOTENT_MIGRATION.md) の 4.6（K・L・M）と 5 章の 2 段目。
+
+| 層 | 方針 |
+|----|------|
+| 画面の ID（`opKey`） | 画面を開いたときに UUID を作る（`app/utils/admin-op-key.ts`・`use-admin-op-key.ts`）。在庫を書く操作の FormData に `opKey`・`opRound` を入れる。サーバーは答えに `opKeyResult` を入れる: `done`（成功がはっきり）→ 画面は `opKey` を作り直して回を 0、`rejected`（はっきり断られた）→ 回だけ +1、`uncertain`（分からない）・答えに無い → どちらも変えない |
+| 操作の種類 | `admin_inventory_count`・`admin_order_transfer`・`admin_purchase`（変えない） |
+| 操作の ID | `opKey` + 対象 + 動き（+ グループ）。棚卸 `countId:confirm|revert|confirm_all|revert_all:groupId`、発注 `entryId:approve`、仕入れ `entryId:receive|cancel`。部品は `encodeURIComponent` して `:` でつなぐ |
+| 段・チャンク | 棚卸 `set`・`i/n`（250 件ずつ）、発注 `transfer_ready`・`transfer_draft`（例外のときの代わり。違う mutation なので段を分ける）・`1/1`、仕入れ `adjust`・`1/1`（前と同じく分けずに 1 回で送る） |
+| 回 | 「戻した回数」+ `.rejN`（画面の `opRound`）。戻した回数は**サーバーがデータに持つ**: 棚卸は `idempotencyRevertRound`（グループの取り消し・一括の取り消しで +1）、発注は `idempotencyRevertRound`（承認の取り消しで +1）。0 回なら `main`、1 回目から `rv1`… 書いて戻したあとに同じ中身を送るとき（確定 → 取り消し → 確定、承認 → 取り消し → 承認）は、画面の `opKey` が同じでも必ず新しいキーになる（設計 3.1）。仕入れは取り消すと `cancelled` で終わり、確定し直す道が無いので持たない |
+| 同じキー | 429・503（`withGraphQLRetry`）と `IDEMPOTENCY_CONCURRENT_REQUEST`（1 秒・2 秒・4 秒）の送り直し。結果が分からないまま押し直したとき（`opKey` も回も変わらない） |
+| 返事 | `IDEMPOTENCY_KEY_PARAMETER_MISMATCH`・待ち切った処理中・トップの errors・通信の例外は `uncertain`（新しいキーで送らない。画面に「Shopify で確かめてから押し直す」を出す）。発注は `uncertain` のとき承認を止める（前は Transfer が作れなくても承認を続けた。はっきりした失敗のときは今も続ける） |
+| `changeFromQuantity` | 仕入れの `inventoryAdjustQuantities` に `changeFromQuantity: null`（確かめない。D9）をはっきり書く（2026-04 で必須）。棚卸は前から `null` を書いている |
+| 版 | **2026-01 のまま** |
+
+**古い画面**: `opKey` が無い・形が違うときは呼ぶたびに新しい ID（`adhoc-…`）。今と同じ動きで、守りは増えない。
+
+**防げないもの**: タブを 2 つ開いて同じ確定を押す（`opKey` がタブごと）。24 時間を過ぎた押し直し。POS が同じ記録（発注の metafield など）を書き直して `idempotencyRevertRound` を落としたとき（推測。その場合も画面の `opKey` は成功で作り直すので、ふつうの使い方では同じキーにならない）。一括の取り消し（`reset_stocktake_all`）がグループごとの失敗を見ずに進む動きは前からのもので、この段では変えていない。
+
+**まだ付けていない所**: POS 入庫（3 段目）・POS 出庫（4 段目）・使っていないコード（5 段目）。
 
 ## D4. POS GraphQL は短 timeout、サーバーは 429 リトライ
 

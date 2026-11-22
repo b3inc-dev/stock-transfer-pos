@@ -284,6 +284,8 @@ export type OrderRequestEntry = {
   linkedTransferId?: string | null;
   arrivalDate?: string;
   inspectionDate?: string;
+  /** 管理画面で承認を取り消した回数（@idempotent のキーの回。docs/IDEMPOTENT_MIGRATION.md 4.6 の L） */
+  idempotencyRevertRound?: number;
 };
 
 export type PurchaseEntry = {
@@ -346,6 +348,8 @@ export interface InventoryCountLike {
   items?: unknown[];
   inventoryItemIds?: string[];
   countName?: string;
+  /** 管理画面で在庫を元に戻した回数（@idempotent のキーの回。docs/IDEMPOTENT_MIGRATION.md 4.6） */
+  idempotencyRevertRound?: number;
   [key: string]: unknown;
 }
 

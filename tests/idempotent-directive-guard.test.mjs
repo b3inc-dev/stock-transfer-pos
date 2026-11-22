@@ -42,13 +42,9 @@ export const IDEMPOTENT_REQUIRED_MUTATIONS = [
 
 /**
  * まだ付けていない所（ファイル → か所の数）。入れる順は docs/IDEMPOTENT_MIGRATION.md 5 章。
- * 2 段目（管理画面 K・L・M）、3 段目（POS 入庫 G・H・F）、4 段目（POS 出庫 A〜F）、5 段目（使っていないコード N）で減らす。
+ * 2 段目（管理画面 K・L・M）は付け終えた（DONE_IN_STAGE_2）。3 段目（POS 入庫 G・H・F）、4 段目（POS 出庫 A〜F）、5 段目（使っていないコード N）で減らす。
  */
 const PENDING = {
-  // 2 段目（管理画面 K・L・M）
-  "app/routes/app.inventory-count.tsx": 1,
-  "app/routes/app.order.tsx": 2,
-  "app/routes/app.purchase.tsx": 2,
   // 5 段目（N）: 呼び出し元が無い adjustInventoryQuantitiesServer
   "app/utils/inventory-set-quantities-server.ts": 1,
   // 5 段目（N）: 拡張の adjustInventoryAtLocation／adjustInventoryToActual（呼び出し元が無い）
@@ -65,6 +61,18 @@ const PENDING = {
 
 /** 1 段目で付け終えたファイル（ここは 0 か所でなければならない。PENDING の数とは別に見る） */
 const DONE_IN_STAGE_1 = ["app/utils/ensure-inventory-activated-server.ts"];
+
+/**
+ * 2 段目（管理画面 K・L・M）で付け終えたファイル（呼び出しがあり、どれも付いている）。
+ * 画面のファイル（app.inventory-count.tsx・app.order.tsx・app.purchase.tsx）には、もう在庫の書き込みの文が無い
+ * （下の部品から呼ぶ）。画面に戻した・足したときは PENDING に無いので「付け忘れ」として止まる。
+ */
+const DONE_IN_STAGE_2 = {
+  "app/utils/admin-inventory-count-set.server.ts": ["inventorySetQuantities"],
+  "app/utils/admin-order-transfer.server.ts": ["inventoryTransferCreateAsReadyToShip", "inventoryTransferCreate"],
+  "app/utils/admin-purchase-adjust.server.ts": ["inventoryAdjustQuantities"],
+};
+const ADMIN_SCREENS = ["app/routes/app.inventory-count.tsx", "app/routes/app.order.tsx", "app/routes/app.purchase.tsx"];
 
 function listSourceFiles(dir) {
   const out = [];
@@ -177,6 +185,22 @@ describe("@idempotent の付け忘れ（app/・extensions/）", () => {
       const calls = scanned[f] ?? [];
       assert.ok(calls.length >= 1, `${f} に呼び出しが見つかりません`);
       assert.deepEqual(calls.filter((c) => !c.keyed), [], `${f} に付いていない所があります`);
+    }
+  });
+
+  it("管理画面の書き込み（K・L・M・2 段目）はすべて付いている", () => {
+    for (const [f, names] of Object.entries(DONE_IN_STAGE_2)) {
+      const calls = scanned[f] ?? [];
+      assert.deepEqual(
+        [...new Set(calls.map((c) => c.name))].sort(),
+        [...names].sort(),
+        `${f} の在庫の書き込みが思っていたものと違います`
+      );
+      assert.deepEqual(calls.filter((c) => !c.keyed), [], `${f} に付いていない所があります`);
+    }
+    for (const f of ADMIN_SCREENS) {
+      assert.equal(PENDING[f], undefined, `${f} は 2 段目で付け終えたので PENDING に入れない`);
+      assert.deepEqual((scanned[f] ?? []).filter((c) => !c.keyed), [], `${f} に付いていない所があります`);
     }
   });
 
