@@ -45,6 +45,11 @@ import {
   useDebounce,
 } from "./modalUiParts.jsx";
 import { logInventoryChangeToApi } from "../../common/logInventoryChange.js";
+import {
+  buildShipmentReceiveOperation,
+  OUTBOUND_REJECT_ALL_KIND,
+  receiveShipmentIdempotent,
+} from "../../common/shipmentReceive.js";
 import { buildStableAppEventId } from "../../common/buildStableAppEventId.js";
 import {
   adjustInventoryAtLocationWithFallback,
@@ -4781,10 +4786,17 @@ function OutboundHistoryDetail({
         return;
       }
 
-      // 全拒否受領を実行
+      // 全拒否受領を実行。@idempotent の操作は配送 + 読んだときの受け取り済み・拒否済みの数（docs/IDEMPOTENT_MIGRATION.md 4.4 の H）。
+      // 応答なしのあと読み直さずに押し直すと同じキー → Shopify は 2 回目を動かさない
       await receiveShipmentWithFallbackV2({
         shipmentId: selectedShipmentId,
         items: rejectItems,
+        op: buildShipmentReceiveOperation({
+          kind: OUTBOUND_REJECT_ALL_KIND,
+          shipmentId: selectedShipmentId,
+          readLines: shipment.lineItems,
+        }),
+        stage: "reject",
       });
 
       // 在庫を出庫元ロケーションに戻す
@@ -10821,76 +10833,13 @@ async function fetchInventoryShipmentEnriched(id, opts = {}) {
 /* =========================
 /* Receive shipment */
 
-async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
-  const clean = (items || [])
-    .map((x) => ({
-      shipmentLineItemId: x.shipmentLineItemId || x.id || x.lineItemId || null,
-      quantity: Number(x.quantity || 0),
-
-      // 新しめのスキーマでは reason が必須になる場合があるため保険（ACCEPTED / REJECTED）
-      reason: String(x.reason || "ACCEPTED").trim().toUpperCase(),
-    }))
-    .filter((x) => x.shipmentLineItemId && x.quantity > 0);
-
-  if (clean.length === 0) return null;
-
-  if (clean.length > SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
-    let last = null;
-    for (let i = 0; i < clean.length; i += SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX) {
-      const slice = clean.slice(i, i + SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX);
-      last = await receiveShipmentWithFallbackV2({ shipmentId, items: slice });
-    }
-    return last;
-  }
-
-  // 1) try: inventoryShipmentReceiveItems（古い環境向け）
-  try {
-    const m1 = `#graphql
-      mutation ReceiveItems($id: ID!, $items: [InventoryShipmentReceiveItemInput!]!) {
-        inventoryShipmentReceiveItems(id: $id, items: $items) {
-          inventoryShipment { id status }
-          userErrors { field message }
-        }
-      }`;
-    const d1 = await adminGraphql(m1, { id: shipmentId, items: clean });
-    assertNoUserErrors(d1?.inventoryShipmentReceiveItems, "inventoryShipmentReceiveItems");
-    return d1?.inventoryShipmentReceiveItems?.inventoryShipment ?? null;
-  } catch (e) {
-    const msg = String(e?.message ?? e);
-    if (!/doesn\\'t exist|Field .* doesn't exist|undefined/i.test(msg)) throw e;
-  }
-
-  // 2) fallback: inventoryShipmentReceive（現行スキーマは lineItems）
-  try {
-    const m2 = `#graphql
-      mutation Receive($id: ID!, $lineItems: [InventoryShipmentReceiveItemInput!]!) {
-        inventoryShipmentReceive(id: $id, lineItems: $lineItems) {
-          inventoryShipment { id status }
-          userErrors { field message }
-        }
-      }`;
-    const d2 = await adminGraphql(m2, { id: shipmentId, lineItems: clean });
-    assertNoUserErrors(d2?.inventoryShipmentReceive, "inventoryShipmentReceive");
-    return d2?.inventoryShipmentReceive?.inventoryShipment ?? null;
-  } catch (e) {
-    // もし reason が未対応のAPIバージョンなら、reason無しで再トライ
-    const msg = String(e?.message ?? e);
-    if (/reason/i.test(msg) && /(not defined by type|Unknown field|invalid)/i.test(msg)) {
-      const noReason = clean.map(({ shipmentLineItemId, quantity }) => ({ shipmentLineItemId, quantity }));
-
-      const m2b = `#graphql
-        mutation Receive($id: ID!, $lineItems: [InventoryShipmentReceiveItemInput!]!) {
-          inventoryShipmentReceive(id: $id, lineItems: $lineItems) {
-            inventoryShipment { id status }
-            userErrors { field message }
-          }
-        }`;
-      const d2b = await adminGraphql(m2b, { id: shipmentId, lineItems: noReason });
-      assertNoUserErrors(d2b?.inventoryShipmentReceive, "inventoryShipmentReceive");
-      return d2b?.inventoryShipmentReceive?.inventoryShipment ?? null;
-    }
-    throw e;
-  }
+/**
+ * 配送の受け取り。@idempotent 付きの共通の部品（extensions/common/shipmentReceive.js。入庫と同じもの）を使う。
+ * 250 件ずつに分ける・reason なしで送り直す、は前と同じ。前に毎回まず試していた inventoryShipmentReceiveItems
+ * （2026-01 に無い mutation）の道は消した（docs/IDEMPOTENT_MIGRATION.md 2 章・3 段目）。
+ */
+async function receiveShipmentWithFallbackV2({ shipmentId, items, op, stage, round }) {
+  return receiveShipmentIdempotent({ adminGraphql, assertNoUserErrors, shipmentId, items, op, stage, round });
 }
 
 // =========================================================

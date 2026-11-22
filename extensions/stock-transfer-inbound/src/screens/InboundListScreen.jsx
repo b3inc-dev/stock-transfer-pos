@@ -20,6 +20,8 @@ import {
   mergeInboundOverIntoTransfers_,
   buildInboundOverItemIndex_,
   receiveShipmentWithFallbackV2,
+  buildShipmentReceiveOperation,
+  INBOUND_RECEIVE_KIND,
   appendInventoryTransferNote_,
   buildInboundNoteLine_,
   transferNoteAlreadyRestoredOrigin,
@@ -1498,10 +1500,13 @@ export function InboundListScreen({
 
         // 伝票明細はShopifyの在庫移管に含まれるため、通常は入庫先で既に有効化されている想定。受領を先に試し、失敗時のみ有効化してリトライする。
         const allInventoryItemIds = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
+        // @idempotent の操作: 配送 + 伝票を読んだときの受け取り済み・拒否済みの数（docs/IDEMPOTENT_MIGRATION.md 4.4）。
+        // 確定のあとは伝票を読み直すまでロックを外さないので、読み直さずに同じ中身を送り直すときだけ同じキーになる
+        const receiveOp = buildShipmentReceiveOperation({ kind: INBOUND_RECEIVE_KIND, shipmentId: shipment.id, readLines: rows });
         let receivedItemsForLog = [];
         if (plannedItems.length > 0) {
           try {
-            await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: plannedItems });
+            await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: plannedItems, op: receiveOp, stage: "receive_v2" });
             receivedItemsForLog = plannedItems;
           } catch (e) {
             const msg = String(e?.message || e || "");
@@ -1532,7 +1537,8 @@ export function InboundListScreen({
                 const errMsg = actResult?.message || "在庫の有効化に失敗しました";
                 throw new Error(`入庫先で在庫を有効化できませんでした。${errMsg} しばらくしてから再度「確定」を押してください。`);
               }
-              await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: plannedItems });
+              // 在庫が無いと断られたあとに同じ中身で送り直すので回を増やす（同じキーだと前の断りが返る）
+              await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: plannedItems, op: receiveOp, stage: "receive_v2", round: "ns1" });
               receivedItemsForLog = plannedItems;
             } else if (!/quantity|unreceived|exceed|max|greater|less/i.test(msg)) {
               throw e;
@@ -1555,7 +1561,7 @@ export function InboundListScreen({
               return { shipmentLineItemId, quantity: deltaPlanned };
             }).filter((x) => x.shipmentLineItemId && x.quantity > 0);
             if (cappedItems.length > 0) {
-              await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: cappedItems });
+              await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: cappedItems, op: receiveOp, stage: "receive_capped" });
               receivedItemsForLog = cappedItems;
             }
             if (overflowMap.size > 0) {
@@ -1604,7 +1610,7 @@ export function InboundListScreen({
         }
 
         if (finalize && rejectedItems.length > 0) {
-          await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: rejectedItems });
+          await receiveShipmentWithFallbackV2({ shipmentId: shipment.id, items: rejectedItems, op: receiveOp, stage: "reject" });
           const originLocationId = String(transferForShipment?.originLocationId || transferForShipment?.origin?.location?.id || inbound?.selectedOriginLocationId || "").trim() || null;
           if (originLocationId) {
             rejectedDeltas = rejectedItems.map((rejected) => {
@@ -1711,11 +1717,17 @@ export function InboundListScreen({
         const allInventoryItemIdsMulti = [...new Set(rows.map((r) => String(r.inventoryItemId || "").trim()).filter(Boolean))];
         const overflowMap = new Map();
         const multiReceivedDeltas = [];
+        // @idempotent の操作は配送ごと（配送 + 伝票を読んだときの数。docs/IDEMPOTENT_MIGRATION.md 4.4）
+        const receiveOpByShip = new Map();
+        byShipment.forEach((sRows, sid) => {
+          receiveOpByShip.set(sid, buildShipmentReceiveOperation({ kind: INBOUND_RECEIVE_KIND, shipmentId: sid, readLines: sRows }));
+        });
         for (const [sid, sRows] of byShipment) {
           const plannedItems = plannedByShip.get(sid) || [];
           if (plannedItems.length === 0) continue;
+          const receiveOp = receiveOpByShip.get(sid);
           try {
-            await receiveShipmentWithFallbackV2({ shipmentId: sid, items: plannedItems });
+            await receiveShipmentWithFallbackV2({ shipmentId: sid, items: plannedItems, op: receiveOp, stage: "receive_v2" });
             for (const p of plannedItems) {
               const row = rowByLineId.get(String(p.shipmentLineItemId || "").trim());
               if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
@@ -1749,7 +1761,8 @@ export function InboundListScreen({
                 const errMsg = actResultMulti?.message || "在庫の有効化に失敗しました";
                 throw new Error(`入庫先で在庫を有効化できませんでした。${errMsg} しばらくしてから再度「確定」を押してください。`);
               }
-              await receiveShipmentWithFallbackV2({ shipmentId: sid, items: plannedItems });
+              // 在庫が無いと断られたあとに同じ中身で送り直すので回を増やす
+              await receiveShipmentWithFallbackV2({ shipmentId: sid, items: plannedItems, op: receiveOp, stage: "receive_v2", round: "ns1" });
               for (const p of plannedItems) {
                 const row = rowByLineId.get(String(p.shipmentLineItemId || "").trim());
                 if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
@@ -1774,7 +1787,7 @@ export function InboundListScreen({
               return { shipmentLineItemId, quantity: deltaPlanned };
             }).filter((x) => x.shipmentLineItemId && x.quantity > 0);
             if (cappedItems.length > 0) {
-              await receiveShipmentWithFallbackV2({ shipmentId: sid, items: cappedItems });
+              await receiveShipmentWithFallbackV2({ shipmentId: sid, items: cappedItems, op: receiveOp, stage: "receive_capped" });
               for (const p of cappedItems) {
                 const row = sRows.find((r) => String(r.shipmentLineItemId || "").trim() === String(p.shipmentLineItemId || "").trim());
                 if (row) multiReceivedDeltas.push({ inventoryItemId: String(row.inventoryItemId || "").trim(), delta: p.quantity });
@@ -1813,7 +1826,7 @@ export function InboundListScreen({
         }
         for (const [sid, rejItems] of rejectedByShip) {
           if (!finalize || rejItems.length === 0) continue;
-          await receiveShipmentWithFallbackV2({ shipmentId: sid, items: rejItems });
+          await receiveShipmentWithFallbackV2({ shipmentId: sid, items: rejItems, op: receiveOpByShip.get(sid), stage: "reject" });
         }
         const originLocationId = String(transferForShipment?.originLocationId || transferForShipment?.origin?.location?.id || inbound?.selectedOriginLocationId || "").trim() || null;
         if (originLocationId && finalize) {

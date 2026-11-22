@@ -116,6 +116,30 @@
 
 **まだ付けていない所**: POS 入庫（3 段目）・POS 出庫（4 段目）・使っていないコード（5 段目）。
 
+### D3f. POS 入庫の受け取り・有効化に `@idempotent` を付ける（2026-11-23・3 段目）
+
+設計 [`IDEMPOTENT_MIGRATION.md`](./IDEMPOTENT_MIGRATION.md) の 4.4（G・H）・4.3（F の入庫）と 5 章の 3 段目。
+
+| 層 | 方針 |
+|----|------|
+| 部品 | 受け取り（`inventoryShipmentReceive`）は `extensions/common/shipmentReceive.js` の 1 つにまとめた。入庫（`inboundApi.js`）と出庫の「全部拒否で戻す」（`ModalOutbound.jsx`）の 2 つの写しはこれを呼ぶだけ。250 件ずつに分ける・reason なしで送り直す、は前の出庫の写しと同じ（入庫の写しは前は分けていなかった。250 件を超えると Shopify に断られていた） |
+| 消した道 | 毎回まず試していた `inventoryShipmentReceiveItems`（2026-01 に無い mutation。毎回エラーになってから `inventoryShipmentReceive` に進んでいた） |
+| 操作の種類 | 入庫 `inbound_receive`・出庫の全部拒否 `outbound_reject_all` |
+| 操作の ID | 配送の ID + `#` + **伝票を読んだときの各明細の「ID:受け取り済み:拒否済み」**（順番によらない）。入庫は確定のあと伝票を読み直すまでロックを外さない（`receiveReloadGate.js`）ので、読み直したあとは受け取り済みが変わって新しいキー、読み直す前の押し直し（応答なし・時間切れのあと）だけ同じキーになる |
+| 段・チャンク | `receive_v2`・`receive_capped`（予定を超えた分を外して送り直す）・`reject`（不足分の拒否）。reason なしで送り直すときは `receive_v2b`（ほかは `<段>_b`）。チャンクは 250 件ずつ `i/n` |
+| 回 | 呼び出し側の回（`main`、在庫が無いと断られて有効化したあとは `ns1`）+ `.` + **送る明細の指紋**（ID:数:reason） |
+| 返事 | `IDEMPOTENCY_CONCURRENT_REQUEST` は 1 秒・2 秒・4 秒待って同じキー（全部で 20 秒まで）。待ち切った・`IDEMPOTENCY_KEY_PARAMETER_MISMATCH` は `ShipmentReceiveIdempotencyError`（送り直さない）。文は画面の「在庫が無い」「数が多すぎる」の見分けの文に当たらないようにしてある（当たると有効化や予定を外す道へ進んでしまう） |
+| 有効化（F・入庫） | `inventoryActivate` に `@idempotent`。種類 `pos_activate`、操作の ID は**有効化の呼び出しごとに新しい ID**、段 `activate:<置き場所>:<商品>:-:-`（サーバーと同じ形）、回は `main`・はっきり断られるたびに `.rejN`。通信の失敗・処理中の送り直しは同じキー。中身の違いはその商品の失敗にする |
+| 版 | **2026-01 のまま** |
+
+**設計と違えたところ（1 つ）**: 設計 4.3 の F（入庫）は「親の操作の ID」でした。実装は**有効化の呼び出しごとの ID**にしました。POS の有効化は初めの数を渡さないので、2 回動いても在庫の数は変わらず（「もう使える」になるだけ）、親の ID を有効化の部品まで通す手間に見合わないためです。
+
+**守りは足すだけ**: 送る数は「受け取りたい数 − もう受け取った数」の差分、確定のあとの読み直しのロック、履歴の `appEventId`（`buildInboundReceiveLogAppEventId`）はそのまま。キーは 24 時間しか効かない。2 台の端末で同じ配送を受け取るのは今も防げない（端末ごとに読んだ数が同じなら同じキーになるので、同じ中身なら Shopify が 1 回にする。推測）。
+
+**見張り**: `tests/idempotent-directive-guard.test.mjs` の `PENDING` を「ファイル → mutation → 数」にした。5 段目（#109）で消える所は `PENDING_UNTIL_STAGE_5` に持ち、「全部残る」か「全部消える」の両方を通す（#109 とこの段のどちらが先に main に入っても、見張りを直さずに通る）。
+
+**まだ付けていない所**: POS 出庫（4 段目。`ModalOutbound.jsx` の作成・下書き・Shipment・明細・有効化）。
+
 ## D4. POS GraphQL は短 timeout、サーバーは 429 リトライ
 
 | クライアント | timeout | 429 retry |

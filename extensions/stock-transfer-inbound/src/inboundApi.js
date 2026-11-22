@@ -1,4 +1,6 @@
 import { adminGraphql, assertNoUserErrors } from "./inboundHelpers.js";
+import { newAdhocOperationId, receiveShipmentIdempotent } from "../../common/shipmentReceive.js";
+import { buildActivateKeyForPos } from "../../common/activateIdempotency.js";
 import { ensureInventoryActivatedWithSkuBarcodeRetry as runInventoryActivateSkuRetry } from "../../common/inventoryActivateRetry.js";
 
 const SHOPIFY = globalThis?.shopify ?? {};
@@ -330,37 +332,17 @@ export async function fetchInventoryShipmentEnriched(id, opts = {}) {
   return { id: s.id, status: s.status, tracking: s.tracking ?? null, lineItems, pageInfo: s.lineItems?.pageInfo || { hasNextPage: false, endCursor: null } };
 }
 
-export async function receiveShipmentWithFallbackV2({ shipmentId, items }) {
-  const clean = (items || [])
-    .map((x) => ({ shipmentLineItemId: x.shipmentLineItemId || x.id || x.lineItemId || null, quantity: Number(x.quantity || 0), reason: String(x.reason || "ACCEPTED").trim().toUpperCase() }))
-    .filter((x) => x.shipmentLineItemId && x.quantity > 0);
-  if (clean.length === 0) return null;
-  try {
-    const m1 = `#graphql mutation ReceiveItems($id: ID!, $items: [InventoryShipmentReceiveItemInput!]!) { inventoryShipmentReceiveItems(id: $id, items: $items) { inventoryShipment { id status } userErrors { field message } } }`;
-    const d1 = await adminGraphql(m1, { id: shipmentId, items: clean });
-    assertNoUserErrors(d1?.inventoryShipmentReceiveItems, "inventoryShipmentReceiveItems");
-    return d1?.inventoryShipmentReceiveItems?.inventoryShipment ?? null;
-  } catch (e) {
-    const msg = String(e?.message ?? e);
-    if (!/doesn't exist|Field .* doesn't exist|undefined/i.test(msg)) throw e;
-  }
-  try {
-    const m2 = `#graphql mutation Receive($id: ID!, $lineItems: [InventoryShipmentReceiveItemInput!]!) { inventoryShipmentReceive(id: $id, lineItems: $lineItems) { inventoryShipment { id status } userErrors { field message } } }`;
-    const d2 = await adminGraphql(m2, { id: shipmentId, lineItems: clean });
-    assertNoUserErrors(d2?.inventoryShipmentReceive, "inventoryShipmentReceive");
-    return d2?.inventoryShipmentReceive?.inventoryShipment ?? null;
-  } catch (e) {
-    const msg = String(e?.message ?? e);
-    if (/reason/i.test(msg) && /(not defined by type|Unknown field|invalid)/i.test(msg)) {
-      const noReason = clean.map(({ shipmentLineItemId, quantity }) => ({ shipmentLineItemId, quantity }));
-      const m2b = `#graphql mutation Receive($id: ID!, $lineItems: [InventoryShipmentReceiveItemInput!]!) { inventoryShipmentReceive(id: $id, lineItems: $lineItems) { inventoryShipment { id status } userErrors { field message } } }`;
-      const d2b = await adminGraphql(m2b, { id: shipmentId, lineItems: noReason });
-      assertNoUserErrors(d2b?.inventoryShipmentReceive, "inventoryShipmentReceive");
-      return d2b?.inventoryShipmentReceive?.inventoryShipment ?? null;
-    }
-    throw e;
-  }
+/**
+ * 配送の受け取り。@idempotent 付きの共通の部品（extensions/common/shipmentReceive.js）を使う。
+ * 前に毎回まず試していた inventoryShipmentReceiveItems（2026-01 に無い mutation）の道は消した（docs/IDEMPOTENT_MIGRATION.md 2 章・3 段目）。
+ * @param {{ shipmentId: string, items: Array, op?: object, stage?: string, round?: string }} p
+ *   op は buildShipmentReceiveOperation（配送 + 読んだときの受け取り済みの数）。stage・round は 4.4 の表
+ */
+export async function receiveShipmentWithFallbackV2({ shipmentId, items, op, stage, round }) {
+  return receiveShipmentIdempotent({ adminGraphql, assertNoUserErrors, shipmentId, items, op, stage, round });
 }
+
+export { buildShipmentReceiveOperation, INBOUND_RECEIVE_KIND } from "../../common/shipmentReceive.js";
 
 export {
   buildTransferAdjustAppEventId,
@@ -385,6 +367,9 @@ export async function ensureInventoryActivatedAtLocation({ locationId, inventory
   const activated = [];
   const errors = [];
   const toProcess = [];
+  // この呼び出しの操作の ID（呼ぶたびに新しい。同じ呼び出しの中の送り直しだけ同じキー）。
+  // 初めの数を渡さない有効化は 2 回しても在庫の数は変わらないので、親の操作の ID は使わない（DECISIONS D3f）
+  const activateOperationId = newAdhocOperationId();
   const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // フェーズ1: tracked と inventoryLevel の状態を一括確認（50件ずつ）
@@ -437,6 +422,8 @@ export async function ensureInventoryActivatedAtLocation({ locationId, inventory
 
     let lastError = null;
     let succeeded = false;
+    // はっきり断られた回数（キーの回）。商品ごとに数える
+    let rejections = 0;
 
     for (let attempt = 1; attempt <= maxAttempts && !succeeded; attempt++) {
       try {
@@ -472,20 +459,33 @@ export async function ensureInventoryActivatedAtLocation({ locationId, inventory
         }
 
         // inventoryActivate でロケーションに在庫レベルを作成
+        // @idempotent: 通信の失敗の送り直しは同じキー、はっきり断られるたびに .rejN（docs/IDEMPOTENT_MIGRATION.md 4.3 の F）
         const actRes = await adminGraphql(
-          `#graphql mutation Activate($inventoryItemId: ID!, $locationId: ID!) {
-            inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
+          `#graphql mutation Activate($inventoryItemId: ID!, $locationId: ID!, $idempotencyKey: String!) {
+            inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) @idempotent(key: $idempotencyKey) {
               inventoryLevel { id }
               userErrors { field message }
             }
           }`,
-          { inventoryItemId, locationId }
+          {
+            inventoryItemId,
+            locationId,
+            idempotencyKey: buildActivateKeyForPos({ operationId: activateOperationId, locationId, inventoryItemId, rejections }),
+          }
         );
         const payload = actRes?.inventoryActivate;
         const userErrs = payload?.userErrors ?? [];
 
         if (userErrs.length > 0) {
           const errMsg = userErrs.map((e) => e?.message).filter(Boolean).join(" / ") || "unknown";
+          // 中身の違い（同じキーで違う中身）は作りの間違い。新しいキーで送り直さず、その商品は失敗にする
+          if (/same idempotency key (cannot be|was) used with different|IDEMPOTENCY_KEY_PARAMETER_MISMATCH/i.test(errMsg)) {
+            errors.push({ inventoryItemId, message: `有効化の結果を確かめられませんでした（IDEMPOTENCY_KEY_PARAMETER_MISMATCH）` });
+            break;
+          }
+          // 処理中なら同じキーで待って送り直す（回を増やさない）
+          const concurrent = /request is currently in progress|another request with the same idempotency key|IDEMPOTENCY_CONCURRENT_REQUEST/i.test(errMsg);
+          if (!concurrent) rejections++;
           // 既に有効化されている場合は成功とみなす（inventoryLevelが存在するか確認）
           if (/already|既に|activated|在庫レベル|already has/i.test(errMsg)) {
             const check = await adminGraphql(
