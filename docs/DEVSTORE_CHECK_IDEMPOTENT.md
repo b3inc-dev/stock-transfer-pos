@@ -1,6 +1,6 @@
-# 開発ストアでの確かめ方 — `@idempotent` の PR（#107・#108・#109・#110）を main に入れる前
+# 開発ストアでの確かめ方 — `@idempotent` の PR（#107・#108・#109・#110・#112）を main に入れる前
 
-T さん 11/23 5:10 の決定: **#107・#108・#109 は、開発ストアで 7 つのタイルを全部確かめてから main に入れる。** 2 段目の #110 も同じ確かめに入れます。
+T さん 11/23 5:10 の決定: **#107・#108・#109 は、開発ストアで 7 つのタイルを全部確かめてから main に入れる。** 2 段目の #110・3 段目の #112 も同じ確かめに入れます。
 この文書はその手順だけです。マージ・本番に出す・スイッチをオンにする・Render の値を変える操作はしていません。
 
 - **【T】** は T さんがやるところ、**【係】** はエージェントがやるところです。
@@ -12,7 +12,8 @@ T さん 11/23 5:10 の決定: **#107・#108・#109 は、開発ストアで 7 �
 | #107 | 設計（docs だけ） | `main` | `52e5f43` | — |
 | #108 | ★ キーの部品・サーバー apply-change の `inventorySetQuantities`・`inventoryActivate` に `@idempotent` | `main` | `e34783e` | POS のロス・仕入・調整・棚卸・入庫補正（サーバー） |
 | #109 | 呼び出し元の無い在庫の書き込みのコードを消す | `main` | `3b91804` | POS の拡張 6 つ（ロス・調整・発注・仕入・棚卸・出庫）のビルド |
-| #110 | ★ 管理画面の棚卸・発注・仕入れに `@idempotent` | #108 のブランチ | `798f142` | 管理画面（サーバー） |
+| #110 | ★ 管理画面の棚卸・発注・仕入れに `@idempotent` | #108 のブランチ | `50a6fbc` | 管理画面（サーバー） |
+| #112 | ★ POS 入庫の受け取り・有効化に `@idempotent`・`inventoryShipmentReceiveItems` の道を消す | #110 のブランチ | `fd45f3e` | POS の入庫・出庫の「強制キャンセル」（拡張） |
 
 どれも **API の版は 2026-01 のまま**です（2026-01 では `@idempotent` は付けても付けなくてもよい）。なので「動きが前と同じか」「在庫・移管が 1 回だけ動くか」を確かめます。
 
@@ -58,14 +59,15 @@ Shopify の説明では、`app dev` の変更は**選んだ開発ストアだけ
 
 ```bash
 git fetch origin
-git switch -c local/idem-devstore origin/claude/idempotent-stage2-admin   # #108 + #110
+git switch -c local/idem-devstore origin/claude/idempotent-stage3-inbound  # #108 + #110 + #112
 git merge --no-edit origin/claude/idempotent-stage5-unused                 # #109
 git merge --no-edit origin/claude/idempotent-migration-design              # #107（docs だけ）
 git log --oneline -6
 ```
 
-- 2026-11-23 に試した結果: 3 つはぶつからずにまとまる。
-- まとめたあと `node --experimental-strip-types --test tests/*.test.mjs` は、付け忘れの見張りが 1 つ失敗する（#109 で消えた所が `PENDING` に残るため）。手元の確かめでは気にしなくてよい。main に入れるときは `PENDING` を `extensions/stock-transfer-inbound/src/inboundApi.js: 3`・`extensions/stock-transfer-tile/src/ModalOutbound.jsx: 8` の 2 つだけにする（後から入れる方の PR で直す）。ほかの失敗 2 つ（`vite` が読めない）は前からのもの。
+- 2026-11-23 に試した結果: ぶつからずにまとまる。
+- まとめたあと `node --experimental-strip-types --test tests/*.test.mjs` の失敗は 2 つ（`vite` が読めない前からのもの）だけ。付け忘れの見張りは #112 で「#109 の前でも後でも通る」形にしたので、`PENDING` を直す必要はない。
+- 開発ストアで確かめるのは**全部をまとめた形**、main には **1 つずつ**入ります（8 章）。途中の形はまとめた形の一部なので危険は小さい（推測）。
 - **このブランチは push しない。** 終わったら消す（7 章）。
 
 ### 3.3 【T】手元のデータベースと設定
@@ -95,9 +97,10 @@ npx prisma migrate deploy   # 手元のデータベースに表を作る
 ### 4.1 【T】公開用の toml を選んで `app dev`
 
 ```bash
-npm run config:use -- shopify.app.public.toml
 npx shopify app dev --config shopify.app.public.toml --store <3.1 のドメイン>
 ```
+
+- `npm run config:use` は打たない（`--config` で渡すので要らない。打つと手元の既定の toml の選びが公開用のまま残る）。
 
 - 画面に出る **アプリの名前が「POS Stock」**、**ストアが開発ストア**であることを確かめる。違ったら Ctrl+C で止める。
 - 画面に出るトンネルの URL（`https://…trycloudflare.com` のような形。推測で、CLI の版で出方が違う）を控える。決まった URL を使いたいときは自分のトンネルを作って `--tunnel-url` で渡す。
@@ -118,6 +121,9 @@ const PROD_APP_URL_PUBLIC = "https://<4.1 のトンネルの URL のホスト>";
 - 保存すると `app dev` が拡張を作り直す。POS のアプリでタイルを開き直す（開発のプレビューの開き方は `app dev` の画面の案内どおり）。
 - **確かめ**: POS でロスの画面を開き、何か 1 つ読み込ませる → `app dev` の画面に `/api/…` の行が出ること。出なければ、まだ Render を呼んでいるので先へ進まない。
 - **このファイルはコミットしない。deploy しない。** 終わったら必ず戻す（7 章）。
+- **書きかえている間は `npm run deploy:public`・`npm run deploy:inhouse`・`shopify app deploy` を打たない。** `deploy:public` は見張り（`scripts/verify-app-mode.js`）が URL の違いで止めるが、**`deploy:inhouse` は止まらない**（自社用の URL は変えていないので通る）。打つと、手元でまとめた #108〜#112 が **Ciara の店に出てしまう**。
+- `git add -A`・`git commit -a` をしない（このファイルが入ってしまう）。
+- `app dev` を止めて動かし直すと、トンネルの URL が変わることがある（推測・CLI の版による）。そのときは 4.3 をやり直す（変わったかは `app dev` の画面の URL で見る）。
 
 ---
 
@@ -133,8 +139,8 @@ const PROD_APP_URL_PUBLIC = "https://<4.1 のトンネルの URL のホスト>";
 | 2 | **仕入** | 商品 A を 2 個で仕入れを作って確定 → その仕入れをキャンセル。★ 確定で押し直しの試し | apply-change（#108）`purchase_entry`・`purchase_cancel` | +2 が 1 回、キャンセルで −2 が 1 回 |
 | 3 | **調整** | 商品 B を「今の数 + 3」に調整 → 確定。商品 **C をロケーション 2** で 5 に調整（在庫の記録が無い所） | apply-change（#108）`adjustment`・有効化（`inventoryActivate`） | B が 1 回だけ変わる。C がロケーション 2 に付いて 5 が 1 回だけ |
 | 4 | **棚卸** | 1 つの商品グループの実数を入れて確定。★ 押し直しの試し。（あれば）251 件以上のグループを確定 | apply-change（#108）`inventory_count`（今の数と照らして書く） | 差のある商品だけ実数に 1 回。251 件以上でも全部入る |
-| 5 | **入庫** | 6 の出庫をロケーション 2 で受け取る: 一部だけ受け取り → 残りを受け取り。予定より 1 個多く受け取って入庫補正 | 受領は拡張から（3 段目でキーを付ける・今は前のまま）。入庫補正は apply-change（#108）`inbound_transfer` | 受け取った数だけ 1 回。補正の 1 個が 1 回 |
-| 6 | **出庫** | ロケーション 1 → 2 に商品 A・B を 1 個ずつ出庫して確定。下書きで保存 → 開き直して明細を 1 つ足す | 拡張から（4 段目でキーを付ける・今は前のまま）。#109 で使っていない関数を消した | 管理画面 → 在庫移管 に移管が **1 つだけ**。下書きの明細が足される |
+| 5 | **入庫** | 6 の出庫をロケーション 2 で受け取る: 一部だけ受け取り → 残りを受け取り。予定より 1 個多く受け取って入庫補正。不足を拒否して確定。商品 C（ロケーション 2 に在庫の記録が無い）を含む配送も 1 つ。★ 確定で押し直しの試し（伝票の読み直しが終わってから押す） | 受領は拡張から `inventoryShipmentReceive`（#112・`@idempotent`。`inventoryShipmentReceiveItems` はもう送らない）。在庫が無いと断られたら有効化して回 `ns1` で送り直す。入庫補正は apply-change（#108）`inbound_transfer` | 受け取った数だけ 1 回。補正の 1 個が 1 回。拒否の数が 1 回。C は有効化されて 1 回 |
+| 6 | **出庫** | ロケーション 1 → 2 に商品 A・B を 1 個ずつ出庫して確定。下書きで保存 → 開き直して明細を 1 つ足す。別の出庫を 1 つ作って「強制キャンセル」（全部拒否で戻す） | 作成は拡張から（4 段目でキーを付ける・今は前のまま）。#109 で使っていない関数を消した。強制キャンセルの受け取りは #112（`outbound_reject_all`） | 管理画面 → 在庫移管 に移管が **1 つだけ**。下書きの明細が足される。強制キャンセルで出庫元の在庫が 1 回だけ戻る |
 | 7 | **発注** | POS で発注を 1 件作る → 管理画面の「発注」でその発注を承認 → 承認を取り消す → もう一度承認 | POS は記録だけ（#109 で使っていない関数を消した）。承認は管理画面（#110）`inventoryTransferCreateAsReadyToShip` | 1 回目の承認で移管が 1 つ。取り消して承認し直すと**新しい移管**がもう 1 つ（前と同じ動き） |
 
 ### 5.1 管理画面（#110）
@@ -144,7 +150,10 @@ const PROD_APP_URL_PUBLIC = "https://<4.1 のトンネルの URL のホスト>";
 | 8 | 棚卸 | 4 の棚卸の別のグループを管理画面で「このグループを確定」→「リセット」→ **もう一度「このグループを確定」** | 確定で実数に、リセットで元の数に、**3 回目の確定でまた実数に**なる（戻したあとの送り直しが書かれる） |
 | 9 | 棚卸 | 「一括確定」→「一括リセット」 | 1 回ずつ動く |
 | 10 | 仕入 | 未入庫の仕入れを「入庫確定」→「キャンセル」 | +数が 1 回、−数が 1 回 |
-| 11 | 押し直し | 8 か 10 の確定を押した直後に、ブラウザの開発ツールでオフラインにする → 戻して同じ画面でもう一度押す | 在庫が 1 回分だけ動く。エラーの文に「Shopify で在庫（または移管）を確かめてから押し直す」が出る |
+| 11 | 押し直し | 8 か 10 の確定を押した直後に、ブラウザの開発ツールでオフラインにする → 通信のエラーが出る → オンラインに戻す → **画面を読み込み直さずに**、同じ画面でもう一度押す | 在庫（または移管）が **1 回分だけ**動く。オフラインのときは画面がサーバーの答えを受け取れないので、「Shopify で確かめてから押し直す」の文は**出ない**（その文はサーバーが「分からない」を返したときだけ出る） |
+| 12 | 対象ごとの opKey | 仕入れ X の「入庫確定」を押した直後にオフライン → 通信のエラー → オンラインに戻す → **画面を読み込み直さずに**別の仕入れ Y を「入庫確定」（成功）→ そのあと X をもう一度「入庫確定」 | X の在庫は **1 回分だけ**増える（Y の成功で X の opKey が変わらないこと。#110 の見直し B の直し）。Y も 1 回分 |
+
+- **画面を読み込み直すと opKey が新しくなる**ので、読み込み直してから押し直すと二重になりうる（仕入れは足し引き）。11・12 は必ず読み込み直さずに行う。読み込み直してしまったときは、押す前に Shopify の「調整履歴」で反映されているかを見る。
 
 ### 5.2 どのタイルでも
 
@@ -162,7 +171,8 @@ const PROD_APP_URL_PUBLIC = "https://<4.1 のトンネルの URL のホスト>";
 | 確定のたびに `/api/inventory/apply-change` の行（ロス・仕入・調整・棚卸・入庫補正） | `IDEMPOTENCY_KEY_PARAMETER_MISMATCH`・`IDEMPOTENCY_CONCURRENT_REQUEST` |
 | 管理画面の確定のたびに `[inventory-count] action actionType=confirm_stocktake_group` など | `[inventory-count] inventorySetQuantities uncertain` |
 | | `[inventory-set-quantities-server] ambiguous chunk`・`ロールバック失敗` |
-| | `[executePurchaseReceive] uncertain`・`[executePurchaseCancel] uncertain` |
+| | `[executePurchaseReceive] uncertain`・`[executePurchaseCancel] uncertain`・`metafieldsSet failed after` |
+| | `inventoryShipmentReceiveItems`（#112 で送らなくなった） |
 | | `@idempotent` が要る・知らない directive といったエラー（2026-01 では出ないはず） |
 | | `Invalid session token`（4.3 の URL の書きかえが合っていない） |
 
@@ -186,14 +196,14 @@ Render → `pos-stock`（公開用）・`pos-stock-ciara`（自社用）→ **Ev
 ## 7. 終わったら
 
 1. 【T】`app dev` を Ctrl+C で止める。
-2. 【T】`npx shopify app dev clean --config shopify.app.public.toml --store <3.1 のドメイン>`（開発ストアを、出している版の POS Stock に戻す）。
-3. 【T】`git checkout -- extensions/common/appUrl.js`（4.3 の書きかえを戻す）→ `git status` で変わったファイルが無いこと。
+2. 【T】`npx shopify app dev clean --config shopify.app.public.toml --store <3.1 のドメイン>`（開発ストアを、出している版の POS Stock に戻す）。Shopify の説明では「出している版に無い拡張・設定と、それに付くデータは消える」。今回は toml と拡張の設定を変えていないので、消えるものは無いはず（推測）。
+3. 【T】`git checkout -- extensions/common/appUrl.js`（4.3 の書きかえを戻す）→ **`git diff --exit-code extensions/common/appUrl.js`**（何も出ずに終われば戻っている）→ `git status` で変わったファイルが無いこと。
 4. 【T】`git switch main && git branch -D local/idem-devstore`。`docker rm -f pos-stock-dev-db`。`.env` を消す。
 5. 【T】#79 に結果を 1 行（下の形）。
 
 ```text
-【確かめ】開発ストア bbbincbbb・#107+#108+#109+#110（先頭 52e5f43 / e34783e / 3b91804 / 798f142）
-1 ロス OK / 2 仕入 OK / 3 調整 OK / 4 棚卸 OK / 5 入庫 OK / 6 出庫 OK / 7 発注 OK / 8〜11 管理画面 OK
+【確かめ】開発ストア bbbincbbb・#107+#108+#109+#110+#112（先頭 52e5f43 / e34783e / 3b91804 / 50a6fbc / fd45f3e）
+1 ロス OK / 2 仕入 OK / 3 調整 OK / 4 棚卸 OK / 5 入庫 OK / 6 出庫 OK / 7 発注 OK / 8〜12 管理画面 OK
 押し直し（★）: 在庫は 1 回 / ログ: IDEMPOTENCY_ なし / Render: 新しい Deploy なし
 ```
 
@@ -208,10 +218,11 @@ Render → `pos-stock`（公開用）・`pos-stock-ciara`（自社用）→ **Ev
 | 1 | #107 を main へ | docs だけ |
 | 2 | #108 を main へ | Render `pos-stock`（と、main を見ていれば `pos-stock-ciara`）にサーバーが出る。拡張は変わらない |
 | 3 | #110 の base を main に変えて、main へ | 管理画面のサーバーが出る |
-| 4 | #109 を main に合わせ、`PENDING` を 3.2 の 2 つにしてから main へ | 拡張のコードだけが変わる（Render は動きが同じ） |
-| 5 | 拡張を出すとき（4 のあと・別に承認） | `npm run deploy:public`・`npm run deploy:inhouse` は #109 の拡張を出すときだけ。1〜3 はサーバーだけなので要らない |
+| 4 | #112 の base を main に変えて、main へ | 拡張のコードだけが変わる（Render は動きが同じ） |
+| 5 | #109 を main に合わせて main へ（見張りは直さなくてよい） | 拡張のコードだけが変わる |
+| 6 | 拡張を出すとき（4・5 のあと・別に承認） | `npm run deploy:public`・`npm run deploy:inhouse` は #112・#109 の拡張を出すときだけ。1〜3 はサーバーだけなので要らない |
 
-- 1 つずつ入れて、自社用（Ciara）で 1 日以上見てから次へ（設計 5 章の推奨）。
+- 1 つずつ入れて、自社用（Ciara）で 1 日以上見てから次へ（設計 5 章の推奨）。ただし `pos-stock-ciara` が main を見て自動で出るかは未確認。**#108 を入れる前に Render → `pos-stock-ciara` → Settings の Branch と Auto-Deploy を確かめる**（見ていなければ Ciara では何も変わらないので、「Ciara で見る」はできない）。
 - 各マージのあと、Render の Logs で `Your service is live` と、6.1 の「出てはいけない」行が無いことを見る。
 - Render で確かめる道（費用がかかる。承認が要る）: `pos-stock` と同じ設定の別のサービスを作り、ブランチ `local/idem-devstore` を push して出し、開発ストア用の別のアプリ（Dev Dashboard で作る）の URL をそこへ向ける。この手順書では使わない。
 
