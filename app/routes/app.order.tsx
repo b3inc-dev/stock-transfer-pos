@@ -2324,6 +2324,7 @@ export default function OrderPage() {
                     </label>
                     <input
                       type="date"
+                      className="Admin-input"
                       value={arrivalDate}
                       onChange={(e) => setArrivalDate(e.target.value)}
                       style={{
@@ -2348,6 +2349,7 @@ export default function OrderPage() {
                     </label>
                     <input
                       type="date"
+                      className="Admin-input"
                       value={inspectionDate}
                       onChange={(e) => setInspectionDate(e.target.value)}
                       style={{
@@ -2450,7 +2452,7 @@ export default function OrderPage() {
                   </div>
                 </div>
                 <div style={{ maxHeight: "400px", overflowY: "auto" }}>
-                  <table
+                  <table className="History-table"
                     style={{
                       width: "100%",
                       borderCollapse: "collapse",
@@ -2540,7 +2542,7 @@ export default function OrderPage() {
                           style={{ borderBottom: "1px solid #eee" }}
                         >
                           {modalEntry?.status === "pending" && (
-                            <td
+                            <td data-label="選択"
                               style={{
                                 padding: "8px",
                                 borderRight: "1px solid #eee",
@@ -2554,7 +2556,7 @@ export default function OrderPage() {
                               />
                             </td>
                           )}
-                          <td
+                          <td data-label="商品名"
                             style={{
                               padding: "8px",
                               borderRight: "1px solid #eee",
@@ -2562,7 +2564,7 @@ export default function OrderPage() {
                           >
                             {item.title || "（商品名なし）"}
                           </td>
-                          <td
+                          <td data-label="SKU"
                             style={{
                               padding: "8px",
                               borderRight: "1px solid #eee",
@@ -2570,7 +2572,7 @@ export default function OrderPage() {
                           >
                             {item.sku || "（SKUなし）"}
                           </td>
-                          <td
+                          <td data-label="JAN"
                             style={{
                               padding: "8px",
                               borderRight: "1px solid #eee",
@@ -2578,7 +2580,7 @@ export default function OrderPage() {
                           >
                             {item.barcode || "（JANなし）"}
                           </td>
-                          <td
+                          <td data-label="オプション1"
                             style={{
                               padding: "8px",
                               borderRight: "1px solid #eee",
@@ -2586,7 +2588,7 @@ export default function OrderPage() {
                           >
                             {item.option1 || "-"}
                           </td>
-                          <td
+                          <td data-label="オプション2"
                             style={{
                               padding: "8px",
                               borderRight: "1px solid #eee",
@@ -2594,7 +2596,7 @@ export default function OrderPage() {
                           >
                             {item.option2 || "-"}
                           </td>
-                          <td
+                          <td data-label="オプション3"
                             style={{
                               padding: "8px",
                               borderRight: "1px solid #eee",
@@ -2602,7 +2604,7 @@ export default function OrderPage() {
                           >
                             {item.option3 || "-"}
                           </td>
-                          <td style={{ padding: "8px", textAlign: "right" }}>
+                          <td data-label="数量" style={{ padding: "8px", textAlign: "right" }}>
                             {item.quantity || "-"}
                           </td>
                         </tr>
