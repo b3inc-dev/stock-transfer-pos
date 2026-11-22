@@ -136,6 +136,74 @@ async function readChunkSnapshot(
   return { ok: true, snapshot };
 }
 
+/** 書く直前の今の数をまとめて読むときの 1 回の件数（クエリの重さを抑える） */
+const LIVE_READ_BATCH = 50;
+
+/**
+ * 棚卸の確定（compareWithLive）用: チャンクの商品の今の数を、nodes でまとめて読む。
+ * 読み方の決まりは readAvailableFromResponse と同じ（在庫の記録が無いときだけ 0、それ以外の失敗は「読めなかった」）。
+ * 1 件でも読めなければ失敗を返す（0 にしない）。
+ */
+async function readChunkLive(
+  admin: { graphql: AdminGraphql },
+  locationGid: string,
+  inventoryItemGids: string[]
+): Promise<
+  | { ok: true; snapshot: ChunkSnapshot }
+  | { ok: false; retryable: boolean; error: string; inventoryItemId: string }
+> {
+  const snapshot: ChunkSnapshot = [];
+  for (let i = 0; i < inventoryItemGids.length; i += LIVE_READ_BATCH) {
+    const ids = inventoryItemGids.slice(i, i + LIVE_READ_BATCH);
+    let response: Response;
+    let json: unknown;
+    try {
+      ({ response, json } = await graphqlWithRetry(admin, `#graphql
+          query LiveAvailable($ids: [ID!]!, $loc: ID!) {
+            nodes(ids: $ids) {
+              ... on InventoryItem {
+                id
+                inventoryLevel(locationId: $loc) {
+                  quantities(names: ["available"]) { name quantity }
+                }
+              }
+            }
+          }
+        `, { ids, loc: locationGid }));
+    } catch (e: unknown) {
+      return { ok: false, retryable: true, error: e instanceof Error ? e.message : String(e), inventoryItemId: ids[0] };
+    }
+    const body = (json && typeof json === "object" ? json : {}) as {
+      data?: { nodes?: unknown[] | null } | null;
+      errors?: unknown;
+    };
+    const nodes = body?.data?.nodes;
+    if (!response.ok || !Array.isArray(nodes) || nodes.length !== ids.length) {
+      // 形が違う・HTTP の失敗・errors だけ → 1 件目の読み方で理由を作る
+      const read = readAvailableFromResponse(response.ok, response.status, {
+        errors: body?.errors,
+        data: Array.isArray(nodes) ? {} : body?.data ?? null,
+      });
+      return {
+        ok: false,
+        retryable: read.ok ? true : read.retryable,
+        error: read.ok ? "今の在庫数の応答の形が違います" : read.error,
+        inventoryItemId: ids[0],
+      };
+    }
+    for (let k = 0; k < ids.length; k++) {
+      // 1 件ずつ、1 商品の応答と同じ形にして同じ決まりで読む
+      const read = readAvailableFromResponse(true, 200, {
+        errors: body?.errors,
+        data: { inventoryItem: nodes[k] as never },
+      });
+      if (!read.ok) return { ok: false, retryable: read.retryable, error: read.error, inventoryItemId: ids[k] };
+      snapshot.push({ inventoryItemId: ids[k], quantity: read.quantity });
+    }
+  }
+  return { ok: true, snapshot };
+}
+
 export type SetInventoryQuantitiesResult = {
   ok: boolean;
   invalidCount?: number;
@@ -158,18 +226,88 @@ export type SetInventoryQuantitiesResult = {
    */
   snapshotUnreadable?: boolean;
   retryable?: boolean;
+  /**
+   * compareWithLive のとき: 書く直前の今の数を読めなかったので、在庫を 1 件も動かさずに止めた。
+   * retryable が true なら、同じ内容で送り直してよい（在庫は動いていない）。
+   */
+  liveUnreadable?: boolean;
+  /**
+   * compareWithLive のとき: 読んでから書くまでに店で在庫が動いた（売れた・入庫した）商品。
+   * 上書きせずに残した（appliedInventoryItemIds には入れない）。1 件でもあれば partiallyApplied。
+   */
+  concurrentChangedInventoryItemIds?: string[];
 };
+
+export type SetInventoryQuantitiesOptions = {
+  /**
+   * true: 各チャンクを書く直前に今の数を読み、その数を changeFromQuantity に入れて書く（棚卸の確定）。
+   * - 今の数がもう目標の数なら書かない（入った扱い）
+   * - 読んでから書くまでに店で在庫が動くと Shopify が CHANGE_FROM_QUANTITY_STALE で 1 件も書かずに断る。
+   *   そのときは 1 回だけ読み直し、2 回の読みで数が変わった商品は上書きせずに残す（売れた分を消さない）
+   * - 今の数を読めなければ 0 にせず止める（1 チャンク目なら在庫は動かない）
+   * false（既定）: これまでどおり changeFromQuantity: null で書く。
+   */
+  compareWithLive?: boolean;
+};
+
+const CHANGE_FROM_QUANTITY_STALE = "CHANGE_FROM_QUANTITY_STALE";
+
+function hasStaleUserError(errs: GraphQLUserError[]): boolean {
+  return errs.some((e) => (e as GraphQLUserError & { code?: string | null }).code === CHANGE_FROM_QUANTITY_STALE);
+}
+
+/**
+ * compareWithLive の 1 チャンク分の書く内容を決める（Shopify を呼ばない。テストで直接確かめる）。
+ * - live が目標と同じ → skip（書かない・入った扱い）
+ * - それ以外 → changeFromQuantity = live で書く
+ * - previousLive が渡され、live と違う → conflict（読んでから書くまでに動いた。上書きしない）
+ */
+export function planCompareAndSetChunk(
+  chunk: Array<{ inventoryItemId: string; quantity: number }>,
+  live: Map<string, number>,
+  previousLive?: Map<string, number>
+): {
+  write: Array<{ inventoryItemId: string; quantity: number; changeFromQuantity: number }>;
+  skipped: string[];
+  conflicts: string[];
+} {
+  const write: Array<{ inventoryItemId: string; quantity: number; changeFromQuantity: number }> = [];
+  const skipped: string[] = [];
+  const conflicts: string[] = [];
+  for (const q of chunk) {
+    const now = live.get(q.inventoryItemId);
+    if (now == null) {
+      // 読めていない商品は書かない（呼び出し側で読めなかったときは先に止めている）
+      conflicts.push(q.inventoryItemId);
+      continue;
+    }
+    if (previousLive && previousLive.has(q.inventoryItemId) && previousLive.get(q.inventoryItemId) !== now) {
+      conflicts.push(q.inventoryItemId);
+      continue;
+    }
+    if (now === q.quantity) {
+      skipped.push(q.inventoryItemId);
+      continue;
+    }
+    write.push({ inventoryItemId: q.inventoryItemId, quantity: q.quantity, changeFromQuantity: now });
+  }
+  return { write, skipped, conflicts };
+}
 
 /**
  * 在庫数を指定値に設定（inventorySetQuantities）。250件超はチャンク分割。
  * チャンク N が失敗した場合、適用済みチャンク 1..N-1 を元の数量に戻すロールバックを試みる。
+ * options.compareWithLive（棚卸の確定）: 各チャンクを書く直前に今の数を読み、changeFromQuantity に入れて書く。
+ * 読んでから書くまでに動いた商品は上書きせず concurrentChangedInventoryItemIds に返す（partiallyApplied）。
  */
 export async function setInventoryQuantitiesServer(
   admin: { graphql: AdminGraphql },
   locationId: string,
   items: Array<{ inventoryItemId: string; quantity: number }>,
-  referenceDocumentUri?: string | null
+  referenceDocumentUri?: string | null,
+  options: SetInventoryQuantitiesOptions = {}
 ): Promise<SetInventoryQuantitiesResult> {
+  const compareWithLive = options.compareWithLive === true;
   const locationGid = toLocationGid(locationId);
   const quantities = (items ?? [])
     .filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.quantity)))
@@ -230,58 +368,136 @@ export async function setInventoryQuantitiesServer(
    * 戻すときの changeFromQuantity に入れ、書いたあとにだれかが動かしていたら Shopify に断ってもらう。
    */
   const lastWritten = new Map<string, number>();
+  /** チャンクごとの「目標の数になっている」商品（戻すのに失敗したとき、入ったままの分を数える） */
+  const appliedPerChunk: string[][] = [];
+  /** compareWithLive: 読んでから書くまでに店で在庫が動いたので、上書きせずに残した商品 */
+  const concurrentChanged: string[] = [];
 
   try {
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
       const chunk = chunks[chunkIndex];
       const chunkItemGids = chunk.map((q) => q.inventoryItemId);
 
-      const input: Record<string, unknown> = {
-        name: "available",
-        reason: "correction",
-        quantities: chunk.map((q) => ({
-          inventoryItemId: q.inventoryItemId,
-          locationId: locationGid,
-          quantity: q.quantity,
-          changeFromQuantity: null,
-        })),
-      };
-      if (refUri) input.referenceDocumentUri = refUri;
-
       let chunkFailed = false;
       let chunkError = "";
       let chunkHadUserErrors = false;
-      try {
-        const { response: resp, json } = await graphqlWithRetry(admin, `#graphql
-            mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-              inventorySetQuantities(input: $input) {
-                inventoryAdjustmentGroup { id }
-                userErrors { field message }
-              }
-            }
-          `, { input });
-        const errJson = json as InventorySetQuantitiesJson;
-        const topLevelErrors = Array.isArray(errJson?.errors) ? errJson.errors : [];
-        const data = errJson?.data?.inventorySetQuantities;
-        if (!resp.ok) {
-          chunkError = topLevelErrors[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
-          chunkFailed = true;
-          // HTTP エラーは適用済みの可能性を否定できない（userErrors なし）
-        } else if (topLevelErrors.length > 0 && !data) {
-          // HTTP 200 + top-level GraphQL errors / null data — 成功扱いにしない
-          chunkError = topLevelErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "GraphQL errors";
-          chunkFailed = true;
-        } else {
-          const errs = data?.userErrors ?? [];
-          if (errs.length) {
-            chunkError = errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
-            chunkFailed = true;
-            chunkHadUserErrors = true;
+      /** このチャンクで「目標の数になっている」と言える商品（書いた分 + もう目標だったので書かなかった分） */
+      const chunkApplied: string[] = [];
+      /** このチャンクで実際に書いた商品と、書いた数 */
+      const chunkWritten: Array<{ inventoryItemId: string; quantity: number }> = [];
+
+      // 書く内容: 既定は changeFromQuantity: null。compareWithLive は書く直前の今の数を入れる。
+      let plan:
+        | { write: Array<{ inventoryItemId: string; quantity: number; changeFromQuantity: number | null }>; skipped: string[] }
+        | null = { write: chunk.map((q) => ({ ...q, changeFromQuantity: null })), skipped: [] };
+      let firstLive: Map<string, number> | null = null;
+      if (compareWithLive) {
+        const live = await readChunkLive(admin, locationGid, chunkItemGids);
+        if (!live.ok) {
+          if (chunkIndex === 0) {
+            // まだ 1 件も書いていない。0 にせず止める（送り直してよい）
+            console.warn(
+              `[inventory-set-quantities-server] 書く直前の今の数を読めないため止めます（在庫は動かしていません）: item=${live.inventoryItemId} error=${live.error}`
+            );
+            return {
+              ok: false,
+              error: live.error,
+              rolledBack: false,
+              liveUnreadable: true,
+              retryable: live.retryable,
+              appliedInventoryItemIds: [],
+            };
           }
+          // 先のチャンクは入っている。このチャンクは 1 件も書いていない（はっきりした失敗）→ 下で戻す
+          plan = null;
+          chunkFailed = true;
+          chunkHadUserErrors = true;
+          chunkError = `書く直前の今の数を読めませんでした（${live.error}）`;
+        } else {
+          firstLive = new Map(live.snapshot.map((x) => [x.inventoryItemId, x.quantity]));
+          const p = planCompareAndSetChunk(chunk, firstLive);
+          plan = { write: p.write, skipped: p.skipped };
         }
-      } catch (e) {
-        chunkError = e instanceof Error ? e.message : String(e);
-        chunkFailed = true;
+      }
+
+      // 書く。compareWithLive で STALE（読んでから書くまでに動いた）なら 1 回だけ読み直して書き直す。
+      for (let attempt = 0; plan && !chunkFailed; attempt++) {
+        if (plan.write.length === 0) {
+          chunkApplied.push(...plan.skipped);
+          break;
+        }
+        const input: Record<string, unknown> = {
+          name: "available",
+          reason: "correction",
+          quantities: plan.write.map((q) => ({
+            inventoryItemId: q.inventoryItemId,
+            locationId: locationGid,
+            quantity: q.quantity,
+            changeFromQuantity: q.changeFromQuantity,
+          })),
+        };
+        if (refUri) input.referenceDocumentUri = refUri;
+        let staleRefused = false;
+        try {
+          const { response: resp, json } = await graphqlWithRetry(admin, `#graphql
+              mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+                inventorySetQuantities(input: $input) {
+                  inventoryAdjustmentGroup { id }
+                  userErrors { field message code }
+                }
+              }
+            `, { input });
+          const errJson = json as InventorySetQuantitiesJson;
+          const topLevelErrors = Array.isArray(errJson?.errors) ? errJson.errors : [];
+          const data = errJson?.data?.inventorySetQuantities;
+          if (!resp.ok) {
+            chunkError = topLevelErrors[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
+            chunkFailed = true;
+            // HTTP エラーは適用済みの可能性を否定できない（userErrors なし）
+          } else if (topLevelErrors.length > 0 && !data) {
+            // HTTP 200 + top-level GraphQL errors / null data — 成功扱いにしない
+            chunkError = topLevelErrors.map((e) => e?.message ?? "").filter(Boolean).join(" / ") || "GraphQL errors";
+            chunkFailed = true;
+          } else {
+            const errs = data?.userErrors ?? [];
+            if (errs.length) {
+              chunkError = errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ");
+              chunkFailed = true;
+              chunkHadUserErrors = true;
+              staleRefused = compareWithLive && hasStaleUserError(errs);
+            }
+          }
+        } catch (e) {
+          chunkError = e instanceof Error ? e.message : String(e);
+          chunkFailed = true;
+        }
+
+        if (!chunkFailed) {
+          chunkApplied.push(...plan.skipped, ...plan.write.map((q) => q.inventoryItemId));
+          chunkWritten.push(...plan.write.map((q) => ({ inventoryItemId: q.inventoryItemId, quantity: q.quantity })));
+          break;
+        }
+        if (!staleRefused || attempt >= 1 || !firstLive) break;
+
+        // STALE: Shopify は 1 件も書いていない。書こうとした商品だけ読み直す。
+        const writeIds = plan.write.map((q) => q.inventoryItemId);
+        const reread = await readChunkLive(admin, locationGid, writeIds);
+        if (!reread.ok) {
+          chunkError = `${chunkError}（読み直しもできませんでした: ${reread.error}）`;
+          break; // はっきりした失敗のまま（下で戻す）
+        }
+        const secondLive = new Map(reread.snapshot.map((x) => [x.inventoryItemId, x.quantity]));
+        const retryItems = chunk.filter((q) => writeIds.includes(q.inventoryItemId));
+        const p = planCompareAndSetChunk(retryItems, secondLive, firstLive);
+        for (const id of p.conflicts) concurrentChanged.push(id);
+        console.warn(
+          `[inventory-set-quantities-server] chunk${chunkIndex}: 書く直前に店の在庫が動きました（STALE）。` +
+            ` 動いた ${p.conflicts.length} 件は上書きせず残し、残りを書き直します`
+        );
+        plan = { write: p.write, skipped: [...plan.skipped, ...p.skipped] };
+        chunkFailed = false;
+        chunkError = "";
+        chunkHadUserErrors = false;
       }
 
       if (chunkFailed) {
@@ -325,10 +541,13 @@ export async function setInventoryQuantitiesServer(
         let rollbackStale = false;
         let rollbackErrorMsg = "";
         for (let ri = chunkIndex - 1; ri >= 0; ri--) {
+          // 戻すのは、このアプリが書いた商品だけ（もう目標だったので書かなかった・動いたので残した商品は戻さない）
+          const toRestore = snapshots[ri].filter((q) => lastWritten.has(q.inventoryItemId));
+          if (toRestore.length === 0) continue;
           const rollbackInput: Record<string, unknown> = {
             name: "available",
             reason: "correction",
-            quantities: snapshots[ri].map((q) => ({
+            quantities: toRestore.map((q) => ({
               inventoryItemId: q.inventoryItemId,
               locationId: locationGid,
               quantity: q.quantity,
@@ -362,7 +581,7 @@ export async function setInventoryQuantitiesServer(
                 (e) => (e as GraphQLUserError & { code?: string | null }).code === "CHANGE_FROM_QUANTITY_STALE"
               );
             } else {
-              for (const q of snapshots[ri]) lastWritten.set(q.inventoryItemId, q.quantity);
+              for (const q of toRestore) lastWritten.set(q.inventoryItemId, q.quantity);
               continue;
             }
           } catch (rbErr) {
@@ -376,9 +595,7 @@ export async function setInventoryQuantitiesServer(
           // 失敗したチャンクは、はっきり断られた（userErrors）なら入ったまま、それ以外は戻ったか分からない。
           // 一部だけ反映（partial_failed）にして、同じ ID でも自動で在庫を動かさない（STATE_MACHINE §6）。
           const stillAppliedChunks = rollbackRefused ? rollbackFailedAt + 1 : rollbackFailedAt;
-          const stillApplied = chunks
-            .slice(0, stillAppliedChunks)
-            .flatMap((c) => c.map((q) => q.inventoryItemId));
+          const stillApplied = appliedPerChunk.slice(0, stillAppliedChunks).flat();
           console.error(
             `[inventory-set-quantities-server] ロールバック失敗 — 手動復旧が必要です。` +
             ` 元のエラー: ${chunkError}。ロールバックエラー（chunk${rollbackFailedAt}）: ${rollbackErrorMsg}。` +
@@ -409,9 +626,25 @@ export async function setInventoryQuantitiesServer(
         };
       }
 
-      // チャンク成功: 適用済み GID を記録
-      for (const gid of chunkItemGids) appliedInventoryItemIds.push(gid);
-      for (const q of chunk) lastWritten.set(q.inventoryItemId, q.quantity);
+      // チャンク成功: 目標の数になっている GID を記録（compareWithLive で動いたので残した商品は入れない）
+      for (const gid of chunkApplied) appliedInventoryItemIds.push(gid);
+      for (const q of chunkWritten) lastWritten.set(q.inventoryItemId, q.quantity);
+      appliedPerChunk.push(chunkApplied);
+    }
+    if (concurrentChanged.length > 0) {
+      // ほかの商品は目標の数にした。動いた商品は上書きしていない（はっきりしている。成否不明ではない）。
+      // 一部だけ反映（partial_failed）にして、自動では書き直さない（管理者がもう一度数えるか Shopify で直す）
+      return {
+        ok: false,
+        error:
+          `確定の途中で店の在庫が動いた商品 ${concurrentChanged.length} 件は、売上・入庫を消さないよう上書きしていません` +
+          `（${CHANGE_FROM_QUANTITY_STALE}）。その商品はもう一度数えてください`,
+        rolledBack: false,
+        partiallyApplied: true,
+        applicationUncertain: false,
+        appliedInventoryItemIds,
+        concurrentChangedInventoryItemIds: [...concurrentChanged],
+      };
     }
     return {
       ok: true,
