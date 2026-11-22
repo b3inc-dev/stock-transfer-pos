@@ -8,10 +8,12 @@
  * - Lite: 設定・入出庫（管理画面の履歴と POS の出庫・入庫）
  * - Pro: すべて
  * - 契約の状態を読めなかった: 止める（plan_check_failed）。「契約が要る」とは言わず、もう一度試してもらう
+ * - 3 か所のプランでロケーションが 4 か所以上: POS のタイルを開くときに止める（location_limit。2026-11-22 T の決定・D17）。
+ *   書き込みの途中（apply-change・履歴の記録・棚卸の完了）では止めない。止めるのは「新しい操作を始める前」だけ
  */
 
 /** @typedef {"settings"|"history"|"transfer"|"inventoryInfo"|"purchase"|"loss"|"order"|"stocktake"|"adjustment"} PlanFeature */
-/** @typedef {"allowed"|"plan_required"|"plan_check_failed"} PlanAccess */
+/** @typedef {"allowed"|"plan_required"|"plan_check_failed"|"location_limit"} PlanAccess */
 
 /** Lite でも使える機能 */
 export const LITE_FEATURES = Object.freeze(["settings", "history", "transfer"]);
@@ -68,6 +70,38 @@ export function featuresForPlanState(state) {
   const out = {};
   for (const f of ALL_FEATURES) out[f] = decideFeatureAccess(state, f) === "allowed";
   return out;
+}
+
+/**
+ * 新しい操作を始めてよいか（POS のタイルを開くとき＝/api/pos-plan だけが使う）。
+ * プランの機能（decideFeatureAccess）に加えて、3 か所のプランでロケーションが多すぎないか（locationPlanMismatch）を見る。
+ * ロケーション数の判定そのものは app/utils/shop-plan.server.ts の getShopPlan（管理画面と同じ 1 か所）が出す。ここでは結果を読むだけ。
+ * 自社用は常に allowed。
+ * @param {{ distribution?: string, plan?: string|null, planCheckFailed?: boolean, locationPlanMismatch?: boolean }} state
+ * @param {PlanFeature} feature
+ * @returns {PlanAccess}
+ */
+export function decideOperationStartAccess(state, feature) {
+  if (String(state?.distribution || "").toLowerCase() === "inhouse") return "allowed";
+  const access = decideFeatureAccess(state, feature);
+  // 未契約・読めなかったときは、そちらの案内を先に出す（ロケーション数は契約があるときだけ意味がある）
+  if (access === "plan_required" && !normalizePlan(state?.plan)) return access;
+  if (access === "plan_check_failed") return access;
+  if (state?.locationPlanMismatch === true && normalizePlan(state?.plan)) return "location_limit";
+  return access;
+}
+
+/**
+ * ロケーション数で止めたとき、どのプランにすればよいか。
+ * 今の機能が Lite で使えるなら今の種類（Lite/Pro）の 10 ロケーションのプラン、Pro だけの機能なら Pro の 10 ロケーションのプラン。
+ * 10 ロケーションのプランは 11 か所目から 1 か所ごとに従量（D15）なので、上限で止まらない。
+ * @param {string|null|undefined} plan
+ * @param {PlanFeature} feature
+ * @returns {{ plan: "lite"|"pro", name: string }}
+ */
+export function requiredPlanForLocations(plan, feature) {
+  const p = normalizePlan(plan) === "pro" || !LITE_FEATURES.includes(feature) ? "pro" : "lite";
+  return { plan: p, name: p === "pro" ? "Pro - 10ロケーション" : "Lite - 10ロケーション" };
 }
 
 /**
@@ -145,11 +179,23 @@ export const PLAN_PAGE_GUIDE = "Shopify 管理画面の「アプリ」→「POS 
  * @param {PlanAccess} access
  * @param {PlanFeature} feature
  * @param {string|null|undefined} plan
+ * @param {{ locationsCount?: number, maxLocations?: number }} [locations] - location_limit のときの数（無くても文は出す）
  * @returns {{ heading: string, body: string } | null}
  */
-export function buildPlanBlockMessage(access, feature, plan) {
+export function buildPlanBlockMessage(access, feature, plan, locations = {}) {
   if (access === "allowed") return null;
   const label = FEATURE_LABELS[feature] || "この機能";
+  if (access === "location_limit") {
+    const max = Number(locations?.maxLocations) > 0 ? Number(locations.maxLocations) : 3;
+    const count = Number(locations?.locationsCount) > 0 ? Number(locations.locationsCount) : null;
+    const need = requiredPlanForLocations(plan, feature);
+    return {
+      heading: "プランを上げてください",
+      body:
+        `今のプランは ${max} ロケーションまでです。ストアのロケーションは ${count != null ? `${count} か所` : `${max} か所より多い`}あるため、` +
+        `${label}は使えません。${PLAN_PAGE_GUIDE}で「${need.name}」に変更してください。`,
+    };
+  }
   if (access === "plan_check_failed") {
     return {
       heading: "契約の状態を確認できませんでした",
@@ -172,11 +218,15 @@ export function buildPlanBlockMessage(access, feature, plan) {
 export const PLAN_ERROR_CODES = Object.freeze({
   plan_required: "plan_required",
   plan_check_failed: "plan_check_failed",
+  location_limit: "location_limit",
 });
 
-/** 止めたときの HTTP ステータス。契約なしは送り直しても変わらないので 402、読めなかったは 503（送り直してよい） */
+/**
+ * 止めたときの HTTP ステータス。契約なし・ロケーション数が多すぎるは送り直しても変わらないので 402、読めなかったは 503（送り直してよい）。
+ * location_limit も 402 にする: 古い版の POS 拡張は 402 を「契約が要る」として、サーバーの heading / message をそのまま出す。
+ */
 export function httpStatusForPlanAccess(access) {
-  if (access === "plan_required") return 402;
+  if (access === "plan_required" || access === "location_limit") return 402;
   if (access === "plan_check_failed") return 503;
   return 200;
 }

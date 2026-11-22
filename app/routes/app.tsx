@@ -162,7 +162,7 @@ export default function App() {
         >
           <strong>ロケーション数がプランと一致していません。</strong>
           <span style={{ marginLeft: "4px" }}>
-            現在のプランは{shopPlan.maxLocationsForPlan}ロケーションまでです。ストアのロケーション数（{shopPlan.locationsCount}）に合ったプランに変更するまで、設定・在庫・入出庫などの機能をご利用いただけません。
+            現在のプランは{shopPlan.maxLocationsForPlan}ロケーションまでです。ストアのロケーション数（{shopPlan.locationsCount}）に合ったプランに変更するまで、設定・在庫・入出庫などの機能と POS のタイルをご利用いただけません。
             <a href="/app/plan" style={{ marginLeft: "8px", color: "#2c6ecb", fontWeight: 600 }}>料金プランで変更する</a>
           </span>
         </div>

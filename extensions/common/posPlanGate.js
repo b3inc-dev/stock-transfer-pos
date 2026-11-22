@@ -3,6 +3,8 @@
  * - 自社用（appUrl.js の APP_MODE = "inhouse"）はサーバーに聞かずに通す（今まで通り全機能）
  * - 公開用: /api/pos-plan に聞く。使えないときは理由と案内を返す
  * - 通信できない・契約を読めない: 止めて「もう一度試す」を出す（契約が要るとは言わない）
+ * - 3 ロケーションのプランでロケーションが多すぎる（location_limit）: 止めて「プランを上げてください」と要るプランを出す。
+ *   タイルを開くときだけ。開いたあとの確定の途中では止めない（半分だけ動かさないため）
  *
  * 画面を止めるだけでは足りないので、サーバー側（apply-change など）でも同じ決まりで止めている。
  * 出庫の Transfer 作成は POS から Shopify へ直接送るため、サーバーでは止められない。ここが唯一の止め口。
@@ -14,7 +16,7 @@ const PLAN_CHECK_TIMEOUT_MS = 15000;
 /**
  * @param {import("./planAccess.js").PlanFeature} feature
  * @param {{ fetchImpl?: typeof fetch, appMode?: string, appUrl?: string, getSessionToken?: () => Promise<string> }} [deps] - テスト用
- * @returns {Promise<{ access: "allowed"|"plan_required"|"plan_check_failed", heading?: string, message?: string, plan?: string|null }>}
+ * @returns {Promise<{ access: "allowed"|"plan_required"|"plan_check_failed"|"location_limit", heading?: string, message?: string, plan?: string|null, requiredPlan?: string|null }>}
  */
 export async function checkPosPlanAccess(feature, deps = {}) {
   const appUrlMod = deps.appMode && deps.appUrl ? null : await import("./appUrl.js");
@@ -55,6 +57,20 @@ export async function checkPosPlanAccess(feature, deps = {}) {
     return { access: "allowed", plan: data?.plan ?? null };
   }
   const code = data?.errorCode;
+  // 3 ロケーションのプランでロケーションが多すぎる（サーバーの getShopPlan が決める。拡張では数えない）
+  if (code === "location_limit") {
+    const msg = buildPlanBlockMessage("location_limit", feature, data?.plan, {
+      locationsCount: data?.locationsCount,
+      maxLocations: data?.maxLocations,
+    });
+    return {
+      access: "location_limit",
+      heading: data?.heading || msg.heading,
+      message: data?.message || msg.body,
+      plan: data?.plan ?? null,
+      requiredPlan: data?.requiredPlan ?? null,
+    };
+  }
   if (res.status === 402 || code === "plan_required") {
     const msg = buildPlanBlockMessage("plan_required", feature, data?.plan);
     return {

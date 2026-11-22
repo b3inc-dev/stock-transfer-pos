@@ -1,12 +1,14 @@
 // 料金プランの門番（サーバー側）。画面を隠すだけにせず、書き込む処理の入口で止める。
 // - 管理画面の action: adminPlanRedirect（親のレイアウト loader は action の前に走らないため）
 // - POS 用 API: planBlockedPosResponse（apply-change / log-inventory-change / pos-stocktake-complete / pos-plan）
+//   ロケーション数の上限（3 ロケーションのプラン）は pos-plan（タイルを開くとき）だけで見る（atOperationStart）
 // 決まりは extensions/common/planAccess.js、判定は shop-plan.server.ts の checkShopFeatureAccess。
 import { redirect } from "react-router";
 import {
   buildPlanBlockMessage,
   featureForAdminPath,
   httpStatusForPlanAccess,
+  requiredPlanForLocations,
 } from "../../extensions/common/planAccess.js";
 import type { PlanAccess, PlanFeature } from "./shop-plan.server";
 import { checkShopFeatureAccess } from "./shop-plan.server";
@@ -34,14 +36,27 @@ export async function adminPlanRedirect(
 }
 
 /** POS へ返す止めたときの中身（UI_RULES 5章: 何が起きたか＋どうすればいいか） */
-export function planBlockedBody(access: PlanAccess, feature: PlanFeature, plan: string | null | undefined) {
-  const msg = buildPlanBlockMessage(access, feature, plan);
+export function planBlockedBody(
+  access: PlanAccess,
+  feature: PlanFeature,
+  plan: string | null | undefined,
+  locations?: { locationsCount?: number; maxLocations?: number },
+) {
+  const msg = buildPlanBlockMessage(access, feature, plan, locations ?? {});
+  const need = access === "location_limit" ? requiredPlanForLocations(plan, feature) : null;
   return {
     ok: false,
     errorCode: access,
     planAccess: access,
     feature,
     plan: plan ?? null,
+    ...(access === "location_limit"
+      ? {
+          locationsCount: locations?.locationsCount ?? null,
+          maxLocations: locations?.maxLocations ?? null,
+          requiredPlan: need?.name ?? null,
+        }
+      : {}),
     error: msg ? `${msg.heading}。${msg.body}` : "この機能は使えません",
     heading: msg?.heading ?? "",
     message: msg?.body ?? "",
@@ -59,18 +74,25 @@ export async function planBlockedPosResponse(args: {
   getAdmin: () => Promise<AdminGraphql> | AdminGraphql;
   headers: Record<string, string>;
   failOpenOnCheckError?: boolean;
+  /**
+   * 新しい操作を始めるときだけ true（今は /api/pos-plan だけ）。3 ロケーションのプランで多すぎれば止める。
+   * 書き込みの API（apply-change・log-inventory-change・pos-stocktake-complete）では付けない（確定の途中で止めない）。
+   */
+  atOperationStart?: boolean;
 }): Promise<Response | null> {
   const { access, shopPlan } = await checkShopFeatureAccess({
     shop: args.shop,
     feature: args.feature,
     getAdmin: args.getAdmin,
+    atOperationStart: args.atOperationStart === true,
   });
   if (access === "allowed") return null;
   if (access === "plan_check_failed" && args.failOpenOnCheckError) {
     console.warn(`[plan-gate] plan check failed; allowing follow-up write: shop=${args.shop} feature=${args.feature}`);
     return null;
   }
-  return new Response(JSON.stringify(planBlockedBody(access, args.feature, shopPlan.plan)), {
+  const locations = { locationsCount: shopPlan.locationsCount, maxLocations: shopPlan.maxLocationsForPlan };
+  return new Response(JSON.stringify(planBlockedBody(access, args.feature, shopPlan.plan, locations)), {
     status: httpStatusForPlanAccess(access),
     headers: { "Content-Type": "application/json", ...args.headers },
   });
