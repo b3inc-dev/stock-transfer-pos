@@ -714,9 +714,12 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const refUri = referenceDocumentUriForActivity(activity, referenceDocumentUri);
+    // 棚卸の確定は「書く直前の今の数」を changeFromQuantity に入れて書く（#19 の引き継ぎ）。
+    // 読んでから書くまでに売れた・入庫した商品は上書きせず残す。ほかの activity はこれまでどおり。
+    const setOptions = { compareWithLive: activity === "inventory_count" };
     let result: Awaited<ReturnType<typeof setInventoryQuantitiesServer>>;
     try {
-      result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+      result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, setOptions);
     } catch (setErr: unknown) {
       // ヘルパー外への例外は成否不明（再 set 禁止）— #22 post-success
       result = {
@@ -735,7 +738,7 @@ export async function action({ request }: ActionFunctionArgs) {
       await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems);
       await new Promise((r) => setTimeout(r, POST_ACTIVATE_SETTLE_BEFORE_SET_MS));
       try {
-        const stockedRetry = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+        const stockedRetry = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, setOptions);
         result = stockedRetry;
       } catch (stockedErr: unknown) {
         result = {
@@ -751,7 +754,7 @@ export async function action({ request }: ActionFunctionArgs) {
       // partial 適用済みを再 set すると二重になるため、完全失敗（または rollback 済み）のみリトライ
       await new Promise((r) => setTimeout(r, 1500));
       try {
-        const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri);
+        const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, setOptions);
         if (retryResult.ok || retryResult.partiallyApplied) result = retryResult;
       } catch (retryErr: unknown) {
         result = {
@@ -1039,6 +1042,8 @@ export async function action({ request }: ActionFunctionArgs) {
               : 0,
           failedChunkIndex: result.failedChunkIndex,
           appliedInventoryItemIds: result.appliedInventoryItemIds ?? [],
+          // 棚卸の確定で、読んでから書くまでに店の在庫が動いたので上書きしなかった商品の数
+          concurrentChangedCount: result.concurrentChangedInventoryItemIds?.length ?? 0,
         }),
         { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );
@@ -1047,16 +1052,21 @@ export async function action({ request }: ActionFunctionArgs) {
     // 完全失敗（未適用 or ロールバック成功）
     // 250 件を超える補正で元に戻す用の数を読めなかったときは、1 件も動かしていない。
     // 送り直してよい失敗（503）にする。イベントは failed なので、同じ ID の次の送信は最初から処理される。
+    // 棚卸の確定で、書く直前の今の数を読めなかったときも 1 件も動かしていない（同じ扱い）。
+    const liveUnreadable = result.liveUnreadable === true;
     const snapshotUnreadable = result.snapshotUnreadable === true;
-    const snapshotRetryable = snapshotUnreadable && result.retryable !== false;
-    const errorCode = snapshotUnreadable
+    const nothingMovedUnreadable = snapshotUnreadable || liveUnreadable;
+    const snapshotRetryable = nothingMovedUnreadable && result.retryable !== false;
+    const errorCode = nothingMovedUnreadable
       ? snapshotRetryable
-        ? "rollback_snapshot_unreadable"
+        ? liveUnreadable
+          ? "current_quantity_unreadable"
+          : "rollback_snapshot_unreadable"
         : "inventory_item_not_found"
       : isNotStockedRetryableError(result.error)
         ? "not_stocked"
         : "set_quantities_failed";
-    const responseError = snapshotUnreadable
+    const responseError = nothingMovedUnreadable
       ? `${snapshotRetryable ? CURRENT_QUANTITY_UNREADABLE_MESSAGE : INVENTORY_ITEM_NOT_FOUND_MESSAGE}（${result.error ?? ""}）`
       : errorSummary;
     for (const l of lineRecords) {
