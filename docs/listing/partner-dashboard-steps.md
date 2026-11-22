@@ -22,8 +22,8 @@ T が上から順に押すための手順。**オンにする（外へ送る）�
 | Plan handle（後から変えられない） | `lite-3` | `lite-10` | `pro-3` | `pro-10` |
 | 表示名（Display name） | Lite - 3 locations | Lite - 10 locations | Pro - 3 locations | Pro - 10 locations |
 | Billing | Monthly | Monthly | Monthly | Monthly |
-| 月額（USD） | 20【T】 | 40【T】 | 60【T】 | 120【T】 |
-| Free trial（日） | 7【T】 | 7【T】 | 14【T】 | 14【T】 |
+| 月額（USD） | 20 | 40 | 60 | 120 |
+| Free trial（日） | 7 | 7 | 14 | 14 |
 | Redirect URL | `/app` | `/app` | `/app` | `/app` |
 | 使用量のメーター | なし | `extra_location_lite`（2 章） | なし | `extra_location_pro`（2 章） |
 
