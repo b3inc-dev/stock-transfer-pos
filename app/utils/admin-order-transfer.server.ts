@@ -7,8 +7,11 @@
  *   （同じキーで違う中身を送らない）
  * - キーは画面の opKey + 発注の ID + approve、回は「承認を取り消した回数」（rv1…）+ 画面の opRound
  * - 代わりの道の `inventoryTransferMarkAsReadyToShip` は 17 の一覧に無いので付けない（2 章）
- * - 前と同じく、作れなかったときも承認は続ける。ただし @idempotent の返事（処理中のまま・中身の違い）のときは
- *   作れたか分からないので `uncertain: true` を返す（呼び出し側は承認を止めて opKey を残す）
+ * - **はっきり断られた（userErrors）ときだけ**、前と同じく承認を続ける（Transfer は作られていない）。
+ * - 作れたか分からないとき（@idempotent の返事・トップの errors・通信の失敗などの例外）は `uncertain: true` を返す
+ *   （呼び出し側は承認を止めて opKey を残す。押し直すと同じキーで、前の送信で作れていれば同じ Transfer が返る）。
+ * - 下書きで作り直す代わりの道は、`inventoryTransferCreateAsReadyToShip` が**この版に無いとはっきり分かるとき**だけ通る
+ *   （前は例外なら何でも代わりの道へ進んでいた。通信の失敗で進むと、段が違うので別のキーになり、Transfer が 2 つできうる）。
  */
 import { retryWhileIdempotencyConcurrent } from "./graphql-with-retry";
 import { classifyIdempotencyErrors } from "./idempotency-key.server";
@@ -68,6 +71,19 @@ type UserErrorLike = { field?: unknown; message?: unknown };
 const formatUserErrors = (errs: ReadonlyArray<UserErrorLike>) =>
   errs.map((e) => `${e.field ?? ""}: ${e.message ?? ""}`).join(" / ");
 
+/** その mutation がこの版に無い、と分かるエラーか（代わりの道へ進んでよいのはこのときだけ） */
+export function isMutationMissingError(e: unknown, mutationName: string): boolean {
+  const msg = e instanceof Error ? e.message : String(e ?? "");
+  const name = mutationName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(Field|field) '?"?${name}'?"? doesn't exist|${name}.{0,40}(doesn't exist|not exist|undefined field|Cannot query field)|Cannot query field "?'?${name}`).test(msg);
+}
+
+const uncertainOf = (label: string, detail: string): OrderTransferResult => ({
+  transferId: null,
+  error: `${label}の結果が分からない: ${detail}`,
+  uncertain: true,
+});
+
 async function sendCreate(
   admin: AdminGraphql,
   mutation: string,
@@ -102,13 +118,8 @@ export async function createOrderTransferIdempotent(
     );
     const payload = data?.data?.inventoryTransferCreateAsReadyToShip;
     const c = classifyAdminWrite(payload?.userErrors, data.errors, concurrentExhausted);
-    if (c.outcome === "uncertain" && c.idempotencyIssue) {
-      return { transferId: null, error: `Transfer作成の結果が分からない（${c.idempotencyIssue}）: ${c.message}`, uncertain: true };
-    }
-    // GraphQL エラー（ネットワークエラーなど）
-    if (data.errors && data.errors.length > 0) {
-      const errorMessages = data.errors.map((e: { message?: string }) => e.message || String(e)).join(" / ");
-      return { transferId: null, error: `GraphQLエラー: ${errorMessages}` };
+    if (c.outcome === "uncertain") {
+      return uncertainOf("Transfer作成", `${c.idempotencyIssue ?? "GraphQLエラー"}: ${c.message}`);
     }
     if (c.outcome === "rejected") {
       return { transferId: null, error: `Transfer作成エラー: ${formatUserErrors(payload?.userErrors ?? [])}` };
@@ -118,8 +129,12 @@ export async function createOrderTransferIdempotent(
       return { transferId: null, error: "Transfer ID が取得できませんでした" };
     }
     return { transferId, error: null };
-  } catch {
-    // inventoryTransferCreateAsReadyToShip が使えない場合（APIバージョンが古いなど）、
+  } catch (readyError) {
+    // 通信の失敗など、作れたか分からない例外は承認を止める（代わりの道へ進まない）
+    if (!isMutationMissingError(readyError, "inventoryTransferCreateAsReadyToShip")) {
+      return uncertainOf("Transfer作成", readyError instanceof Error ? readyError.message : String(readyError));
+    }
+    // inventoryTransferCreateAsReadyToShip がこの版に無い場合だけ、
     // Draft を作成してから ReadyToShip にマークする方法を試す（前からの動き）
     try {
       const { json: draftData, concurrentExhausted } = await sendCreate(
@@ -132,12 +147,8 @@ export async function createOrderTransferIdempotent(
       );
       const draftPayload = draftData?.data?.inventoryTransferCreate;
       const c = classifyAdminWrite(draftPayload?.userErrors, draftData.errors, concurrentExhausted);
-      if (c.outcome === "uncertain" && c.idempotencyIssue) {
-        return { transferId: null, error: `Draft作成の結果が分からない（${c.idempotencyIssue}）: ${c.message}`, uncertain: true };
-      }
-      if (draftData.errors && draftData.errors.length > 0) {
-        const errorMessages = draftData.errors.map((e: { message?: string }) => e.message || String(e)).join(" / ");
-        return { transferId: null, error: `Draft作成エラー: ${errorMessages}` };
+      if (c.outcome === "uncertain") {
+        return uncertainOf("Draft作成", `${c.idempotencyIssue ?? "GraphQLエラー"}: ${c.message}`);
       }
       if (c.outcome === "rejected") {
         return { transferId: null, error: `Draft作成エラー: ${formatUserErrors(draftPayload?.userErrors ?? [])}` };
@@ -161,8 +172,8 @@ export async function createOrderTransferIdempotent(
       }
       return { transferId: markPayload?.inventoryTransfer?.id ?? draftId, error: null };
     } catch (fallbackError) {
-      const errorMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-      return { transferId: null, error: `フォールバック処理エラー: ${errorMessage}` };
+      // 下書きを作れたか・印を付けられたか分からない。承認を止める（押し直すと同じキーで同じ下書きが返る）
+      return uncertainOf("Draft作成", fallbackError instanceof Error ? fallbackError.message : String(fallbackError));
     }
   }
 }

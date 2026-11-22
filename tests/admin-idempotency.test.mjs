@@ -33,6 +33,8 @@ const { withGraphQLRetry } = await import("../app/utils/graphql-with-retry.ts");
 const { isUuidV5 } = await import("../extensions/common/idempotencyKey.js");
 
 const {
+  adminOpKeyStateFor,
+  applyAdminOpKeyResult,
   appendAdminOpKey,
   initialAdminOpKeyState,
   isAdminOpKey,
@@ -47,6 +49,7 @@ const {
   buildAdminIdempotency,
   buildAdminRound,
   classifyAdminWrite,
+  metafieldsSetError,
   readAdminOpKey,
   readRevertRound,
 } = opKeyServer;
@@ -170,6 +173,27 @@ describe("画面の opKey・opRound（admin-op-key.ts）", () => {
   it("初めの状態は回 0", () => {
     assert.equal(initialAdminOpKeyState().opRound, 0);
   });
+  it("opKey は対象ごと: 仕入れ X が分からないまま Y が成功しても、X の opKey は変わらない（X の押し直しは同じキー）", () => {
+    const states = new Map();
+    const x = adminOpKeyStateFor(states, "purchase_X");
+    const y = adminOpKeyStateFor(states, "purchase_Y");
+    assert.notEqual(x.opKey, y.opKey);
+    assert.equal(applyAdminOpKeyResult(states, { error: "x", opKeyResult: "uncertain", opKey: x.opKey }), "purchase_X");
+    assert.equal(applyAdminOpKeyResult(states, { ok: true, opKeyResult: "done", opKey: y.opKey }), "purchase_Y");
+    assert.deepEqual(states.get("purchase_X"), x);
+    assert.notEqual(states.get("purchase_Y").opKey, y.opKey);
+    // X がはっきり断られたら X の回だけ +1
+    applyAdminOpKeyResult(states, { error: "x", opKeyResult: "rejected", opKey: x.opKey });
+    assert.deepEqual(states.get("purchase_X"), { opKey: x.opKey, opRound: 1 });
+  });
+  it("opKey の無い答え・どの対象のものでもない答えは何も変えない", () => {
+    const states = new Map();
+    const x = adminOpKeyStateFor(states, "X");
+    assert.equal(applyAdminOpKeyResult(states, { ok: true, opKeyResult: "done" }), null);
+    assert.equal(applyAdminOpKeyResult(states, { ok: true, opKeyResult: "done", opKey: OPKEY2 }), null);
+    assert.equal(applyAdminOpKeyResult(states, { ok: true, opKey: x.opKey }), null);
+    assert.deepEqual(states.get("X"), x);
+  });
 });
 
 describe("サーバーのキーの材料（admin-op-key.server.ts）", () => {
@@ -219,6 +243,13 @@ describe("サーバーのキーの材料（admin-op-key.server.ts）", () => {
     const c = adminIdempotencyKey(countIdem(op, ["a:b", "confirm", "c"]), "set");
     const d = adminIdempotencyKey(countIdem(op, ["a", "b:confirm", "c"]), "set");
     assert.equal(new Set([a, b, c, d]).size, 4);
+  });
+  it("記録の保存（metafieldsSet）: userErrors・トップの errors・例外・答えなしは失敗の文、成功は null", async () => {
+    assert.equal(await metafieldsSetError(async () => json({ data: { metafieldsSet: { metafields: [], userErrors: [] } } })), null);
+    assert.match(await metafieldsSetError(async () => json({ data: { metafieldsSet: { userErrors: [{ message: "too big" }] } } })), /too big/);
+    assert.match(await metafieldsSetError(async () => json({ errors: [{ message: "Throttled" }] })), /Throttled/);
+    assert.match(await metafieldsSetError(async () => { throw new Error("socket"); }), /socket/);
+    assert.ok(await metafieldsSetError(async () => json({ data: {} })));
   });
   it("答えの分け方: 処理中・中身の違い・トップの errors は uncertain、ほかの userErrors は rejected", () => {
     assert.deepEqual(classifyAdminWrite([], []), { outcome: "ok" });
@@ -470,7 +501,7 @@ describe("L 発注から移管（admin-order-transfer.server.ts）", () => {
     assert.equal(s.transfers(), 2);
   });
 
-  it("READY が例外 → 下書きの mutation（段 transfer_draft）で違うキー。どちらにも @idempotent", async () => {
+  it("READY がこの版に無い（そのエラーのときだけ）→ 下書きの mutation（段 transfer_draft）で違うキー。どちらにも @idempotent", async () => {
     const s = fakeShopify({ reply: (n) => (n === 0 ? new Error("Field 'inventoryTransferCreateAsReadyToShip' doesn't exist") : null) });
     const r = await order.createOrderTransferIdempotent(s.admin, input, idem());
     assert.ok(r.transferId);
@@ -479,6 +510,35 @@ describe("L 発注から移管（admin-order-transfer.server.ts）", () => {
     assert.equal(s.calls[1].key, adminIdempotencyKey(idem(), "transfer_draft"));
     assert.notEqual(s.calls[0].key, s.calls[1].key);
     assert.equal(s.calls[2].key, undefined); // MarkAsReadyToShip は 17 の一覧に無い
+  });
+
+  it("READY が通信の失敗などの例外 → 下書きの道へ進まず uncertain: true（Transfer を 2 つ作らない）", async () => {
+    const s = fakeShopify({ reply: (n) => (n === 0 ? new Error("socket hang up") : null) });
+    const r = await order.createOrderTransferIdempotent(s.admin, input, idem());
+    assert.equal(r.uncertain, true);
+    assert.equal(s.calls.length, 1);
+    // 同じ opKey の押し直しは同じキー
+    await order.createOrderTransferIdempotent(s.admin, input, idem());
+    assert.equal(s.calls[0].key, s.calls[1].key);
+    assert.equal(s.transfers(), 1);
+  });
+
+  it("トップの errors・下書きの道の例外も uncertain", async () => {
+    const top = await order.createOrderTransferIdempotent(fakeShopify({ reply: () => json({ errors: [{ message: "Internal error" }] }) }).admin, input, idem());
+    assert.equal(top.uncertain, true);
+    const s = fakeShopify({
+      reply: (n) => (n === 0 ? new Error("Field 'inventoryTransferCreateAsReadyToShip' doesn't exist on type 'Mutation'") : n === 1 ? new Error("timeout") : null),
+    });
+    const r = await order.createOrderTransferIdempotent(s.admin, input, idem());
+    assert.equal(r.uncertain, true);
+  });
+
+  it("「この版に無い」の見分け: Shopify の文は当たり、通信の失敗・ほかの文は当たらない", () => {
+    const n = "inventoryTransferCreateAsReadyToShip";
+    assert.ok(order.isMutationMissingError(new Error(`Field '${n}' doesn't exist on type 'Mutation'`), n));
+    assert.ok(order.isMutationMissingError(new Error(`[{"message":"Field '${n}' doesn't exist on type 'Mutation'"}]`), n));
+    assert.ok(!order.isMutationMissingError(new Error("socket hang up"), n));
+    assert.ok(!order.isMutationMissingError(new Error("Field 'foo' doesn't exist"), n));
   });
 
   it("処理中のまま・中身の違い → uncertain: true（承認を止める）。はっきりした断り → uncertain なし", async () => {
@@ -511,7 +571,7 @@ describe("画面の配線（文の照らし合わせ）", async () => {
 
   it("棚卸: 確定・取り消しの 6 か所で opKey を入れて送る。取り消しで戻した回数を増やす", () => {
     const src = read("app/routes/app.inventory-count.tsx");
-    assert.equal((src.match(/historyOpKey\.append\(fd\);\n\s*historyActionFetcher\.submit/g) ?? []).length, 6);
+    assert.equal((src.match(/historyOpKey\.append\(fd, `\$\{modalCount\.id\}:(confirm|revert|confirm_all|revert_all)[^`]*`\);\n\s*historyActionFetcher\.submit/g) ?? []).length, 6);
     assert.equal((src.match(/idempotencyRevertRound: nextRevertRound/g) ?? []).length, 2);
     assert.equal((src.match(/adjustInventoryQuantitiesServer\(/g) ?? []).length, 4);
     assert.equal((src.match(/buildAdminIdempotency\(\{/g) ?? []).length, 4);
@@ -519,13 +579,17 @@ describe("画面の配線（文の照らし合わせ）", async () => {
   });
   it("発注: 承認で opKey を入れて送る。承認の取り消しで戻した回数を増やす", () => {
     const src = read("app/routes/app.order.tsx");
-    assert.match(src, /orderOpKey\.append\(formData\);\n\s*fetcher\.submit/);
+    assert.match(src, /orderOpKey\.append\(formData, modalEntry\.id\);\n\s*fetcher\.submit/);
+    // Transfer を作ったあとの記録の保存の失敗は uncertain
+    assert.match(src, /metafieldsSetError\(/);
     assert.equal((src.match(/idempotencyRevertRound: readRevertRound\(e\.idempotencyRevertRound\) \+ 1/g) ?? []).length, 2);
     assert.doesNotMatch(src, /inventoryTransferCreate(AsReadyToShip)?\(input/);
   });
   it("仕入れ: 確定・取り消しで opKey を入れて送る", () => {
     const src = read("app/routes/app.purchase.tsx");
-    assert.equal((src.match(/purchaseOpKey\.append\((fd|formData)\);/g) ?? []).length, 2);
+    assert.equal((src.match(/purchaseOpKey\.append\((fd, modalEntry\.id|formData, entryId)\);/g) ?? []).length, 2);
+    // 在庫を書いたあとの記録の保存の失敗は uncertain（確定・取り消しの 2 か所）
+    assert.equal((src.match(/const mfError = await metafieldsSetError\(/g) ?? []).length, 2);
     assert.doesNotMatch(src, /inventoryAdjustQuantities\(input/);
   });
   it("版は 2026-01 のまま", () => {

@@ -1154,12 +1154,14 @@ export type InventoryCount = {
  */
 function countWriteFailure(
   result: { error?: string; opKeyResult: "done" | "rejected" | "uncertain"; appliedCount: number },
-  fallback: string
+  fallback: string,
+  /** どの対象の答えかを画面が見分けるため、送られてきた opKey をそのまま返す */
+  opKey: string | null
 ) {
   const base = result.error || fallback;
   const partial = result.appliedCount > 0 ? `（先に ${result.appliedCount} 件は反映済み）` : "";
   const error = result.opKeyResult === "uncertain" ? `${base}${partial}。${ADMIN_UNCERTAIN_MESSAGE}` : `${base}${partial}`;
-  return { ok: false as const, error, opKeyResult: result.opKeyResult };
+  return { ok: false as const, error, opKeyResult: result.opKeyResult, opKey };
 }
 
 /** 管理画面から棚卸確定・リセット時の変動ログを DB に記録（api/log-inventory-change と同様のロジック） */
@@ -4675,7 +4677,7 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
           revertRound: readRevertRound((count as InventoryCountLike).idempotencyRevertRound),
         })
       );
-      if (!adjustResult.ok) return countWriteFailure(adjustResult, "在庫調整に失敗しました");
+      if (!adjustResult.ok) return countWriteFailure(adjustResult, "在庫調整に失敗しました", adminOp.opKey);
       await logInventoryChangeServer(
         db,
         shop,
@@ -4719,8 +4721,8 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         : c
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
-    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const };
-    return { ok: true, opKeyResult: "done" as const };
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
+    return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
   }
 
   if (actionTypeNorm === "reset_stocktake_group") {
@@ -4758,7 +4760,7 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
           revertRound: readRevertRound((count as InventoryCountLike).idempotencyRevertRound),
         })
       );
-      if (!revertResult.ok) return countWriteFailure(revertResult, "在庫の取り消しに失敗しました");
+      if (!revertResult.ok) return countWriteFailure(revertResult, "在庫の取り消しに失敗しました", adminOp.opKey);
       await logInventoryChangeServer(
         db,
         shop,
@@ -4789,9 +4791,9 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         : c
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
-    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const };
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
-    return { ok: true, opKeyResult: "done" as const };
+    return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
   }
 
   if (actionTypeNorm === "confirm_stocktake_all") {
@@ -4847,7 +4849,7 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
           revertRound: readRevertRound((count as InventoryCountLike).idempotencyRevertRound),
         })
       );
-      if (!adjustResult.ok) return countWriteFailure(adjustResult, "在庫調整に失敗しました");
+      if (!adjustResult.ok) return countWriteFailure(adjustResult, "在庫調整に失敗しました", adminOp.opKey);
       await logInventoryChangeServer(
         db,
         shop,
@@ -4890,9 +4892,9 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         : c
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
-    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const };
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
-    return { ok: true, opKeyResult: "done" as const };
+    return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
   }
 
   if (actionTypeNorm === "reset_stocktake_all") {
@@ -4958,9 +4960,9 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         : c
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
-    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const };
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
-    return { ok: true, opKeyResult: "done" as const };
+    return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
   }
 
   if (actionTypeNorm === "cancel_stocktake_group") {
@@ -9088,7 +9090,7 @@ export default function InventoryCountPage() {
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", groupId);
                                           fd.set("items", JSON.stringify(items));
-                                          historyOpKey.append(fd);
+                                          historyOpKey.append(fd, `${modalCount.id}:confirm:${groupId}`);
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
                                         style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && !loadingIncompleteGroupIds.has(String(groupId)) && incompleteGroupProductsFetcher.state === "idle" ? "pointer" : "not-allowed" }}
@@ -9125,7 +9127,7 @@ export default function InventoryCountPage() {
                                           fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", groupId);
-                                          historyOpKey.append(fd);
+                                          historyOpKey.append(fd, `${modalCount.id}:revert:${groupId}`);
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
                                         style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
@@ -9330,7 +9332,7 @@ export default function InventoryCountPage() {
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", singleGroupId);
                                           fd.set("items", JSON.stringify(items));
-                                          historyOpKey.append(fd);
+                                          historyOpKey.append(fd, `${modalCount.id}:confirm:${singleGroupId}`);
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
                                         style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && !loadingIncompleteGroupIds.has(String(singleGroupId)) && incompleteGroupProductsFetcher.state === "idle" ? "pointer" : "not-allowed" }}
@@ -9367,7 +9369,7 @@ export default function InventoryCountPage() {
                                           fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", singleGroupId);
-                                          historyOpKey.append(fd);
+                                          historyOpKey.append(fd, `${modalCount.id}:revert:${singleGroupId}`);
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
                                         style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
@@ -9560,7 +9562,7 @@ export default function InventoryCountPage() {
                             fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                             fd.set("countId", modalCount.id);
                             fd.set("incompleteGroupsItems", JSON.stringify(incompletePayload));
-                            historyOpKey.append(fd);
+                            historyOpKey.append(fd, `${modalCount.id}:confirm_all`);
                             historyActionFetcher.submit(fd, { method: "post" });
                           }}
                           title={hasIncomplete && !canConfirmAll && stillLoadingIncomplete ? "商品リストの読み込みが完了してから確定できます" : isCountFullyCompleted ? "完了済みのため操作できません" : undefined}
@@ -9586,7 +9588,7 @@ export default function InventoryCountPage() {
                               fd.set("action", "reset_stocktake_all");
                               fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                               fd.set("countId", modalCount.id);
-                              historyOpKey.append(fd);
+                              historyOpKey.append(fd, `${modalCount.id}:revert_all`);
                               historyActionFetcher.submit(fd, { method: "post" });
                             }}
                             style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
