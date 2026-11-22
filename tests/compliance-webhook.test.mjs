@@ -22,6 +22,7 @@ const TABLES = [
   "inventoryCountDocument",
   "orderPendingLocation",
   "refundPendingLocation",
+  "appUsageReport",
 ];
 
 function fakeDb() {
@@ -96,6 +97,53 @@ describe("shop/redact", () => {
       handleComplianceWebhook({ topic: "SHOP_REDACT", shop: "a.myshopify.com", payload: {}, db, log: quiet }),
       /db down/,
     );
+  });
+});
+
+describe("shop/redact and AppUsageReport (D19 案)", () => {
+  test("deletes only that shop's usage report rows", async () => {
+    const db = fakeDb();
+    const res = await handleComplianceWebhook({
+      topic: "shop/redact",
+      shop: "a.myshopify.com",
+      payload: { shop_domain: "a.myshopify.com" },
+      db,
+      log: quiet,
+    });
+    assert.equal(res.deleted.appUsageReport, 1);
+    assert.deepEqual(
+      db.calls.filter((c) => c.table === "appUsageReport"),
+      [{ table: "appUsageReport", where: { shop: "a.myshopify.com" } }],
+    );
+  });
+
+  test("keeps usage report rows when the shop installed again or on the in-house app", async () => {
+    for (const extra of [
+      { isShopStillInstalled: async () => true },
+      { getDistribution: () => "inhouse" },
+    ]) {
+      const db = fakeDb();
+      await handleComplianceWebhook({ topic: "SHOP_REDACT", shop: "a.myshopify.com", payload: {}, db, log: quiet, ...extra });
+      assert.deepEqual(db.calls.filter((c) => c.table === "appUsageReport"), []);
+    }
+  });
+
+  test("customers/redact does not touch usage report rows", async () => {
+    const db = fakeDb();
+    await handleComplianceWebhook({
+      topic: "customers/redact",
+      shop: "a.myshopify.com",
+      payload: { orders_to_redact: [1] },
+      db,
+      log: quiet,
+    });
+    assert.deepEqual(db.calls.filter((c) => c.table === "appUsageReport"), []);
+  });
+
+  test("app/uninstalled route deletes sessions only (usage reports are kept)", () => {
+    const src = readFileSync(new URL("../app/routes/webhooks.app.uninstalled.tsx", import.meta.url), "utf8");
+    assert.match(src, /db\.session\.deleteMany/);
+    assert.doesNotMatch(src, /appUsageReport/);
   });
 });
 

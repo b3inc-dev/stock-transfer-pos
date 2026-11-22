@@ -245,7 +245,7 @@ API バージョンバンプとセットで別 PR。
   - 失敗は `failed`（HTTP の番号・理由・回数）で残し、10 分おいて同じキー・同じ数で送り直す（最大 8 回。400・403 は自動で送り直さない）。202 は受け取っただけなので、請求の成否は Dev Dashboard の Logs で見る。
   - 呼ぶのは `getShopPlan`（管理画面と POS の API）。待たない。同じ店・同じ期間の DB 確認は 1 つのサーバーで 10 分に 1 回まで。自社用（Ciara）は来ない。開発ストアはテスト課金なので送ってよい。
   - 3 か所プランでロケーションが多い店（`locationPlanMismatch`）には送らない（機能が止まっている。プラン変更の案内のまま）。
-- **残り**: 期間の途中で増えた分は取らない。アプリの uninstall のあと 24 時間で期間が閉じる（送り損ねた `failed` はそこで失う）。shop/redact で `AppUsageReport` を消すかは未決（個人情報は入っていない）。
+- **残り**: 期間の途中で増えた分は取らない。アプリの uninstall のあと 24 時間で期間が閉じる（送り損ねた `failed` はそこで失う）。shop/redact で `AppUsageReport` を消すかは D19【案】（消す。T の確認待ち）。
 
 ## D16. 契約は Partner API の activeSubscription でも読めるようにする（既定オフ・2026-11-22）
 
@@ -287,6 +287,21 @@ API バージョンバンプとセットで別 PR。
   - 試験: `tests/public-scopes.test.mjs`（toml と既定のスコープが同じ・見張りが止める）。
 - **戻すとき**: Level 1 を申請して承認 → 公開用 toml に `read_orders` → `PUBLIC_DEFAULT_SCOPES` → Webhook のコメントを外す → 見張りを直す。T の承認が要る（`docs/INVENTORY_CHANGE_HISTORY_CAUSES.md`）。
 - **残り（推測）**: Render の公開用に `SCOPES` の環境変数を `read_orders` 入りで入れていると、toml と食い違う。入っているかは T が確かめる（`docs/listing/partner-dashboard-steps.md`）。
+
+## D19.【案・T の確認待ち】shop/redact で `AppUsageReport` も消す。uninstall では消さない（2026-11-23）
+
+- **事実**:
+  - shop/redact の処理（`app/utils/compliance-webhook.ts`）は、その店の行を `InventoryChangeEvent`・`InventoryCountDocument`・`InventoryChangeLog`・`OrderPendingLocation`・`RefundPendingLocation`・`Session` から消している（明細は ON DELETE CASCADE）。店の名前（`shop`）を持つテーブルで消していなかったのは `AppUsageReport`（D15）だけ。
+  - `app/uninstalled`（`webhooks.app.uninstalled.tsx`）は `Session` だけを消す。
+  - shopify.dev（privacy-law-compliance、2026-11-23 確認）: shop/redact はアンインストールの 48 時間後に届き、`shop_id`・`shop_domain` で「その店のデータを DB から消す」ためのもの。消す対象の種類は書かれていない。法令で残す義務があるときだけ消さなくてよい、という例外がある。請求のために残してよいとは書かれていない。
+  - `AppUsageReport` に個人の情報は無い（期間・プラン・ロケーション数・単位・送った結果）。
+- **案**:
+  - shop/redact で、その店の `AppUsageReport` も消す（ほかのテーブルと同じ `where: { shop }`）。48 時間のうちに入れ直した店と、自社用（Ciara）のサーバーでは、今と同じく何も消さない。
+  - uninstall では消さない（48 時間のうちに入れ直すことがある。D15 のとおり、期間は uninstall の 24 時間後に閉じる）。
+- **理由**: 今の「店のデータは shop/redact でまとめて消す」に合わせるため。1 つだけ残すと、プライバシーポリシーに残す理由と期間を書く必要が出る。請求の正しい記録は Shopify（Dev Dashboard の Logs・請求）にある。
+- **消したあとに入れ直したとき**: 新しい契約になり、期間も新しい（推測ではなく D15 の「uninstall の 24 時間後に期間が閉じる」から）。同じ期間の終わりの日付になったとしても、Shopify の `idempotency_key` は永久に重複を止めるので、2 回は請求されない（D15）。
+- **試験**: `tests/compliance-webhook.test.mjs`（shop/redact で消す・入れ直し／自社用・customers/redact では消さない・uninstall の処理は `Session` だけ）。
+- **T が「残す」に決めたとき**: `compliance-webhook.ts` の `appUsageReport` の 1 行を消し、`docs/listing/privacy-policy.md` の `{{USAGE_RECORD_RETENTION}}` に「残すなら」の文と保存する月数を入れる。
 
 ---
 

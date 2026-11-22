@@ -29,6 +29,7 @@ export type ComplianceDb = {
   inventoryCountDocument: { deleteMany: DeleteMany };
   orderPendingLocation: { deleteMany: DeleteMany };
   refundPendingLocation: { deleteMany: DeleteMany };
+  appUsageReport: { deleteMany: DeleteMany };
 };
 
 export type ComplianceResult = {
@@ -109,6 +110,10 @@ export async function handleComplianceWebhook(args: {
       deleted.inventoryChangeLog = (await db.inventoryChangeLog.deleteMany({ where })).count;
       deleted.orderPendingLocation = (await db.orderPendingLocation.deleteMany({ where })).count;
       deleted.refundPendingLocation = (await db.refundPendingLocation.deleteMany({ where })).count;
+      // 10 か所を超えた分の報告の記録（D15）。個人の情報は無いが、この店のデータなので一緒に消す（D19【案】）。
+      // app/uninstalled では消さない（48 時間のうちに入れ直すと同じ期間の記録が要る）。
+      // 消したあとに入れ直しても、Shopify 側の idempotency_key は永久に重複を止めるので 2 回は請求されない。
+      deleted.appUsageReport = (await db.appUsageReport.deleteMany({ where })).count;
       deleted.session = (await db.session.deleteMany({ where })).count;
       log(`[compliance] shop/redact for ${shopDomain}`, deleted);
       return { status: 200, handled: normalized, deleted };
