@@ -17,7 +17,7 @@
 | `InventoryChangeEvent` / `…Line` | 1 回の操作の記録（再送しても 2 回にならないため）と行ごとの結果 | POS・管理画面の操作 | `shop/redact`（明細は一緒に消える） |
 | `InventoryCountDocument` / `…Chunk` | 棚卸のデータ（名前・状態・ロケーション・数えた数） | 棚卸 | `shop/redact`（明細は一緒に消える） |
 | `OrderPendingLocation` / `RefundPendingLocation` | 注文 ID・返金 ID と商品・ロケーション・数 | **公開版では入らない**: 入れるのは `orders/updated`・`refunds/create` の webhook で、公開用 toml ではコメントアウトしている（公開用は `read_orders` も持たない。D18） | `customers/redact`（その注文の行）・`shop/redact` |
-| `AppUsageReport`（PR #80 で増える） | 請求期間・プラン・ロケーション数・送った単位・送った結果 | 料金プランの確認のとき（公開用だけ） | **今は消さない**（D15 の残り「shop/redact で消すかは未決」）【T】 |
+| `AppUsageReport`（PR #80 で増える） | 請求期間・プラン・ロケーション数・送った単位・送った結果 | 料金プランの確認のとき（公開用だけ） | `shop/redact`（D19【案】。T が確かめる）。uninstall では消さない |
 
 顧客の氏名・メール・電話・住所、支払いの情報は、どのテーブルにも無い【事実】。
 
@@ -38,11 +38,11 @@
 |---|---|
 | `customers/data_request` | 顧客ごとのデータを持っていないので、渡すものはない（記録だけして 200。**店へ何かを送る処理は無い**ので、本文では「答えます」と書かない） |
 | `customers/redact` | `orders_to_redact` の注文の行を `OrderPendingLocation`・`RefundPendingLocation` から消す |
-| `shop/redact` | アンインストールの 48 時間後に届く。その店の行を `InventoryChangeEvent`・`InventoryCountDocument`・`InventoryChangeLog`・`OrderPendingLocation`・`RefundPendingLocation`・`Session` から消す。48 時間のうちに入れ直した店と、自社用（inhouse）のサーバーでは消さない |
+| `shop/redact` | アンインストールの 48 時間後に届く。その店の行を `InventoryChangeEvent`・`InventoryCountDocument`・`InventoryChangeLog`・`OrderPendingLocation`・`RefundPendingLocation`・`AppUsageReport`（D19【案】）・`Session` から消す。48 時間のうちに入れ直した店と、自社用（inhouse）のサーバーでは消さない |
 
 ### 1.5 決まっていない・合っていないこと
 
-- `AppUsageReport` を `shop/redact` で消すか（個人情報は無い）【T】。請求の記録として残すなら、本文の「請求の記録」の行のとおりに書く。
+- `AppUsageReport` を `shop/redact` で消すか（個人情報は無い）【T】。**案は「消す」**（D19。コードはそのとおり）。決まれば本文の `{{USAGE_RECORD_RETENTION}}` に「消すなら」の文を入れる。残すなら D19 の「残すに決めたとき」のとおりに直す。
 - ~~`read_orders` のスコープ（#73 の G4）~~ **決まり（2026-11-22 T）**: 公開用の toml から外した（DECISIONS D18）。本文 2.1 の最後の文はそのまま。
 - サーバーの場所（Render の地域）とログの保存日数【T】。
 
