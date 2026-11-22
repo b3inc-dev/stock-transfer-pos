@@ -31,5 +31,5 @@
 | 1 | ~~4 つのプランの月額と無料体験の日数~~ **決まり（2026-11-22 T）** | Lite 3 か所 $20・Lite 10 か所 $40・Pro 3 か所 $60・Pro 10 か所 $120、無料体験 Lite 7 日・Pro 14 日（DECISIONS D17）。3 か所のプランで多すぎる店は POS でも止める（#91） | ja.md / en.md / partner-dashboard-steps.md |
 | 2 | サポートのメールアドレスと、サポートページ・プライバシーポリシーを置く URL | `{{SUPPORT_EMAIL}}`・`{{SUPPORT_URL}}`・`{{PRIVACY_URL}}` | privacy-policy.md / support-faq.md |
 | 3 | 会社名・住所の表記（プライバシーポリシーの「運営者」） | `{{COMPANY_NAME}}`・`{{COMPANY_ADDRESS}}` | privacy-policy.md |
-| 4 | `read_orders` を外すか（#73 の G4） | 公開版は注文の webhook を使っていない | privacy-policy.md の 2 章 |
+| 4 | ~~`read_orders` を外すか（#73 の G4）~~ **決まり（2026-11-22 T）** | 公開用の toml から外した（自社用はそのまま。DECISIONS D18）。保護された顧客データの申請はしない。公開版の在庫の履歴は売上・返品に分けない | privacy-policy.md の 2 章（2.1 の最後の文はそのまま） |
 | 5 | 英語のリスティングを出すか | 画面は日本語だけ。出すなら対応言語は「日本語」のまま | en.md |

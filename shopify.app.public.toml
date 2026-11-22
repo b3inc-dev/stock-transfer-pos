@@ -34,8 +34,11 @@ api_version = "2026-01"
   compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
   uri = "/webhooks/compliance"
 
-  # 保護された顧客データを含む Webhook。未承認アプリではデプロイ時にエラーになるためコメントアウト。
-  # 承認後はコメントを外して deploy する。https://shopify.dev/docs/apps/launch/protected-customer-data
+  # 注文・返品の Webhook は公開用では受けない（2026-11-22 T の決定。read_orders も外した。docs/DECISIONS.md D18）。
+  # 公開用の在庫の履歴では、売上・返品は「管理画面・その他」に入る（売上・返品に分けない）。
+  # 戻すときは: 保護された顧客データ（Level 1）を申請して承認 → scopes に read_orders を足す →
+  # app/utils/default-scopes.ts の PUBLIC_DEFAULT_SCOPES も直す → 下のコメントを外す → scripts/verify-app-mode.js の見張りを直す。
+  # https://shopify.dev/docs/apps/launch/protected-customer-data
   # [[webhooks.subscriptions]]
   # topics = [ "orders/updated" ]
   # uri = "/webhooks/orders/updated"
@@ -50,7 +53,8 @@ embedded_app_direct_api_access = true
 
 [access_scopes]
 # read_users は制限付きスコープのため必須から除外。詳細: docs/ERROR_DEPLOY_READ_USERS_SCOPE.md
-scopes = "read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers,read_orders"
+# read_orders は公開用では持たない（注文のデータを使わない。DECISIONS D18）。自社用の shopify.app.toml には残す。
+scopes = "read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers"
 
 [auth]
 redirect_urls = [ "https://pos-stock.onrender.com" ]
