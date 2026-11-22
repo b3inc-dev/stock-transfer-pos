@@ -194,6 +194,20 @@
 - #55・#63・#64 を一緒に main へ入れても衝突せず、テストが同じ結果になることを確かめた（11/21）。
 - 開発ストア（bbbincbbb）での確認が残っているもの: A2/A3（インストール直後）、B2/B3（プランの承認・辞退・変更）、S1/S2（POS の 7 つのタイルを最後まで）、W3/W4（`shop/redact` で実際に消えるか）。
 
+### 4.0b 2026-11-23 の進み具合（`main` = `a7e2fc7`。#100 のあと）
+
+4.0 までは前の記録として残す。食い違うときはこの表を正とする。
+
+| ID | 内容 | 今の状態 | PR・決定 |
+|----|------|----------|----------|
+| G4 / A9 / D1 | `read_orders` と保護された顧客データ | **決まり・main に入った**。公開用の toml からだけ `read_orders` を外した。保護された顧客データ（Level 1）は申請しない（提出のときは「使わない」を選ぶ）。自社用（Ciara）は変えない。公開版の在庫の履歴は売上・返品に分けない | #100・DECISIONS D18 |
+| G4 | 公開用 Render `pos-stock` の環境変数 | **済（11/23 0:20・T の承認）**。`SCOPES` を公開用 toml と同じ値（`read_orders` なし）、`APP_DISTRIBUTION=public` | #79 のコメント |
+| G4 | 公開用の toml を Shopify に出す | **残り【T】**。`npm run deploy:public`（スコープの変更が Shopify に入るのはこのとき） | — |
+| G5 / B4 | 10 か所を超えた分の従量 | **決まり・PR あり（draft）**。Billing API の `appUsageRecordCreate` はやめて、App Events API で 1 請求期間に 1 回送る。送るスイッチ `APP_EVENTS_USAGE_ENABLED` は既定オフ。開発ストアで確かめてから main へ | #80 → #82・DECISIONS D15〜D17（#80・#82 の中） |
+| 料金 | プランの数と値段 | **決まり**（T・11/22）: Lite 3 か所 $20・Lite 10 か所 $40・Pro 3 か所 $60・Pro 10 か所 $120、無料体験 Lite 7 日・Pro 14 日。10 か所のプランは 11 か所目から 1 か所ごとに $4 / $12。6 章の案 A（$19 / $59）は使わない | DECISIONS D17（#82 の中） |
+| — | deploy のときの `APP_MODE` と toml の食い違いを止める | **済（main に入った）**。`npm run deploy` は止まり、`deploy:inhouse` / `deploy:public` だけ使う。`deploy:public` は toml に `read_orders` や注文・返品の Webhook があっても止める | #97・#99・#100 |
+| — | リスティングの文 | **済（main に入った）** | #84 |
+
 
 ### 4.1 状態の一覧
 
@@ -220,7 +234,7 @@
 | S4 | POS のトークン | 【済】 | `extensions/common/*.js` が `getSessionToken()`、サーバーは `authenticate.pos`（`api.log-inventory-change.tsx` は自前の検証も持つ） |
 | S5 | Shopify POS だけ | 【済】 | 外部 POS との連携なし |
 | 公開版の URL | 自社用の値が混ざらない | 【済】（注意あり） | 公開 toml は `pos-stock.onrender.com` だけ。`extensions/common/appUrl.js` は `APP_MODE = "public"`（`main`）。自社用で deploy するときにここを書き換える運用なので、**公開版を deploy する直前に `public` であることを必ず確かめる**（PR #37 がこの確認を自動にする案） |
-| 自社用の判定 | Ciara の店名の固定 | 【済】 | 店名はコードに無い。`APP_DISTRIBUTION` と `CUSTOM_APP_STORE_IDS`（環境変数）だけ。**公開 Render でこの 2 つが空なこと**を T が確認 |
+| 自社用の判定 | Ciara の店名の固定 | 【済】 | 店名はコードに無い。`APP_DISTRIBUTION` と `CUSTOM_APP_STORE_IDS`（環境変数）だけ。**公開 Render でこの 2 つが空なこと**を T が確認（**11/23 追記**: 公開 Render には `APP_DISTRIBUTION=public` を入れた。`public` はよい値。`CUSTOM_APP_STORE_IDS` が空なことは今も確かめる） |
 | API 版 | 期限 | 【済】（注意） | `2026-01`。Shopify は各版を少なくとも 12 か月支える約束なので、2027-01 ごろまでに上げる |
 | 言語 | 画面の言語 | 【T】 | 管理画面と POS のタイル名は日本語だけ。リスティングの対応言語は「日本語」だけにする（4.3.2）。英語の画面録画は字幕で対応 |
 
@@ -310,6 +324,8 @@ In admin, filter transfer, loss and count history by origin, destination and sta
 
 ## 6. 料金案（**T が決めるための案**。まだ決まっていない）
 
+> **2026-11-22 追記: 決まった。** 4 プラン（$20 / $40 / $60 / $120）＋ 10 か所のプランは 11 か所目から従量（App Events API）。案 A は使わない（4.0b・DECISIONS D17）。下は決める前の記録。
+
 いまのコードの前提（`app/utils/billing.ts`・`app/routes/app.tsx`）:
 - プランの判定はサブスクリプション名で行う。名前に `Pro` → Pro、`Lite` → Lite。名前に `3` / `10` があればその店舗数を上限とみなす。
 - Pro だけが使える管理画面: 在庫情報・仕入・ロス・発注・棚卸・調整。
@@ -368,10 +384,10 @@ In admin, filter transfer, loss and count history by origin, destination and sta
 | T2 | Partner の本人確認・登録料・緊急連絡先・API 連絡先メール（「Shopify」を含まない） | 提出前 |
 | T3 | **サポート用メールアドレス**（例: support@b3-inc.com のような専用アドレス）と、サポートページの URL | 提出前 |
 | T4 | **プライバシーポリシーの置き場所**（会社サイトの専用ページ、または利用者ヘルプのサイト。PR #50 の `/help/stock-transfer-pos/` と同じサイトに置くのが自然）と、本文の確認 | 提出前 |
-| T5 | 料金（6 章の案 A / B / C） | G3・G5 の前 |
-| T6 | `read_orders` を外すか、保護された顧客データ Level 1 を申請するか（G4）。申請は**審査中はできない** | 提出前 |
+| T5 | 料金（6 章の案 A / B / C） → **決まった**（4.0b） | G3・G5 の前 |
+| T6 | `read_orders` を外すか、保護された顧客データ Level 1 を申請するか（G4）。申請は**審査中はできない** → **決まった**: 公開用から外す・申請しない（#100・D18）。残りは `npm run deploy:public` | 提出前 |
 | T7 | アプリ名を「POS Stock」のままにするか | リスティング作成前 |
-| T8 | 公開 Render の環境変数の確認: `APP_DISTRIBUTION` と `CUSTOM_APP_STORE_IDS` が空、`ENABLE_PLAN_DEBUG` が無い、`SCOPES` が toml と同じ | 提出前 |
+| T8 | 公開 Render の環境変数の確認: `APP_DISTRIBUTION` が `public`（11/23 に入れた。空でもよいが `inhouse` は不可）、`CUSTOM_APP_STORE_IDS` が空、`ENABLE_PLAN_DEBUG` が無い、`SCOPES` が toml と同じ（11/23 に直した） | 提出前 |
 | T9 | Ciara 以外の開発ストア（同じ Partner 組織のもの）で、インストール → 管理画面 → POS 全タイル → アンインストール → 再インストール を通す。審査用のログイン（二段階認証なし）をこのストアで用意 | G1〜G3 が入ったあと |
 | T10 | G1〜G3・G6 を直す PR を出してよいか（main へのマージ・公開版の deploy は毎回 T の承認） | すぐ |
 
