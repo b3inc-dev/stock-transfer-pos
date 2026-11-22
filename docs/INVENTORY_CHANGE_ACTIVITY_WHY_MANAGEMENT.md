@@ -118,7 +118,7 @@ Webhook で「直前数量と今回数量が同じ」（実質変動なし）の
 
 | # | 確認項目 | 内容 |
 |---|----------|------|
-| 1 | **デプロイ** | 入庫・出庫・棚卸・仕入で `logInventoryChangeToApi` を呼ぶ**最新の拡張**がデプロイされているか。古いバンドルだと共通関数の import パス違いや `sourceId` 必須のままの可能性がある。`shopify app deploy` で再デプロイし、POS アプリを更新してから再度操作してみる。 |
+| 1 | **デプロイ** | 入庫・出庫・棚卸・仕入で `logInventoryChangeToApi` を呼ぶ**最新の拡張**がデプロイされているか。古いバンドルだと共通関数の import パス違いや `sourceId` 必須のままの可能性がある。`npm run deploy:inhouse` / `npm run deploy:public` で再デプロイし、POS アプリを更新してから再度操作してみる。 |
 | 2 | **API の 401** | Render の Web サービス **Logs** で `api/log-inventory-change` にリクエストが来ているか、**401** や **POS auth failed** が出ていないか。401 なら「管理画面でアプリを1回開く」でオフラインセッションが DB にあり、同じショップの POS からは通る想定。 |
 | 3 | **全種別とも API で上書き** | ロス含め入庫・出庫・棚卸・仕入はすべて「Webhook は admin_webhook で保存 → API で上書き」の同じ流れ。どれかだけ「管理」のままなら、そのフローの API が届いていないか 401 等で失敗している。上記 1・2 を確認する。 |
 | 4 | **共通モジュールのパス** | 各拡張から `extensions/common/logInventoryChange.js` を参照しているか。デプロイ時の「Could not resolve ... logInventoryChange.js」が出ていたら、その拡張はバンドルに共通処理が含まれておらず、API が呼ばれない。inbound は `../../../common/`、tile は `../../common/` など、拡張のディレクトリ深さに合わせた相対パスになっているか確認する。 |

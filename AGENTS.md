@@ -83,7 +83,7 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 - **GAS（Google Apps Script）: リポジトリ内に存在しない**
 - **GitHub Actions: なし**（`.github/workflows` なし）
 - **定期実行**: Render Cron → 日次在庫スナップショットのみ（移管処理ジョブではない）
-- **デプロイ**: `main` → Render；拡張は `shopify app deploy`（inhouse / public）
+- **デプロイ**: `main` → Render；拡張は `npm run deploy:inhouse` / `npm run deploy:public`（`shopify app deploy` や `npm run deploy` を直接打たない。`docs/DEPLOY.md` §3）
 
 ## 変更時のチェックリスト
 

@@ -25,7 +25,7 @@
 |---|--------|------|------|
 | A1 | **本番用永続DBの用意** | PostgreSQL（**Render Add-on** または Supabase）を1つ用意し、`DATABASE_URL` を設定。Prisma 本番用設定・マイグレーション実施。デプロイで履歴が消えないようにする。※ Render Add-on の PostgreSQL で問題なく本番利用可能。 | RELEASE_REQUIREMENTS_PUBLIC_APP.md セクション5 |
 | A2 | **公開アプリ用環境の準備** | パートナーで「公開アプリ」を新規作成 → Client ID/Secret 取得。公開用デプロイ先（例: pos-stock.onrender.com）を用意し、環境変数・`shopify.app.public.toml` の `client_id` / `application_url` / `redirect_urls` を設定。 | RELEASE_REQUIREMENTS_PUBLIC_APP.md ステップ1〜5 |
-| A3 | **公開用でデプロイ・動作確認** | `shopify app config use public` → `shopify app deploy`。インストール〜主要画面の疎通確認。 | 同上 |
+| A3 | **公開用でデプロイ・動作確認** | `npm run deploy:public`（`shopify app deploy` / `npm run deploy` を直接打たない。`docs/DEPLOY.md` §3）。インストール〜主要画面の疎通確認。 | 同上 |
 
 **Phase A 完了の目安**: 本番用に Render Add-on の PostgreSQL を使い `DATABASE_URL`・Prisma・マイグレーション済み、かつ公開アプリ作成・Client ID/Secret・公開用デプロイ先・デプロイと動作確認まで済んでいれば **Phase A は完了** でよい。
 

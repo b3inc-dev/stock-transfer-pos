@@ -2,6 +2,8 @@
 
 **作成日**: 2026年2月7日
 
+> **2026-11 の注記**: deploy は `npm run deploy:inhouse`（自社用）/ `npm run deploy:public`（公開用）で行います。`shopify app deploy` や `npm run deploy` を直接打たないでください（`npm run deploy` は止めてあります。直打ちは APP_MODE と toml の確かめを通らないため。`docs/DEPLOY.md` §3）。下の文で「deploy する」「`shopify app deploy` を実行」と書いてある所は、この 2 つのどちらかに読みかえてください（7.2・7.3 の CLI と Shopify の仕組みの説明は、そのまま残しています）。
+
 ---
 
 ## 1. なぜPCを閉じると管理画面が開かなくなるか
@@ -51,10 +53,10 @@ application_url = "https://stock-transfer-pos.onrender.com"
 次のコマンドで、**コードのデプロイ**と**Shopify 側のアプリURLの更新**を行います。
 
 ```bash
-shopify app deploy
+npm run deploy:inhouse
 ```
 
-- このとき、**現在の config**（通常は `shopify.app.toml`）の **`application_url`** が Shopify に送られ、**アプリのURLが本番（Render）に切り替わります**。
+- このとき、**`shopify.app.toml`** の **`application_url`** が Shopify に送られ、**アプリのURLが本番（Render）に切り替わります**。
 - デプロイが終わったら、**開発ストアで「アプリを開く」**と、本番URL（Render）の管理画面が開くようになります。
 
 ### ステップ 3: 動作確認
@@ -81,12 +83,12 @@ shopify app deploy
 
 - 次に **`shopify app dev`** を実行すると、また**トンネルURL**がアプリのURLとして登録されます。
 - その間は、アプリを開くと**トンネル（ローカル）**に飛び、PCを閉じると開けなくなります。
-- **開発が終わったら、もう一度 `shopify app deploy` を実行**すると、また本番URLに戻り、PCを閉じても管理画面が開くようになります。
+- **開発が終わったら、もう一度 `npm run deploy:inhouse`（公開用は `npm run deploy:public`）を実行**すると、また本番URLに戻り、PCを閉じても管理画面が開くようになります。
 
 ### 公開用アプリ（pos-stock.onrender.com）の場合
 
 - 公開用は **`shopify.app.public.toml`** を使います。
-- 切り替え: `shopify app config use public` のあと `shopify app deploy` を実行します。
+- deploy: `npm run deploy:public` を実行します。
 - 本番URLは `shopify.app.public.toml` の `application_url`（例: `https://pos-stock.onrender.com`）になります。
 
 ---
@@ -95,20 +97,18 @@ shopify app deploy
 
 | やりたいこと | やること |
 |--------------|----------|
-| PCを閉じても管理画面を開けるようにする | 本番（Render）を起きた状態にしておき、**`shopify app deploy`** を実行してアプリURLを本番に戻す。**deploy 後もトンネルURLに飛ぶ場合は「7. パートナーダッシュボードでアプリURLを手動で本番に戻す」を実行。** |
+| PCを閉じても管理画面を開けるようにする | 本番（Render）を起きた状態にしておき、**`npm run deploy:inhouse` / `npm run deploy:public`** を実行してアプリURLを本番に戻す。**deploy 後もトンネルURLに飛ぶ場合は「7. パートナーダッシュボードでアプリURLを手動で本番に戻す」を実行。** |
 | 開発ストアで本番のアプリを試す | 上記のあと、開発ストアからアプリを開く。本番URLで開くので、開発ストアのデータのまま本番アプリを確認できる。 |
-| またローカルで開発する | `shopify app dev` を実行。終わったら再度 `shopify app deploy` または手動でアプリURLを本番に戻す。 |
+| またローカルで開発する | `shopify app dev` を実行。終わったら再度 `npm run deploy:inhouse` / `npm run deploy:public` または手動でアプリURLを本番に戻す。 |
 
 **コマンドの目安**
 
 ```bash
 # 自社用アプリ（POS Stock - Ciara）を本番URLにする場合
-shopify app config use shopify.app.toml
-shopify app deploy
+npm run deploy:inhouse
 
 # 公開用アプリ（POS Stock）を本番URLにする場合
-shopify app config use public
-shopify app deploy
+npm run deploy:public
 ```
 
 デプロイ後、開発ストアからアプリを開いて、本番URLで表示されることを確認してください。
@@ -127,15 +127,13 @@ shopify app deploy
 **「POS Stock」を開いたときにトンネルエラーになる**場合は、**公開用アプリ**のアクティブなバージョンがまだトンネルURLのままです。次のように **公開用の deploy** を実行してください。
 
 ```bash
-shopify app config use public
-shopify app deploy
+npm run deploy:public
 ```
 
 **「POS Stock - Ciara」を開いたときにエラーになる**場合は、自社用の deploy です。
 
 ```bash
-shopify app config use shopify.app.toml
-shopify app deploy
+npm run deploy:inhouse
 ```
 
 deploy は **いま開いている（エラーになっている）アプリ**に対応する config で行う必要があります。
@@ -180,12 +178,10 @@ Shopify の公式ドキュメントでは、次のように説明されていま
    - 公開用: **`shopify.app.public.toml`** の `application_url = "https://pos-stock.onrender.com"`
 3. その toml を使って **deploy** する。
    ```bash
-   # 自社用の場合（通常はこれがデフォルト）
-   shopify app config use shopify.app.toml
-   shopify app deploy
+   # 自社用の場合
+   npm run deploy:inhouse
    # 公開用の場合
-   shopify app config use public
-   shopify app deploy
+   npm run deploy:public
    ```
 4. deploy が成功すると **新しいバージョン** が作成され、そのバージョンに toml の **App URL** が含まれます。通常はそのままリリースされるので、**アクティブなバージョン** が本番URLになります。
 5. **Dev Dashboard → Apps → 対象アプリ → Versions** で、いま **Active** のバージョンを開き、**App URL** と **Redirect URLs** が本番URLになっているか確認する。
@@ -193,7 +189,7 @@ Shopify の公式ドキュメントでは、次のように説明されていま
 
 **まだトンネルURLのバージョンが Active のままの場合**
 
-- 上記のとおり **toml を本番URLにしたうえで、再度 `shopify app deploy`** を実行してください。  
+- 上記のとおり **toml を本番URLにしたうえで、再度 `npm run deploy:inhouse` / `npm run deploy:public`** を実行してください。  
   新しいバージョンが作成・リリースされ、そのバージョンの URL が使われます。
 - もし **過去に本番URLで deploy したバージョン** が残っていれば、Dev Dashboard の **Versions** でそのバージョンを選び **Release** して「そのバージョンをアクティブにする」方法でも、本番URLに戻せます。
 
@@ -216,13 +212,13 @@ Shopify の公式ドキュメントでは、次のように説明されていま
    別のターミナルで動いていないかも確認する。
 
 2. **deploy したアプリと、開いているアプリが同じか**  
-   - サイドバーで **「POS Stock」** を開いてエラー → **公開用**で deploy（`shopify app config use public` → `shopify app deploy`）。
-   - **「POS Stock - Ciara」** を開いてエラー → **自社用**で deploy（`shopify.app.toml` で deploy）。
+   - サイドバーで **「POS Stock」** を開いてエラー → **公開用**で deploy（`npm run deploy:public`）。
+   - **「POS Stock - Ciara」** を開いてエラー → **自社用**で deploy（`npm run deploy:inhouse`）。
 
 3. **Dev Dashboard で Active バージョンの URL を確認**  
    - **Dev Dashboard → Apps → POS Stock（または該当アプリ）→ Versions** を開く。
    - **Active** になっているバージョンをクリックし、**App URL** が **https://pos-stock.onrender.com**（公開用）や **https://stock-transfer-pos.onrender.com**（自社用）になっているか確認する。
-   - まだ **trycloudflare.com** や **ngrok** のURLになっている場合は、**本番URLが書かれた toml で再度 `shopify app deploy`** を実行し、新バージョンができたらそのバージョンが Active になるか確認する。
+   - まだ **trycloudflare.com** や **ngrok** のURLになっている場合は、**本番URLが書かれた toml で再度 `npm run deploy:inhouse` / `npm run deploy:public`** を実行し、新バージョンができたらそのバージョンが Active になるか確認する。
 
 4. **開発ストアでアンインストール → 再インストール**  
    - 上記まで正しいのにまだトンネルに飛ぶ場合は、その開発ストアで一度アプリをアンインストールし、**本番URLのアプリ**として再度インストールする（7.5 参照）。
@@ -251,12 +247,12 @@ Shopify の公式ドキュメントでは、次のように説明されていま
 
 1. **実際にリクエストされているURLを確認する**  
    - 管理画面で「POS Stock」を開いた状態で、iframe の中身のURLを確認します（アプリ画面で右クリック → 「フレームで開く」や、開発者ツールの Network タブでドキュメントの Request URL を確認）。  
-   - パスが `/` や `/app` ではなく、`/embed` や `/app/embed` などになっていれば、**Dev Dashboard → 対象アプリ → Versions → Active バージョン** の **App URL** を **パスなし** の `https://pos-stock.onrender.com` に修正し、必要なら toml の `application_url` を同じにしたうえで **再度 `shopify app deploy`** してください。
+   - パスが `/` や `/app` ではなく、`/embed` や `/app/embed` などになっていれば、**Dev Dashboard → 対象アプリ → Versions → Active バージョン** の **App URL** を **パスなし** の `https://pos-stock.onrender.com` に修正し、必要なら toml の `application_url` を同じにしたうえで **再度 `npm run deploy:public`** してください。
 
 2. **App URL をルートに統一する**  
    - **shopify.app.public.toml** の `application_url` は **パスなし** にします。  
      `application_url = "https://pos-stock.onrender.com"`  
-   - 変更後は `shopify app config use public` → `shopify app deploy` を実行し、Dev Dashboard の Active バージョンの App URL がルートになっているか確認します。
+   - 変更後は `npm run deploy:public` を実行し、Dev Dashboard の Active バージョンの App URL がルートになっているか確認します。
 
 3. **Render の環境変数を確認する**  
    - pos-stock サービス（公開用URLを提供）で、**SHOPIFY_API_KEY**（公開用アプリの client_id）、**SHOPIFY_APP_URL**（`https://pos-stock.onrender.com`）、**SHOPIFY_API_SECRET** などが正しく設定されているか確認します。
@@ -290,4 +286,4 @@ Shopify の公式ドキュメントでは、次のように説明されていま
 - **`shopify app dev`** を再度実行すると、またアプリのURLがトンネルURLに上書きされます。
 - 開発が終わって「PCを閉じても開ける」状態に戻したいときは、  
   - もう一度 **パートナーダッシュボードでアプリURLを本番に戻す**か、  
-  - **`shopify app deploy`** を実行したうえで、まだトンネルURLのままなら同様に手動で本番URLに戻してください。
+  - **`npm run deploy:inhouse` / `npm run deploy:public`** を実行したうえで、まだトンネルURLのままなら同様に手動で本番URLに戻してください。
