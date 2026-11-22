@@ -51,7 +51,7 @@ Q. 通信が切れて確定できたか分からないときは。
 A. 同じ操作をもう一度送っても、在庫の調整（ロス・棚卸・入庫など）は 2 回にならない作りです。出庫は、Shopify 管理画面の「在庫移管」で作られているかを先に確かめてから、もう一度確定してください。
 
 Q. アンインストールするとデータはどうなりますか。
-A. プライバシーポリシー（{{PRIVACY_URL}}）の「保存する期間と削除」をご覧ください。アンインストールの 48 時間後に、アプリのデータベースからその店舗の記録を削除します。
+A. プライバシーポリシー（{{PRIVACY_URL}}）の「保存する期間と削除」をご覧ください。アンインストールの 48 時間後に、アプリのデータベースからその店舗の記録を削除します。ストアの中（メタフィールド）に保存した設定・記録・毎日の在庫高は、アンインストールのあともストアに残ることがあり、アンインストールのあとはアプリから削除できません。削除を希望するときは、アンインストールの前にご連絡ください。
 
 Q. 対応している言語は。
 A. 画面は日本語です。
@@ -115,5 +115,5 @@ Q. The connection dropped and I am not sure the action went through.
 A. Sending an inventory adjustment (loss, count, receiving) again does not apply it twice. For a transfer, first check Inventory transfers in Shopify admin, then confirm again only if it is not there.
 
 Q. What happens to my data when I uninstall?
-A. See "Retention and deletion" in our privacy policy ({{PRIVACY_URL}}). We delete the store's records from our database 48 hours after uninstall.
+A. See "Retention and deletion" in our privacy policy ({{PRIVACY_URL}}). We delete the store's records from our database 48 hours after uninstall. Settings, records and daily inventory snapshots saved in your Shopify store (metafields) may stay in the store after uninstall, and the app can no longer delete them then. If you want them deleted, contact us before you uninstall.
 ```
