@@ -63,12 +63,24 @@ export function getPlanFromActiveSubscriptions(subscriptions: ActiveSubscription
 
 /**
  * サブスクリプション名から「3ロケーション用」か「10ロケーション用」かを判定する。
- * パートナーで lite-3 / lite-10 / pro-3 / pro-10 のように設定している場合、名前に "10" または "3" が含まれる想定。
+ * パートナーで lite-3 / lite-10 / pro-3 / pro-10（必ずハイフン）のように設定している場合、名前に "10" または "3" が含まれる想定。
+ * アンダースコアの handle（lite_3 / pro_10）は受け付けない（console.error を出して null）。
  * 判定できない場合は null（制限しない）。
  */
 export function getMaxLocationsFromSubscriptionName(name: string): 3 | 10 | null {
   const n = String(name || "").trim();
   if (!n) return null;
+  // プランの handle はハイフン（lite-3 / pro-10）。アンダースコア（lite_3 / pro_10）は受け付けない。
+  // そのまま読むと 3/10 が取れず「制限なし」に黙って倒れるので、はっきりログを出す（判定は null のまま）。
+  const underscored = findUnderscorePlanHandles(n);
+  if (underscored.length > 0) {
+    console.error(
+      `[billing] plan handle uses underscore (${underscored.join(", ")}); POS Stock plan handles must use hyphens ` +
+        `(${underscored.map((h) => h.replace(/_/g, "-")).join(", ")}). Location limit NOT applied for:`,
+      n
+    );
+    return null;
+  }
   // 先に 10 を判定（lite-10, "10 locations", "10ロケーション" など）
   if (/-10\b|10ロケーション|10\s*locations?/i.test(n)) return 10;
   if (/\b10\b/.test(n)) return 10;
@@ -110,3 +122,8 @@ export const TRIAL_DAYS = { lite: 7, pro: 14 } as const;
 // appSubscriptionCreate（createAppSubscription）と appUsageRecordCreate（reportUsageRecord）は消した。
 // App Pricing の契約に Billing API の従量を付けることはできない（App Events API では INVALID_SUBSCRIPTION）。
 // 10 か所を超えた分は app/utils/app-events-usage.server.ts が App Events API で送る。
+
+/** アンダースコアで書かれたプランの handle（lite_3 / pro_10 など）を拾う。正しい形はハイフン（lite-3 / pro-10） */
+export function findUnderscorePlanHandles(name: string): string[] {
+  return Array.from(String(name || "").matchAll(/(?:^|[^a-z0-9])((?:lite|pro)_(?:3|10))(?![a-z0-9])/gi), (m) => m[1]);
+}
