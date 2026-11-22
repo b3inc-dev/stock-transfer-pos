@@ -65,6 +65,8 @@ Render → `pos-stock` → Environment
 | `PARTNER_API_APP_ID` | 公開用アプリの ID | 使うときだけ |
 | `PARTNER_API_VERSION` | 省略（既定 `2026-10`） | いらない |
 | `APP_EVENTS_USAGE_ENABLED` | **まだ入れない** | 6. で入れる |
+| `APP_DISTRIBUTION` | `public` | **入れ済み**（2026-11-23 0:20・T の承認・#100 のとき）。変えない |
+| `SCOPES` | 公開用 toml と同じ（`read_orders` なし） | **直し済み**（2026-11-23 0:20・#100 のとき）。変えない |
 
 - `APP_EVENTS_CLIENT_ID` / `APP_EVENTS_CLIENT_SECRET` は入れなくてよい（無いときは `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` を使う）
 - `PARTNER_API_ORG_ID` は Dev Dashboard の数字ではなく、**Partner Dashboard**（partners.shopify.com）の URL の数字
@@ -103,7 +105,19 @@ git ls-tree --name-only origin/main prisma/migrations/ | tail -3
 2. カードで承認 → main へマージ
 3. Render `pos-stock` が「Live」になるまで待つ
 
-2026-11-22 の時点では #82 は main とぶつかりません。
+2026-11-23（main `a7e2fc7`、#100 のあと）に試した結果:
+
+- **#80 だけを main へ入れると `docs/DECISIONS.md` がぶつかる**（#100 が D18 を足したため）。直し方: D14 のあと・D18 の前に #80 の D15 を置くだけ。【係】が #80 向けの別ブランチの PR で main を取り込み、直してから T にカードを出す
+- #82（#80 を含む）を main と合わせるとぶつからない。試験は 445 件成功・失敗 2 件（`vite` が無いだけ。main と同じ）
+- #80・#82 はどちらも toml・スコープ・Webhook を変えない（#100 と食い違わない）
+
+**#80 と #82 は続けて入れる。間で `APP_EVENTS_USAGE_ENABLED=1` にしない。** #82 で記録とキーの期間の書き方（`2026-12-21T00:00:00Z` → `2026-12-21`）が変わるので、#80 だけでオンにして送ると、#82 のあと同じ期間をもう一度送るおそれがある（推測。オフのまま続けて入れれば起きない）。
+
+### 拡張（POS のタイル）を Shopify に出す
+
+- #82 には POS の拡張の変更（3 か所のプランで多すぎる店をタイルでも止める・#91）が入っている。拡張は Render ではなく `npm run deploy:public` で出る
+- 【T】#82 が Live になったあとで `npm run deploy:public`（手順は #79 のコメント）。T の決定（11/22 22:30）どおり、拡張はこのあと
+- #100 のスコープの変更のために先に `deploy:public` をしたときは、#82 のあとでもう一度する（そのときの main の拡張が出るだけ）
 
 ---
 
@@ -149,8 +163,8 @@ shopify app execute -c public -s <開発ストア>.myshopify.com -q '{ shop { id
 
 ## 7. 自社用（Ciara）は変わらない
 
-- 自社用（`APP_DISTRIBUTION=inhouse`）は Shopify に契約を聞かず、報告もしません（#82 で、報告の中でも DB・Shopify を触らないよう二重にしてあります）
-- `pos-stock-ciara` が main を見て自動で出るかは未確認です。出た場合でも、増えるのは空の `AppUsageReport` の表だけです
+- 自社用は Shopify に契約を聞かず、報告もしません。自社用かどうかは `SHOPIFY_API_KEY` が自社用の client_id・`APP_DISTRIBUTION=inhouse`・`CUSTOM_APP_STORE_IDS` のどれかで決まります（`app/utils/plan-distribution.ts`）。#82 で、報告の中でも DB・Shopify を触らないよう二重にしてあります
+- **main へのマージで、自社用 `pos-stock-ciara` にも自動で配備が始まります**（#100 のマージで確かめた・#79 の 11/23 0:20 の記録）。Ciara で増えるのは空の `AppUsageReport` の表だけです（`CREATE TABLE IF NOT EXISTS`。今ある表は変えない）
 - 【T】マージのあと Ciara で: 管理画面が開く・POS の出庫・入庫が今まで通り
 
 ---
