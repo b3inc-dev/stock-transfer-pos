@@ -219,6 +219,20 @@ API バージョンバンプとセットで別 PR。
 
 - **残り（サーバーで止められないもの）**: 出庫の Transfer 作成・入庫の受領は POS から Shopify へ直接送る（D1）。ここはタイルの `PlanGate` だけが止め口。古い版の拡張が端末に残っている間は止まらない（推測。次の `shopify app deploy` で入れ替わる）。ロケーション数とプランの不一致は今まで通り管理画面だけで扱う。
 
+## D15. 10 か所を超えたロケーションは App Events API で 1 請求期間に 1 回報告する（2026-11-21）
+
+- **T の決定（2026-11-21 21:10、#79）**: 料金は Shopify App Pricing。Billing API の従量（`appUsageRecordCreate`）は消し、10 か所を超えた分は App Events API で報告する。従量に上限は付けない。
+- **理由**: App Pricing の契約に Billing API の従量は付けられない（App Events API の請求エラー `INVALID_SUBSCRIPTION`）。App Pricing の使用量は月額のみ・上限（cap）なし（shopify.dev 2026-11-21 確認）。
+- **判断**:
+  - 送る数は `max(0, ロケーション数 − 10)`。メーターは Lite `extra_location_lite`（$4）・Pro `extra_location_pro`（$12）。handle は env で変えられる。
+  - 1 店・1 請求期間（`activeSubscriptions[].currentPeriodEnd`）に 1 回。DB `AppUsageReport` の `(shop, periodEnd)` 一意 ＋ Shopify の `idempotency_key`（請求イベントは永久に重複しない）。期間の中で最初に数えた時点の数で送る（あとから増えた分は次の期間から）。一度送ろうとした行は数を変えない。
+  - 外へ送るのは `APP_EVENTS_USAGE_ENABLED=1` のときだけ（既定オフ）。オフでも数は `disabled` で残す。
+  - 上限が Shopify に無いので、アプリ側の上限 `APP_EVENTS_USAGE_MAX_UNITS`（既定 50）を超えたら送らず `over_limit` で残す。
+  - 失敗は `failed`（HTTP の番号・理由・回数）で残し、10 分おいて同じキー・同じ数で送り直す（最大 8 回。400・403 は自動で送り直さない）。202 は受け取っただけなので、請求の成否は Dev Dashboard の Logs で見る。
+  - 呼ぶのは `getShopPlan`（管理画面と POS の API）。待たない。同じ店・同じ期間の DB 確認は 1 つのサーバーで 10 分に 1 回まで。自社用（Ciara）は来ない。開発ストアはテスト課金なので送ってよい。
+  - 3 か所プランでロケーションが多い店（`locationPlanMismatch`）には送らない（機能が止まっている。プラン変更の案内のまま）。
+- **残り**: 期間の途中で増えた分は取らない。アプリの uninstall のあと 24 時間で期間が閉じる（送り損ねた `failed` はそこで失う）。shop/redact で `AppUsageReport` を消すかは未決（個人情報は入っていない）。
+
 ## D16. 契約は Partner API の activeSubscription でも読めるようにする（既定オフ・2026-11-22）
 
 - **背景**: T の決定（2026-11-21）。shopify.dev の Shopify App Pricing の説明は、店の契約の正しい確かめ方を Partner API の `activeSubscription(appId:, shopId:)` としている。Admin API の `currentAppInstallation.activeSubscriptions` に App Pricing の契約が出るかは書かれていない（未確認）。

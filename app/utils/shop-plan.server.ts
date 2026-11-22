@@ -4,10 +4,8 @@ import type { ActiveSubscription } from "./billing";
 import {
   getPlanFromActiveSubscriptions,
   getMaxLocationsFromSubscriptionName,
-  getUsageLineItemId,
-  calculateUsageAmount,
-  reportUsageRecord,
 } from "./billing";
+import { computeExtraLocationUsage, reportExtraLocationUsage, type UsageReportStore } from "./app-events-usage.server";
 import { resolvePlanDistribution } from "./plan-distribution";
 import {
   getPartnerActiveSubscription,
@@ -52,6 +50,17 @@ export type ShopPlan = {
   locationPlanMismatch?: boolean;
   /** 現在のプランが対象とする最大ロケーション数（3 or 10）。locationPlanMismatch 時のみ意味を持つ */
   maxLocationsForPlan?: 3 | 10;
+  /**
+   * 公開用・Lite/Pro で 10 か所を超えた分（App Events API で 1 請求期間に 1 回報告する数）。
+   * 料金プラン画面で店に見せる。自社用・未契約・3 か所プランの不一致のときは無い。
+   */
+  extraLocationUsage?: {
+    units: number;
+    unitPriceUsd: number;
+    amountUsd: number;
+    /** Shopify の currentPeriodEnd（報告の記録 AppUsageReport を引くキー） */
+    periodEnd: string | null;
+  };
   /** 要因特定用。ENABLE_PLAN_DEBUG=1 のときのみ付与。本番では設定しないこと */
   planDebug?: {
     shop: string | undefined;
@@ -105,8 +114,8 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
   let planFromBilling: "lite" | "pro" | null = null;
   /** Shopify から契約の一覧を読めたか（読めない＝未契約とは言えない） */
   let subscriptionsRead = false;
-  let activeSubscriptions: Array<{ id?: string; name?: string; status?: string; currentPeriodEnd?: string | null; lineItems?: Array<{ id: string; plan?: { pricingDetails?: { __typename?: string } } }> }> = [];
   let shopGid: string | null = null;
+  let activeSubscriptions: Array<{ id?: string; name?: string; status?: string; currentPeriodEnd?: string | null }> = [];
   try {
     const resp = await admin.graphql(
       `#graphql
@@ -124,14 +133,6 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
               name
               status
               currentPeriodEnd
-              lineItems {
-                id
-                plan {
-                  pricingDetails {
-                    __typename
-                  }
-                }
-              }
             }
           }
         }
@@ -207,33 +208,6 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
 
   const features = featuresForPlanState({ distribution, plan, planCheckFailed }) as ShopPlanFeatures;
 
-  // 公開・本番・Lite/Pro・10ロケーション超のとき、従量課金を 1 回だけ報告（同一期間は idempotencyKey で重複防止）
-  if (
-    distribution === "public" &&
-    !isDevelopmentStore &&
-    (plan === "lite" || plan === "pro") &&
-    locationsCount > 10
-  ) {
-    try {
-      const active = activeSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
-      const sub = active.find((s) => getUsageLineItemId(s as ActiveSubscription) && s.currentPeriodEnd) as (ActiveSubscription & { currentPeriodEnd?: string | null }) | undefined;
-      const usageLineItemId = sub ? getUsageLineItemId(sub) : null;
-      const periodEnd = sub?.currentPeriodEnd;
-      if (usageLineItemId && periodEnd && sub?.id) {
-        const { amountUsd, extraLocations } = calculateUsageAmount(plan, locationsCount);
-        if (amountUsd > 0) {
-          const idempotencyKey = `usage-${sub.id}-${periodEnd}`;
-          const description = `${extraLocations} extra location(s) (${locationsCount} total): $${amountUsd.toFixed(2)}`;
-          reportUsageRecord(admin, usageLineItemId, amountUsd, description, idempotencyKey).catch(() => {
-            // ローダーの応答をブロックしない。失敗時は次回アクセス時に再試行される
-          });
-        }
-      }
-    } catch {
-      // Usage 報告失敗で設定・ホーム等の loader を落とさない
-    }
-  }
-
   // ロケーション数とプラン（3/10）の一致チェック。公開アプリ・Lite/Pro のときのみ
   let locationPlanMismatch = false;
   let maxLocationsForPlan: 3 | 10 | undefined;
@@ -249,6 +223,34 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
     if (maxFromPlans !== null && locationsCount > maxFromPlans) {
       locationPlanMismatch = true;
       maxLocationsForPlan = maxFromPlans;
+    }
+  }
+
+  // 10 か所を超えた分の従量（App Events API）。公開用・Lite/Pro・3 か所プランの不一致でないときだけ。
+  // 送るかどうか・1 期間 1 回・失敗の記録は app-events-usage.server.ts。ここでは待たない（画面と POS の API を遅くしない）。
+  let extraLocationUsage: ShopPlan["extraLocationUsage"];
+  if (distribution === "public" && !forceInhouse && (plan === "lite" || plan === "pro") && !locationPlanMismatch) {
+    const usage = computeExtraLocationUsage(plan, locationsCount);
+    if (usage.units > 0) {
+      const activeWithPeriod = activeSubscriptions.filter(
+        (s) => String(s?.status || "").toUpperCase() === "ACTIVE" && s.currentPeriodEnd
+      );
+      const periodEnd = activeWithPeriod[0]?.currentPeriodEnd ?? null;
+      extraLocationUsage = { units: usage.units, unitPriceUsd: usage.unitPriceUsd, amountUsd: usage.amountUsd, periodEnd };
+      const reportPlan = plan;
+      const shopForReport = String(currentShop ?? "").trim().toLowerCase();
+      if (shopForReport) {
+        void import("../db.server")
+          .then(({ default: prisma }) =>
+            reportExtraLocationUsage(
+              { shop: shopForReport, shopGid, plan: reportPlan, locationsCount, periodEnd },
+              { store: prisma.appUsageReport as unknown as UsageReportStore }
+            )
+          )
+          .catch((e) => {
+            console.error("[getShopPlan] extra location usage report crashed:", e instanceof Error ? e.message : String(e));
+          });
+      }
     }
   }
 
@@ -273,6 +275,7 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
     isDevelopmentStore,
     ...(planCheckFailed ? { planCheckFailed: true } : {}),
     ...(locationPlanMismatch ? { locationPlanMismatch: true, maxLocationsForPlan } : {}),
+    ...(extraLocationUsage ? { extraLocationUsage } : {}),
     planDebug,
   };
 }
