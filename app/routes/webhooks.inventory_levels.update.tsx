@@ -1026,4 +1026,4 @@ async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response>
 
 // 4 秒を過ぎたら先に 200 を返し、処理は続ける（webhook-response-budget.ts）
 export const action = (args: ActionFunctionArgs) =>
-  respondWithinBudget(() => handleWebhook(args), { label: "inventory_levels/update" });
+  respondWithinBudget(() => handleWebhook(args), { label: "inventory_levels/update", request: args.request });

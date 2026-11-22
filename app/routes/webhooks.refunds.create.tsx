@@ -554,4 +554,4 @@ async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response>
 
 // 4 秒を過ぎたら先に 200 を返し、処理は続ける（Shopify の 5 秒の待ちで「失敗」にしない。webhook-response-budget.ts）
 export const action = (args: ActionFunctionArgs) =>
-  respondWithinBudget(() => handleWebhook(args), { label: "refunds/create" });
+  respondWithinBudget(() => handleWebhook(args), { label: "refunds/create", request: args.request });
