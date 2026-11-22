@@ -133,7 +133,7 @@ shopify.dev の Shopify App Pricing の説明では、店の今の契約を確�
 - 契約が見つかれば、それでプランを決める。**プランの判定は項目の `handle` を使う**ので、料金プランの handle にも `lite` / `pro`（3/10 か所なら `-3` / `-10`）を入れておく（推測: handle は表示名から作られることが多い。必ず Partner Dashboard で確かめる）
 - 「契約なし」と答えたら Admin API の結果を使う（Admin に有効な契約があれば止めない）
 - 失敗（429・5 秒の timeout・権限・公開アプリでない等）のときは今まで通り Admin API だけで決める。両方読めなければ今まで通り「確認できませんでした」で止める（#78）
-- 店ごとに、見つかった結果は 60 秒、契約なしは 15 秒覚える（上限が 1 クライアント 4 回/秒のため）。失敗は覚えない
+- 店ごとに、見つかった結果は 60 秒、契約なしは 15 秒覚える（上限が 1 クライアント 4 回/秒のため）。失敗した店は 30 秒聞き直さず Admin API だけで決める（timeout の 5 秒を毎回待たない）。429 のあとは 10 秒どの店でも聞かない。3 つのアプリ（POS Stock・Location Stock・Review Q&A）は Partner API client を分ける（上限は client ごと）
 - 確かめるとき: `ENABLE_PLAN_DEBUG=1` で `planDebug.planSource`（`partner` / `admin`）と `partnerStatus` が見える
 
 ---

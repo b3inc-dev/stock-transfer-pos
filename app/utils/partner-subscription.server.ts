@@ -16,6 +16,10 @@ export const PARTNER_API_TIMEOUT_MS = 5_000;
 export const PARTNER_CACHE_FOUND_MS = 60_000;
 /** 契約が無かったときに覚える時間（契約した直後にすぐ使えるよう短く） */
 export const PARTNER_CACHE_NONE_MS = 15_000;
+/** 失敗した店は、この時間 Partner に聞き直さず失敗を返す（呼ぶ側はすぐ Admin API で決める。timeout の 5 秒を毎回待たない） */
+export const PARTNER_FAILURE_BACKOFF_MS = 30_000;
+/** 429 のあとは、この時間どの店でも Partner に聞かない（上限は 1 クライアントごとなので、聞き続けると全部止まる） */
+export const PARTNER_THROTTLE_COOLDOWN_MS = 10_000;
 
 export type PartnerApiConfig = {
   token: string;
@@ -88,7 +92,7 @@ export type PartnerLookupFailure =
 
 export type PartnerLookup =
   | { ok: true; subscription: PartnerSubscription | null; cached: boolean }
-  | { ok: false; reason: PartnerLookupFailure; status?: number };
+  | { ok: false; reason: PartnerLookupFailure; status?: number; cached?: boolean };
 
 export const ACTIVE_SUBSCRIPTION_QUERY = `query AppActiveSubscription($appId: ID!, $shopId: ID!) {
   activeSubscription(appId: $appId, shopId: $shopId) {
@@ -198,11 +202,15 @@ export async function fetchPartnerActiveSubscription(args: {
 }
 
 const cache = new Map<string, { result: PartnerLookup & { ok: true }; at: number }>();
+const failures = new Map<string, { result: PartnerLookup & { ok: false }; at: number }>();
 const inflight = new Map<string, Promise<PartnerLookup>>();
+/** 429 を受けたあと、どの店でも聞かない時刻（このサーバーの中だけ） */
+let throttledUntil = 0;
 
 /**
  * 店ごとに少しのあいだ覚えて Partner API に聞く（4 回/秒の上限があるため）。
- * 失敗は覚えない（次の呼び出しでもう一度聞く）。ログは理由と店のドメインだけ（トークンは出さない）。
+ * 失敗は店ごとに 30 秒覚えて失敗を返す（呼ぶ側は Admin API だけで決める）。429 のあとは 10 秒どの店でも聞かない。
+ * ログは実際に聞いて失敗したときだけ、理由と店のドメインだけ（トークンは出さない）。
  */
 export async function getPartnerActiveSubscription(args: {
   config: PartnerApiConfig;
@@ -222,6 +230,12 @@ export async function getPartnerActiveSubscription(args: {
     if (now() - hit.at < ttl) return { ...hit.result, cached: true };
     cache.delete(key);
   }
+  const failed = failures.get(key);
+  if (failed) {
+    if (now() - failed.at < PARTNER_FAILURE_BACKOFF_MS) return { ...failed.result, cached: true };
+    failures.delete(key);
+  }
+  if (now() < throttledUntil) return { ok: false, reason: "throttled", cached: true };
   const running = inflight.get(key);
   if (running) return running;
   const p = (async () => {
@@ -232,8 +246,11 @@ export async function getPartnerActiveSubscription(args: {
       timeoutMs: args.timeoutMs,
     });
     if (result.ok) {
+      failures.delete(key);
       cache.set(key, { result, at: now() });
     } else {
+      failures.set(key, { result, at: now() });
+      if (result.reason === "throttled") throttledUntil = now() + PARTNER_THROTTLE_COOLDOWN_MS;
       console.warn(
         `[partner-subscription] lookup failed: reason=${result.reason}${result.status ? ` status=${result.status}` : ""} shop=${args.shop ?? shopGid}`
       );
@@ -261,5 +278,7 @@ export function partnerSubscriptionToAdminShape(sub: PartnerSubscription, shopGi
 /** テスト用 */
 export function __clearPartnerSubscriptionCacheForTest() {
   cache.clear();
+  failures.clear();
   inflight.clear();
+  throttledUntil = 0;
 }
