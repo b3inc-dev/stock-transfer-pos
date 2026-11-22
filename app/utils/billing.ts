@@ -62,6 +62,22 @@ export function getPlanFromActiveSubscriptions(subscriptions: ActiveSubscription
 }
 
 /**
+ * この契約がプラン（getPlanFromActiveSubscriptions の結果）を決めた契約か。従量の請求期間をその契約から取るのに使う。
+ * Pro は名前に pro を含む契約。Lite は名前に lite を含む契約（名前から読めず Lite に倒したときは、ACTIVE な契約のどれでも）。
+ */
+export function subscriptionDecidesPlan(
+  sub: { name?: string | null; status?: string | null },
+  plan: "lite" | "pro",
+  allSubscriptions: ReadonlyArray<{ name?: string | null; status?: string | null }>
+): boolean {
+  const name = String(sub?.name ?? "");
+  if (plan === "pro") return /pro/i.test(name);
+  if (/lite/i.test(name)) return true;
+  const active = allSubscriptions.filter((s) => String(s?.status ?? "").toUpperCase() === "ACTIVE");
+  return !active.some((s) => /lite|pro/i.test(String(s?.name ?? "")));
+}
+
+/**
  * サブスクリプション名から「3ロケーション用」か「10ロケーション用」かを判定する。
  * パートナーで lite-3 / lite-10 / pro-3 / pro-10（必ずハイフン）のように設定している場合、名前に "10" または "3" が含まれる想定。
  * アンダースコアの handle（lite_3 / pro_10）は受け付けない（console.error を出して null）。

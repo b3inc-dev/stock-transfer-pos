@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, test } from "node:test";
 import { readFileSync } from "node:fs";
 import { parseActiveSubscriptionResponse, partnerSubscriptionToAdminShape } from "../app/utils/partner-subscription.server.ts";
+import { getPlanFromActiveSubscriptions, subscriptionDecidesPlan } from "../app/utils/billing.ts";
 import {
   __resetAppEventsTokenForTest,
   __resetUsageRecheckForTest,
@@ -13,6 +14,7 @@ import {
   normalizePeriodEnd,
   pickUsagePeriodEnd,
   reportExtraLocationUsage,
+  selectPlanSubscription,
   usagePeriodKey,
   resolveAppEventsCredentials,
   PERIOD_END_MARGIN_MS,
@@ -481,8 +483,62 @@ describe("つなぎ方（ソースの確認）", () => {
   test("期間はプランを決めた契約から選ぶ（Partner で決めたら Partner の期間）", () => {
     const src = read("app/utils/shop-plan.server.ts");
     assert.match(src, /partnerPeriodEnd = partner\.subscription\.currentPeriodEnd/);
-    assert.match(src, /pickUsagePeriodEnd\(\{\s*planSource,\s*partnerPeriodEnd,\s*adminSubscriptions: activeSubscriptions,?\s*\}\)/);
+    assert.match(src, /pickUsagePeriodEnd\(\{\s*planSource,\s*partnerPeriodEnd,\s*planSubscription,?\s*\}\)/);
+    // Admin の期間はプランを決めた契約だけ（ACTIVE な契約の先頭ではない）
+    assert.match(src, /selectPlanSubscription\(activeSubscriptions, \{\s*preferId: planSource === "partner" \? partnerSubscriptionId : null,\s*matches: \(s\) => subscriptionDecidesPlan\(s, planForPick, activeSubscriptions\),?\s*\}\)/);
+    assert.match(src, /partnerSubscriptionId = partner\.subscription\.legacySubscriptionId/);
+    assert.match(src, /activeSubscriptions \{\s*id\s*name\s*status\s*currentPeriodEnd\s*createdAt\s*\}/);
     assert.doesNotMatch(src.replace(/^\s*\/\/.*$/gm, ""), /activeWithPeriod/);
+  });
+});
+
+describe("プランを決めた契約から期間を取る（古い Billing API の契約と App Pricing の契約が同時に ACTIVE）", () => {
+  const OLD = { id: "gid://shopify/AppSubscription/1", name: "Lite", status: "ACTIVE", currentPeriodEnd: "2099-12-05T00:00:00Z", createdAt: "2099-01-01T00:00:00Z" };
+  const NEW = { id: "gid://shopify/AppSubscription/2", name: "Pro", status: "ACTIVE", currentPeriodEnd: "2099-12-21T00:00:00Z", createdAt: "2099-11-21T00:00:00Z" };
+  // shop-plan.server.ts と同じ組み立て
+  const periodFor = (subs, { planSource = "admin", partnerPeriodEnd = null, preferId = null, plan } = {}) => {
+    const p = plan ?? getPlanFromActiveSubscriptions(subs);
+    const planSubscription = selectPlanSubscription(subs, {
+      preferId: planSource === "partner" ? preferId : null,
+      matches: (s) => subscriptionDecidesPlan(s, p, subs),
+    });
+    return pickUsagePeriodEnd({ planSource, partnerPeriodEnd, planSubscription });
+  };
+
+  test("古い Lite と新しい Pro: Pro の契約の期間（並び順に関係なく）", () => {
+    assert.equal(periodFor([OLD, NEW]).periodEnd, "2099-12-21T00:00:00.000Z");
+    assert.equal(periodFor([NEW, OLD]).periodEnd, "2099-12-21T00:00:00.000Z");
+  });
+
+  test("同じプランの古い契約と新しい契約: 作られた日が新しい方。日が無く期間が違えば null（送らない）", () => {
+    const oldPro = { ...OLD, name: "Pro (legacy)" };
+    assert.equal(periodFor([oldPro, NEW]).periodEnd, "2099-12-21T00:00:00.000Z");
+    assert.deepEqual(periodFor([{ ...oldPro, createdAt: null }, { ...NEW, createdAt: null }]), { periodEnd: null, periodSource: null });
+  });
+
+  test("Partner で決めて Partner に期間が無い: legacySubscriptionId と同じ Admin の契約の期間", () => {
+    const newerLegacy = { ...OLD, name: "Pro (legacy)", createdAt: "2099-11-30T00:00:00Z" };
+    assert.deepEqual(periodFor([newerLegacy, NEW], { planSource: "partner", preferId: "2", plan: "pro" }), {
+      periodEnd: "2099-12-21T00:00:00.000Z",
+      periodSource: "admin",
+    });
+  });
+
+  test("名前から読めず Lite に倒した契約も、プランを決めた契約として選べる", () => {
+    const unnamed = { ...NEW, name: "Basic" };
+    assert.equal(getPlanFromActiveSubscriptions([unnamed]), "lite");
+    assert.equal(subscriptionDecidesPlan(unnamed, "lite", [unnamed]), true);
+    assert.equal(subscriptionDecidesPlan(unnamed, "lite", [unnamed, OLD]), false);
+    assert.equal(periodFor([unnamed]).periodEnd, "2099-12-21T00:00:00.000Z");
+  });
+
+  test("selectPlanSubscription: ACTIVE だけ・preferId は gid でも数字でも", () => {
+    assert.equal(selectPlanSubscription([{ ...NEW, status: "CANCELLED" }], { matches: () => true }), null);
+    assert.equal(selectPlanSubscription([OLD, NEW], { matches: () => true, preferId: "gid://shopify/AppSubscription/1" }), OLD);
+  });
+
+  test("planSubscription を渡さない古い呼び方: 期間の違う ACTIVE な契約が 2 件あれば null", () => {
+    assert.deepEqual(pickUsagePeriodEnd({ planSource: "admin", adminSubscriptions: [OLD, NEW] }), { periodEnd: null, periodSource: null });
   });
 });
 
