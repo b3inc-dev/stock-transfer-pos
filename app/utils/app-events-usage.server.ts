@@ -99,29 +99,90 @@ export function normalizePeriodEnd(value: unknown): string | null {
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 }
 
+/** プランを決めた契約の候補（Admin API の activeSubscriptions の 1 件） */
+export type PlanSubscriptionCandidate = {
+  id?: string | null;
+  name?: string | null;
+  status?: string | null;
+  currentPeriodEnd?: string | null;
+  createdAt?: string | null;
+};
+
+/** gid://shopify/AppSubscription/123 と 123 を同じものとみる */
+function subscriptionIdTail(id: unknown): string | null {
+  const m = String(id ?? "").match(/(\d+)\s*$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * プランを決めた契約を 1 件選ぶ（純粋な関数）。従量の請求期間は、この契約の期間を使う。
+ * 古い Billing API の契約と App Pricing の契約が同時に ACTIVE の店（切りかえの途中）で、
+ * プランを決めていない方の契約の期間を使わないため。
+ * - ACTIVE な契約だけを見る。
+ * - preferId（Partner API の legacySubscriptionId など）と同じ契約があれば、それ。
+ * - なければ matches（プランを決めた名前か）に合う契約。1 件ならそれ。
+ * - 2 件以上なら、作られた日（createdAt）が一番新しいもの（切りかえで新しく入った App Pricing の契約）。
+ *   作られた日で決まらず、期間も違うときは null（どちらの期間か分からないので送らず missing_period で残す）。
+ */
+export function selectPlanSubscription<T extends PlanSubscriptionCandidate>(
+  subs: ReadonlyArray<T> | null | undefined,
+  opts: { matches: (s: T) => boolean; preferId?: string | null }
+): T | null {
+  const active = (subs ?? []).filter((s) => String(s?.status ?? "").toUpperCase() === "ACTIVE");
+  const preferTail = subscriptionIdTail(opts.preferId);
+  if (preferTail) {
+    const same = active.find((s) => subscriptionIdTail(s?.id) === preferTail);
+    if (same) return same;
+  }
+  const candidates = active.filter((s) => opts.matches(s));
+  if (candidates.length <= 1) return candidates[0] ?? null;
+  const created = (s: T) => {
+    const t = Date.parse(String(s?.createdAt ?? ""));
+    return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+  };
+  const sorted = [...candidates].sort((a, b) => created(b) - created(a));
+  const top = sorted[0];
+  const tied = sorted.filter((s) => created(s) === created(top));
+  if (tied.length === 1) return top;
+  const keys = new Set(tied.map((s) => usagePeriodKey(s?.currentPeriodEnd)));
+  return keys.size === 1 ? top : null;
+}
+
 /**
  * 従量を数える請求期間を選ぶ（純粋な関数）。
  * - プランを Partner API の契約で決めたとき（planSource === "partner"）は、その契約の期間（currentBillingCycle.endTime）を先に使う。
  *   Admin API に契約が出ない店（App Pricing）でも報告できるように。
- * - Partner の期間が無い（試用中など）・Partner を使っていないときは Admin API の ACTIVE な契約の currentPeriodEnd。
- * - どちらも無ければ null（呼ぶ側は送らずに missing_period で残す）。
+ * - それ以外は、プランを決めた契約（planSubscription。selectPlanSubscription で選ぶ）の currentPeriodEnd。
+ *   ほかの ACTIVE な契約（古い Billing API の契約など）の期間は使わない。
+ * - planSubscription を渡さないとき（古い呼び方）は adminSubscriptions の ACTIVE な契約を見るが、
+ *   期間が違う契約が 2 件以上あるとどれか分からないので null。
+ * - どれも無ければ null（呼ぶ側は送らずに missing_period で残す）。
  * 同じ期間なら Partner と Admin で同じ値になるように、ISO にそろえて返す（DB の (shop, periodEnd) と送るキーを 1 つにする）。
  */
 export function pickUsagePeriodEnd(args: {
   planSource: UsagePeriodSource;
   partnerPeriodEnd?: string | null;
+  planSubscription?: { status?: string | null; currentPeriodEnd?: string | null } | null;
   adminSubscriptions?: ReadonlyArray<{ status?: string | null; currentPeriodEnd?: string | null }> | null;
 }): { periodEnd: string | null; periodSource: UsagePeriodSource | null } {
+  const none = { periodEnd: null, periodSource: null };
   if (args.planSource === "partner") {
     const p = normalizePeriodEnd(args.partnerPeriodEnd);
     if (p) return { periodEnd: p, periodSource: "partner" };
   }
-  for (const s of args.adminSubscriptions ?? []) {
-    if (String(s?.status ?? "").toUpperCase() !== "ACTIVE") continue;
-    const a = normalizePeriodEnd(s?.currentPeriodEnd);
-    if (a) return { periodEnd: a, periodSource: "admin" };
+  if (args.planSubscription !== undefined) {
+    const s = args.planSubscription;
+    if (!s || String(s.status ?? "").toUpperCase() !== "ACTIVE") return none;
+    const a = normalizePeriodEnd(s.currentPeriodEnd);
+    return a ? { periodEnd: a, periodSource: "admin" } : none;
   }
-  return { periodEnd: null, periodSource: null };
+  const periods = (args.adminSubscriptions ?? [])
+    .filter((s) => String(s?.status ?? "").toUpperCase() === "ACTIVE")
+    .map((s) => normalizePeriodEnd(s?.currentPeriodEnd))
+    .filter((p): p is string => p !== null);
+  if (periods.length === 0) return none;
+  if (new Set(periods.map((p) => usagePeriodKey(p))).size > 1) return none;
+  return { periodEnd: periods[0], periodSource: "admin" };
 }
 
 /** 同じ店・同じ期間の DB 確認の間隔（POS の API で何度も呼ばれても DB を毎回読まない） */

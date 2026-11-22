@@ -4,11 +4,13 @@ import type { ActiveSubscription } from "./billing";
 import {
   getPlanFromActiveSubscriptions,
   getMaxLocationsFromSubscriptionName,
+  subscriptionDecidesPlan,
 } from "./billing";
 import {
   computeExtraLocationUsage,
   pickUsagePeriodEnd,
   reportExtraLocationUsage,
+  selectPlanSubscription,
   type UsagePeriodSource,
   type UsageReportStore,
 } from "./app-events-usage.server";
@@ -126,7 +128,7 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
   /** Shopify から契約の一覧を読めたか（読めない＝未契約とは言えない） */
   let subscriptionsRead = false;
   let shopGid: string | null = null;
-  let activeSubscriptions: Array<{ id?: string; name?: string; status?: string; currentPeriodEnd?: string | null }> = [];
+  let activeSubscriptions: Array<{ id?: string; name?: string; status?: string; currentPeriodEnd?: string | null; createdAt?: string | null }> = [];
   try {
     const resp = await admin.graphql(
       `#graphql
@@ -144,6 +146,7 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
               name
               status
               currentPeriodEnd
+              createdAt
             }
           }
         }
@@ -180,6 +183,8 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
   let planSubscriptions = activeSubscriptions;
   /** Partner で契約が見つかったときの、その契約の今の請求期間の終わり（従量の報告に使う） */
   let partnerPeriodEnd: string | null = null;
+  /** Partner で契約が見つかったときの、その契約の Admin 側の id（legacySubscriptionId。Admin の契約と結びつける） */
+  let partnerSubscriptionId: string | null = null;
   if (distribution === "public") {
     const partnerConfig = readPartnerApiConfig();
     if (!partnerConfig.enabled) {
@@ -199,6 +204,7 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
         subscriptionsRead = true;
         planSubscriptions = [shaped];
         partnerPeriodEnd = partner.subscription.currentPeriodEnd;
+        partnerSubscriptionId = partner.subscription.legacySubscriptionId ?? null;
         planFromBilling = getPlanFromActiveSubscriptions([shaped] as ActiveSubscription[]);
       } else {
         partnerStatus = "none";
@@ -246,11 +252,17 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
   if (distribution === "public" && !forceInhouse && (plan === "lite" || plan === "pro") && !locationPlanMismatch) {
     const usage = computeExtraLocationUsage(plan, locationsCount);
     if (usage.units > 0) {
-      // プランを決めた契約の期間を使う（Partner で決めたのに Admin の期間を見ると、Admin に契約が出ない店で送れない）
+      // プランを決めた契約の期間を使う（Partner で決めたのに Admin の期間を見ると、Admin に契約が出ない店で送れない）。
+      // Admin の期間も、プランを決めた契約のものだけを使う（古い Billing API の契約が同時に ACTIVE でも、そちらの期間を使わない）
+      const planForPick = plan;
+      const planSubscription = selectPlanSubscription(activeSubscriptions, {
+        preferId: planSource === "partner" ? partnerSubscriptionId : null,
+        matches: (s) => subscriptionDecidesPlan(s, planForPick, activeSubscriptions),
+      });
       const { periodEnd, periodSource } = pickUsagePeriodEnd({
         planSource,
         partnerPeriodEnd,
-        adminSubscriptions: activeSubscriptions,
+        planSubscription,
       });
       extraLocationUsage = { units: usage.units, unitPriceUsd: usage.unitPriceUsd, amountUsd: usage.amountUsd, periodEnd, periodSource };
       const reportPlan = plan;
