@@ -9479,27 +9479,6 @@ async function ensureInventoryActivatedAtLocation({
   return { ok: errors.length === 0, activated, errors };
 }
 
-async function inventoryTransferDuplicateSafe({ id }) {
-  if (!id) throw new Error("inventoryTransferDuplicateSafe: id is required");
-
-  const q = `
-    mutation InventoryTransferDuplicate($id: ID!) {
-      inventoryTransferDuplicate(id: $id) {
-        inventoryTransfer {
-          id
-          name
-          status
-        }
-        userErrors { field message }
-      }
-    }
-  `;
-
-  const res = await adminGraphql(q, { id });
-  assertNoUserErrors(res?.inventoryTransferDuplicate?.userErrors);
-  return res?.inventoryTransferDuplicate?.inventoryTransfer || null;
-}
-
 async function inventoryTransferCancelSafe({ id }) {
   if (!id) return null;
 
