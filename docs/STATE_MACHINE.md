@@ -179,7 +179,8 @@ pending → applying → completed
 | 途中停止（アプリクラッシュ） | 上に同じ | CP + 下書きが残れば再開容易 | Shopify 側の掃除は手動（孤児 Transfer） |
 | 同時実行（2 端末） | 二重 | 端末ローカル lock / CP のみ | **高**（分散ロックなし） |
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
-| 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー + **確定のあとの伝票の読み直しが終わるまでロックを外さない**（読み直し失敗時は読み直せるまで確定不可。`receiveReloadGate.js`） | 比較的低い（2 端末同時は残る） |
+| 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー + **確定のあとの伝票の読み直しが終わるまでロックを外さない**（読み直し失敗時は読み直せるまで確定不可。`receiveReloadGate.js`）+ `inventoryShipmentReceive` の `@idempotent`（配送 + 読んだときの受け取り済みの数。読み直す前の押し直しを Shopify が 1 回にする。D3f） | 比較的低い（2 端末同時は残る） |
+| 入庫の受け取りの 250 分割の途中失敗（POS 入庫・出庫の全部拒否） | 1 つ目のチャンクは入ったのに、2 つ目以降が「在庫が無い」「数が多すぎる」で断られ、画面の代わりの道（有効化して `ns1`・予定まで削って `receive_capped`）が**新しいキー**で 1 つ目のチャンクをもう一度送る → 一部入庫だと二重に受け取る | 分ける前に明細を `shipmentLineItemId` の順に並べる（チャンクの中身とキーが読んだ順によらない）。2 つ目以降のチャンクの失敗は `ShipmentReceivePartialError`（`shipmentReceive.js`。文は代わりの道の見分けの文に当たらない日本語だけ・元の失敗は `cause`）にして投げる。画面は代わりの道へ進まず、入った分（`receivedItems`）だけ履歴に残し、拒否・メモの続きにも進まずに投げ直す → 必ず伝票を読み直す（`receiveReloadGate.js`。読み直せなければ確定不可）。次の確定は読み直した受け取り済みの数からの差分だけ | 不足の拒否（`reject`）が 250 件を超えて途中で止まったときは、入った拒否の分の出庫元への戻しは自動ではしない（読み直しのあとの拒否は残りの分だけ。手で確かめる）。2 端末同時は残る |
 | 管理画面の棚卸・発注・仕入れの押し直し | 二重の足し引き・二重の Transfer | 画面の `opKey` から作る `@idempotent`。結果が分からないときは同じキーのまま押し直す。取り消したあとは戻した回数で新しいキー（D3e） | タブ 2 つ・24 時間を過ぎた押し直しは未カバー |
 | apply-change 再送 | 二重 set | `appEventId` unique。サーバーの書き込みは `@idempotent`（同じ呼び出しの中の 429・5xx・処理中の送り直しを Shopify が 1 回にする。D3d） | 設計意図どおり（キーは 24 時間だけ。`appEventId` の守りはそのまま） |
 | ロス・仕入れ・調整の応答なし | 押し直しで新 ID → 二重 | 送る前に ID を端末へ保存し、完了かはっきりした断りまで同じ ID（D3c） | 2 端末は未カバー |
@@ -196,6 +197,7 @@ pending → applying → completed
   InventoryChangeEvent.appEventId
   Webhook 系 idempotencyKey
   入庫 receive の差分計算
+  POS 入庫・出庫の全部拒否の inventoryShipmentReceive と入庫の inventoryActivate の @idempotent（D3f。24 時間）
   サーバー apply-change の inventorySetQuantities / inventoryActivate の @idempotent（D3d。24 時間）
   管理画面の棚卸・発注から移管・仕入れの @idempotent（画面の opKey。D3e。24 時間）
 

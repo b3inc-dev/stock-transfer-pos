@@ -582,6 +582,9 @@ describe("画面の配線（文の照らし合わせ）", async () => {
     assert.match(src, /orderOpKey\.append\(formData, modalEntry\.id\);\n\s*fetcher\.submit/);
     // Transfer を作ったあとの記録の保存の失敗は uncertain
     assert.match(src, /metafieldsSetError\(/);
+    // 承認の取り消し（2 か所）も記録の保存の答えを見る（失敗したのに done にしない）
+    assert.equal((src.match(/const cancelMfError = await metafieldsSetError\(/g) ?? []).length, 2);
+    assert.equal((src.match(/if \(cancelMfError\) \{[\s\S]{0,400}?opKeyResult: "uncertain" as const/g) ?? []).length, 2);
     assert.equal((src.match(/idempotencyRevertRound: readRevertRound\(e\.idempotencyRevertRound\) \+ 1/g) ?? []).length, 2);
     assert.doesNotMatch(src, /inventoryTransferCreate(AsReadyToShip)?\(input/);
   });

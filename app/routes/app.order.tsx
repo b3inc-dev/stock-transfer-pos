@@ -707,30 +707,40 @@ export async function action({ request }: ActionFunctionArgs) {
           : e
       );
 
-      // Metafield に保存
-      await admin.graphql(
-        `#graphql
-          mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
+      // Metafield に保存。保存の答えを見る（失敗したのに「取り消した」と見せない。在庫・Transfer は書かない）
+      const cancelMfError = await metafieldsSetError(() =>
+        admin.graphql(
+          `#graphql
+            mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id namespace key }
+                userErrors { field message }
+              }
             }
+          `,
+          {
+            variables: {
+              metafields: [
+                {
+                  ownerId: appInstallationId,
+                  namespace: ORDER_NS,
+                  key: ORDER_KEY,
+                  type: "json",
+                  value: JSON.stringify(updatedEntries),
+                },
+              ],
+            },
           }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: ORDER_NS,
-                key: ORDER_KEY,
-                type: "json",
-                value: JSON.stringify(updatedEntries),
-              },
-            ],
-          },
-        }
+        )
       );
+      if (cancelMfError) {
+        console.error(`[order cancelApproval] metafieldsSet failed: ${cancelMfError}`);
+        return {
+          error: `承認の取り消しを記録できませんでした（${cancelMfError}）。在庫と移管は変えていません。画面を読み込み直して、状態を確かめてからもう一度押してください。`,
+          opKeyResult: "uncertain" as const,
+          opKey: adminOp.opKey,
+        };
+      }
 
       return {
         ok: true,
@@ -901,30 +911,40 @@ export async function action({ request }: ActionFunctionArgs) {
           : e
       );
 
-      // Metafield に保存
-      await admin.graphql(
-        `#graphql
-          mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
+      // Metafield に保存。保存の答えを見る（失敗したのに「取り消した」と見せない。在庫・Transfer は書かない）
+      const cancelMfError = await metafieldsSetError(() =>
+        admin.graphql(
+          `#graphql
+            mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id namespace key }
+                userErrors { field message }
+              }
             }
+          `,
+          {
+            variables: {
+              metafields: [
+                {
+                  ownerId: appInstallationId,
+                  namespace: ORDER_NS,
+                  key: ORDER_KEY,
+                  type: "json",
+                  value: JSON.stringify(updatedEntries),
+                },
+              ],
+            },
           }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: ORDER_NS,
-                key: ORDER_KEY,
-                type: "json",
-                value: JSON.stringify(updatedEntries),
-              },
-            ],
-          },
-        }
+        )
       );
+      if (cancelMfError) {
+        console.error(`[order cancelApproval] metafieldsSet failed: ${cancelMfError}`);
+        return {
+          error: `承認の取り消しを記録できませんでした（${cancelMfError}）。在庫と移管は変えていません。画面を読み込み直して、状態を確かめてからもう一度押してください。`,
+          opKeyResult: "uncertain" as const,
+          opKey: adminOp.opKey,
+        };
+      }
 
       return {
         ok: true,

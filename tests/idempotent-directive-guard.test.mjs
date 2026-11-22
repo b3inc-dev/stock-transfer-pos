@@ -5,10 +5,12 @@
  * app/・extensions/ の .ts・.tsx・.js・.jsx を読み、GraphQL の文の中でこれらを呼ぶ所に
  * @idempotent(key: が付いているかを見る。docs/ と一番上の stock-transfer-loss/（配備されない写し）は見ない。
  *
- * まだ付けていない所は PENDING に「あと何か所」で持つ（2 段目以降の PR で減らし、最後は空にする）。
- * - PENDING に無いファイルで 1 か所でも付いていなければ失敗（新しく付け忘れた）
+ * まだ付けていない所は PENDING に「ファイル → mutation → あと何か所」で持つ（段ごとに減らし、最後は空にする）。
+ * - PENDING に無い所で 1 か所でも付いていなければ失敗（新しく付け忘れた）
  * - PENDING の数より多ければ失敗（付け忘れが増えた）
  * - PENDING の数より少なければ失敗（付けたなら PENDING を減らす）
+ * - 5 段目（#109）で消える所は PENDING_UNTIL_STAGE_5 に持ち、「全部残る」か「全部消える」の両方を通す
+ *   （#109 と 2・3 段目の PR のどちらが先に main に入っても、見張りを直さずに通るように）
  * Run: node --test tests/idempotent-directive-guard.test.mjs
  */
 import { describe, it } from "node:test";
@@ -41,23 +43,60 @@ export const IDEMPOTENT_REQUIRED_MUTATIONS = [
 ];
 
 /**
- * まだ付けていない所（ファイル → か所の数）。入れる順は docs/IDEMPOTENT_MIGRATION.md 5 章。
- * 2 段目（管理画面 K・L・M）は付け終えた（DONE_IN_STAGE_2）。3 段目（POS 入庫 G・H・F）、4 段目（POS 出庫 A〜F）、5 段目（使っていないコード N）で減らす。
+ * まだ付けていない所（ファイル → mutation → か所の数）。入れる順は docs/IDEMPOTENT_MIGRATION.md 5 章。
+ * 2 段目（管理画面 K・L・M）と 3 段目（POS 入庫 G・H・F）は付け終えた。4 段目（POS 出庫 A〜F）で減らす。
  */
 const PENDING = {
-  // 5 段目（N）: 呼び出し元が無い adjustInventoryQuantitiesServer
-  "app/utils/inventory-set-quantities-server.ts": 1,
-  // 5 段目（N）: 拡張の adjustInventoryAtLocation／adjustInventoryToActual（呼び出し元が無い）
-  "extensions/stock-transfer-adjustment/src/screens/loss/adjustmentApi.js": 2,
-  "extensions/stock-transfer-loss/src/screens/loss/lossApi.js": 2,
-  "extensions/stock-transfer-order/src/screens/order/orderApi.js": 2,
-  "extensions/stock-transfer-purchase/src/screens/purchase/purchaseApi.js": 1,
-  "extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js": 2,
-  // 3 段目（POS 入庫 G・F）
-  "extensions/stock-transfer-inbound/src/inboundApi.js": 3,
-  // 3 段目（H）・4 段目（A〜F）・5 段目（inventoryTransferDuplicate）
-  "extensions/stock-transfer-tile/src/ModalOutbound.jsx": 9,
+  // 4 段目（POS 出庫 A〜F）
+  "extensions/stock-transfer-tile/src/ModalOutbound.jsx": {
+    inventoryTransferCreate: 2,
+    inventoryTransferSetItems: 1,
+    inventoryActivate: 1,
+    inventoryTransferCreateAsReadyToShip: 1,
+    inventoryShipmentCreate: 1,
+  },
 };
+
+/**
+ * 5 段目（#109・呼び出し元が無いコード N）で消える所。#109 が先に入っても後に入っても見張りが通るように、
+ * ここは「この数か 0（ファイルごと消えた・その mutation が無くなった）」を許す。増えたら失敗する。
+ * #109 が main に入ったら、この表は空にする（そのあとは 0 だけが通る）。
+ */
+const PENDING_UNTIL_STAGE_5 = {
+  "app/utils/inventory-set-quantities-server.ts": { inventoryAdjustQuantities: 1 },
+  "extensions/stock-transfer-adjustment/src/screens/loss/adjustmentApi.js": { inventoryActivate: 1, inventorySetQuantities: 1 },
+  "extensions/stock-transfer-loss/src/screens/loss/lossApi.js": { inventoryAdjustQuantities: 1, inventorySetQuantities: 1 },
+  "extensions/stock-transfer-order/src/screens/order/orderApi.js": { inventoryAdjustQuantities: 1, inventorySetQuantities: 1 },
+  "extensions/stock-transfer-purchase/src/screens/purchase/purchaseApi.js": { inventoryAdjustQuantities: 1 },
+  "extensions/stock-transfer-stocktake/src/screens/stocktake/stocktakeApi.js": { inventoryActivate: 1, inventorySetQuantities: 1 },
+  "extensions/stock-transfer-tile/src/ModalOutbound.jsx": { inventoryTransferDuplicate: 1 },
+};
+
+/**
+ * 付いていない所の数（ファイル → mutation → 数）が、PENDING と PENDING_UNTIL_STAGE_5 で許す数と合うか。
+ * 合わない所の説明の一覧を返す（空なら合う）。
+ */
+export function comparePending(actual, pending, untilStage5) {
+  const problems = [];
+  const files = new Set([...Object.keys(actual), ...Object.keys(pending), ...Object.keys(untilStage5)]);
+  for (const f of files) {
+    const names = new Set([
+      ...Object.keys(actual[f] ?? {}),
+      ...Object.keys(pending[f] ?? {}),
+      ...Object.keys(untilStage5[f] ?? {}),
+    ]);
+    for (const n of names) {
+      const got = actual[f]?.[n] ?? 0;
+      const must = pending[f]?.[n] ?? 0;
+      const may = untilStage5[f]?.[n] ?? 0;
+      // 4 段目までの残り（must）はそのまま。5 段目で消える分（may）は「全部残る」か「全部消える」
+      if (got !== must && got !== must + may) {
+        problems.push(`${f} の ${n}: 付いていない所が ${got} か所（許すのは ${must}${may ? ` か ${must + may}` : ""}）`);
+      }
+    }
+  }
+  return problems;
+}
 
 /** 1 段目で付け終えたファイル（ここは 0 か所でなければならない。PENDING の数とは別に見る） */
 const DONE_IN_STAGE_1 = ["app/utils/ensure-inventory-activated-server.ts"];
@@ -73,6 +112,12 @@ const DONE_IN_STAGE_2 = {
   "app/utils/admin-purchase-adjust.server.ts": ["inventoryAdjustQuantities"],
 };
 const ADMIN_SCREENS = ["app/routes/app.inventory-count.tsx", "app/routes/app.order.tsx", "app/routes/app.purchase.tsx"];
+
+/** 3 段目（POS 入庫 G・H・F）で付け終えたファイル（呼び出しがあり、どれも付いている） */
+const DONE_IN_STAGE_3 = {
+  "extensions/common/shipmentReceive.js": ["inventoryShipmentReceive"],
+  "extensions/stock-transfer-inbound/src/inboundApi.js": ["inventoryActivate"],
+};
 
 function listSourceFiles(dir) {
   const out = [];
@@ -168,6 +213,22 @@ describe("findIdempotentCalls（見張りの読み方）", () => {
   });
 });
 
+describe("comparePending（5 段目の分は #109 の前でも後でも通る）", () => {
+  const pending = { "a.js": { x: 2 } };
+  const until5 = { "a.js": { y: 1 }, "b.js": { z: 2 } };
+  it("#109 の前（5 段目の分が全部残る）も、後（全部消える）も通る", () => {
+    assert.deepEqual(comparePending({ "a.js": { x: 2, y: 1 }, "b.js": { z: 2 } }, pending, until5), []);
+    assert.deepEqual(comparePending({ "a.js": { x: 2 } }, pending, until5), []);
+  });
+  it("4 段目までの残りが減った・増えた、5 段目の分が半端・増えた、知らない所が出た、は失敗", () => {
+    assert.equal(comparePending({ "a.js": { x: 1 } }, pending, until5).length, 1);
+    assert.equal(comparePending({ "a.js": { x: 3 } }, pending, until5).length, 1);
+    assert.equal(comparePending({ "a.js": { x: 2 }, "b.js": { z: 1 } }, pending, until5).length, 1);
+    assert.equal(comparePending({ "a.js": { x: 2 }, "b.js": { z: 3 } }, pending, until5).length, 1);
+    assert.equal(comparePending({ "a.js": { x: 2 }, "c.js": { w: 1 } }, pending, until5).length, 1);
+  });
+});
+
 describe("@idempotent の付け忘れ（app/・extensions/）", () => {
   const scanned = scanRepo();
   const unkeyedBy = Object.fromEntries(
@@ -204,11 +265,28 @@ describe("@idempotent の付け忘れ（app/・extensions/）", () => {
     }
   });
 
-  it("まだ付けていない所は PENDING の数と同じ（増えても減っても PENDING を直す）", () => {
-    const actual = Object.fromEntries(Object.entries(unkeyedBy).map(([f, calls]) => [f, calls.length]));
+  it("POS 入庫の受け取りと有効化（G・H・F・3 段目）はすべて付いている。受け取りは共通の部品 1 か所だけ", () => {
+    for (const [f, names] of Object.entries(DONE_IN_STAGE_3)) {
+      const calls = scanned[f] ?? [];
+      assert.deepEqual([...new Set(calls.map((c) => c.name))].sort(), [...names].sort(), `${f} の在庫の書き込みが思っていたものと違います`);
+      assert.deepEqual(calls.filter((c) => !c.keyed), [], `${f} に付いていない所があります`);
+    }
+    const receiveFiles = Object.entries(scanned)
+      .filter(([, calls]) => calls.some((c) => c.name === "inventoryShipmentReceive"))
+      .map(([f]) => f);
+    assert.deepEqual(receiveFiles, ["extensions/common/shipmentReceive.js"]);
+  });
+
+  it("まだ付けていない所は PENDING の数と同じ（増えても減っても PENDING を直す。5 段目の分は #109 の前でも後でも通る）", () => {
+    const actual = Object.fromEntries(
+      Object.entries(unkeyedBy).map(([f, calls]) => [
+        f,
+        calls.reduce((m, c) => ({ ...m, [c.name]: (m[c.name] ?? 0) + 1 }), {}),
+      ])
+    );
     assert.deepEqual(
-      actual,
-      PENDING,
+      comparePending(actual, PENDING, PENDING_UNTIL_STAGE_5),
+      [],
       "付いていない所: " +
         JSON.stringify(
           Object.fromEntries(Object.entries(unkeyedBy).map(([f, c]) => [f, c.map((x) => `${x.name}@${x.line}`)])),
