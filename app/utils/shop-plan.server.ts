@@ -9,6 +9,11 @@ import {
   reportUsageRecord,
 } from "./billing";
 import { resolvePlanDistribution } from "./plan-distribution";
+import {
+  getPartnerActiveSubscription,
+  partnerSubscriptionToAdminShape,
+  readPartnerApiConfig,
+} from "./partner-subscription.server";
 import { getInhouseClientId, getPublicClientId } from "./shop-install-probe.server";
 import {
   decideFeatureAccess,
@@ -54,6 +59,10 @@ export type ShopPlan = {
     distributionResult: "inhouse" | "public";
     shopInCustomList: boolean;
     customStoreIdsCount: number;
+    /** どこから契約を読んだか（partner = Partner API、admin = Admin API） */
+    planSource: "partner" | "admin";
+    /** Partner API を使えなかった理由（スイッチオフ・設定不足・失敗の理由） */
+    partnerStatus?: string;
   };
 };
 
@@ -97,11 +106,13 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
   /** Shopify から契約の一覧を読めたか（読めない＝未契約とは言えない） */
   let subscriptionsRead = false;
   let activeSubscriptions: Array<{ id?: string; name?: string; status?: string; currentPeriodEnd?: string | null; lineItems?: Array<{ id: string; plan?: { pricingDetails?: { __typename?: string } } }> }> = [];
+  let shopGid: string | null = null;
   try {
     const resp = await admin.graphql(
       `#graphql
         query ShopPlanAndLocations($first: Int!) {
           shop {
+            id
             plan {
               partnerDevelopment
             }
@@ -130,9 +141,10 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
     const text = typeof resp?.text === "function" ? await resp.text() : "";
     if (text && String(text).trim()) {
       try {
-        const data = JSON.parse(text) as { data?: { locations?: { nodes?: unknown[] }; shop?: { plan?: { partnerDevelopment?: boolean } }; currentAppInstallation?: { activeSubscriptions?: unknown[] } } };
+        const data = JSON.parse(text) as { data?: { locations?: { nodes?: unknown[] }; shop?: { id?: string; plan?: { partnerDevelopment?: boolean } }; currentAppInstallation?: { activeSubscriptions?: unknown[] } } };
         locationsCount = data?.data?.locations?.nodes?.length ?? 0;
         isDevelopmentStore = data?.data?.shop?.plan?.partnerDevelopment === true;
+        shopGid = typeof data?.data?.shop?.id === "string" ? data.data.shop.id : null;
         const subs = data?.data?.currentAppInstallation?.activeSubscriptions;
         if (Array.isArray(subs)) {
           subscriptionsRead = true;
@@ -145,6 +157,40 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
     }
   } catch (e) {
     console.warn("[getShopPlan] plan query failed:", e instanceof Error ? e.message : String(e));
+  }
+
+  // Partner API（既定オフ。PARTNER_API_SUBSCRIPTION_ENABLED=1 と設定がそろったときだけ）。
+  // 契約が見つかればそれを正にする。契約なしと答えたら Admin API の結果を使う（Admin に有効な契約があれば止めない）。
+  // 失敗（429・timeout など）のときは今まで通り Admin API の結果だけで決める（読めなければ planCheckFailed）。
+  let planSource: "partner" | "admin" = "admin";
+  let partnerStatus: string | undefined;
+  /** プランの名前（Lite/Pro・3/10 か所）を読むための契約。Partner で見つかればその 1 件 */
+  let planSubscriptions = activeSubscriptions;
+  if (distribution === "public") {
+    const partnerConfig = readPartnerApiConfig();
+    if (!partnerConfig.enabled) {
+      partnerStatus = partnerConfig.reason;
+      if (partnerConfig.reason === "missing_config") {
+        console.warn("[getShopPlan] PARTNER_API_SUBSCRIPTION_ENABLED=1 but missing:", (partnerConfig.missing ?? []).join(","));
+      }
+    } else if (!shopGid) {
+      partnerStatus = "no_shop_id";
+    } else {
+      const partner = await getPartnerActiveSubscription({ config: partnerConfig.config, shopGid, shop: currentShop });
+      if (!partner.ok) {
+        partnerStatus = partner.reason;
+      } else if (partner.subscription) {
+        const shaped = partnerSubscriptionToAdminShape(partner.subscription, shopGid);
+        planSource = "partner";
+        subscriptionsRead = true;
+        planSubscriptions = [shaped];
+        planFromBilling = getPlanFromActiveSubscriptions([shaped] as ActiveSubscription[]);
+      } else {
+        partnerStatus = "none";
+        // Partner は「契約なし」と答えた。Admin を読めなかったときも「未契約」と分かったので止めて案内する
+        subscriptionsRead = true;
+      }
+    }
   }
 
   // プラン: 自社用（inhouse）は全機能。公開用は開発ストアも本番も Shopify の契約（開発ストアはテスト課金）で決める。
@@ -192,7 +238,7 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
   let locationPlanMismatch = false;
   let maxLocationsForPlan: 3 | 10 | undefined;
   if (distribution === "public" && !forceInhouse && (plan === "lite" || plan === "pro")) {
-    const active = activeSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
+    const active = planSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
     let maxFromPlans: 3 | 10 | null = null;
     for (const s of active) {
       const m = getMaxLocationsFromSubscriptionName(String(s?.name || ""));
@@ -214,6 +260,8 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
           distributionResult: distribution,
           shopInCustomList: forceInhouse,
           customStoreIdsCount,
+          planSource,
+          ...(partnerStatus ? { partnerStatus } : {}),
         }
       : undefined;
 

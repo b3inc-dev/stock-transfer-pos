@@ -219,6 +219,17 @@ API バージョンバンプとセットで別 PR。
 
 - **残り（サーバーで止められないもの）**: 出庫の Transfer 作成・入庫の受領は POS から Shopify へ直接送る（D1）。ここはタイルの `PlanGate` だけが止め口。古い版の拡張が端末に残っている間は止まらない（推測。次の `shopify app deploy` で入れ替わる）。ロケーション数とプランの不一致は今まで通り管理画面だけで扱う。
 
+## D16. 契約は Partner API の activeSubscription でも読めるようにする（既定オフ・2026-11-22）
+
+- **背景**: T の決定（2026-11-21）。shopify.dev の Shopify App Pricing の説明は、店の契約の正しい確かめ方を Partner API の `activeSubscription(appId:, shopId:)` としている。Admin API の `currentAppInstallation.activeSubscriptions` に App Pricing の契約が出るかは書かれていない（未確認）。
+- **判断**:
+  - 読む処理は `app/utils/partner-subscription.server.ts` の 1 か所。同じ形のファイルを location-stock-indicator・review-qa にも置く（リポジトリをまたぐ共通パッケージは作らない）。
+  - 既定オフ。`PARTNER_API_SUBSCRIPTION_ENABLED=1` と `PARTNER_API_TOKEN`・`PARTNER_API_ORG_ID`（Partner Dashboard の URL の数字）・`PARTNER_API_APP_ID` がそろったときだけ、公開用で聞く。版は既定 `2026-10`（`PARTNER_API_VERSION` で変えられる）。
+  - 契約が見つかれば正にする（項目の `handle` を名前として、今と同じ Pro/Lite・3/10 の決まりで読む）。「契約なし」なら Admin API の結果を使う（払っている店を止めない）。失敗なら Admin API だけで決め、両方読めなければ D14 の `plan_check_failed`。
+  - 店の ID は Admin API の `shop { id }` から取る（Admin を読めなければ Partner にも聞けない → D14 のまま）。
+  - 店ごとに見つかった結果は 60 秒・契約なしは 15 秒覚え、同時の呼び出しは 1 回にまとめる（上限 4 回/秒）。失敗は覚えない。トークンはログに出さない。
+- **残り**: 開発ストアのテスト課金が Partner の `activeSubscription` に出るかは未確認（出なければ「契約なし」→ Admin の結果を使うので止まらない）。
+
 ---
 
 ## 関連正本

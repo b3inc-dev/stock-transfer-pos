@@ -106,6 +106,38 @@
 
 ---
 
+## 6-2. Partner API で契約を読む（既定オフ・2026-11-22）
+
+shopify.dev の Shopify App Pricing の説明では、店の今の契約を確かめる正しい場所は **Partner API の `activeSubscription(appId:, shopId:)`** です。Admin API の `currentAppInstallation.activeSubscriptions` に App Pricing の契約が出るかは書かれていません（未確認）。そのため、Partner API で読めるようにしました（DECISIONS D16）。**スイッチを入れるまでは今まで通り Admin API だけで読みます。**
+
+### T が作るもの
+
+1. Dev Dashboard → 組織の設定（Organization settings）→ Users → Security → **Partner API clients** → 「Add Partner API client」
+2. 名前を付け、権限は **Manage apps** だけにする（`activeSubscription` に要る権限。View financials は要らない）
+3. 出てきたトークンをすぐ控える（ページを離れると二度と見られない）。必要になったら作り直し（rotate）できる
+   - 作るには、組織の App development の権限・Manage financials の権限・確認済みの仕事用メールが要る
+
+### 環境変数（公開用の Render `pos-stock` だけ。自社用には入れない）
+
+| 名前 | 値 |
+|---|---|
+| `PARTNER_API_SUBSCRIPTION_ENABLED` | `1` で使う。空・ほかの値はオフ（既定） |
+| `PARTNER_API_TOKEN` | 上で控えたトークン（秘密。コミットしない・ログに出さない） |
+| `PARTNER_API_ORG_ID` | **Partner Dashboard**（partners.shopify.com）の URL にある数字。Dev Dashboard の URL の数字（organization ID）ではない |
+| `PARTNER_API_APP_ID` | 公開用アプリの ID（数字、または `gid://shopify/App/<数字>`） |
+| `PARTNER_API_VERSION` | 省略可。既定 `2026-10` |
+
+### 動き
+
+- 公開用で、スイッチがオンで設定がそろっているときだけ聞く。自社用は聞かない
+- 契約が見つかれば、それでプランを決める。**プランの判定は項目の `handle` を使う**ので、料金プランの handle にも `lite` / `pro`（3/10 か所なら `-3` / `-10`）を入れておく（推測: handle は表示名から作られることが多い。必ず Partner Dashboard で確かめる）
+- 「契約なし」と答えたら Admin API の結果を使う（Admin に有効な契約があれば止めない）
+- 失敗（429・5 秒の timeout・権限・公開アプリでない等）のときは今まで通り Admin API だけで決める。両方読めなければ今まで通り「確認できませんでした」で止める（#78）
+- 店ごとに、見つかった結果は 60 秒、契約なしは 15 秒覚える（上限が 1 クライアント 4 回/秒のため）。失敗は覚えない
+- 確かめるとき: `ENABLE_PLAN_DEBUG=1` で `planDebug.planSource`（`partner` / `admin`）と `partnerStatus` が見える
+
+---
+
 ## 7. まとめチェックリスト
 
 - [ ] パートナー → Apps → 対象アプリ → 配布 → 価格 を開いた
@@ -115,6 +147,7 @@
 - [ ] 月額・トライアル日数（Lite 7日・Pro 14日）を設定した
 - [ ] リダイレクトURL を `/app` または `/app/settings` にした
 - [ ] 本番環境に SHOPIFY_APP_HANDLE を設定した（必要なら）
+- [ ] （使うなら）Partner API client を作り、6-2 の環境変数を公開用だけに入れた
 
 より詳しい考え方・無料プランの例・複数プラン例は **docs/APP_PRICING_SETUP_GUIDE.md** を参照してください。
 
