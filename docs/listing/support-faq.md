@@ -35,8 +35,11 @@ A. Lite で使えるのは、設定・出庫・入庫・入出庫の履歴です
 Q. 「契約の状態を確認できませんでした」と出ます。
 A. Shopify から料金プランの情報を読めなかったときに出ます。通信の状態を確かめて、もう一度お試しください。続くときはお問い合わせください。
 
+Q. 「プランを上げてください」と出ます。
+A. 3 ロケーションのプランで、ストアのロケーションが 4 か所以上あるときに出ます。料金プランの画面で、表示された 10 ロケーションのプラン（Lite - 10ロケーション か Pro - 10ロケーション）に変更し、POS で「もう一度確認」を押してください。
+
 Q. ロケーションが 10 か所を超えるとどうなりますか。
-A. 10 ロケーションのプランでは、10 か所を超えた分が 1 か所ごとに月 US${{EXTRA_LITE}}（Lite）／ US${{EXTRA_PRO}}（Pro）で Shopify の請求に加わります。今の数と金額は、アプリの「料金プラン」の画面で見られます。
+A. 10 ロケーションのプランでは、10 か所を超えた分が 1 か所ごとに月 US$4（Lite）／ US$12（Pro）で Shopify の請求に加わります。今の数と金額は、アプリの「料金プラン」の画面で見られます。
 
 Q. 出庫すると Shopify の在庫はどう変わりますか。
 A. 出庫は Shopify の在庫移管（Transfer）と出荷（Shipment）として作られます。入庫先で入庫を確定すると、Shopify の在庫に入ります。Shopify 管理画面の「在庫移管」でも同じものが見られます。
@@ -99,8 +102,11 @@ A. Lite includes settings, transfers, receiving and transfer history. Losses, st
 Q. It says the plan could not be checked.
 A. The app could not read your plan from Shopify. Check your connection and try again. Contact us if it continues.
 
+Q. It asks me to upgrade my plan.
+A. This appears on a 3-location plan when your store has 4 or more locations. Change to the 10-location plan shown (Lite - 10 locations or Pro - 10 locations) on the plan page, then tap "もう一度確認" (Check again) on POS.
+
 Q. What happens if I have more than 10 locations?
-A. On the 10-location plans, each location over 10 is billed at US${{EXTRA_LITE}}/month (Lite) or US${{EXTRA_PRO}}/month (Pro) on your Shopify bill. The plan page in the app shows the current count and amount.
+A. On the 10-location plans, each location over 10 is billed at US$4/month (Lite) or US$12/month (Pro) on your Shopify bill. The plan page in the app shows the current count and amount.
 
 Q. How does a transfer change Shopify inventory?
 A. A transfer is created as a Shopify inventory transfer and shipment. When the destination confirms receiving, the stock is added there. You can see the same transfer under Inventory transfers in Shopify admin.

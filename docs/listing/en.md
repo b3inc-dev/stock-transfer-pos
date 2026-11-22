@@ -61,17 +61,18 @@ stock transfer / stocktake / receiving / POS inventory / inventory count
 
 ## 8. Pricing
 
-Prices and trial days are **not confirmed by T yet**（ja.md 9.2 と同じ値）【T】.
+Prices and trial days are decided（2026-11-22 T。ja.md 9.2 と同じ値）.
 
 | Plan (display name) | Monthly | Locations included | Each location over 10 | Free trial |
 |---|---|---|---|---|
-| Lite - 3 locations | US$20【T】 | up to 3 | — | 7 days【T】 |
-| Lite - 10 locations | US$40【T】 | up to 10 | US$4 / month | 7 days【T】 |
-| Pro - 3 locations | US$60【T】 | up to 3 | — | 14 days【T】 |
-| Pro - 10 locations | US$120【T】 | up to 10 | US$12 / month | 14 days【T】 |
+| Lite - 3 locations | US$20 | up to 3 | — | 7 days |
+| Lite - 10 locations | US$40 | up to 10 | US$4 / month | 7 days |
+| Pro - 3 locations | US$60 | up to 3 | — | 14 days |
+| Pro - 10 locations | US$120 | up to 10 | US$12 / month | 14 days |
 
 - Lite: settings, transfers, receiving, transfer history and CSV.
 - Pro: everything in Lite, plus inventory info, purchases, losses, orders, stock counts and adjustments.
+- On a 3-location plan, a store with more than 3 locations is asked to upgrade (in the admin and on the POS tiles) before it can use the app.
 
 Additional charges text（料金欄に追加料金の説明を入れる場所があれば貼る）:
 

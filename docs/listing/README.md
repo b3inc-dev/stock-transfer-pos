@@ -28,7 +28,7 @@
 
 | # | 決めること | 今の案 | 使うファイル |
 |---|---|---|---|
-| 1 | 4 つのプランの月額と無料体験の日数 | 料金プラン画面（`app/routes/app.plan.tsx`）と設計書の値: Lite 3 か所 $20・Lite 10 か所 $40・Pro 3 か所 $60・Pro 10 か所 $120、無料体験 Lite 7 日・Pro 14 日 | ja.md / en.md / partner-dashboard-steps.md |
+| 1 | ~~4 つのプランの月額と無料体験の日数~~ **決まり（2026-11-22 T）** | Lite 3 か所 $20・Lite 10 か所 $40・Pro 3 か所 $60・Pro 10 か所 $120、無料体験 Lite 7 日・Pro 14 日（DECISIONS D17）。3 か所のプランで多すぎる店は POS でも止める（#91） | ja.md / en.md / partner-dashboard-steps.md |
 | 2 | サポートのメールアドレスと、サポートページ・プライバシーポリシーを置く URL | `{{SUPPORT_EMAIL}}`・`{{SUPPORT_URL}}`・`{{PRIVACY_URL}}` | privacy-policy.md / support-faq.md |
 | 3 | 会社名・住所の表記（プライバシーポリシーの「運営者」） | `{{COMPANY_NAME}}`・`{{COMPANY_ADDRESS}}` | privacy-policy.md |
 | 4 | `read_orders` を外すか（#73 の G4） | 公開版は注文の webhook を使っていない | privacy-policy.md の 2 章 |
