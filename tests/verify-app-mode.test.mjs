@@ -95,3 +95,25 @@ describe("package.json の deploy スクリプト", () => {
     });
   }
 });
+
+describe("npm run deploy は止める（見張りを通らないため）", () => {
+  const pkg = JSON.parse(read("package.json"));
+  it("deploy は shopify app deploy を呼ばず、止めるスクリプトだけを動かす", () => {
+    const s = pkg.scripts.deploy;
+    assert.equal(s, "node scripts/deploy-blocked.js");
+    assert.doesNotMatch(s, /shopify\s+app\s+deploy/);
+  });
+  it("止めるスクリプトは案内を出して exit 1（deploy:inhouse / deploy:public を使う）", () => {
+    const r = spawnSync(process.execPath, [path.join(root, "scripts", "deploy-blocked.js")], { encoding: "utf8" });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /deploy:inhouse か deploy:public を使ってください/);
+    assert.equal(r.stdout, "");
+  });
+  it("shopify app deploy を直接呼ぶのは見張りを通す deploy:public / deploy:inhouse だけ", () => {
+    for (const [name, s] of Object.entries(pkg.scripts)) {
+      if (!/shopify\s+app\s+deploy/.test(s)) continue;
+      assert.ok(name === "deploy:public" || name === "deploy:inhouse", name);
+      assert.match(s, /verify-app-mode\.js/, name);
+    }
+  });
+});

@@ -56,6 +56,7 @@ npm run deploy:inhouse   # 自社用（POS Stock - Ciara・shopify.app.toml）
 npm run deploy:public    # 公開用（POS Stock・shopify.app.public.toml）
 ```
 
+- **`npm run deploy` は止めてある**（何も deploy せず「deploy:inhouse か deploy:public を使ってください」と出して終わる。`scripts/deploy-blocked.js`）。
 - **`shopify app deploy` を直接打たない**（`npx shopify app deploy` も同じ）。拡張の `extensions/common/appUrl.js` の `APP_MODE` が、deploy する toml と合わないまま出ると、POS が別のアプリのサーバーを呼び、棚卸の確定などが「Invalid session token」（401）になる（pos-stock-ciara-251 で本当に起きた。252 で `APP_MODE=inhouse` にして出し直して直った）。
 - 2 つの npm スクリプトは、`APP_MODE` を書きかえる → `scripts/verify-app-mode.js` で `APP_MODE` と toml の `application_url` が合っているかを確かめる → 合わなければ **deploy せずに止める** → 確かめた toml を `--config` で渡して deploy する、の順に動く。
 - どの URL がどちらの `APP_MODE` かは `appUrl.js` の `PROD_APP_URL_PUBLIC` / `PROD_APP_URL_INHOUSE` から読む（URL を変えたら appUrl.js と toml を一緒に直す。どちらとも違う URL の toml は止まる）。
