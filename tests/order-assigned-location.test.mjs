@@ -38,6 +38,9 @@ async function deliver({ scope, cancel = false, error = false, location = null }
     "../utils/admin-webhook-retry": { findWithAdminWebhookRetry: async () => null },
     "../utils/inventory-change-log": {},
     "../utils/timezone": { getDateInShopTimezone: () => "2026-01-01" },
+    // 外した店の 500 を受ける部品と、4 秒で先に返す部品（ここでは素通し）
+    "../utils/webhook-auth-safe.server": { authenticateWebhook: (r) => modules["../shopify.server"].authenticate.webhook(r) },
+    "../utils/webhook-response-budget": { respondWithinBudget: (work) => work() },
   };
   const exports = {};
   runInNewContext(compiled, {

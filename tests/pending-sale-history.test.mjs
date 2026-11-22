@@ -60,6 +60,9 @@ test("a sale preserves a previous adjustment ending at the sale's starting quant
     "../utils/inventory-history-order": inventoryHistoryOrder,
     "../utils/repairInventoryLogMetadata.js": repairInventoryLogMetadata,
     "../utils/readWebhookShopTimezone.js": readWebhookShopTimezone,
+    // 外した店の 500 を受ける部品と、4 秒で先に返す部品（ここでは素通し）
+    "../utils/webhook-auth-safe.server": { authenticateWebhook: (r) => modules["../shopify.server"].authenticate.webhook(r) },
+    "../utils/webhook-response-budget": { respondWithinBudget: (work) => work() },
   };
   const source = readFileSync(new URL("../app/routes/webhooks.inventory_levels.update.tsx", import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, {
