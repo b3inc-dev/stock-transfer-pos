@@ -180,6 +180,7 @@ pending → applying → completed
 | 同時実行（2 端末） | 二重 | 端末ローカル lock / CP のみ | **高**（分散ロックなし） |
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
 | 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー + **確定のあとの伝票の読み直しが終わるまでロックを外さない**（読み直し失敗時は読み直せるまで確定不可。`receiveReloadGate.js`） | 比較的低い（2 端末同時は残る） |
+| 管理画面の棚卸・発注・仕入れの押し直し | 二重の足し引き・二重の Transfer | 画面の `opKey` から作る `@idempotent`。結果が分からないときは同じキーのまま押し直す。取り消したあとは戻した回数で新しいキー（D3e） | タブ 2 つ・24 時間を過ぎた押し直しは未カバー |
 | apply-change 再送 | 二重 set | `appEventId` unique。サーバーの書き込みは `@idempotent`（同じ呼び出しの中の 429・5xx・処理中の送り直しを Shopify が 1 回にする。D3d） | 設計意図どおり（キーは 24 時間だけ。`appEventId` の守りはそのまま） |
 | ロス・仕入れ・調整の応答なし | 押し直しで新 ID → 二重 | 送る前に ID を端末へ保存し、完了かはっきりした断りまで同じ ID（D3c） | 2 端末は未カバー |
 | ロス・仕入れ・調整の一部だけ反映 | 押し直しで新 ID → 反映済みの分が二重 | ID を手放さず同じ ID で送る（サーバーは在庫を動かさない）。リセットで取りやめたときだけ ID を捨てる（D3c） | 取りやめ後に同じ明細を入れ直すと二重 |
@@ -196,9 +197,10 @@ pending → applying → completed
   Webhook 系 idempotencyKey
   入庫 receive の差分計算
   サーバー apply-change の inventorySetQuantities / inventoryActivate の @idempotent（D3d。24 時間）
+  管理画面の棚卸・発注から移管・仕入れの @idempotent（画面の opKey。D3e。24 時間）
 
 [弱い / 端末ローカル]
-  inventoryTransferCreate*（Shopify 側 idempotency key まだなし＝IDEMPOTENT_MIGRATION の 4 段目。アプリは CP + note マーカー）
+  inventoryTransferCreate*（POS 出庫は Shopify 側 idempotency key まだなし＝IDEMPOTENT_MIGRATION の 4 段目。アプリは CP + note マーカー。管理画面の発注から移管は D3e で付けた）
   inventoryShipmentCreate* / MarkInTransit（Transfer 回復後の Shipment 補完あり）
   出庫 UI ロック（永続・分散なし）
 ```

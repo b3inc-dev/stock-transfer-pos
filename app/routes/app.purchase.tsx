@@ -11,6 +11,17 @@ import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone
 import { logInventoryChangesFromAdjustment } from "../utils/inventory-change-log";
 import db from "../db.server";
 import { adminPlanRedirect } from "../utils/plan-gate.server";
+import { buildPurchaseAdjustChanges, sendPurchaseAdjustQuantities } from "../utils/admin-purchase-adjust.server";
+import {
+  ADMIN_IDEMPOTENCY_KIND,
+  ADMIN_UNCERTAIN_MESSAGE,
+  adminRecordSaveFailedMessage,
+  buildAdminIdempotency,
+  metafieldsSetError,
+  readAdminOpKey,
+  type AdminOpKeyInput,
+} from "../utils/admin-op-key.server";
+import { useAdminOpKey } from "../utils/use-admin-op-key";
 
 const PURCHASE_NS = "stock_transfer_pos";
 const PURCHASE_KEY = "purchase_entries_v1";
@@ -47,83 +58,37 @@ function normalizeInventoryItemGid(inventoryItemId: string): string {
   return s;
 }
 
-/** 仕入確定：在庫プラス調整を行う。失敗時はエラーを返し metafield は更新しない。 */
+type PurchaseAdmin = { graphql: (q: string, v?: { variables?: Record<string, unknown> }) => Promise<Response>; request: (options: { data: string; variables?: Record<string, unknown> }) => Promise<Response> };
+type PurchaseWriteResult =
+  | { ok: true; adjustmentGroupId?: string | null; opKeyResult: "done" }
+  | { ok: false; error: string; opKeyResult: "rejected" | "uncertain" };
+
+/**
+ * 仕入確定：在庫プラス調整を行う。失敗時はエラーを返し metafield は更新しない。
+ * @idempotent のキーは画面の opKey + 仕入れの ID + receive（docs/IDEMPOTENT_MIGRATION.md 4.6 の M）。
+ */
 async function executePurchaseReceive(
-  admin: { graphql: (q: string, v?: { variables?: Record<string, unknown> }) => Promise<Response>; request: (options: { data: string; variables?: Record<string, unknown> }) => Promise<Response> },
+  admin: PurchaseAdmin,
   entry: PurchaseEntry,
-  shop: string
-): Promise<{ ok: boolean; error?: string; adjustmentGroupId?: string | null }> {
+  shop: string,
+  adminOp: AdminOpKeyInput
+): Promise<PurchaseWriteResult> {
   const locationGid = normalizeLocationGid(entry.locationId);
-  if (!locationGid) return { ok: false, error: "入庫先ロケーションIDが不正です" };
+  if (!locationGid) return { ok: false, error: "入庫先ロケーションIDが不正です", opKeyResult: "rejected" };
   const items = entry.items || [];
-  if (items.length === 0) return { ok: false, error: "商品がありません" };
+  if (items.length === 0) return { ok: false, error: "商品がありません", opKeyResult: "rejected" };
 
-  const changes = items
-    .map((item) => {
-      const invId = normalizeInventoryItemGid(item.inventoryItemId);
-      const qty = Math.max(0, Number(item.quantity || 0));
-      if (!invId || qty === 0) return null;
-      return { inventoryItemId: invId, locationId: locationGid, delta: qty };
-    })
-    .filter((c): c is { inventoryItemId: string; locationId: string; delta: number } => c !== null);
+  const changes = buildPurchaseAdjustChanges(items, locationGid, normalizeInventoryItemGid, 1);
+  if (changes.length === 0) return { ok: false, error: "有効な在庫変更がありません", opKeyResult: "rejected" };
 
-  if (changes.length === 0) return { ok: false, error: "有効な在庫変更がありません" };
-
-  const mutation = `#graphql
-    mutation InventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
-      inventoryAdjustQuantities(input: $input) {
-        inventoryAdjustmentGroup { id }
-        userErrors { field message }
-      }
-    }`;
-  
-  // デバッグ: 送信する変数を確認
-  const variables = {
-    input: { reason: "correction", name: "available", changes },
-  };
-  console.log(`[executePurchaseReceive] Sending mutation with variables:`, JSON.stringify(variables, null, 2));
-  console.log(`[executePurchaseReceive] Changes count: ${changes.length}, first change:`, changes[0] ? JSON.stringify(changes[0], null, 2) : "none");
-  
-  let resp: Response;
-  let data: { data?: { inventoryAdjustQuantities?: { userErrors?: Array<{ message?: string }>; inventoryAdjustmentGroup?: { id?: string } } }; errors?: Array<{ message?: string }> };
-  try {
-    // admin.graphqlは第2引数に { variables: { ... } } 形式を期待する
-    resp = await admin.graphql(mutation, { variables });
-    data = await resp.json();
-    // デバッグ: レスポンス全体を確認
-    console.log(`[executePurchaseReceive] Response status: ${resp.status}`);
-    console.log(`[executePurchaseReceive] Response data:`, JSON.stringify(data, null, 2));
-    
-    // デバッグ: エラーを確認
-    if (data?.errors) {
-      console.error(`[executePurchaseReceive] GraphQL errors:`, JSON.stringify(data.errors, null, 2));
-    }
-    if (data?.data?.inventoryAdjustQuantities?.userErrors?.length > 0) {
-      console.error(`[executePurchaseReceive] User errors:`, JSON.stringify(data?.data?.inventoryAdjustQuantities?.userErrors, null, 2));
-    }
-  } catch (error: unknown) {
-    console.error(`[executePurchaseReceive] Exception caught:`, error);
-    const err = error as { response?: Response; body?: { errors?: Array<{ message?: string }> } };
-    if (err?.response) {
-      try {
-        const errorData = await err.response.json();
-        console.error(`[executePurchaseReceive] Error response data:`, JSON.stringify(errorData, null, 2));
-      } catch {
-        console.error(`[executePurchaseReceive] Could not parse error response`);
-      }
-    }
-    if (err?.body?.errors) {
-      console.error(`[executePurchaseReceive] Error body errors:`, JSON.stringify(err.body.errors, null, 2));
-    }
-    throw error;
-  }
-
-  const userErrors = data?.data?.inventoryAdjustQuantities?.userErrors ?? [];
-  if (userErrors.length) {
-    return { ok: false, error: userErrors.map((e) => e.message ?? "").join(" / ") };
-  }
-
-  const adjustmentGroupId = data?.data?.inventoryAdjustQuantities?.inventoryAdjustmentGroup?.id || null;
+  const sent = await sendPurchaseAdjustQuantities(
+    admin,
+    changes,
+    buildAdminIdempotency({ shop, kind: ADMIN_IDEMPOTENCY_KIND.purchase, op: adminOp, parts: [entry.id, "receive"] }),
+    "executePurchaseReceive"
+  );
+  if (!sent.ok) return sent;
+  const adjustmentGroupId = sent.adjustmentGroupId;
 
   // 在庫変動履歴を記録
   try {
@@ -141,17 +106,22 @@ async function executePurchaseReceive(
     // ログ記録の失敗は無視して続行（在庫調整は成功している）
   }
 
-  return { ok: true, adjustmentGroupId };
+  return { ok: true, adjustmentGroupId, opKeyResult: "done" };
 }
 
-/** 仕入キャンセル：在庫を戻す（received のときのみ）。冪等：既に cancelled なら何もしない。 */
+/**
+ * 仕入キャンセル：在庫を戻す（received のときのみ）。冪等：既に cancelled なら何もしない。
+ * @idempotent のキーは画面の opKey + 仕入れの ID + cancel。取り消しのあとに同じ仕入れを確定し直す道は無い（cancelled で終わり）ので、
+ * 「戻した回数」は持たない。
+ */
 async function executePurchaseCancel(
-  admin: { graphql: (q: string, v?: { variables?: Record<string, unknown> }) => Promise<Response>; request: (options: { data: string; variables?: Record<string, unknown> }) => Promise<Response> },
+  admin: PurchaseAdmin,
   entry: PurchaseEntry,
-  shop: string
-): Promise<{ ok: boolean; error?: string; adjustmentGroupId?: string | null }> {
-  if (entry.status === "cancelled") return { ok: true };
-  if (entry.status !== "received") return { ok: true }; // pending の場合は在庫増していないのでメタフィールド更新のみ
+  shop: string,
+  adminOp: AdminOpKeyInput
+): Promise<PurchaseWriteResult> {
+  if (entry.status === "cancelled") return { ok: true, opKeyResult: "done" };
+  if (entry.status !== "received") return { ok: true, opKeyResult: "done" }; // pending の場合は在庫増していないのでメタフィールド更新のみ
 
   // 要件 Rule C: キャンセル完了済みログがあるときだけ在庫調整をスキップ。
   // apply-change は setQuantities 前に quantityAfter=null の先行行を書くため、
@@ -166,7 +136,7 @@ async function executePurchaseCancel(
       },
       select: { id: true },
     });
-    if (completedCancelLog) return { ok: true };
+    if (completedCancelLog) return { ok: true, opKeyResult: "done" };
 
     const completedCancelEvent = await db.inventoryChangeEvent.findFirst({
       where: {
@@ -177,79 +147,26 @@ async function executePurchaseCancel(
       },
       select: { id: true },
     });
-    if (completedCancelEvent) return { ok: true };
+    if (completedCancelEvent) return { ok: true, opKeyResult: "done" };
   } catch (e) {
     console.error("[executePurchaseCancel] Rule C log lookup failed:", e);
     // 参照失敗時は従来どおり在庫調整へ進む（idempotencyKey が最後の砦）
   }
 
   const locationGid = normalizeLocationGid(entry.locationId);
-  if (!locationGid) return { ok: false, error: "入庫先ロケーションIDが不正です" };
-  const items = entry.items || [];
-  const changes = items
-    .map((item) => {
-      const invId = normalizeInventoryItemGid(item.inventoryItemId);
-      const qty = Math.max(0, Number(item.quantity || 0));
-      if (!invId || qty === 0) return null;
-      return { inventoryItemId: invId, locationId: locationGid, delta: -qty };
-    })
-    .filter((c): c is { inventoryItemId: string; locationId: string; delta: number } => c !== null);
+  if (!locationGid) return { ok: false, error: "入庫先ロケーションIDが不正です", opKeyResult: "rejected" };
+  const changes = buildPurchaseAdjustChanges(entry.items || [], locationGid, normalizeInventoryItemGid, -1);
 
-  if (changes.length === 0) return { ok: true };
+  if (changes.length === 0) return { ok: true, opKeyResult: "done" };
 
-  const mutation = `#graphql
-    mutation InventoryAdjustQuantities($input: InventoryAdjustQuantitiesInput!) {
-      inventoryAdjustQuantities(input: $input) {
-        inventoryAdjustmentGroup { id }
-        userErrors { field message }
-      }
-    }`;
-  
-  // デバッグ: 送信する変数を確認
-  const variables = {
-    input: { reason: "correction", name: "available", changes },
-  };
-  console.log(`[executePurchaseCancel] Sending mutation with variables:`, JSON.stringify(variables, null, 2));
-  console.log(`[executePurchaseCancel] Changes count: ${changes.length}, first change:`, changes[0] ? JSON.stringify(changes[0], null, 2) : "none");
-  
-  let resp: Response;
-  let data: { data?: { inventoryAdjustQuantities?: { userErrors?: Array<{ message?: string }>; inventoryAdjustmentGroup?: { id?: string } } }; errors?: Array<{ message?: string }> };
-  try {
-    resp = await admin.graphql(mutation, { variables });
-    data = await resp.json();
-    console.log(`[executePurchaseCancel] Response status: ${resp.status}`);
-    console.log(`[executePurchaseCancel] Response data:`, JSON.stringify(data, null, 2));
-    
-    // デバッグ: エラーを確認
-    if (data?.errors) {
-      console.error(`[executePurchaseCancel] GraphQL errors:`, JSON.stringify(data.errors, null, 2));
-    }
-    if (data?.data?.inventoryAdjustQuantities?.userErrors?.length > 0) {
-      console.error(`[executePurchaseCancel] User errors:`, JSON.stringify(data?.data?.inventoryAdjustQuantities?.userErrors, null, 2));
-    }
-  } catch (error: unknown) {
-    console.error(`[executePurchaseCancel] Exception caught:`, error);
-    const err = error as { response?: Response; body?: { errors?: unknown } };
-    if (err?.response) {
-      try {
-        const errorData = await err.response.json();
-        console.error(`[executePurchaseCancel] Error response data:`, JSON.stringify(errorData, null, 2));
-      } catch {
-        console.error(`[executePurchaseCancel] Could not parse error response`);
-      }
-    }
-    if (err?.body?.errors) {
-      console.error(`[executePurchaseCancel] Error body errors:`, JSON.stringify(err.body.errors, null, 2));
-    }
-    throw error;
-  }
-  
-  const userErrors = data?.data?.inventoryAdjustQuantities?.userErrors ?? [];
-  if (userErrors.length) {
-    return { ok: false, error: userErrors.map((e: { message?: string }) => e.message).join(" / ") };
-  }
-  
-  const adjustmentGroupId = data?.data?.inventoryAdjustQuantities?.inventoryAdjustmentGroup?.id || null;
+  const sent = await sendPurchaseAdjustQuantities(
+    admin,
+    changes,
+    buildAdminIdempotency({ shop, kind: ADMIN_IDEMPOTENCY_KIND.purchase, op: adminOp, parts: [entry.id, "cancel"] }),
+    "executePurchaseCancel"
+  );
+  if (!sent.ok) return sent;
+  const adjustmentGroupId = sent.adjustmentGroupId;
 
   // 在庫変動履歴を記録
   try {
@@ -267,7 +184,22 @@ async function executePurchaseCancel(
     // ログ記録の失敗は無視して続行（在庫調整は成功している）
   }
 
-  return { ok: true, adjustmentGroupId };
+  return { ok: true, adjustmentGroupId, opKeyResult: "done" };
+}
+
+/** 仕入れの在庫の書き込みに失敗したときの答え（rejected = 画面は回を増やす・uncertain = opKey も回も変えない） */
+function purchaseWriteFailure(
+  result: { error: string; opKeyResult: "rejected" | "uncertain" },
+  fallback: string,
+  opKey: string | null
+) {
+  const base = `${fallback}: ${result.error || "不明なエラー"}`;
+  return {
+    error: result.opKeyResult === "uncertain" ? `${base}。${ADMIN_UNCERTAIN_MESSAGE}` : base,
+    opKeyResult: result.opKeyResult,
+    // どの仕入れの答えかを画面が見分けるため、送られてきた opKey をそのまま返す
+    opKey,
+  };
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -405,6 +337,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();
     const entryId = String(formData.get("entryId") || "").trim();
+    // 在庫を書く操作（確定・取り消し）の opKey・opRound（docs/IDEMPOTENT_MIGRATION.md 4.6 の M。仕入れ 1 件ごと）
+    const adminOp = readAdminOpKey(formData);
 
     const appResp = await admin.graphql(
       `#graphql
@@ -827,17 +761,9 @@ export async function action({ request }: ActionFunctionArgs) {
           return resp;
         },
       };
-      let receiveResult;
-      try {
-        receiveResult = await executePurchaseReceive(adminWithRequest, entry, shop);
-      } catch (error: unknown) {
-        console.error("[action receive] Error in executePurchaseReceive:", error);
-        const err = error as { message?: string; body?: { errors?: Array<{ message?: string }> } };
-        const errorMessage = err?.message ?? err?.body?.errors?.[0]?.message ?? String(error);
-        return { error: `在庫調整に失敗しました: ${errorMessage}` };
-      }
+      const receiveResult = await executePurchaseReceive(adminWithRequest, entry, shop, adminOp);
       if (!receiveResult.ok) {
-        return { error: receiveResult.error ?? "在庫調整に失敗しました" };
+        return purchaseWriteFailure(receiveResult, "在庫調整に失敗しました", adminOp.opKey);
       }
       const now = new Date().toISOString();
       const updated = entries.map((e) =>
@@ -847,37 +773,44 @@ export async function action({ request }: ActionFunctionArgs) {
       );
       const appInstallationId = appData?.data?.currentAppInstallation?.id;
       if (!appInstallationId) {
-        return { error: "アプリインストールIDが取得できません" };
+        return { error: "アプリインストールIDが取得できません", opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
       }
-      await admin.graphql(
-        `#graphql
-          mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
+      // 在庫を書いたあとの記録の保存。失敗したら uncertain（opKey を変えない。押し直すと同じキー → Shopify は書かず、記録だけ書き直す）
+      const mfError = await metafieldsSetError(() =>
+        admin.graphql(
+          `#graphql
+            mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id namespace key }
+                userErrors { field message }
+              }
             }
+          `,
+          {
+            variables: {
+              metafields: [
+                {
+                  ownerId: appInstallationId,
+                  namespace: PURCHASE_NS,
+                  key: PURCHASE_KEY,
+                  type: "json",
+                  value: JSON.stringify(updated),
+                },
+              ],
+            },
           }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: PURCHASE_NS,
-                key: PURCHASE_KEY,
-                type: "json",
-                value: JSON.stringify(updated),
-              },
-            ],
-          },
-        }
+        )
       );
-      return { ok: true };
+      if (mfError) {
+        console.error(`[purchase ${intent}] metafieldsSet failed after inventory write: ${mfError}`);
+        return { error: adminRecordSaveFailedMessage(mfError), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
+      }
+      return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
     }
 
     if (intent === "cancel") {
       if (entry.status === "cancelled") {
-        return { ok: true, message: "既にキャンセル済みです" };
+        return { ok: true, message: "既にキャンセル済みです", opKeyResult: "done" as const, opKey: adminOp.opKey };
       }
       // adminオブジェクトにrequestメソッドを追加（logInventoryChangesFromAdjustment用）
       const adminWithRequest = {
@@ -887,9 +820,9 @@ export async function action({ request }: ActionFunctionArgs) {
           return resp;
         },
       };
-      const cancelResult = await executePurchaseCancel(adminWithRequest, entry, shop);
+      const cancelResult = await executePurchaseCancel(adminWithRequest, entry, shop, adminOp);
       if (!cancelResult.ok) {
-        return { error: cancelResult.error ?? "在庫の戻しに失敗しました" };
+        return purchaseWriteFailure(cancelResult, "在庫の戻しに失敗しました", adminOp.opKey);
       }
       const updated = entries.map((e) =>
         e.id === entryId
@@ -902,32 +835,39 @@ export async function action({ request }: ActionFunctionArgs) {
       );
       const appInstallationId = appData?.data?.currentAppInstallation?.id;
       if (!appInstallationId) {
-        return { error: "アプリインストールIDが取得できません" };
+        return { error: "アプリインストールIDが取得できません", opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
       }
-      await admin.graphql(
-        `#graphql
-          mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
+      // 在庫を書いたあとの記録の保存。失敗したら uncertain（opKey を変えない。押し直すと同じキー → Shopify は書かず、記録だけ書き直す）
+      const mfError = await metafieldsSetError(() =>
+        admin.graphql(
+          `#graphql
+            mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id namespace key }
+                userErrors { field message }
+              }
             }
+          `,
+          {
+            variables: {
+              metafields: [
+                {
+                  ownerId: appInstallationId,
+                  namespace: PURCHASE_NS,
+                  key: PURCHASE_KEY,
+                  type: "json",
+                  value: JSON.stringify(updated),
+                },
+              ],
+            },
           }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: PURCHASE_NS,
-                key: PURCHASE_KEY,
-                type: "json",
-                value: JSON.stringify(updated),
-              },
-            ],
-          },
-        }
+        )
       );
-      return { ok: true };
+      if (mfError) {
+        console.error(`[purchase ${intent}] metafieldsSet failed after inventory write: ${mfError}`);
+        return { error: adminRecordSaveFailedMessage(mfError), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
+      }
+      return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
     }
 
     return { error: "不明な操作です" };
@@ -959,6 +899,8 @@ export default function PurchasePage() {
   };
   const csvColumns = purchaseCsvExportColumns ?? DEFAULT_PURCHASE_CSV_COLUMNS;
   const fetcher = useFetcher<typeof action>();
+  // 仕入れの確定・取り消し（在庫を書く）に付ける opKey（docs/IDEMPOTENT_MIGRATION.md 4.6 の M）
+  const purchaseOpKey = useAdminOpKey(fetcher.data);
   const revalidator = useRevalidator();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -1424,6 +1366,7 @@ export default function PurchasePage() {
       const formData = new FormData();
       formData.set("intent", "cancel");
       formData.set("entryId", entryId);
+      purchaseOpKey.append(formData, entryId);
       fetcher.submit(formData, { method: "post", action: location.pathname });
     }
   };
@@ -3094,6 +3037,7 @@ export default function PurchasePage() {
                     const fd = new FormData();
                     fd.set("intent", "receive");
                     fd.set("entryId", modalEntry.id);
+                    purchaseOpKey.append(fd, modalEntry.id);
                     fetcher.submit(fd, { method: "post", action: location.pathname });
                   }}
                   disabled={fetcher.state === "submitting"}

@@ -4,11 +4,14 @@ import { randomBytes } from "crypto";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator, useRouteError, isRouteErrorResponse, data } from "react-router";
 import { useState, useMemo, useEffect, useRef } from "react";
+import { useAdminOpKey } from "../utils/use-admin-op-key";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import { findCountInChunkRaws, lookupCountChunkIndices, parseCountChunkIndex, tailChunkIndices } from "../utils/inventory-count-single-read";
 import { isInventoryCountReadOnlyAction } from "../utils/inventory-count-revalidation";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
+import { adjustInventoryQuantitiesServer, toRawIdForCount } from "../utils/admin-inventory-count-set.server";
+import { ADMIN_IDEMPOTENCY_KIND, ADMIN_UNCERTAIN_MESSAGE, buildAdminIdempotency, readAdminOpKey, readRevertRound } from "../utils/admin-op-key.server";
 import { getDateInShopTimezone, extractDateFromISO, formatDateTimeInShopTimezone, getShopTimezone } from "../utils/timezone";
 import db from "../db.server";
 import type { InventoryCountLike, InventoryCountEntryLike, InputLikeEvent } from "../types";
@@ -1145,93 +1148,20 @@ export type InventoryCount = {
   }>;
 };
 
-/** 管理画面から棚卸確定・リセット時に在庫を反映するためのヘルパー。IDをGIDに正規化 */
-function toRawIdForCount(id: string | number | null | undefined): string {
-  if (id == null) return "";
-  const s = String(id).trim();
-  if (s.startsWith("gid://")) {
-    const last = s.split("/").pop();
-    return last || s;
-  }
-  return s;
-}
-function toLocationGidForCount(locationId: string): string {
-  const s = String(locationId || "").trim();
-  if (s.startsWith("gid://")) return s;
-  const raw = toRawIdForCount(locationId);
-  return raw ? `gid://shopify/Location/${raw}` : s;
-}
-function toInventoryItemGidForCount(inventoryItemId: string): string | null {
-  const str = String(inventoryItemId || "").trim();
-  if (!str) return null;
-  if (/^\d+$/.test(str)) return `gid://shopify/InventoryItem/${str}`;
-  if (str.includes("gid://")) return str;
-  return null;
-}
-
-/** Shopify inventorySetQuantities の quantities 配列の最大件数（API 制限） */
-const INVENTORY_SET_QUANTITIES_MAX = 250;
-
-/** 管理画面から inventorySetQuantities で在庫を設定（POS の adjustInventoryToActual と同様）。250件超はチャンク分割して複数回実行。 */
-async function adjustInventoryQuantitiesServer(
-  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
-  locationId: string,
-  items: Array<{ inventoryItemId: string; quantity: number }>,
-  referenceDocumentUri?: string | null
-): Promise<{ ok: boolean; invalidCount?: number; error?: string }> {
-  const locationGid = toLocationGidForCount(locationId);
-  const quantities = (items ?? [])
-    .filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.quantity)))
-    .map((x) => {
-      const gid = toInventoryItemGidForCount(x.inventoryItemId);
-      const quantity = Math.floor(Number(x.quantity) ?? 0);
-      return gid ? { valid: true as const, inventoryItemId: gid, quantity } : { valid: false as const };
-    });
-  const validQuantities = quantities.filter((q) => q.valid);
-  const invalidCount = quantities.filter((q) => !q.valid).length;
-  if (validQuantities.length === 0) {
-    return { ok: false, invalidCount, error: "有効な在庫アイテムがありません" };
-  }
-  const refUri = referenceDocumentUri
-    ? `gid://stock-transfer-pos/InventoryCount/${referenceDocumentUri}`
-    : undefined;
-  for (let i = 0; i < validQuantities.length; i += INVENTORY_SET_QUANTITIES_MAX) {
-    const chunk = validQuantities.slice(i, i + INVENTORY_SET_QUANTITIES_MAX);
-    const input: Record<string, unknown> = {
-      name: "available",
-      reason: "correction",
-      quantities: chunk.map((q) => ({
-        inventoryItemId: q.inventoryItemId,
-        locationId: locationGid,
-        quantity: q.quantity,
-        changeFromQuantity: null,
-      })),
-    };
-    if (refUri) input.referenceDocumentUri = refUri;
-    try {
-      const resp = await admin.graphql(
-        `#graphql
-          mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-            inventorySetQuantities(input: $input) {
-              inventoryAdjustmentGroup { id }
-              userErrors { field message }
-            }
-          }
-        `,
-        { variables: { input } }
-      );
-      const json = await resp.json();
-      const data = json?.data?.inventorySetQuantities;
-      const errs = data?.userErrors ?? [];
-      if (errs.length) {
-        return { ok: false, error: errs.map((e: { message?: string }) => e.message).join(" / ") };
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: msg };
-    }
-  }
-  return { ok: true, invalidCount: invalidCount > 0 ? invalidCount : undefined };
+/**
+ * 棚卸の在庫の書き込みに失敗したときの答え（docs/IDEMPOTENT_MIGRATION.md 3.3・4.6）。
+ * rejected = はっきり断られた（画面は回を増やす）、uncertain = 分からない（画面は opKey も回も変えない）。
+ */
+function countWriteFailure(
+  result: { error?: string; opKeyResult: "done" | "rejected" | "uncertain"; appliedCount: number },
+  fallback: string,
+  /** どの対象の答えかを画面が見分けるため、送られてきた opKey をそのまま返す */
+  opKey: string | null
+) {
+  const base = result.error || fallback;
+  const partial = result.appliedCount > 0 ? `（先に ${result.appliedCount} 件は反映済み）` : "";
+  const error = result.opKeyResult === "uncertain" ? `${base}${partial}。${ADMIN_UNCERTAIN_MESSAGE}` : `${base}${partial}`;
+  return { ok: false as const, error, opKeyResult: result.opKeyResult, opKey };
 }
 
 /** 管理画面から棚卸確定・リセット時の変動ログを DB に記録（api/log-inventory-change と同様のロジック） */
@@ -2525,6 +2455,8 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
   }
   const actionTypeNorm = actionType.trim();
   meta.actionType = actionTypeNorm;
+  // 在庫を書く操作（棚卸の確定・取り消し）の画面の opKey・opRound（docs/IDEMPOTENT_MIGRATION.md 4.6 の K）
+  const adminOp = readAdminOpKey(formData);
 
   try {
   // SKU検索は metafield 不要のため先に実行（ownerId 未取得で早期 return されないようにする）
@@ -4736,9 +4668,16 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         admin,
         count.locationId,
         toAdjust.map((i) => ({ inventoryItemId: i.inventoryItemId, quantity: Number(i.actualQuantity) })),
-        countId
+        countId,
+        buildAdminIdempotency({
+          shop,
+          kind: ADMIN_IDEMPOTENCY_KIND.inventoryCount,
+          op: adminOp,
+          parts: [countId, "confirm", groupId],
+          revertRound: readRevertRound((count as InventoryCountLike).idempotencyRevertRound),
+        })
       );
-      if (!adjustResult.ok) return { ok: false, error: (adjustResult.error ?? "在庫調整に失敗しました") as const };
+      if (!adjustResult.ok) return countWriteFailure(adjustResult, "在庫調整に失敗しました", adminOp.opKey);
       await logInventoryChangeServer(
         db,
         shop,
@@ -4782,8 +4721,8 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         : c
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
-    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
-    return { ok: true };
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
+    return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
   }
 
   if (actionTypeNorm === "reset_stocktake_group") {
@@ -4812,9 +4751,16 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         admin,
         count.locationId,
         toRevert.map((it: InventoryCountEntryLike) => ({ inventoryItemId: it.inventoryItemId, quantity: it.currentQuantity })),
-        null
+        null,
+        buildAdminIdempotency({
+          shop,
+          kind: ADMIN_IDEMPOTENCY_KIND.inventoryCount,
+          op: adminOp,
+          parts: [countId, "revert", groupId],
+          revertRound: readRevertRound((count as InventoryCountLike).idempotencyRevertRound),
+        })
       );
-      if (!revertResult.ok) return { ok: false, error: (revertResult.error ?? "在庫の取り消しに失敗しました") as const };
+      if (!revertResult.ok) return countWriteFailure(revertResult, "在庫の取り消しに失敗しました", adminOp.opKey);
       await logInventoryChangeServer(
         db,
         shop,
@@ -4836,16 +4782,18 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
     const keyToDelete = Object.keys(groupItemsMap).find((k) => normalizeIdForMatch(k) === normalizeIdForMatch(groupId));
     if (keyToDelete) delete (groupItemsMap as Record<string, unknown>)[keyToDelete];
     const allIds = Array.isArray(count.productGroupIds) && count.productGroupIds.length > 0 ? count.productGroupIds : count.productGroupId ? [count.productGroupId] : [];
+    // 在庫を元に戻したので「戻した回数」を 1 つ増やす。次の確定（同じ中身でも）は新しいキーになる（docs/IDEMPOTENT_MIGRATION.md 3.1・4.6）
+    const nextRevertRound = readRevertRound((count as InventoryCountLike).idempotencyRevertRound) + 1;
     const allDone = allIds.every((id) => getGroupItemsByKey(groupItemsMap as Record<string, unknown[]>, id).length > 0);
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
-        ? { ...c, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
+        ? { ...c, idempotencyRevertRound: nextRevertRound, groupItems: groupItemsMap, status: allDone ? "completed" : "in_progress", completedAt: allDone ? new Date().toISOString() : undefined }
         : c
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
-    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
-    return { ok: true };
+    return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
   }
 
   if (actionTypeNorm === "confirm_stocktake_all") {
@@ -4892,9 +4840,16 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         admin,
         count.locationId,
         allEntries.map((e) => ({ inventoryItemId: e.inventoryItemId, quantity: e.actualQuantity })),
-        countId
+        countId,
+        buildAdminIdempotency({
+          shop,
+          kind: ADMIN_IDEMPOTENCY_KIND.inventoryCount,
+          op: adminOp,
+          parts: [countId, "confirm_all", "-"],
+          revertRound: readRevertRound((count as InventoryCountLike).idempotencyRevertRound),
+        })
       );
-      if (!adjustResult.ok) return { ok: false, error: (adjustResult.error ?? "在庫調整に失敗しました") as const };
+      if (!adjustResult.ok) return countWriteFailure(adjustResult, "在庫調整に失敗しました", adminOp.opKey);
       await logInventoryChangeServer(
         db,
         shop,
@@ -4937,9 +4892,9 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         : c
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
-    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
-    return { ok: true };
+    return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
   }
 
   if (actionTypeNorm === "reset_stocktake_all") {
@@ -4964,7 +4919,20 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         .map((it: InventoryCountEntryLike) => ({ ...it, currentQuantity: Number(it?.currentQuantity ?? 0), actualQuantity: Number(it?.actualQuantity ?? 0) }))
         .filter((it: InventoryCountEntryLike) => it.currentQuantity !== it.actualQuantity);
       if (toRevert.length > 0) {
-        await adjustInventoryQuantitiesServer(admin, count.locationId, toRevert.map((it: InventoryCountEntryLike) => ({ inventoryItemId: it.inventoryItemId, quantity: it.currentQuantity })), null);
+        // 前からの動き: グループごとの失敗は止めない（この PR では変えない）
+        await adjustInventoryQuantitiesServer(
+          admin,
+          count.locationId,
+          toRevert.map((it: InventoryCountEntryLike) => ({ inventoryItemId: it.inventoryItemId, quantity: it.currentQuantity })),
+          null,
+          buildAdminIdempotency({
+            shop,
+            kind: ADMIN_IDEMPOTENCY_KIND.inventoryCount,
+            op: adminOp,
+            parts: [countId, "revert_all", groupId],
+            revertRound: readRevertRound((count as InventoryCountLike).idempotencyRevertRound),
+          })
+        );
         await logInventoryChangeServer(
           db,
           shop,
@@ -4984,15 +4952,17 @@ async function handleInventoryCountAction({ request }: ActionFunctionArgs, meta:
         );
       }
     }
+    // 在庫を元に戻したので「戻した回数」を 1 つ増やす。次の確定（同じ中身でも）は新しいキーになる（docs/IDEMPOTENT_MIGRATION.md 3.1・4.6）
+    const nextRevertRound = readRevertRound((count as InventoryCountLike).idempotencyRevertRound) + 1;
     const updatedCounts = inventoryCounts.map((c) =>
       String(c.id) === String(countId) || normalizeIdForMatch(c.id) === normalizeIdForMatch(countId)
-        ? { ...c, groupItems: {}, status: "in_progress" as const, completedAt: undefined }
+        ? { ...c, idempotencyRevertRound: nextRevertRound, groupItems: {}, status: "in_progress" as const, completedAt: undefined }
         : c
     );
     const { userErrors } = await writeInventoryCountsChunked(admin, updatedCounts as InventoryCount[], ownerId, expectedVersionNum);
-    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / ") as const };
+    if (userErrors.length) return { ok: false, error: userErrors.map((e) => e.message).join(" / "), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
     invalidateIncompleteGroupProductsCacheForCount(session?.shop ?? "", countId);
-    return { ok: true };
+    return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
   }
 
   if (actionTypeNorm === "cancel_stocktake_group") {
@@ -5314,6 +5284,8 @@ export default function InventoryCountPage() {
   const [restoreProductGroupIds, setRestoreProductGroupIds] = useState<string[]>([]);
   const [modalEditedQuantities, setModalEditedQuantities] = useState<Record<string, Record<string, number>>>({});
   const historyActionFetcher = useFetcher<typeof action>();
+  // 棚卸の確定・取り消し（在庫を書く）に付ける opKey（docs/IDEMPOTENT_MIGRATION.md 4.6 の K）
+  const historyOpKey = useAdminOpKey(historyActionFetcher.data);
   const revalidator = useRevalidator();
   useEffect(() => {
     const d = metafieldRetryFetcher.data as { ok?: boolean; error?: string; retriedCountId?: string } | undefined;
@@ -9118,6 +9090,7 @@ export default function InventoryCountPage() {
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", groupId);
                                           fd.set("items", JSON.stringify(items));
+                                          historyOpKey.append(fd, `${modalCount.id}:confirm:${groupId}`);
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
                                         style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && !loadingIncompleteGroupIds.has(String(groupId)) && incompleteGroupProductsFetcher.state === "idle" ? "pointer" : "not-allowed" }}
@@ -9154,6 +9127,7 @@ export default function InventoryCountPage() {
                                           fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", groupId);
+                                          historyOpKey.append(fd, `${modalCount.id}:revert:${groupId}`);
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
                                         style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
@@ -9358,6 +9332,7 @@ export default function InventoryCountPage() {
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", singleGroupId);
                                           fd.set("items", JSON.stringify(items));
+                                          historyOpKey.append(fd, `${modalCount.id}:confirm:${singleGroupId}`);
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
                                         style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", cursor: historyActionFetcher.state === "idle" && !loadingIncompleteGroupIds.has(String(singleGroupId)) && incompleteGroupProductsFetcher.state === "idle" ? "pointer" : "not-allowed" }}
@@ -9394,6 +9369,7 @@ export default function InventoryCountPage() {
                                           fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                                           fd.set("countId", modalCount.id);
                                           fd.set("groupId", singleGroupId);
+                                          historyOpKey.append(fd, `${modalCount.id}:revert:${singleGroupId}`);
                                           historyActionFetcher.submit(fd, { method: "post" });
                                         }}
                                         style={{ padding: "6px 12px", fontSize: "13px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}
@@ -9586,6 +9562,7 @@ export default function InventoryCountPage() {
                             fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                             fd.set("countId", modalCount.id);
                             fd.set("incompleteGroupsItems", JSON.stringify(incompletePayload));
+                            historyOpKey.append(fd, `${modalCount.id}:confirm_all`);
                             historyActionFetcher.submit(fd, { method: "post" });
                           }}
                           title={hasIncomplete && !canConfirmAll && stillLoadingIncomplete ? "商品リストの読み込みが完了してから確定できます" : isCountFullyCompleted ? "完了済みのため操作できません" : undefined}
@@ -9611,6 +9588,7 @@ export default function InventoryCountPage() {
                               fd.set("action", "reset_stocktake_all");
                               fd.set("inventoryCountsVersion", String(inventoryCountsVersion));
                               fd.set("countId", modalCount.id);
+                              historyOpKey.append(fd, `${modalCount.id}:revert_all`);
                               historyActionFetcher.submit(fd, { method: "post" });
                             }}
                             style={{ padding: "8px 16px", fontSize: "14px", borderRadius: "6px", border: "1px solid #d72c0d", background: "#fff", color: "#d72c0d", cursor: historyActionFetcher.state === "idle" ? "pointer" : "not-allowed" }}

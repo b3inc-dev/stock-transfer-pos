@@ -215,6 +215,8 @@ export const OrderRequestEntrySchema = z.object({
   linkedTransferId: z.string().nullable().optional(),
   arrivalDate: z.string().optional(),
   inspectionDate: z.string().optional(),
+  /** 管理画面で承認を取り消した回数（@idempotent のキーの回。D3e）。parse で落とさないように持つ */
+  idempotencyRevertRound: z.number().int().nonnegative().optional(),
 });
 
 export const OrderRequestEntriesSchema = z.array(OrderRequestEntrySchema);
