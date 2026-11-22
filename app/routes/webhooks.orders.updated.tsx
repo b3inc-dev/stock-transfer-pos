@@ -1,7 +1,8 @@
 // app/routes/webhooks.orders.updated.tsx
 // 注文更新Webhookハンドラー（売上時の在庫変動検知）
 import type { ActionFunctionArgs } from "react-router";
-import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../utils/webhook-auth-safe.server";
+import { respondWithinBudget } from "../utils/webhook-response-budget";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import db from "../db.server";
@@ -50,15 +51,17 @@ async function lookupAssignedLocation(admin: AdminGraphQLRequestClient, orderId:
   }
 }
 
-export const action = async ({ request }: ActionFunctionArgs) => {
+async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response> {
   try {
     let payload, shop, topic, session;
+    let sessionRefreshFailed = false;
     try {
-      const result = await authenticate.webhook(request);
+      const result = await authenticateWebhook(request);
       payload = result.payload;
       shop = result.shop;
       topic = result.topic;
       session = result.session;
+      sessionRefreshFailed = "sessionRefreshFailed" in result && result.sessionRefreshFailed === true;
     } catch (authError) {
       console.error(`[orders/updated] Webhook authentication error:`, authError);
       if (authError instanceof Error) {
@@ -122,6 +125,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // セッションからadminクライアントを作成
     if (!session) {
+      if (sessionRefreshFailed) {
+        // 外した店など、トークンを更新できない店。アプリからは何もできないので 200 で受け取って終わる
+        // （401 だと Shopify が 48 時間送り直し続ける）。
+        console.warn(`[orders/updated] セッションを更新できない店のため記録しない: shop=${shop}`);
+        return new Response("OK", { status: 200 });
+      }
       console.error(`[orders/updated] No session found for webhook: shop=${shop}`);
       return new Response("No session", { status: 401 });
     }
@@ -698,4 +707,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     return new Response("Internal Server Error", { status: 500 });
   }
-};
+}
+
+// 4 秒を過ぎたら先に 200 を返し、処理は続ける（Shopify の 5 秒の待ちで「失敗」にしない。webhook-response-budget.ts）
+export const action = (args: ActionFunctionArgs) =>
+  respondWithinBudget(() => handleWebhook(args), { label: "orders/updated", request: args.request });

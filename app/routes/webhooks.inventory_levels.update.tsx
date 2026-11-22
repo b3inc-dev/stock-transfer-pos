@@ -1,7 +1,8 @@
 // app/routes/webhooks.inventory_levels.update.tsx
 // 在庫レベル更新Webhookハンドラー（管理画面での在庫変動検知）
 import type { ActionFunctionArgs } from "react-router";
-import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../utils/webhook-auth-safe.server";
+import { respondWithinBudget } from "../utils/webhook-response-budget";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import shopify from "../shopify.server";
 import { findOrderLinkedReplay, repairInventoryLogMetadata } from "../utils/repairInventoryLogMetadata.js";
@@ -26,12 +27,12 @@ const PENDING_ORDER_MAX_RETRIES = 1; // 最大約 0.8s（旧 2.5s×3 は棚卸�
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export const action = async ({ request }: ActionFunctionArgs) => {
+async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response> {
   // デバッグ: webhookが到達したかどうかを確認
   console.log(`[inventory_levels/update] Webhook endpoint called: method=${request.method}, url=${request.url}`);
   
   try {
-    const { payload, shop, topic, session } = await authenticate.webhook(request);
+    const { payload, shop, topic, session } = await authenticateWebhook(request);
 
     console.log(`[inventory_levels/update] Webhook received: shop=${shop}, topic=${topic}`);
 
@@ -1021,4 +1022,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     console.error("inventory_levels/update webhook error:", error);
     return new Response("Internal Server Error", { status: 500 });
   }
-};
+}
+
+// 4 秒を過ぎたら先に 200 を返し、処理は続ける（webhook-response-budget.ts）
+export const action = (args: ActionFunctionArgs) =>
+  respondWithinBudget(() => handleWebhook(args), { label: "inventory_levels/update", request: args.request });

@@ -7,6 +7,7 @@
 // topic の形（"SHOP_REDACT" / "shop/redact"）の違いと消す処理は app/utils/compliance-webhook.ts。
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
+import { authenticateWebhook } from "../utils/webhook-auth-safe.server";
 import db from "../db.server";
 import { handleComplianceWebhook, type ComplianceDb } from "../utils/compliance-webhook";
 import { getServerDistribution, isShopStillInstalled } from "../utils/shop-install-probe.server";
@@ -22,7 +23,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   let webhook: Awaited<ReturnType<typeof authenticate.webhook>>;
   try {
-    webhook = await authenticate.webhook(request);
+    // 外した店でトークンの更新に失敗した 500 は、HMAC を確かめてセッション無しで受ける（webhook-auth-safe.ts）
+    webhook = (await authenticateWebhook(request)) as Awaited<ReturnType<typeof authenticate.webhook>>;
   } catch (err) {
     // HMAC が正しくないときなど。ライブラリが投げた Response（401 など）はそのまま返す。
     if (err instanceof Response) return err;

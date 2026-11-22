@@ -294,3 +294,13 @@ activate → settle → [チャンクごと] 今の数を読む（50 件ずつ�
 ```
 
 - 残る危険: 一覧で在庫を読んでから確定で今の数を読むまでの売上は、数えた数で上書きされる（D9 追記の「選ばなかった案」）。
+
+## 12. Webhook の応答の時間（4 秒で先に 200）
+
+- Shopify は Webhook の応答を 5 秒まで待ち、過ぎると「失敗」として送り直す。サーバーは最後まで処理して 200 を返すので、Render のログには 200 しか残らない。
+- `orders/updated`・`refunds/create` は `findWithAdminWebhookRetry`（2.5 秒 × 12 回）で、1 商品ごとに最大 30 秒待つことがある。`inventory_levels/update` も Admin API を何度も呼ぶ。
+- この 3 つは `respondWithinBudget`（`app/utils/webhook-response-budget.ts`）を通す。4 秒より早く終われば、これまでと同じ応答（400・401・500・503）を返す。4 秒を過ぎたら先に 200 を返し、処理は同じプロセスで最後まで続ける（結果はログ `[webhook-budget]`）。
+- 4 秒を過ぎたあとに失敗しても、Shopify は送り直さない（前も、5 秒を過ぎたあとの 500 は Shopify に届いていなかった）。配備の再起動と重なると、続きの処理が止まることがある（前は Shopify の送り直しで拾えていた）。
+- 前の動き（終わるまで待つ）に戻すのは、Render の環境変数を **ちょうど `WEBHOOK_RESPONSE_BUDGET_MS=0`** にすること（`off` も 0 と同じに扱う）。ほかの数でない値（`false`・`none` など）や負の数は 0 ではなく**既定の 4000** になるので、戻すときは必ず `0` と書く。環境変数を変えるとサーバーが入れ直され、そのときから効く。
+- ログ `[webhook-budget]` には、店（`shop=` … `X-Shopify-Shop-Domain`）と Webhook の ID（`webhookId=` … `X-Shopify-Webhook-Id`）が入る。「先に 200 を返す」行があって、同じ `webhookId` の「続きの処理が終わった」「続きの処理が失敗した」行が無いものが、配備の再起動などで止まった分。配備の時刻と合わせて探し、要るなら手で直す。本文（注文の中身）はログに出さない。
+- 外した店でトークンの更新に失敗したとき、ライブラリ 1.1 系は `authenticate.webhook` で 500 を投げる。受け口は `authenticateWebhook`（`webhook-auth-safe.ts`）を通し、HMAC を確かめてセッション無しで受ける。`orders/updated`・`refunds/create` はそのとき 200 で終わる（記録しない）。
