@@ -86,6 +86,6 @@ On the 10-location plans, each location over 10 is billed at US$4/month (Lite) o
 |---|---|
 | Sales channel requirement | Requires POS (online store not required) |
 | Languages | Japanese |
-| Support email | 載せない。問い合わせはフォーム https://b3-inc.com/contact だけ（T 2026-11-23 1:35）。Partner Dashboard でメールの欄が必須なら【T】 |
+| Support email | app-support@b3-inc.com（全アプリ共通の窓口。T 2026-11-23 1:54・2:00）。届いたら自動の返事でフォーム https://b3-inc.com/contact を案内する。受け口は T が作る（commercor-site docs/SUPPORT_EMAIL_ALIASES.md）。受け口ができてから Partner Dashboard に入れる |
 | Support page | https://commercore.b3-inc.com/apps/stock-transfer-pos/support/ |
 | Privacy policy | https://commercore.b3-inc.com/apps/stock-transfer-pos/privacy/ |
