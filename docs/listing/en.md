@@ -86,6 +86,6 @@ On the 10-location plans, each location over 10 is billed at US$4/month (Lite) o
 |---|---|
 | Sales channel requirement | Requires POS (online store not required) |
 | Languages | Japanese |
-| Support email | `{{SUPPORT_EMAIL}}`【T】 |
-| Support page | `{{SUPPORT_URL}}`【T】 |
-| Privacy policy | `{{PRIVACY_URL}}`【T】 |
+| Support email | 載せない。問い合わせはフォーム https://b3-inc.com/contact だけ（T 2026-11-23 1:35）。Partner Dashboard でメールの欄が必須なら【T】 |
+| Support page | https://commercore.b3-inc.com/apps/stock-transfer-pos/support/ |
+| Privacy policy | https://commercore.b3-inc.com/apps/stock-transfer-pos/privacy/ |

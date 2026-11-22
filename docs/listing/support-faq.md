@@ -1,6 +1,7 @@
 # サポートページと FAQ の案 — POS Stock
 
-- サポートページは Shopify 向けの専用ページにする（宣伝のページにしない）【事実: Best practices の Support】。置き場所は T が決める（PR #50 の `/help/stock-transfer-pos/` の利用者ヘルプと同じサイトが自然）【T】。
+- サポートページは Shopify 向けの専用ページにする（宣伝のページにしない）【事実: Best practices の Support】。置き場所は T が決める（PR #50 の `/help/stock-transfer-pos/` の利用者ヘルプと同じサイトが自然）。
+- **公開する本文の正本は commercor-site の `editorial/app_policies.py`**（b3inc-dev/commercor-site PR #14、T の決定 2026-11-23 1:35「紹介サイトに置く・連絡先はフォームだけ」）。公開の URL: プライバシーポリシー https://commercore.b3-inc.com/apps/stock-transfer-pos/privacy/・サポート https://commercore.b3-inc.com/apps/stock-transfer-pos/support/。この案は根拠として残す。文を変えるときは commercor-site も同じ PR の流れで直す。
 - 答えはコードで確かめたことだけ。根拠を `<!-- -->` で書いた（公開するときは消してよい）。
 
 ---
@@ -10,8 +11,8 @@
 ```
 # POS Stock サポート
 
-お問い合わせ: {{SUPPORT_EMAIL}}
-受付: {{SUPPORT_HOURS}}（日本時間）。{{SUPPORT_REPLY_DAYS}} 営業日以内にお返事します。
+お問い合わせ: お問い合わせフォーム https://b3-inc.com/contact（フォームだけ）
+受付: 平日 10時〜18時（日本時間）。3 営業日以内にお返事します。日本語と英語のお問い合わせを受け付けます。
 お問い合わせのときは、ストアのドメイン（xxx.myshopify.com）と、困っている画面の名前を書いてください。
 
 ## はじめかた
@@ -54,7 +55,7 @@ Q. 通信が切れて確定できたか分からないときは。
 A. 同じ操作をもう一度送っても、在庫の調整（ロス・棚卸・入庫など）は 2 回にならない作りです。出庫は、Shopify 管理画面の「在庫移管」で作られているかを先に確かめてから、もう一度確定してください。
 
 Q. アンインストールするとデータはどうなりますか。
-A. プライバシーポリシー（{{PRIVACY_URL}}）の「保存する期間と削除」をご覧ください。アンインストールの 48 時間後に、アプリのデータベースからその店舗の記録を削除します。ストアの中（メタフィールド）に保存した設定・記録・毎日の在庫高は、アンインストールのあともストアに残ることがあり、アンインストールのあとはアプリから削除できません。削除を希望するときは、アンインストールの前にご連絡ください。
+A. プライバシーポリシー（https://commercore.b3-inc.com/apps/stock-transfer-pos/privacy/）の「保存する期間と削除」をご覧ください。アンインストールの 48 時間後に、アプリのデータベースからその店舗の記録を削除します。ストアの中（メタフィールド）に保存した設定・記録・毎日の在庫高は、アンインストールのあともストアに残ることがあり、アンインストールのあとはアプリから削除できません。削除を希望するときは、アンインストールの前にご連絡ください。
 
 Q. 対応している言語は。
 A. 画面は日本語です。
@@ -76,8 +77,8 @@ A. 画面は日本語です。
 ```
 # POS Stock Support
 
-Contact: {{SUPPORT_EMAIL}}
-Hours: {{SUPPORT_HOURS}} (Japan time). We reply within {{SUPPORT_REPLY_DAYS}} business days.
+Contact: our contact form https://b3-inc.com/contact (form only)
+Hours: weekdays 10:00-18:00 (Japan time). We reply within 3 business days, in Japanese or English.
 Please include your store domain (xxx.myshopify.com) and the name of the screen.
 The app screens are in Japanese.
 
@@ -121,5 +122,5 @@ Q. The connection dropped and I am not sure the action went through.
 A. Sending an inventory adjustment (loss, count, receiving) again does not apply it twice. For a transfer, first check Inventory transfers in Shopify admin, then confirm again only if it is not there.
 
 Q. What happens to my data when I uninstall?
-A. See "Retention and deletion" in our privacy policy ({{PRIVACY_URL}}). We delete the store's records from our database 48 hours after uninstall. Settings, records and daily inventory snapshots saved in your Shopify store (metafields) may stay in the store after uninstall, and the app can no longer delete them then. If you want them deleted, contact us before you uninstall.
+A. See "Retention and deletion" in our privacy policy (https://commercore.b3-inc.com/apps/stock-transfer-pos/privacy/). We delete the store's records from our database 48 hours after uninstall. Settings, records and daily inventory snapshots saved in your Shopify store (metafields) may stay in the store after uninstall, and the app can no longer delete them then. If you want them deleted, contact us before you uninstall.
 ```

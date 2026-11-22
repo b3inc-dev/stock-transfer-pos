@@ -115,6 +115,6 @@ POS では、出庫・入庫・ロス・棚卸・仕入・発注・在庫調整�
 | 対応言語 | 日本語 |
 | カテゴリ | 在庫管理（Inventory management）など。Partner の選択肢から T が選ぶ【T】 |
 | デモストア URL | なし（POS のアプリなのでストアの見本ページが無い）。必要なら開発ストアの管理画面ではなく、画面録画で見せる |
-| サポートのメール | `{{SUPPORT_EMAIL}}`【T】 |
-| サポートページ | `{{SUPPORT_URL}}`【T】（support-faq.md を置く） |
-| プライバシーポリシー | `{{PRIVACY_URL}}`【T】（privacy-policy.md を置く） |
+| サポートのメール | 載せない。問い合わせはフォーム https://b3-inc.com/contact だけ（T 2026-11-23 1:35）。Partner Dashboard でメールの欄が必須なら【T】 |
+| サポートページ | https://commercore.b3-inc.com/apps/stock-transfer-pos/support/ |
+| プライバシーポリシー | https://commercore.b3-inc.com/apps/stock-transfer-pos/privacy/ |
