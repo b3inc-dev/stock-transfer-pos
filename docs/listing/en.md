@@ -76,7 +76,7 @@ Prices and trial days are **not confirmed by T yet**（ja.md 9.2 と同じ値）
 Additional charges text（料金欄に追加料金の説明を入れる場所があれば貼る）:
 
 ```
-On the 10-location plans, each location over 10 is billed at US$4/month (Lite) or US$12/month (Pro), added to your Shopify bill. The count is taken once at the start of each billing period.
+On the 10-location plans, each location over 10 is billed at US$4/month (Lite) or US$12/month (Pro), added to your Shopify bill. The count is taken once per billing period, when the app first checks your locations in that period.
 ```
 
 ## 9. Other fields

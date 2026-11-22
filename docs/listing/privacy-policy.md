@@ -25,7 +25,8 @@
 
 - 設定・ロス・仕入・発注・調整・棚卸の記録・商品グループ・入庫の照合の記録などを、`currentAppInstallation` に付くメタフィールドに JSON で入れる（例: `extensions/stock-transfer-loss/src/screens/loss/lossApi.js` の `ownerId = currentAppInstallation.id`）。
 - この記録には、記録の担当者として選んだ・入れた**スタッフ名**が入る（`staffName`。ロス・仕入・発注・調整）。
-- 【推測】アプリに付くメタフィールドは、Shopify がアプリのアンインストールで消す。Shopify の説明で確かめてから公開する。
+- **在庫高の毎日の記録（スナップショット）は、アプリではなくショップに付くメタフィールド**に入る: `inventory_info.daily_snapshots`（`app/utils/inventory-snapshot.ts` の `saveSnapshotsForDate`、`ownerId: shopId`。ロケーションごとの在庫数・在庫金額。Cron の `api.inventory-snapshot-daily.tsx` と、管理画面の在庫情報を開いたときの `app.inventory-info.tsx`）。予約されていない namespace のショップのメタフィールドなので、**アンインストールしても残る**【事実】。アンインストールのあとはトークンが無く、アプリからは消せない。`shop/redact` でも消さない（DB だけを消す）。
+- `currentAppInstallation` に付くメタフィールドがアンインストールで消えるかは、shopify.dev に書かれていない【未確認 2026-11-22】（https://shopify.dev/apps/metafields/app-owned の app-data metafields の説明に、アンインストールのときの扱いが無い。https://community.shopify.dev/t/cannot-delete-app-data-metafields/8301 でも答えが出ていない）。なので本文では「残ることがある」と書く（消えると約束しない）。
 
 ### 1.3 POS の端末に入るもの【事実: AGENTS.md「POS 下書き・UI 状態 → `SHOPIFY.storage` / localStorage」】
 
@@ -35,7 +36,7 @@
 
 | topic | 動き |
 |---|---|
-| `customers/data_request` | 顧客ごとのデータを持っていないので、渡すものはない（記録だけして 200） |
+| `customers/data_request` | 顧客ごとのデータを持っていないので、渡すものはない（記録だけして 200。**店へ何かを送る処理は無い**ので、本文では「答えます」と書かない） |
 | `customers/redact` | `orders_to_redact` の注文の行を `OrderPendingLocation`・`RefundPendingLocation` から消す |
 | `shop/redact` | アンインストールの 48 時間後に届く。その店の行を `InventoryChangeEvent`・`InventoryCountDocument`・`InventoryChangeLog`・`OrderPendingLocation`・`RefundPendingLocation`・`Session` から消す。48 時間のうちに入れ直した店と、自社用（inhouse）のサーバーでは消さない |
 
@@ -61,7 +62,7 @@
 本アプリは、店舗が本アプリを使うために必要な次の情報だけを、Shopify の API から受け取り、または店舗の操作によって保存します。
 
 - 店舗の情報: ストアのドメイン、Shopify から発行されるアクセストークン
-- 在庫の情報: 商品・バリエーション・SKU、ロケーションの名前と ID、在庫数とその変動（出庫・入庫・ロス・棚卸・仕入・発注・在庫調整）、在庫移管と出荷の ID、操作した日時、店舗が入力したメモ
+- 在庫の情報: 商品・バリエーション・SKU、ロケーションの名前と ID、在庫数とその変動（出庫・入庫・ロス・棚卸・仕入・発注・在庫調整）、在庫移管と出荷の ID、操作した日時、店舗が入力したメモ、ロケーションごとの毎日の在庫数と在庫金額（在庫高）
 - スタッフの情報: 記録の担当者として店舗が選んだ・入力したスタッフの名前
 - 料金の情報: 契約しているプランとロケーション数（使用量の請求のため）
 
@@ -79,7 +80,7 @@
 ## 3. 保存する場所と、渡す先
 
 - 本アプリのサーバーとデータベース（ホスティング: Render。地域: {{SERVER_REGION}}）
-- 店舗の Shopify ストアの中（本アプリ用のメタフィールド）
+- 店舗の Shopify ストアの中（メタフィールド。設定・ロス・仕入・発注・調整・棚卸・入庫の照合の記録、毎日の在庫高）
 - POS の端末の中（作りかけの明細）
 
 情報を渡すのは、本アプリを動かすための Shopify（API と請求）とホスティングの会社だけです。法令で求められたときを除き、ほかの第三者には渡しません。通信は HTTPS で暗号化しています。
@@ -88,8 +89,9 @@
 
 - 本アプリをインストールしている間は、在庫の記録を保存します。
 - 本アプリをアンインストールすると、すぐにアクセストークンを削除します。
-- アンインストールの 48 時間後に Shopify から届く削除の依頼（shop/redact）を受けて、その店舗の在庫の記録をデータベースから削除します。その前にもう一度インストールした場合は削除しません。
-- Shopify からお客様のデータの削除の依頼（customers/redact）が届いたときは、その注文につながるデータを削除します。データの開示の依頼（customers/data_request）には、お客様ごとのデータを持っていないことを店舗に答えます。
+- アンインストールの 48 時間後に Shopify から届く削除の依頼（shop/redact）を受けて、その店舗の在庫の記録を本アプリのデータベースから削除します。その前にもう一度インストールした場合は削除しません。
+- 店舗の Shopify ストアの中（メタフィールド）に保存した設定・記録・毎日の在庫高は、アンインストールのあとも店舗のストアに残ることがあります。アンインストールのあとは、本アプリからは削除できません。削除を希望する店舗は、アンインストールの前に {{SUPPORT_EMAIL}} にご連絡ください。
+- Shopify からお客様のデータの削除の依頼（customers/redact）が届いたときは、その注文につながるデータを削除します。本アプリはお客様ごとのデータを持たないため、データの開示の依頼（customers/data_request）で渡すものはありません。
 - {{USAGE_RECORD_RETENTION}}
 - サーバーのログは {{LOG_RETENTION_DAYS}} 日で消えます。
 
@@ -130,7 +132,7 @@ Last updated: {{UPDATED_DATE}}
 The App receives from the Shopify API, or saves when a merchant uses it, only the information needed to run the App:
 
 - Store information: the store's myshopify domain and the access token issued by Shopify
-- Inventory information: products, variants and SKUs; location names and IDs; inventory quantities and changes (transfers, receiving, losses, stock counts, purchases, orders and adjustments); inventory transfer and shipment IDs; dates and times; notes entered by the merchant
+- Inventory information: products, variants and SKUs; location names and IDs; inventory quantities and changes (transfers, receiving, losses, stock counts, purchases, orders and adjustments); inventory transfer and shipment IDs; dates and times; notes entered by the merchant; daily stock quantity and value per location (inventory snapshots)
 - Staff information: staff names that the merchant selects or enters as the person in charge of a record
 - Billing information: the merchant's plan and number of locations (for usage charges)
 
@@ -148,7 +150,7 @@ We do not use this information for advertising or for any purpose unrelated to t
 ## 3. Where it is stored and who receives it
 
 - The App's servers and database (hosted on Render, region: {{SERVER_REGION}})
-- The merchant's Shopify store (metafields owned by the App)
+- The merchant's Shopify store (metafields: settings; loss, purchase, order, adjustment, stock count and receiving records; daily inventory snapshots)
 - The POS device (unfinished lists)
 
 We share information only with Shopify (API and billing) and our hosting provider, as needed to run the App, unless the law requires otherwise. All traffic is encrypted with HTTPS.
@@ -157,8 +159,9 @@ We share information only with Shopify (API and billing) and our hosting provide
 
 - We keep inventory records while the App is installed.
 - When the App is uninstalled, we delete the access token right away.
-- When Shopify sends the shop/redact request 48 hours after uninstall, we delete the store's inventory records from our database. If the App is installed again before that, we do not delete them.
-- When Shopify sends a customers/redact request, we delete data linked to the listed orders. For a customers/data_request, we tell the merchant that we hold no data per customer.
+- When Shopify sends the shop/redact request 48 hours after uninstall, we delete the store's inventory records from the App's database. If the App is installed again before that, we do not delete them.
+- Settings, records and daily inventory snapshots saved in the merchant's Shopify store (metafields) may stay in the store after uninstall. After uninstall, the App can no longer delete them. Merchants who want them deleted should contact {{SUPPORT_EMAIL}} before uninstalling.
+- When Shopify sends a customers/redact request, we delete data linked to the listed orders. We hold no data per customer, so there is nothing to provide for a customers/data_request.
 - {{USAGE_RECORD_RETENTION_EN}}
 - Server logs are deleted after {{LOG_RETENTION_DAYS}} days.
 
