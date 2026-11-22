@@ -233,6 +233,18 @@ API バージョンバンプとセットで別 PR。
 
 - **残り（サーバーで止められないもの）**: 出庫の Transfer 作成・入庫の受領は POS から Shopify へ直接送る（D1）。ここはタイルの `PlanGate` だけが止め口。古い版の拡張が端末に残っている間は止まらない（推測。次の `shopify app deploy` で入れ替わる）。ロケーション数とプランの不一致は今まで通り管理画面だけで扱う。
 
+## D18. 公開用は read_orders を持たない（2026-11-22 T の決定・#79）
+
+- **事実（main e8a4ddf で調べた。#79 のコメント）**: `read_orders` を使うのは注文の Webhook `orders/updated` と返品の Webhook `refunds/create` だけ（在庫の履歴で「売上」「返品」を分けるため）。公開用の toml では、どちらも保護された顧客データの承認が無いためコメントアウトしていた。ほかに Shopify の注文を読むところは無い（「発注」「仕入」はアプリの DB の書類。POS 拡張にも注文の query は無い）。
+- **判断**: 公開用（`shopify.app.public.toml`）の scopes から `read_orders` を外す。保護された顧客データ（Level 1）は申請しない。自社用（Ciara・`shopify.app.toml`）は scopes も Webhook も変えない。
+- **影響**: **公開版の在庫の履歴は、売上・返品に分けない**（売上で減った分・返品で増えた分は `inventory_levels/update` だけで記録され、「管理画面・その他」に入る）。公開版はまだ店がいないので、困る店はいない。
+- **合わせたところ**:
+  - SCOPES の環境変数が無いときの既定（`app/utils/default-scopes.ts`）を公開用・自社用で分けた。どちらのサーバーかは料金プランと同じ `detectServerDistribution`（分からないときは自社用＝今まで通り）。toml の client_id を読むところは `app/utils/app-toml.server.ts` へ移した（`shopify.server.ts` から使うため。`shop-install-probe.server.ts` は出し直すだけ）。
+  - `npm run deploy:public` の見張り（`scripts/verify-app-mode.js` の `checkPublicScopes`）: 公開用の toml に `read_orders`・`write_orders`・`read_all_orders` か、コメントでない `orders/*`・`refunds/*` の Webhook があると止める。
+  - 試験: `tests/public-scopes.test.mjs`（toml と既定のスコープが同じ・見張りが止める）。
+- **戻すとき**: Level 1 を申請して承認 → 公開用 toml に `read_orders` → `PUBLIC_DEFAULT_SCOPES` → Webhook のコメントを外す → 見張りを直す。T の承認が要る（`docs/INVENTORY_CHANGE_HISTORY_CAUSES.md`）。
+- **残り（推測）**: Render の公開用に `SCOPES` の環境変数を `read_orders` 入りで入れていると、toml と食い違う。入っているかは T が確かめる（`docs/listing/partner-dashboard-steps.md`）。
+
 ---
 
 ## 関連正本

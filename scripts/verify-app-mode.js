@@ -9,6 +9,10 @@
  * どの URL がどちらの APP_MODE かは、appUrl.js の PROD_APP_URL_PUBLIC / PROD_APP_URL_INHOUSE から読む
  * （URL を 2 か所に書かない）。合わない・読めないときは exit 1 で止める。
  *
+ * 公開用（APP_MODE="public"）のときは、もう 1 つ見る（DECISIONS D18・2026-11-22 T の決定）:
+ * 公開用の toml に read_orders と、注文・返品の Webhook（orders/* と refunds/*）が無いこと。
+ * 公開用は保護された顧客データを申請していないので、あると deploy が失敗するか、審査で理由を聞かれる。
+ *
  * 使い方: node scripts/verify-app-mode.js <shopify.app.toml|shopify.app.public.toml>
  */
 import { readFileSync } from "node:fs";
@@ -67,6 +71,47 @@ export function checkAppMode({ tomlText, appUrlText, tomlName = "toml" }) {
   return { ok: true, mode: actualMode, host };
 }
 
+/** 公開用で持たないスコープ（注文のデータ）。保護された顧客データの申請をしていないため */
+export const PUBLIC_FORBIDDEN_SCOPES = ["read_orders", "write_orders", "read_all_orders"];
+const PROTECTED_TOPIC = /^(orders|refunds)\//;
+
+/** toml の文から access_scopes の scopes を読む（コメントの行は見ない） */
+export function parseScopes(tomlText) {
+  const m = String(tomlText ?? "").match(/^\s*scopes\s*=\s*"([^"]*)"/m);
+  return m ? m[1].split(",").map((s) => s.trim()).filter(Boolean) : null;
+}
+
+/** toml の文から、コメントでない行の webhook topics を読む */
+export function parseWebhookTopics(tomlText) {
+  const topics = [];
+  for (const line of String(tomlText ?? "").split(/\r?\n/)) {
+    const m = line.match(/^\s*topics\s*=\s*\[([^\]]*)\]/);
+    if (!m) continue;
+    for (const t of m[1].matchAll(/"([^"]+)"/g)) topics.push(t[1]);
+  }
+  return topics;
+}
+
+/**
+ * 公開用の toml に、注文のスコープと注文・返品の Webhook が無いかを確かめる。
+ * @returns {{ ok: true } | { ok: false, error: string }}
+ */
+export function checkPublicScopes({ tomlText, tomlName = "toml" }) {
+  const scopes = parseScopes(tomlText);
+  if (!scopes) return { ok: false, error: `${tomlName} に access_scopes の scopes がありません` };
+  const badScopes = scopes.filter((s) => PUBLIC_FORBIDDEN_SCOPES.includes(s));
+  const badTopics = parseWebhookTopics(tomlText).filter((t) => PROTECTED_TOPIC.test(t));
+  if (badScopes.length || badTopics.length) {
+    return {
+      ok: false,
+      error:
+        `${tomlName}（公開用）に注文のデータがあります: ${[...badScopes, ...badTopics].join(", ")}。` +
+        ` 公開用では read_orders と注文・返品の Webhook を使わない決まりです（docs/DECISIONS.md D18）`,
+    };
+  }
+  return { ok: true };
+}
+
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const tomlArg = process.argv[2];
@@ -87,6 +132,13 @@ if (isMain) {
   if (!r.ok) {
     console.error(`[verify-app-mode] 止めました（deploy していません）: ${r.error}`);
     process.exit(1);
+  }
+  if (r.mode === "public") {
+    const s = checkPublicScopes({ tomlText, tomlName: tomlArg });
+    if (!s.ok) {
+      console.error(`[verify-app-mode] 止めました（deploy していません）: ${s.error}`);
+      process.exit(1);
+    }
   }
   console.log(`[verify-app-mode] OK: APP_MODE="${r.mode}" と ${tomlArg}（${r.host}）が合っています`);
 }

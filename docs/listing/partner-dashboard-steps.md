@@ -70,7 +70,7 @@ T が上から順に押すための手順。**オンにする（外へ送る）�
 | `APP_DISTRIBUTION` | 空（または `public`） | `plan-distribution.ts` |
 | `CUSTOM_APP_STORE_IDS` | 空 | 同上 |
 | `ENABLE_PLAN_DEBUG` | 無い（確かめる間だけ `1`） | `shop-plan.server.ts` |
-| `SCOPES` | 公開用 toml の `scopes` と同じ | `app/shopify.server.ts` |
+| `SCOPES` | 無くてよい（無ければ公開用 toml と同じものを使う。`app/utils/default-scopes.ts`）。入れるなら公開用 toml の `scopes` と同じ。**`read_orders` を入れない**（D18）。今 Render に `read_orders` 入りの値があれば消すか直す【T】 | `app/shopify.server.ts` |
 | `SHOPIFY_APP_HANDLE` | 3 章の handle | `app/routes/app.plan.tsx` |
 | `INVENTORY_SNAPSHOT_API_KEY` | 在庫高の毎日の記録を使うなら、Render の Cron Job と同じ値（`docs/CRON_JOB_SETUP_GUIDE.md`）。公開用に Cron Job があるかは【T】が確かめる | `api.inventory-snapshot-daily.tsx` |
 

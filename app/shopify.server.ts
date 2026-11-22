@@ -6,16 +6,24 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
+import { getInhouseClientId, getPublicClientId } from "./utils/app-toml.server";
+import { resolveAppScopes } from "./utils/default-scopes";
+import { detectServerDistribution } from "./utils/plan-distribution";
 
-/** shopify.app.toml の access_scopes と一致させる（SCOPES 未設定時のフォールバック）。read_users は制限付きのため含めない。 */
-const DEFAULT_SCOPES =
-  "read_inventory,read_inventory_transfers,read_locations,read_products,write_inventory,write_inventory_shipments,write_inventory_shipments_received_items,write_inventory_transfers,read_orders";
+/**
+ * SCOPES 未設定時は toml の access_scopes と同じものを使う（app/utils/default-scopes.ts）。read_users は制限付きのため含めない。
+ * 公開用は read_orders を持たない（DECISIONS D18）。どちらのサーバーかは料金プランと同じ決まりで決める。
+ */
+const scopes = resolveAppScopes(
+  process.env.SCOPES,
+  detectServerDistribution(process.env, null, getPublicClientId(), getInhouseClientId()).distribution,
+);
 
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
   apiVersion: ApiVersion.January26,
-  scopes: process.env.SCOPES?.trim() ? process.env.SCOPES.split(",").map((s) => s.trim()) : DEFAULT_SCOPES.split(","),
+  scopes,
   appUrl: process.env.SHOPIFY_APP_URL || "",
   authPathPrefix: "/auth",
   sessionStorage: new PrismaSessionStorage(prisma),
