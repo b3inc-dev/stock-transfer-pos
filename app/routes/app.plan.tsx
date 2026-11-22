@@ -75,12 +75,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const usage = shopPlan.extraLocationUsage;
     if (usage && session?.shop) {
       try {
+        // 請求期間が分からないときは送っていない（missing_period で残している）
         const row = usage.periodEnd
           ? await prisma.appUsageReport.findUnique({
               where: { shop_periodEnd: { shop: session.shop.trim().toLowerCase(), periodEnd: usage.periodEnd } },
               select: { status: true },
             })
-          : null;
+          : { status: "missing_period" };
         usageReportNote = describeUsageReportForMerchant(row);
       } catch (e) {
         console.warn("[app.plan] usage report read failed:", e instanceof Error ? e.message : String(e));

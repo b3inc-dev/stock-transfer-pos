@@ -225,7 +225,7 @@ API バージョンバンプとセットで別 PR。
 - **理由**: App Pricing の契約に Billing API の従量は付けられない（App Events API の請求エラー `INVALID_SUBSCRIPTION`）。App Pricing の使用量は月額のみ・上限（cap）なし（shopify.dev 2026-11-21 確認）。
 - **判断**:
   - 送る数は `max(0, ロケーション数 − 10)`。メーターは Lite `extra_location_lite`（$4）・Pro `extra_location_pro`（$12）。handle は env で変えられる。
-  - 1 店・1 請求期間（`activeSubscriptions[].currentPeriodEnd`）に 1 回。DB `AppUsageReport` の `(shop, periodEnd)` 一意 ＋ Shopify の `idempotency_key`（請求イベントは永久に重複しない）。期間の中で最初に数えた時点の数で送る（あとから増えた分は次の期間から）。一度送ろうとした行は数を変えない。
+  - 1 店・1 請求期間（プランを決めた契約の今の請求期間の終わり。D16 の Partner API で決めたときは Partner の期間、そうでなければ `activeSubscriptions[].currentPeriodEnd`）に 1 回。期間がどちらからも分からないときは送らず `missing_period` で数と理由を残す。DB `AppUsageReport` の `(shop, periodEnd)` 一意 ＋ Shopify の `idempotency_key`（請求イベントは永久に重複しない）。期間の中で最初に数えた時点の数で送る（あとから増えた分は次の期間から）。一度送ろうとした行は数を変えない。
   - 外へ送るのは `APP_EVENTS_USAGE_ENABLED=1` のときだけ（既定オフ）。オフでも数は `disabled` で残す。
   - 上限が Shopify に無いので、アプリ側の上限 `APP_EVENTS_USAGE_MAX_UNITS`（既定 50）を超えたら送らず `over_limit` で残す。
   - 失敗は `failed`（HTTP の番号・理由・回数）で残し、10 分おいて同じキー・同じ数で送り直す（最大 8 回。400・403 は自動で送り直さない）。202 は受け取っただけなので、請求の成否は Dev Dashboard の Logs で見る。
@@ -242,6 +242,7 @@ API バージョンバンプとセットで別 PR。
   - 契約が見つかれば正にする（項目の `handle` を名前として、今と同じ Pro/Lite・3/10 の決まりで読む）。「契約なし」なら Admin API の結果を使う（払っている店を止めない）。失敗なら Admin API だけで決め、両方読めなければ D14 の `plan_check_failed`。
   - 店の ID は Admin API の `shop { id }` から取る（Admin を読めなければ Partner にも聞けない → D14 のまま）。
   - 店ごとに見つかった結果は 60 秒・契約なしは 15 秒覚え、同時の呼び出しは 1 回にまとめる（上限 1 client 4 回/秒）。失敗した店は 30 秒聞き直さず Admin API だけで決め、429 のあとは 10 秒どの店でも聞かない（2026-11-22 レビューで追加）。トークンはログに出さない。
+  - 10 か所を超えた分の報告（D15）の請求期間も、プランを決めた契約から取る（`pickUsagePeriodEnd`）。Partner で決めたら Partner の `currentBillingCycle.endTime`、無ければ（試用中など）Admin API の ACTIVE な契約の `currentPeriodEnd`、どちらも無ければ送らず `missing_period` で残す。値は ISO にそろえる（同じ期間なら同じ行・同じキー）。Admin に App Pricing の契約が出ない店でも送れるように（2026-11-22 レビューで追加）。
 - **残り**: 開発ストアのテスト課金が Partner の `activeSubscription` に出るかは未確認（出なければ「契約なし」→ Admin の結果を使うので止まらない）。
 
 ---

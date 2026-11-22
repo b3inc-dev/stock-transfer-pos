@@ -6,11 +6,13 @@
  * 上限は Shopify 側に無い（App Pricing は usage cap 非対応）ので、アプリ側の上限（APP_EVENTS_USAGE_MAX_UNITS）で止める。
  *
  * 決まり:
- * - 1 店・1 請求期間（Shopify の currentPeriodEnd）につき 1 回だけ送る。DB（AppUsageReport）の
+ * - 1 店・1 請求期間（契約の今の請求期間の終わり。Partner API で契約を読んだときは Partner の currentBillingCycle.endTime、
+ *   そうでなければ Admin API の currentPeriodEnd。pickUsagePeriodEnd）につき 1 回だけ送る。DB（AppUsageReport）の
  *   (shop, periodEnd) の一意と、Shopify の idempotency_key（請求イベントは永久に重複しない）の 2 重で守る。
  * - 外へ送るのは APP_EVENTS_USAGE_ENABLED=1 のときだけ（既定オフ）。オフでも数は DB に「disabled」で残す。
  * - 失敗は黙って捨てない。DB に status=failed・HTTP の番号・理由を残し、時間をおいて同じキーで送り直す（同じキーなので二重請求にならない）。
  * - 上限を超えた分は送らず status=over_limit で残す（T が上限を見直すと次の確認で送る）。
+ * - 請求期間が分からないときは送らず status=missing_period で残す（periodEnd は MISSING_PERIOD_END。期間が分かれば別の行で送る）。
  * - 自社用（Ciara）はここに来ない（呼ぶ側で distribution === "public" を確かめる）。
  *
  * Shopify の仕様（2026-11-21 shopify.dev で確認）:
@@ -23,7 +25,7 @@
 
 export type UsagePlan = "lite" | "pro";
 
-export type UsageReportStatus = "disabled" | "sending" | "sent" | "failed" | "over_limit";
+export type UsageReportStatus = "disabled" | "sending" | "sent" | "failed" | "over_limit" | "missing_period";
 
 export type UsageReportRow = {
   id: string;
@@ -83,6 +85,43 @@ export const STALE_SENDING_MS = 5 * 60_000;
  * 次の期間のキーで送る分と 2 回になる（Shopify の currentPeriodEnd が更新に遅れたとき・失敗の送り直しのとき）。
  */
 export const PERIOD_END_MARGIN_MS = 10 * 60_000;
+/** 請求期間が分からないときに記録する行の periodEnd（日付として読めない値。送る行とは混ざらない） */
+export const MISSING_PERIOD_END = "unknown";
+
+export type UsagePeriodSource = "partner" | "admin";
+
+/** 請求期間の終わりを ISO 8601（UTC・ミリ秒つき）にそろえる。読めなければ null */
+export function normalizePeriodEnd(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
+}
+
+/**
+ * 従量を数える請求期間を選ぶ（純粋な関数）。
+ * - プランを Partner API の契約で決めたとき（planSource === "partner"）は、その契約の期間（currentBillingCycle.endTime）を先に使う。
+ *   Admin API に契約が出ない店（App Pricing）でも報告できるように。
+ * - Partner の期間が無い（試用中など）・Partner を使っていないときは Admin API の ACTIVE な契約の currentPeriodEnd。
+ * - どちらも無ければ null（呼ぶ側は送らずに missing_period で残す）。
+ * 同じ期間なら Partner と Admin で同じ値になるように、ISO にそろえて返す（DB の (shop, periodEnd) と送るキーを 1 つにする）。
+ */
+export function pickUsagePeriodEnd(args: {
+  planSource: UsagePeriodSource;
+  partnerPeriodEnd?: string | null;
+  adminSubscriptions?: ReadonlyArray<{ status?: string | null; currentPeriodEnd?: string | null }> | null;
+}): { periodEnd: string | null; periodSource: UsagePeriodSource | null } {
+  if (args.planSource === "partner") {
+    const p = normalizePeriodEnd(args.partnerPeriodEnd);
+    if (p) return { periodEnd: p, periodSource: "partner" };
+  }
+  for (const s of args.adminSubscriptions ?? []) {
+    if (String(s?.status ?? "").toUpperCase() !== "ACTIVE") continue;
+    const a = normalizePeriodEnd(s?.currentPeriodEnd);
+    if (a) return { periodEnd: a, periodSource: "admin" };
+  }
+  return { periodEnd: null, periodSource: null };
+}
+
 /** 同じ店・同じ期間の DB 確認の間隔（POS の API で何度も呼ばれても DB を毎回読まない） */
 export const RECHECK_MS = 10 * 60_000;
 
@@ -214,14 +253,14 @@ export type ReportUsageInput = {
   shopGid: string | null;
   plan: UsagePlan;
   locationsCount: number;
-  /** Shopify の activeSubscriptions[].currentPeriodEnd */
+  /** 請求期間の終わり（pickUsagePeriodEnd で選んだもの）。null なら送らずに missing_period で残す */
   periodEnd: string | null;
 };
 
 export type ReportUsageResult =
-  | { outcome: "skipped"; reason: "no_extra_locations" | "missing_period" | "period_ended" | "missing_shop_id" | "recently_checked" | "in_progress" | "lost_race" | "max_attempts" | "not_retryable" | "waiting_retry" }
+  | { outcome: "skipped"; reason: "no_extra_locations" | "period_ended" | "missing_shop_id" | "recently_checked" | "in_progress" | "lost_race" | "max_attempts" | "not_retryable" | "waiting_retry" }
   | { outcome: "already_sent"; row: UsageReportRow }
-  | { outcome: "disabled" | "over_limit" | "sent" | "failed"; row: UsageReportRow };
+  | { outcome: "disabled" | "over_limit" | "sent" | "failed" | "missing_period"; row: UsageReportRow };
 
 const recentChecks = new Map<string, number>();
 export function __resetUsageRecheckForTest() {
@@ -241,8 +280,9 @@ export async function reportExtraLocationUsage(
   const usage = computeExtraLocationUsage(input.plan, input.locationsCount);
   if (usage.units <= 0) return { outcome: "skipped", reason: "no_extra_locations" };
   if (!input.periodEnd || !Number.isFinite(Date.parse(input.periodEnd))) {
-    console.warn(`[app-events-usage] no currentPeriodEnd; cannot report. shop=${input.shop}`);
-    return { outcome: "skipped", reason: "missing_period" };
+    // 期間が分からないと 1 期間 1 回のキーを作れないので送らない。黙って捨てずに数と理由を残す
+    console.warn(`[app-events-usage] no billing period; not sent (recorded as missing_period). shop=${input.shop}`);
+    return recordMissingPeriod(input, usage, deps);
   }
   if (nowFn() >= Date.parse(input.periodEnd) - PERIOD_END_MARGIN_MS) {
     // 期間が終わった（終わりそう）。今送ると次の期間の請求に入って 2 重になるので送らない（記録も変えない）
@@ -352,6 +392,51 @@ export async function reportExtraLocationUsage(
   }
 }
 
+/** 期間が分からない店の行のキー（Shopify には送らない。idempotencyKey の一意を守るためだけ） */
+function missingPeriodKey(input: ReportUsageInput): string {
+  const id = input.shopGid ? numericShopId(input.shopGid) : null;
+  return `pstk-xloc-${id ?? input.shop}-noperiod`.slice(0, 64);
+}
+
+/** 請求期間が分からないとき: 送らずに (shop, MISSING_PERIOD_END) の 1 行へ数と理由を残す */
+async function recordMissingPeriod(
+  input: ReportUsageInput,
+  usage: ReturnType<typeof computeExtraLocationUsage>,
+  deps: { store: UsageReportStore; env?: Env; now?: () => number; force?: boolean }
+): Promise<ReportUsageResult> {
+  const env = deps.env ?? process.env;
+  const now = (deps.now ?? Date.now)();
+  const memoKey = `${input.shop}|${MISSING_PERIOD_END}`;
+  if (!deps.force) {
+    const last = recentChecks.get(memoKey);
+    if (last != null && now - last < RECHECK_MS) return { outcome: "skipped", reason: "recently_checked" };
+  }
+  recentChecks.set(memoKey, now);
+  const where = { shop_periodEnd: { shop: input.shop, periodEnd: MISSING_PERIOD_END } };
+  const fields = {
+    plan: input.plan,
+    eventHandle: getEventHandle(input.plan, env),
+    locationsCount: usage.locationsCount,
+    units: usage.units,
+    status: "missing_period" as UsageReportStatus,
+    lastError: "請求期間（currentPeriodEnd / currentBillingCycle）を Partner API・Admin API のどちらからも読めないため送っていない",
+  };
+  let row = await deps.store.findUnique({ where });
+  if (!row) {
+    try {
+      row = await deps.store.create({
+        data: { shop: input.shop, periodEnd: MISSING_PERIOD_END, idempotencyKey: missingPeriodKey(input), attempts: 0, ...fields },
+      });
+    } catch {
+      row = await deps.store.findUnique({ where });
+      if (!row) return { outcome: "skipped", reason: "lost_race" };
+    }
+  } else {
+    row = await deps.store.update({ where: { id: row.id }, data: fields });
+  }
+  return { outcome: "missing_period", row };
+}
+
 /** 店に見せる「報告の状態」（料金プラン画面） */
 export function describeUsageReportForMerchant(row: Pick<UsageReportRow, "status"> | null): string {
   switch (row?.status) {
@@ -363,6 +448,8 @@ export function describeUsageReportForMerchant(row: Pick<UsageReportRow, "status
       return "超えた数がアプリの上限を超えているため、まだ報告していません。サポートが確認します。";
     case "sending":
       return "Shopify に報告しています。";
+    case "missing_period":
+      return "Shopify から請求期間を読めないため、まだ報告していません。読めるようになったら自動で報告します。";
     default:
       return "今の請求期間の分は、まだ Shopify に報告していません。";
   }

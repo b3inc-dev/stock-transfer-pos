@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, test } from "node:test";
 import { readFileSync } from "node:fs";
+import { parseActiveSubscriptionResponse, partnerSubscriptionToAdminShape } from "../app/utils/partner-subscription.server.ts";
 import {
   __resetAppEventsTokenForTest,
   __resetUsageRecheckForTest,
@@ -8,6 +9,9 @@ import {
   computeExtraLocationUsage,
   describeUsageReportForMerchant,
   getEventHandle,
+  MISSING_PERIOD_END,
+  normalizePeriodEnd,
+  pickUsagePeriodEnd,
   reportExtraLocationUsage,
   PERIOD_END_MARGIN_MS,
   RETRY_AFTER_MS,
@@ -226,8 +230,40 @@ describe("スイッチ・上限・失敗", () => {
 
   test("期間や店の ID が分からないときは送らない", async () => {
     const store = fakeStore();
-    assert.equal((await reportExtraLocationUsage(input({ periodEnd: null }), { store, env: ENV_ON })).reason, "missing_period");
-    assert.equal((await reportExtraLocationUsage(input({ shopGid: null }), { store, env: ENV_ON })).reason, "missing_shop_id");
+    const fetchImpl = fakeFetch();
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: null }), { store, env: ENV_ON, fetchImpl })).outcome, "missing_period");
+    assert.equal((await reportExtraLocationUsage(input({ shopGid: null }), { store, env: ENV_ON, fetchImpl })).reason, "missing_shop_id");
+    assert.equal(fetchImpl.calls.length, 0);
+  });
+
+  test("期間が分からないときは送らずに missing_period で数と理由を残す（1 店 1 行・数は新しくする）", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch();
+    const r = await reportExtraLocationUsage(input({ periodEnd: null }), { store, env: ENV_ON, fetchImpl });
+    assert.equal(r.outcome, "missing_period");
+    assert.equal(store.rows.length, 1);
+    assert.equal(store.rows[0].periodEnd, MISSING_PERIOD_END);
+    assert.equal(store.rows[0].status, "missing_period");
+    assert.equal(store.rows[0].units, 3);
+    assert.equal(store.rows[0].attempts, 0);
+    assert.match(store.rows[0].lastError, /請求期間/);
+    // 10 分の間は DB を読み直さない
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: null }), { store, env: ENV_ON, fetchImpl })).reason, "recently_checked");
+    // 数が変わったら同じ行を新しくする
+    const r2 = await reportExtraLocationUsage(input({ periodEnd: "", locationsCount: 15 }), { store, env: ENV_ON, fetchImpl, force: true });
+    assert.equal(r2.outcome, "missing_period");
+    assert.equal(store.rows.length, 1);
+    assert.equal(store.rows[0].units, 5);
+    // スイッチがオフでも同じ（期間が分からないことを先に残す）
+    __resetUsageRecheckForTest();
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: null }), { store, env: {}, fetchImpl })).outcome, "missing_period");
+    assert.equal(fetchImpl.calls.length, 0);
+    // 期間が分かれば別の行で送る（missing_period の行はそのまま）
+    const r3 = await reportExtraLocationUsage(input(), { store, env: ENV_ON, fetchImpl });
+    assert.equal(r3.outcome, "sent");
+    assert.equal(store.rows.length, 2);
+    assert.equal(fetchImpl.events().length, 1);
+    assert.match(describeUsageReportForMerchant({ status: "missing_period" }), /請求期間を読めない/);
   });
 
   test("請求期間が終わった（終わりそう）なら、古い期間のキーで送らない（次の期間と 2 重にしない）", async () => {
@@ -252,6 +288,100 @@ describe("スイッチ・上限・失敗", () => {
   });
 });
 
+describe("従量を数える請求期間（Partner API と Admin API）", () => {
+  const PARTNER_END = "2099-12-21T00:00:00Z";
+  const ADMIN_END = "2099-11-30T00:00:00.000Z";
+  const partnerSub = (cycle) =>
+    parseActiveSubscriptionResponse(
+      200,
+      JSON.stringify({
+        data: {
+          activeSubscription: {
+            billingPeriod: "EVERY_30_DAYS",
+            cancelAtEndOfCycle: false,
+            trialEndsAt: null,
+            legacySubscriptionId: null,
+            currentBillingCycle: cycle,
+            items: [{ handle: "pro-10" }],
+          },
+        },
+      })
+    ).subscription;
+
+  test("Partner で契約を読んだときは Partner の期間を使う（Admin に契約が無くても）", () => {
+    const sub = partnerSub({ startTime: "2099-11-21T00:00:00Z", endTime: PARTNER_END });
+    const shaped = partnerSubscriptionToAdminShape(sub, GID);
+    assert.deepEqual(pickUsagePeriodEnd({ planSource: "partner", partnerPeriodEnd: shaped.currentPeriodEnd, adminSubscriptions: [] }), {
+      periodEnd: "2099-12-21T00:00:00.000Z",
+      periodSource: "partner",
+    });
+    // Admin にも別の期間があっても Partner を先に使う
+    assert.equal(
+      pickUsagePeriodEnd({ planSource: "partner", partnerPeriodEnd: PARTNER_END, adminSubscriptions: [{ status: "ACTIVE", currentPeriodEnd: ADMIN_END }] }).periodSource,
+      "partner"
+    );
+  });
+
+  test("Partner の期間が無い（試用中など）ときは Admin の ACTIVE な契約の期間にさがる", () => {
+    const sub = partnerSub(null);
+    assert.equal(sub.currentPeriodEnd, null);
+    assert.deepEqual(
+      pickUsagePeriodEnd({
+        planSource: "partner",
+        partnerPeriodEnd: sub.currentPeriodEnd,
+        adminSubscriptions: [
+          { status: "CANCELLED", currentPeriodEnd: "2099-01-01T00:00:00Z" },
+          { status: "ACTIVE", currentPeriodEnd: ADMIN_END },
+        ],
+      }),
+      { periodEnd: ADMIN_END, periodSource: "admin" }
+    );
+  });
+
+  test("Admin で決めたときは Admin の期間だけを見る（Partner の値があっても使わない）", () => {
+    assert.deepEqual(
+      pickUsagePeriodEnd({ planSource: "admin", partnerPeriodEnd: PARTNER_END, adminSubscriptions: [{ status: "active", currentPeriodEnd: ADMIN_END }] }),
+      { periodEnd: ADMIN_END, periodSource: "admin" }
+    );
+  });
+
+  test("どこにも期間が無ければ null（送らない）", () => {
+    assert.deepEqual(pickUsagePeriodEnd({ planSource: "partner", partnerPeriodEnd: null, adminSubscriptions: [] }), { periodEnd: null, periodSource: null });
+    assert.deepEqual(pickUsagePeriodEnd({ planSource: "admin", adminSubscriptions: [{ status: "ACTIVE", currentPeriodEnd: "not a date" }] }), {
+      periodEnd: null,
+      periodSource: null,
+    });
+    assert.equal(normalizePeriodEnd(""), null);
+  });
+
+  test("Partner と Admin で同じ期間なら同じ値にそろう（DB の行と送るキーが 1 つになる）", () => {
+    const a = pickUsagePeriodEnd({ planSource: "partner", partnerPeriodEnd: "2099-12-21T00:00:00Z" }).periodEnd;
+    const b = pickUsagePeriodEnd({ planSource: "admin", adminSubscriptions: [{ status: "ACTIVE", currentPeriodEnd: "2099-12-21T00:00:00.000Z" }] }).periodEnd;
+    assert.equal(a, b);
+  });
+
+  test("Partner の経路: Admin に契約が無くても Partner の期間で 1 回送る", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch([202]);
+    const sub = partnerSub({ startTime: "2099-11-21T00:00:00Z", endTime: PARTNER_END });
+    const { periodEnd } = pickUsagePeriodEnd({ planSource: "partner", partnerPeriodEnd: sub.currentPeriodEnd, adminSubscriptions: [] });
+    const r = await reportExtraLocationUsage(input({ periodEnd }), { store, env: ENV_ON, fetchImpl });
+    assert.equal(r.outcome, "sent");
+    assert.equal(fetchImpl.events().length, 1);
+    assert.equal(fetchImpl.events()[0].body.idempotency_key, buildIdempotencyKey(GID, PARTNER_END));
+    assert.equal(store.rows[0].periodEnd, "2099-12-21T00:00:00.000Z");
+  });
+
+  test("Admin の経路: Admin の期間で 1 回送る", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch([202]);
+    const { periodEnd } = pickUsagePeriodEnd({ planSource: "admin", adminSubscriptions: [{ status: "ACTIVE", currentPeriodEnd: ADMIN_END }] });
+    const r = await reportExtraLocationUsage(input({ periodEnd }), { store, env: ENV_ON, fetchImpl });
+    assert.equal(r.outcome, "sent");
+    assert.equal(fetchImpl.events()[0].body.idempotency_key, buildIdempotencyKey(GID, ADMIN_END));
+  });
+});
+
 describe("つなぎ方（ソースの確認）", () => {
   const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
   test("Billing API の従量（appUsageRecordCreate）と appSubscriptionCreate は残っていない", () => {
@@ -264,5 +394,11 @@ describe("つなぎ方（ソースの確認）", () => {
     const src = read("app/utils/shop-plan.server.ts");
     assert.match(src, /distribution === "public" && !forceInhouse && \(plan === "lite" \|\| plan === "pro"\) && !locationPlanMismatch/);
     assert.match(src, /void import\("\.\.\/db\.server"\)/);
+  });
+  test("期間はプランを決めた契約から選ぶ（Partner で決めたら Partner の期間）", () => {
+    const src = read("app/utils/shop-plan.server.ts");
+    assert.match(src, /partnerPeriodEnd = partner\.subscription\.currentPeriodEnd/);
+    assert.match(src, /pickUsagePeriodEnd\(\{\s*planSource,\s*partnerPeriodEnd,\s*adminSubscriptions: activeSubscriptions,?\s*\}\)/);
+    assert.doesNotMatch(src.replace(/^\s*\/\/.*$/gm, ""), /activeWithPeriod/);
   });
 });
