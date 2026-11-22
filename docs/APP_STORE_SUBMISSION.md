@@ -185,7 +185,7 @@
 | G2 | ドメインの入力欄・ダミー文 | **済**（main に入った） | #75 |
 | G3 | 未契約でも POS の全機能と API が使える | **済**（main に入った）。管理画面・POS・API で止める。契約を読めないときは入出庫の戻しだけ通す | #78 |
 | G4 | `read_orders` と保護された顧客データ | **T**（決まっていない） | — |
-| G5 | 10 店舗超の従量課金（`appUsageRecordCreate`） | **T**（料金しだい）。App Pricing のプランには従量の明細が無いので、今は呼ばれない（`app/utils/shop-plan.server.ts` は明細が無ければ何もしない）。案 A にするなら、決まったあとで消す | — |
+| G5 | 10 店舗超の従量課金（`appUsageRecordCreate`） | **決まり**（2026-11-22 T。案 B の形）。`appUsageRecordCreate` は消して App Events API で送る | #80 |
 | G6 | テンプレートの「Additional page」 | **済**（main に無い） | — |
 | G7 | 画面録画・スクショ・アイコン・プライバシーポリシー・サポート窓口 | **T** | — |
 | — | Render のログのエラー直し | **PR あり**。レビュー済み・main に追いついた → T の承認 | #55・#63・#64 |
@@ -232,7 +232,7 @@
 | 2 | G2 | アプリ URL を直接開くと店のドメイン入力欄とダミー文が出る（2.3.1） | `app/routes/_index/route.tsx`、`app/routes/auth.login/route.tsx` | 小 |
 | 3 | G3 | 未契約でも POS の全機能と POS 用 API が使える。料金の約束と食い違う | POS 用 API にプランの確認を足す（共通の 1 か所で）＋ POS のタイルで案内 | 中 |
 | 4 | G4 | `read_orders` と保護された顧客データの方針が決まっていない | T が決める → 外すなら公開 toml と `DEFAULT_SCOPES`（`app/shopify.server.ts`）と公開 Render の `SCOPES` | 小（決まれば） |
-| 5 | G5 | 10 店舗超の従量課金が App Pricing では動かない（`appUsageRecordCreate`） | 料金案（6 章）を決めてから。最初は従量なしで出すのが早い | 小〜中 |
+| 5 | G5 | 10 店舗超の従量課金が App Pricing では動かない（`appUsageRecordCreate`） | 料金は決まった（6 章）。#80 で App Events API に変える | 小〜中 |
 | 6 | G6 | テンプレートの「Additional page」 | `app/routes/app.additional.tsx` を消す | 小 |
 | 7 | G7 | 画面録画・スクショ・アイコン・プライバシーポリシー・サポート窓口が無い | 5〜7 章 / T | T |
 
@@ -308,14 +308,26 @@ In admin, filter transfer, loss and count history by origin, destination and sta
 
 ---
 
-## 6. 料金案（**T が決めるための案**。まだ決まっていない）
+## 6. 料金案（**2026-11-22 T 決定: 下の「決まり」。案 A・C は使わない**）
+
+**決まり（2026-11-22 18:05、#79）**: Shopify App Pricing の 4 プラン。案 B の形（基本料＋10 か所を超えた分の従量。従量は App Events API で送る。#80・D15）。
+
+| プラン（表示名 / handle） | 月額 | 無料体験 | 内容 |
+|---|---|---|---|
+| Lite - 3ロケーション / `lite-3` | US$20 | 7 日 | 出庫・入庫・入出庫履歴・CSV。3 か所まで |
+| Lite - 10ロケーション / `lite-10` | US$40 | 7 日 | 同上。11 か所目から 1 か所 US$4 |
+| Pro - 3ロケーション / `pro-3` | US$60 | 14 日 | すべて。3 か所まで |
+| Pro - 10ロケーション / `pro-10` | US$120 | 14 日 | すべて。11 か所目から 1 か所 US$12 |
+
+- 3 か所のプランで 4 か所以上ある店は、管理画面と POS のタイルで「プランを上げてください」と出して止める（#91・D17）。
+- 以下の案 A〜C は決める前の記録として残す。
 
 いまのコードの前提（`app/utils/billing.ts`・`app/routes/app.tsx`）:
 - プランの判定はサブスクリプション名で行う。名前に `Pro` → Pro、`Lite` → Lite。名前に `3` / `10` があればその店舗数を上限とみなす。
 - Pro だけが使える管理画面: 在庫情報・仕入・ロス・発注・棚卸・調整。
 - 開発ストアと自社用（inhouse）は全部無料で使える。
 
-**案 A（すすめる。12/3 に間に合わせやすい）: 従量なしの 2 プラン（Shopify App Pricing）**
+**（使わない）案 A: 従量なしの 2 プラン（Shopify App Pricing）**
 
 | プラン名（この名前で判定される） | 月額 | 無料体験 | 内容 |
 |---|---|---|---|
@@ -326,10 +338,10 @@ In admin, filter transfer, loss and count history by origin, destination and sta
 - 数字は既存の `docs/APP_PRICING_SETUP_GUIDE.md` の案に合わせた。
 - 必要な修正: G3（POS 側のプラン確認）。
 
-**案 B: 設計どおり 基本料＋10 店舗超の従量**（Lite $40 / Pro $120 ＋ 1 店舗 $4 / $12）
-- App Pricing では従量を App Events API で送る作りに変える必要があり、上限額（cap）も使えない。12/3 には間に合わない見込み。
+**（この形に決まった）案 B: 設計どおり 基本料＋10 店舗超の従量**（Lite $40 / Pro $120 ＋ 1 店舗 $4 / $12。3 か所のプラン $20 / $60 も使う）
+- App Pricing では従量を App Events API で送る作りに変える必要があり、上限額（cap）も使えない。→ #80 で App Events API に変えた（D15）。
 
-**案 C: 無料で出す**
+**（使わない）案 C: 無料で出す**
 - 審査はいちばん軽い。あとで有料にすると課金の流れをもう一度審査される。1 章の「10 店」の条件は有料の Shopify プランの店のインストール数なので、アプリが無料でも数える（無料体験中の店は数えない）。
 
 ---
@@ -368,7 +380,7 @@ In admin, filter transfer, loss and count history by origin, destination and sta
 | T2 | Partner の本人確認・登録料・緊急連絡先・API 連絡先メール（「Shopify」を含まない） | 提出前 |
 | T3 | **サポート用メールアドレス**（例: support@b3-inc.com のような専用アドレス）と、サポートページの URL | 提出前 |
 | T4 | **プライバシーポリシーの置き場所**（会社サイトの専用ページ、または利用者ヘルプのサイト。PR #50 の `/help/stock-transfer-pos/` と同じサイトに置くのが自然）と、本文の確認 | 提出前 |
-| T5 | 料金（6 章の案 A / B / C） | G3・G5 の前 |
+| T5 | ~~料金（6 章の案 A / B / C）~~ **決まり（2026-11-22）**: $20 / $40 / $60 / $120・無料体験 7 / 14 日 | 済 |
 | T6 | `read_orders` を外すか、保護された顧客データ Level 1 を申請するか（G4）。申請は**審査中はできない** | 提出前 |
 | T7 | アプリ名を「POS Stock」のままにするか | リスティング作成前 |
 | T8 | 公開 Render の環境変数の確認: `APP_DISTRIBUTION` と `CUSTOM_APP_STORE_IDS` が空、`ENABLE_PLAN_DEBUG` が無い、`SCOPES` が toml と同じ | 提出前 |
