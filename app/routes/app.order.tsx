@@ -13,7 +13,9 @@ import { createOrderTransferIdempotent } from "../utils/admin-order-transfer.ser
 import {
   ADMIN_IDEMPOTENCY_KIND,
   ADMIN_UNCERTAIN_MESSAGE,
+  adminRecordSaveFailedMessage,
   buildAdminIdempotency,
+  metafieldsSetError,
   readAdminOpKey,
   readRevertRound,
   type AdminOpKeyInput,
@@ -471,6 +473,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const intentRaw = String(formData.get("intent") || "loadItems").trim();
     const intent = intentRaw || "loadItems";
     const entryId = String(formData.get("entryId") || "").trim();
+    // 発注の承認（Transfer を作る）の opKey・opRound（docs/IDEMPOTENT_MIGRATION.md 4.6 の L。発注 1 件ごと）
+    const adminOp = readAdminOpKey(formData);
 
     if (!entryId) {
       return { error: "entryId is required" };
@@ -733,6 +737,7 @@ export async function action({ request }: ActionFunctionArgs) {
         entryId,
         status: "pending" as const,
         opKeyResult: "done" as const,
+        opKey: adminOp.opKey,
       };
     }
 
@@ -771,7 +776,7 @@ export async function action({ request }: ActionFunctionArgs) {
       const reflectToPurchase = formData.get("reflectToPurchase") === "true";
 
       // Shopify Transfer（発注書）を作成（失敗しても承認自体は続行）
-      const transferResult = await createTransferForOrder(admin, entry, approvedItems, session?.shop ?? "", readAdminOpKey(formData));
+      const transferResult = await createTransferForOrder(admin, entry, approvedItems, session?.shop ?? "", adminOp);
       const transferId = transferResult.transferId;
       const transferError = transferResult.error;
 
@@ -779,7 +784,7 @@ export async function action({ request }: ActionFunctionArgs) {
       // 前の送信で作れていれば Shopify はその Transfer を返す（二重に作らない）
       if (transferResult.uncertain) {
         console.error("[createTransferForOrder] Transfer作成の結果が分からない:", transferError);
-        return { error: `${transferError ?? "Transfer作成の結果が分かりません"}。${ADMIN_UNCERTAIN_MESSAGE}`, opKeyResult: "uncertain" as const };
+        return { error: `${transferError ?? "Transfer作成の結果が分かりません"}。${ADMIN_UNCERTAIN_MESSAGE}`, opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
       }
 
       // Transfer作成エラーがある場合はログに記録（承認自体は続行）
@@ -820,30 +825,37 @@ export async function action({ request }: ActionFunctionArgs) {
           : e
       );
 
-      // Metafield に保存
-      await admin.graphql(
-        `#graphql
-          mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
+      // Metafield に保存。Transfer を作ったあとの記録の保存が失敗したら uncertain（opKey を変えない。
+      // 押し直すと同じキー → Shopify は同じ Transfer を返し、記録だけ書き直す）
+      const mfError = await metafieldsSetError(() =>
+        admin.graphql(
+          `#graphql
+            mutation SetOrderEntries($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id namespace key }
+                userErrors { field message }
+              }
             }
+          `,
+          {
+            variables: {
+              metafields: [
+                {
+                  ownerId: appInstallationId,
+                  namespace: ORDER_NS,
+                  key: ORDER_KEY,
+                  type: "json",
+                  value: JSON.stringify(updatedEntries),
+                },
+              ],
+            },
           }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: ORDER_NS,
-                key: ORDER_KEY,
-                type: "json",
-                value: JSON.stringify(updatedEntries),
-              },
-            ],
-          },
-        }
+        )
       );
+      if (mfError) {
+        console.error(`[order approve] metafieldsSet failed after transfer create: ${mfError}`);
+        return { error: adminRecordSaveFailedMessage(mfError), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
+      }
 
       return {
         ok: true,
@@ -855,6 +867,7 @@ export async function action({ request }: ActionFunctionArgs) {
         purchaseName: purchaseName ?? null,
         purchaseError: purchaseError ?? null,
         opKeyResult: "done" as const,
+        opKey: adminOp.opKey,
       };
     }
 
@@ -918,6 +931,7 @@ export async function action({ request }: ActionFunctionArgs) {
         entryId,
         status: "pending" as const,
         opKeyResult: "done" as const,
+        opKey: adminOp.opKey,
       };
     }
 
@@ -1376,7 +1390,7 @@ export default function OrderPage() {
     formData.set("reflectToPurchase", reflectToPurchase ? "true" : "false");
     formData.set("arrivalDate", arrivalDate);
     formData.set("inspectionDate", inspectionDate);
-    orderOpKey.append(formData);
+    orderOpKey.append(formData, modalEntry.id);
     fetcher.submit(formData, { method: "post" });
   };
 

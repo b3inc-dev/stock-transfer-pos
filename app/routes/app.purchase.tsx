@@ -15,7 +15,9 @@ import { buildPurchaseAdjustChanges, sendPurchaseAdjustQuantities } from "../uti
 import {
   ADMIN_IDEMPOTENCY_KIND,
   ADMIN_UNCERTAIN_MESSAGE,
+  adminRecordSaveFailedMessage,
   buildAdminIdempotency,
+  metafieldsSetError,
   readAdminOpKey,
   type AdminOpKeyInput,
 } from "../utils/admin-op-key.server";
@@ -186,11 +188,17 @@ async function executePurchaseCancel(
 }
 
 /** 仕入れの在庫の書き込みに失敗したときの答え（rejected = 画面は回を増やす・uncertain = opKey も回も変えない） */
-function purchaseWriteFailure(result: { error: string; opKeyResult: "rejected" | "uncertain" }, fallback: string) {
+function purchaseWriteFailure(
+  result: { error: string; opKeyResult: "rejected" | "uncertain" },
+  fallback: string,
+  opKey: string | null
+) {
   const base = `${fallback}: ${result.error || "不明なエラー"}`;
   return {
     error: result.opKeyResult === "uncertain" ? `${base}。${ADMIN_UNCERTAIN_MESSAGE}` : base,
     opKeyResult: result.opKeyResult,
+    // どの仕入れの答えかを画面が見分けるため、送られてきた opKey をそのまま返す
+    opKey,
   };
 }
 
@@ -329,6 +337,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const formData = await request.formData();
     const intent = String(formData.get("intent") || "").trim();
     const entryId = String(formData.get("entryId") || "").trim();
+    // 在庫を書く操作（確定・取り消し）の opKey・opRound（docs/IDEMPOTENT_MIGRATION.md 4.6 の M。仕入れ 1 件ごと）
+    const adminOp = readAdminOpKey(formData);
 
     const appResp = await admin.graphql(
       `#graphql
@@ -751,9 +761,9 @@ export async function action({ request }: ActionFunctionArgs) {
           return resp;
         },
       };
-      const receiveResult = await executePurchaseReceive(adminWithRequest, entry, shop, readAdminOpKey(formData));
+      const receiveResult = await executePurchaseReceive(adminWithRequest, entry, shop, adminOp);
       if (!receiveResult.ok) {
-        return purchaseWriteFailure(receiveResult, "在庫調整に失敗しました");
+        return purchaseWriteFailure(receiveResult, "在庫調整に失敗しました", adminOp.opKey);
       }
       const now = new Date().toISOString();
       const updated = entries.map((e) =>
@@ -763,37 +773,44 @@ export async function action({ request }: ActionFunctionArgs) {
       );
       const appInstallationId = appData?.data?.currentAppInstallation?.id;
       if (!appInstallationId) {
-        return { error: "アプリインストールIDが取得できません", opKeyResult: "uncertain" as const };
+        return { error: "アプリインストールIDが取得できません", opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
       }
-      await admin.graphql(
-        `#graphql
-          mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
+      // 在庫を書いたあとの記録の保存。失敗したら uncertain（opKey を変えない。押し直すと同じキー → Shopify は書かず、記録だけ書き直す）
+      const mfError = await metafieldsSetError(() =>
+        admin.graphql(
+          `#graphql
+            mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id namespace key }
+                userErrors { field message }
+              }
             }
+          `,
+          {
+            variables: {
+              metafields: [
+                {
+                  ownerId: appInstallationId,
+                  namespace: PURCHASE_NS,
+                  key: PURCHASE_KEY,
+                  type: "json",
+                  value: JSON.stringify(updated),
+                },
+              ],
+            },
           }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: PURCHASE_NS,
-                key: PURCHASE_KEY,
-                type: "json",
-                value: JSON.stringify(updated),
-              },
-            ],
-          },
-        }
+        )
       );
-      return { ok: true, opKeyResult: "done" as const };
+      if (mfError) {
+        console.error(`[purchase ${intent}] metafieldsSet failed after inventory write: ${mfError}`);
+        return { error: adminRecordSaveFailedMessage(mfError), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
+      }
+      return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
     }
 
     if (intent === "cancel") {
       if (entry.status === "cancelled") {
-        return { ok: true, message: "既にキャンセル済みです" };
+        return { ok: true, message: "既にキャンセル済みです", opKeyResult: "done" as const, opKey: adminOp.opKey };
       }
       // adminオブジェクトにrequestメソッドを追加（logInventoryChangesFromAdjustment用）
       const adminWithRequest = {
@@ -803,9 +820,9 @@ export async function action({ request }: ActionFunctionArgs) {
           return resp;
         },
       };
-      const cancelResult = await executePurchaseCancel(adminWithRequest, entry, shop, readAdminOpKey(formData));
+      const cancelResult = await executePurchaseCancel(adminWithRequest, entry, shop, adminOp);
       if (!cancelResult.ok) {
-        return purchaseWriteFailure(cancelResult, "在庫の戻しに失敗しました");
+        return purchaseWriteFailure(cancelResult, "在庫の戻しに失敗しました", adminOp.opKey);
       }
       const updated = entries.map((e) =>
         e.id === entryId
@@ -818,32 +835,39 @@ export async function action({ request }: ActionFunctionArgs) {
       );
       const appInstallationId = appData?.data?.currentAppInstallation?.id;
       if (!appInstallationId) {
-        return { error: "アプリインストールIDが取得できません", opKeyResult: "uncertain" as const };
+        return { error: "アプリインストールIDが取得できません", opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
       }
-      await admin.graphql(
-        `#graphql
-          mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
-            metafieldsSet(metafields: $metafields) {
-              metafields { id namespace key }
-              userErrors { field message }
+      // 在庫を書いたあとの記録の保存。失敗したら uncertain（opKey を変えない。押し直すと同じキー → Shopify は書かず、記録だけ書き直す）
+      const mfError = await metafieldsSetError(() =>
+        admin.graphql(
+          `#graphql
+            mutation SetPurchaseEntries($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id namespace key }
+                userErrors { field message }
+              }
             }
+          `,
+          {
+            variables: {
+              metafields: [
+                {
+                  ownerId: appInstallationId,
+                  namespace: PURCHASE_NS,
+                  key: PURCHASE_KEY,
+                  type: "json",
+                  value: JSON.stringify(updated),
+                },
+              ],
+            },
           }
-        `,
-        {
-          variables: {
-            metafields: [
-              {
-                ownerId: appInstallationId,
-                namespace: PURCHASE_NS,
-                key: PURCHASE_KEY,
-                type: "json",
-                value: JSON.stringify(updated),
-              },
-            ],
-          },
-        }
+        )
       );
-      return { ok: true, opKeyResult: "done" as const };
+      if (mfError) {
+        console.error(`[purchase ${intent}] metafieldsSet failed after inventory write: ${mfError}`);
+        return { error: adminRecordSaveFailedMessage(mfError), opKeyResult: "uncertain" as const, opKey: adminOp.opKey };
+      }
+      return { ok: true, opKeyResult: "done" as const, opKey: adminOp.opKey };
     }
 
     return { error: "不明な操作です" };
@@ -1342,7 +1366,7 @@ export default function PurchasePage() {
       const formData = new FormData();
       formData.set("intent", "cancel");
       formData.set("entryId", entryId);
-      purchaseOpKey.append(formData);
+      purchaseOpKey.append(formData, entryId);
       fetcher.submit(formData, { method: "post", action: location.pathname });
     }
   };
@@ -3013,7 +3037,7 @@ export default function PurchasePage() {
                     const fd = new FormData();
                     fd.set("intent", "receive");
                     fd.set("entryId", modalEntry.id);
-                    purchaseOpKey.append(fd);
+                    purchaseOpKey.append(fd, modalEntry.id);
                     fetcher.submit(fd, { method: "post", action: location.pathname });
                   }}
                   disabled={fetcher.state === "submitting"}

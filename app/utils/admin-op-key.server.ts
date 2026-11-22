@@ -147,4 +147,30 @@ export function classifyAdminWrite(
 
 /** 結果が分からないときに画面に出す文（管理者が Shopify で確かめる。設計 3.3） */
 export const ADMIN_UNCERTAIN_MESSAGE =
-  "在庫に反映されたか確かめられませんでした。Shopify の管理画面で在庫（または移管）を確かめてから、もう一度押してください（24 時間以内に同じ画面から押し直せば、二重には反映されません）。";
+  "在庫に反映されたか確かめられませんでした。Shopify の管理画面で在庫（または移管）を確かめてから、画面を読み込み直さずに同じ画面でもう一度押してください（24 時間以内なら二重には反映されません）。";
+
+/**
+ * metafieldsSet（記録の保存）の答えを読む。失敗なら理由の文、成功なら null。
+ * 在庫・移管を書いたあとの記録の保存が失敗したときは、画面に uncertain を返す（opKey を変えない）。
+ * 同じ opKey で押し直すと同じキーになり、Shopify は書かずに前の答えを返すので、記録だけが書き直される。
+ */
+export async function metafieldsSetError(send: () => Promise<Response>): Promise<string | null> {
+  try {
+    const resp = await send();
+    const json = (await resp.json()) as {
+      data?: { metafieldsSet?: { userErrors?: Array<{ message?: string }> } | null };
+      errors?: Array<{ message?: string }>;
+    };
+    const errs = [...(json?.data?.metafieldsSet?.userErrors ?? []), ...(json?.errors ?? [])];
+    if (errs.length > 0) return errs.map((e) => String(e?.message ?? "")).filter(Boolean).join(" / ") || "記録の保存に失敗しました";
+    if (!json?.data?.metafieldsSet) return "記録の保存の答えがありません";
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** 在庫・移管は書けたが記録の保存に失敗したときの文 */
+export function adminRecordSaveFailedMessage(detail: string): string {
+  return `Shopify には反映しましたが、アプリの記録の保存に失敗しました（${detail}）。画面を読み込み直さずに、同じ画面でもう一度押してください（24 時間以内なら Shopify には二重に反映されません）。`;
+}
