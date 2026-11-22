@@ -272,7 +272,7 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
           .then(({ default: prisma }) =>
             reportExtraLocationUsage(
               { shop: shopForReport, shopGid, plan: reportPlan, locationsCount, periodEnd },
-              { store: prisma.appUsageReport as unknown as UsageReportStore }
+              { store: prisma.appUsageReport as unknown as UsageReportStore, inhouseClientId: getInhouseClientId() }
             )
           )
           .catch((e) => {

@@ -10,6 +10,7 @@ import {
   computeExtraLocationUsage,
   describeUsageReportForMerchant,
   getEventHandle,
+  isInhouseForUsage,
   MISSING_PERIOD_END,
   normalizePeriodEnd,
   pickUsagePeriodEnd,
@@ -592,5 +593,52 @@ describe("プランの handle はハイフン（lite-3 / pro-10）", () => {
     assert.match(logs[0], /pro_10.*pro-10/);
     assert.deepEqual(findUnderscorePlanHandles("Lite_3 pro-10"), ["Lite_3"]);
     assert.deepEqual(findUnderscorePlanHandles("Pro - 10ロケーション"), []);
+  });
+});
+
+describe("自社用（Ciara）は関数の中でも送らない・記録しない（守りの二重化）", () => {
+  beforeEach(() => {
+    __resetUsageRecheckForTest();
+    __resetAppEventsTokenForTest();
+  });
+  const INPUT = { shop: SHOP, shopGid: GID, plan: "pro", locationsCount: 15, periodEnd: PERIOD };
+  const cases = [
+    ["APP_DISTRIBUTION=inhouse", { ...ENV_ON, APP_DISTRIBUTION: " InHouse " }, null],
+    ["CUSTOM_APP_STORE_IDS にある店", { ...ENV_ON, CUSTOM_APP_STORE_IDS: "other.myshopify.com, DEMO.myshopify.com" }, null],
+    ["SHOPIFY_API_KEY が自社用の client_id", { ...ENV_ON, SHOPIFY_API_KEY: "ciara-client-id" }, "ciara-client-id"],
+  ];
+  for (const [name, env, inhouseClientId] of cases) {
+    test(`${name} → DB も Shopify も触らない`, async () => {
+      const store = fakeStore();
+      const touched = [];
+      for (const k of ["findUnique", "create", "updateMany", "update"]) {
+        const orig = store[k];
+        store[k] = async (...a) => {
+          touched.push(k);
+          return orig(...a);
+        };
+      }
+      const fetchImpl = fakeFetch();
+      const res = await reportExtraLocationUsage(INPUT, { store, env, fetchImpl, inhouseClientId, force: true });
+      assert.deepEqual(res, { outcome: "skipped", reason: "inhouse" });
+      assert.deepEqual(touched, []);
+      assert.equal(store.rows.length, 0);
+      assert.equal(fetchImpl.calls.length, 0);
+    });
+  }
+  test("公開用（どれにも当たらない）は今まで通り送る", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch();
+    const env = { ...ENV_ON, SHOPIFY_API_KEY: "public-client-id", CUSTOM_APP_STORE_IDS: "other.myshopify.com" };
+    const res = await reportExtraLocationUsage(INPUT, { store, env, fetchImpl, inhouseClientId: "ciara-client-id" });
+    assert.equal(res.outcome, "sent");
+    assert.equal(fetchImpl.events().length, 1);
+  });
+  test("isInhouseForUsage の決まり", () => {
+    assert.equal(isInhouseForUsage(SHOP, {}), false);
+    assert.equal(isInhouseForUsage(SHOP, { APP_DISTRIBUTION: "public" }), false);
+    assert.equal(isInhouseForUsage(SHOP, { SHOPIFY_API_KEY: "" }, ""), false);
+    assert.equal(isInhouseForUsage("", { CUSTOM_APP_STORE_IDS: "" }), false);
+    assert.equal(isInhouseForUsage(SHOP, { SHOPIFY_API_KEY: "x" }, "x"), true);
   });
 });
