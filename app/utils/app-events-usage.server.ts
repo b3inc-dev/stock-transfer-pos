@@ -16,6 +16,8 @@
  * - 上限を超えた分は送らず status=over_limit で残す（T が上限を見直すと次の確認で送る）。
  * - 請求期間が分からないときは送らず status=missing_period で残す（periodEnd は MISSING_PERIOD_END。期間が分かれば別の行で送る）。
  * - 自社用（Ciara）はここに来ない（呼ぶ側で distribution === "public" を確かめる）。
+ *   念のためこの関数の中でも、APP_DISTRIBUTION=inhouse・CUSTOM_APP_STORE_IDS の店・SHOPIFY_API_KEY が自社用アプリの
+ *   client_id（deps.inhouseClientId）と同じなら、DB も Shopify も触らずに返す（isInhouseForUsage。守りの二重化）。
  *
  * Shopify の仕様（2026-11-21 shopify.dev で確認）:
  * - トークン: POST https://api.shopify.com/auth/access_token（client_credentials。60 分有効）。鍵は公開用アプリ自身の
@@ -377,7 +379,7 @@ export type ReportUsageInput = {
 };
 
 export type ReportUsageResult =
-  | { outcome: "skipped"; reason: "no_extra_locations" | "period_ended" | "missing_shop_id" | "recently_checked" | "in_progress" | "lost_race" | "max_attempts" | "not_retryable" | "waiting_retry" }
+  | { outcome: "skipped"; reason: "inhouse" | "no_extra_locations" | "period_ended" | "missing_shop_id" | "recently_checked" | "in_progress" | "lost_race" | "max_attempts" | "not_retryable" | "waiting_retry" }
   | { outcome: "already_sent"; row: UsageReportRow }
   | { outcome: "disabled" | "over_limit" | "sent" | "failed" | "missing_period"; row: UsageReportRow };
 
@@ -387,14 +389,45 @@ export function __resetUsageRecheckForTest() {
 }
 
 /**
+ * 自社用（全機能・請求なし）の店か。plan-distribution.ts の detectServerDistribution の自社用の決まりと同じ
+ * （このファイルは他のファイルを import しないので、ここで同じ env を読む）。
+ * - SHOPIFY_API_KEY が自社用アプリの client_id（shopify.app.toml。呼ぶ側が getInhouseClientId() を渡す）と同じ
+ * - APP_DISTRIBUTION=inhouse
+ * - 店が CUSTOM_APP_STORE_IDS にある
+ */
+export function isInhouseForUsage(shop: string, env: Env = process.env, inhouseClientId?: string | null): boolean {
+  const apiKey = String(env.SHOPIFY_API_KEY ?? "").trim();
+  const inhouseId = String(inhouseClientId ?? "").trim();
+  if (apiKey && inhouseId && apiKey === inhouseId) return true;
+  if (String(env.APP_DISTRIBUTION ?? "").trim().toLowerCase() === "inhouse") return true;
+  const s = String(shop ?? "").trim().toLowerCase();
+  if (!s) return false;
+  return String(env.CUSTOM_APP_STORE_IDS ?? "")
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean)
+    .includes(s);
+}
+
+/**
  * 10 か所を超えていれば、この期間の分を 1 回だけ報告する。何度呼んでも安全（同じ期間は 1 件だけ）。
  * 呼ぶ側は await しなくてよい（失敗は DB と console に残る。投げない）。
  */
 export async function reportExtraLocationUsage(
   input: ReportUsageInput,
-  deps: { store: UsageReportStore; env?: Env; fetchImpl?: FetchLike; now?: () => number; force?: boolean }
+  deps: {
+    store: UsageReportStore;
+    env?: Env;
+    fetchImpl?: FetchLike;
+    now?: () => number;
+    force?: boolean;
+    /** 自社用アプリ（Ciara）の client_id（shopify.app.toml）。SHOPIFY_API_KEY がこれと同じなら自社用として送らない */
+    inhouseClientId?: string | null;
+  }
 ): Promise<ReportUsageResult> {
   const env = deps.env ?? process.env;
+  // 守りの二重化: 呼ぶ側（getShopPlan）が自社用を止めているが、ほかから呼ばれても自社用は送らない・記録もしない
+  if (isInhouseForUsage(input.shop, env, deps.inhouseClientId)) return { outcome: "skipped", reason: "inhouse" };
   const nowFn = deps.now ?? Date.now;
   const usage = computeExtraLocationUsage(input.plan, input.locationsCount);
   if (usage.units <= 0) return { outcome: "skipped", reason: "no_extra_locations" };
