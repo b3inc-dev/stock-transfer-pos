@@ -242,7 +242,7 @@ API バージョンバンプとセットで別 PR。
   - 契約が見つかれば正にする（項目の `handle` を名前として、今と同じ Pro/Lite・3/10 の決まりで読む）。「契約なし」なら Admin API の結果を使う（払っている店を止めない）。失敗なら Admin API だけで決め、両方読めなければ D14 の `plan_check_failed`。
   - 店の ID は Admin API の `shop { id }` から取る（Admin を読めなければ Partner にも聞けない → D14 のまま）。
   - 店ごとに見つかった結果は 60 秒・契約なしは 15 秒覚え、同時の呼び出しは 1 回にまとめる（上限 1 client 4 回/秒）。失敗した店は 30 秒聞き直さず Admin API だけで決め、429 のあとは 10 秒どの店でも聞かない（2026-11-22 レビューで追加）。トークンはログに出さない。
-  - 10 か所を超えた分の報告（D15）の請求期間も、プランを決めた契約から取る（`pickUsagePeriodEnd`）。Partner で決めたら Partner の `currentBillingCycle.endTime`、無ければ（試用中など）Admin API の ACTIVE な契約の `currentPeriodEnd`、どちらも無ければ送らず `missing_period` で残す。値は ISO にそろえる（同じ期間なら同じ行・同じキー）。Admin に App Pricing の契約が出ない店でも送れるように（2026-11-22 レビューで追加）。
+  - 10 か所を超えた分の報告（D15）の請求期間も、プランを決めた契約から取る（`pickUsagePeriodEnd`）。Partner で決めたら Partner の `currentBillingCycle.endTime`、無ければ（試用中など）Admin API の ACTIVE な契約の `currentPeriodEnd`、どちらも無ければ送らず `missing_period` で残す。DB の `periodEnd` と `idempotency_key` は期間の終わりの **UTC の日付**（例 `2026-12-21`、`usagePeriodKey`）にする。Partner と Admin で期間の終わりが秒の単位でずれても同じ行・同じキーになり、2 回送らない。期間の終わり 10 分前の止めは正確な時刻で見る。Admin に App Pricing の契約が出ない店でも送れるように（2026-11-22 レビューで追加）。
 - **残り**: 開発ストアのテスト課金が Partner の `activeSubscription` に出るかは未確認（出なければ「契約なし」→ Admin の結果を使うので止まらない）。
 
 ---

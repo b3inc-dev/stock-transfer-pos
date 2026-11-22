@@ -13,6 +13,7 @@ import {
   normalizePeriodEnd,
   pickUsagePeriodEnd,
   reportExtraLocationUsage,
+  usagePeriodKey,
   PERIOD_END_MARGIN_MS,
   RETRY_AFTER_MS,
 } from "../app/utils/app-events-usage.server.ts";
@@ -92,8 +93,13 @@ describe("数の計算とキー", () => {
 
   test("キーは店と期間で決まり、64 文字以内", () => {
     const k = buildIdempotencyKey(GID, PERIOD);
-    assert.equal(k, "pstk-xloc-12345678-20991221T000000Z");
+    assert.equal(k, "pstk-xloc-12345678-20991221");
     assert.equal(buildIdempotencyKey(GID, "2099-12-21T00:00:00.000Z"), k);
+    // 同じ日なら秒・時刻がずれても同じキー（UTC の日付）
+    assert.equal(buildIdempotencyKey(GID, "2099-12-21T00:00:07Z"), k);
+    assert.equal(buildIdempotencyKey(GID, "2099-12-21T09:00:00+09:00"), buildIdempotencyKey(GID, "2099-12-21T00:00:00Z"));
+    assert.equal(usagePeriodKey("2099-12-21T23:59:59Z"), "2099-12-21");
+    assert.equal(usagePeriodKey(null), null);
     assert.ok(k.length <= 64);
     assert.equal(buildIdempotencyKey("bad", PERIOD), null);
     assert.equal(buildIdempotencyKey(GID, "not a date"), null);
@@ -118,7 +124,7 @@ describe("1 店・1 期間に 1 回", () => {
       shop_id: GID,
       event_handle: "extra_location_pro",
       timestamp: "2026-11-25T03:04:05Z",
-      idempotency_key: "pstk-xloc-12345678-20991221T000000Z",
+      idempotency_key: "pstk-xloc-12345678-20991221",
       attributes: { value: 3 },
     });
     assert.equal(store.rows[0].status, "sent");
@@ -369,7 +375,39 @@ describe("従量を数える請求期間（Partner API と Admin API）", () => 
     assert.equal(r.outcome, "sent");
     assert.equal(fetchImpl.events().length, 1);
     assert.equal(fetchImpl.events()[0].body.idempotency_key, buildIdempotencyKey(GID, PARTNER_END));
-    assert.equal(store.rows[0].periodEnd, "2099-12-21T00:00:00.000Z");
+    assert.equal(store.rows[0].periodEnd, "2099-12-21");
+  });
+
+  test("Partner の endTime と Admin の currentPeriodEnd が数秒ずれても、同じ行・同じキーで 1 回だけ送る", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch([202]);
+    const partnerEnd = "2099-12-21T00:00:00Z";
+    const adminEnd = "2099-12-21T00:00:04.000Z";
+    const viaPartner = pickUsagePeriodEnd({ planSource: "partner", partnerPeriodEnd: partnerEnd, adminSubscriptions: [] }).periodEnd;
+    const viaAdmin = pickUsagePeriodEnd({ planSource: "admin", adminSubscriptions: [{ status: "ACTIVE", currentPeriodEnd: adminEnd }] }).periodEnd;
+    assert.notEqual(viaPartner, viaAdmin);
+    assert.equal(buildIdempotencyKey(GID, viaPartner), buildIdempotencyKey(GID, viaAdmin));
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: viaPartner }), { store, env: ENV_ON, fetchImpl })).outcome, "sent");
+    // Partner が失敗して Admin の期間にさがった（10 分の間隔も過ぎた）
+    __resetUsageRecheckForTest();
+    const r = await reportExtraLocationUsage(input({ periodEnd: viaAdmin }), { store, env: ENV_ON, fetchImpl });
+    assert.equal(r.outcome, "already_sent");
+    assert.equal(store.rows.length, 1);
+    assert.equal(fetchImpl.events().length, 1);
+  });
+
+  test("期間の終わり 10 分前の止めは、日付ではなく正確な時刻で見る", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch([202]);
+    const end = "2099-12-21T12:00:00Z";
+    // 同じ日の 11:49:59（10 分より前）なら送る
+    let now = Date.parse(end) - PERIOD_END_MARGIN_MS - 1000;
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: end }), { store, env: ENV_ON, fetchImpl, now: () => now })).outcome, "sent");
+    // 11:55（日付はまだ同じでも 10 分前を過ぎた）なら送らない
+    const store2 = fakeStore();
+    now = Date.parse(end) - 5 * 60_000;
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: end }), { store: store2, env: ENV_ON, fetchImpl, now: () => now, force: true })).reason, "period_ended");
+    assert.equal(store2.rows.length, 0);
   });
 
   test("Admin の経路: Admin の期間で 1 回送る", async () => {

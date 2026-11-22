@@ -7,7 +7,7 @@ import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { getShopPlan } from "../utils/shop-plan.server";
 import { buildManagedPricingPlansUrl } from "../utils/billing";
-import { describeUsageReportForMerchant } from "../utils/app-events-usage.server";
+import { describeUsageReportForMerchant, usagePeriodKey } from "../utils/app-events-usage.server";
 import prisma from "../db.server";
 import { ALL_FEATURES, FEATURE_LABELS } from "../../extensions/common/planAccess.js";
 
@@ -76,9 +76,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (usage && session?.shop) {
       try {
         // 請求期間が分からないときは送っていない（missing_period で残している）
-        const row = usage.periodEnd
+        const periodKey = usagePeriodKey(usage.periodEnd);
+        const row = periodKey
           ? await prisma.appUsageReport.findUnique({
-              where: { shop_periodEnd: { shop: session.shop.trim().toLowerCase(), periodEnd: usage.periodEnd } },
+              where: { shop_periodEnd: { shop: session.shop.trim().toLowerCase(), periodEnd: periodKey } },
               select: { status: true },
             })
           : { status: "missing_period" };

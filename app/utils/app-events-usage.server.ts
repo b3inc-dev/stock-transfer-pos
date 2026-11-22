@@ -9,6 +9,8 @@
  * - 1 店・1 請求期間（契約の今の請求期間の終わり。Partner API で契約を読んだときは Partner の currentBillingCycle.endTime、
  *   そうでなければ Admin API の currentPeriodEnd。pickUsagePeriodEnd）につき 1 回だけ送る。DB（AppUsageReport）の
  *   (shop, periodEnd) の一意と、Shopify の idempotency_key（請求イベントは永久に重複しない）の 2 重で守る。
+ *   DB の periodEnd とキーは、期間の終わりの UTC の日付（例 "2026-12-21"。usagePeriodKey）。Partner と Admin で
+ *   期間の終わりが数秒ずれても同じ行・同じキーになり、2 回送らない。期間の終わり 10 分前の止めは正確な時刻で見る。
  * - 外へ送るのは APP_EVENTS_USAGE_ENABLED=1 のときだけ（既定オフ）。オフでも数は DB に「disabled」で残す。
  * - 失敗は黙って捨てない。DB に status=failed・HTTP の番号・理由を残し、時間をおいて同じキーで送り直す（同じキーなので二重請求にならない）。
  * - 上限を超えた分は送らず status=over_limit で残す（T が上限を見直すと次の確認で送る）。
@@ -154,15 +156,24 @@ export function numericShopId(shopGid: string): string | null {
 }
 
 /**
- * 1 店・1 期間で変わらないキー（64 文字まで）。
- * 例: pstk-xloc-12345678-20261221T000000Z
+ * 期間を表すキー: 期間の終わりの UTC の日付（"2026-12-21"）。読めなければ null。
+ * Partner の currentBillingCycle.endTime と Admin の currentPeriodEnd が秒の単位でずれても同じ値にする。
+ * 請求期間は 30 日・1 年なので、同じ店で終わりが同じ日になる別の期間は無い。
+ */
+export function usagePeriodKey(periodEnd: string | null | undefined): string | null {
+  const t = Date.parse(String(periodEnd ?? ""));
+  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : null;
+}
+
+/**
+ * 1 店・1 期間で変わらないキー（64 文字まで）。期間は usagePeriodKey（UTC の日付）。
+ * 例: pstk-xloc-12345678-20261221
  */
 export function buildIdempotencyKey(shopGid: string, periodEnd: string): string | null {
   const id = numericShopId(shopGid);
-  const t = Date.parse(periodEnd);
-  if (!id || !Number.isFinite(t)) return null;
-  const stamp = new Date(t).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-  const key = `pstk-xloc-${id}-${stamp}`;
+  const day = usagePeriodKey(periodEnd);
+  if (!id || !day) return null;
+  const key = `pstk-xloc-${id}-${day.replace(/-/g, "")}`;
   return key.length <= 64 ? key : null;
 }
 
@@ -295,7 +306,9 @@ export async function reportExtraLocationUsage(
     return { outcome: "skipped", reason: "missing_shop_id" };
   }
 
-  const memoKey = `${input.shop}|${input.periodEnd}`;
+  // DB の行は期間の日付で引く（正確な時刻は上の「期間の終わり 10 分前」の止めだけに使う）
+  const periodKey = usagePeriodKey(input.periodEnd) as string;
+  const memoKey = `${input.shop}|${periodKey}`;
   const now = nowFn();
   if (!deps.force) {
     const last = recentChecks.get(memoKey);
@@ -304,7 +317,7 @@ export async function reportExtraLocationUsage(
   recentChecks.set(memoKey, now);
 
   const store = deps.store;
-  const where = { shop_periodEnd: { shop: input.shop, periodEnd: input.periodEnd } };
+  const where = { shop_periodEnd: { shop: input.shop, periodEnd: periodKey } };
   const enabled = isUsageReportingEnabled(env);
   const maxUnits = getMaxUnits(env);
   const eventHandle = getEventHandle(input.plan, env);
@@ -332,7 +345,7 @@ export async function reportExtraLocationUsage(
     if (!row) {
       try {
         row = await store.create({
-          data: { shop: input.shop, periodEnd: input.periodEnd, idempotencyKey, status: holdStatus, lastError, attempts: 0, ...fields },
+          data: { shop: input.shop, periodEnd: periodKey, idempotencyKey, status: holdStatus, lastError, attempts: 0, ...fields },
         });
       } catch {
         row = await store.findUnique({ where });
@@ -348,7 +361,7 @@ export async function reportExtraLocationUsage(
   if (!row) {
     try {
       row = await store.create({
-        data: { shop: input.shop, periodEnd: input.periodEnd, idempotencyKey, status: "sending", attempts: 1, ...fields },
+        data: { shop: input.shop, periodEnd: periodKey, idempotencyKey, status: "sending", attempts: 1, ...fields },
       });
     } catch {
       return { outcome: "skipped", reason: "lost_race" };

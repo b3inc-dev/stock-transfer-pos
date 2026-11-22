@@ -253,4 +253,4 @@ TOP の「はじめての設定」に載せる文言のたたき台です。必�
 
 - **プラン取得**: `getShopPlan`（`app/routes/app.tsx`）で `currentAppInstallation.activeSubscriptions` を取得し、サブスク名から `lite` / `pro` を判定。開発ストアは課金せず `plan = "pro"`。
 - **サブスク作成**: アプリは作らない（App Pricing。店は Shopify の pricing_plans で選ぶ）。`createAppSubscription` は 2026-11-21 に消した。
-- **10ロケーション超の従量課金**（D15）: `getShopPlan` で、公開用・Lite/Pro・3 か所プランの不一致でない・`locationsCount > 10` のとき、`reportExtraLocationUsage` を待たずに呼ぶ。1 店・1 請求期間（`currentPeriodEnd`）に 1 行（`AppUsageReport`）と、Shopify の `idempotency_key = pstk-xloc-{店の番号}-{currentPeriodEnd}` で 1 回だけ。送るのは `APP_EVENTS_USAGE_ENABLED=1` のときだけ。数は料金プラン画面に出す。
+- **10ロケーション超の従量課金**（D15）: `getShopPlan` で、公開用・Lite/Pro・3 か所プランの不一致でない・`locationsCount > 10` のとき、`reportExtraLocationUsage` を待たずに呼ぶ。1 店・1 請求期間に 1 行（`AppUsageReport`、期間の終わりの UTC の日付）と、Shopify の `idempotency_key = pstk-xloc-{店の番号}-{期間の終わりの UTC の日付 YYYYMMDD}` で 1 回だけ（期間は D16 の `pickUsagePeriodEnd`）。送るのは `APP_EVENTS_USAGE_ENABLED=1` のときだけ。数は料金プラン画面に出す。
