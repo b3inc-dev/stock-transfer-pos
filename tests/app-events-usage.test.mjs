@@ -396,6 +396,49 @@ describe("従量を数える請求期間（Partner API と Admin API）", () => 
     assert.equal(fetchImpl.events().length, 1);
   });
 
+  test("期間の終わりが UTC の 0 時をまたいでずれても（23:59:58 と 00:00:01）同じ期間として 1 回だけ送る", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch([202]);
+    const viaAdmin = pickUsagePeriodEnd({ planSource: "admin", adminSubscriptions: [{ status: "ACTIVE", currentPeriodEnd: "2099-12-20T23:59:58Z" }] }).periodEnd;
+    const viaPartner = pickUsagePeriodEnd({ planSource: "partner", partnerPeriodEnd: "2099-12-21T00:00:01Z" }).periodEnd;
+    assert.notEqual(usagePeriodKey(viaAdmin), usagePeriodKey(viaPartner));
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: viaAdmin }), { store, env: ENV_ON, fetchImpl })).outcome, "sent");
+    __resetUsageRecheckForTest();
+    const r = await reportExtraLocationUsage(input({ periodEnd: viaPartner }), { store, env: ENV_ON, fetchImpl });
+    assert.equal(r.outcome, "already_sent");
+    assert.equal(store.rows.length, 1);
+    assert.equal(fetchImpl.events().length, 1);
+    // 逆向き（先に翌日の日付で送った）も同じ
+    const store2 = fakeStore();
+    const fetch2 = fakeFetch([202]);
+    __resetUsageRecheckForTest();
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: viaPartner }), { store: store2, env: ENV_ON, fetchImpl: fetch2 })).outcome, "sent");
+    __resetUsageRecheckForTest();
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: viaAdmin }), { store: store2, env: ENV_ON, fetchImpl: fetch2 })).outcome, "already_sent");
+    assert.equal(fetch2.events().length, 1);
+  });
+
+  test("前後 1 日の行が送りかけ（failed）なら、その行のキーで送り直す（新しいキーで 2 回目を作らない）", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch([503, 202]);
+    const before = "2099-12-20T23:59:58Z";
+    const after = "2099-12-21T00:00:01Z";
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: before }), { store, env: ENV_ON, fetchImpl, force: true })).outcome, "failed");
+    const r = await reportExtraLocationUsage(input({ periodEnd: after }), { store, env: ENV_ON, fetchImpl, force: true });
+    assert.equal(r.outcome, "sent");
+    assert.equal(store.rows.length, 1);
+    const keys = fetchImpl.events().map((e) => e.body.idempotency_key);
+    assert.deepEqual(keys, [buildIdempotencyKey(GID, before), buildIdempotencyKey(GID, before)]);
+  });
+
+  test("2 日以上離れた行は別の期間（前の期間の行があっても送る）", async () => {
+    const store = fakeStore();
+    const fetchImpl = fakeFetch([202]);
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: "2099-11-21T00:00:00Z" }), { store, env: ENV_ON, fetchImpl })).outcome, "sent");
+    assert.equal((await reportExtraLocationUsage(input({ periodEnd: "2099-12-21T00:00:00Z" }), { store, env: ENV_ON, fetchImpl })).outcome, "sent");
+    assert.equal(store.rows.length, 2);
+  });
+
   test("期間の終わり 10 分前の止めは、日付ではなく正確な時刻で見る", async () => {
     const store = fakeStore();
     const fetchImpl = fakeFetch([202]);

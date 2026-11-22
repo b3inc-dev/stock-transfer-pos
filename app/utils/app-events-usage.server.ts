@@ -165,6 +165,29 @@ export function usagePeriodKey(periodEnd: string | null | undefined): string | n
   return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : null;
 }
 
+/** "2026-12-21" を days 日ずらす（UTC） */
+export function shiftPeriodKey(periodKey: string, days: number): string {
+  return new Date(Date.parse(`${periodKey}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * この期間の行を探す。同じ日付が無ければ前後 1 日の行も同じ期間として返す
+ * （Partner と Admin で期間の終わりが UTC の 0 時をまたいでずれたとき。例 23:59:58 と 00:00:01）。
+ * 請求期間は 30 日・1 年なので、終わりが 1 日以内の別の期間は無い。
+ * missing_period の行（periodEnd = MISSING_PERIOD_END）は日付でないので混ざらない。
+ */
+export async function findUsageReportForPeriod(
+  store: Pick<UsageReportStore, "findUnique">,
+  shop: string,
+  periodKey: string
+): Promise<UsageReportRow | null> {
+  for (const key of [periodKey, shiftPeriodKey(periodKey, -1), shiftPeriodKey(periodKey, 1)]) {
+    const row = await store.findUnique({ where: { shop_periodEnd: { shop, periodEnd: key } } });
+    if (row) return row;
+  }
+  return null;
+}
+
 /**
  * 1 店・1 期間で変わらないキー（64 文字まで）。期間は usagePeriodKey（UTC の日付）。
  * 例: pstk-xloc-12345678-20261221
@@ -322,7 +345,9 @@ export async function reportExtraLocationUsage(
   const maxUnits = getMaxUnits(env);
   const eventHandle = getEventHandle(input.plan, env);
 
-  let row = await store.findUnique({ where });
+  // 同じ日付の行が無ければ前後 1 日の行（送った・送りかけ・止めた、どれでも）を同じ期間として使う。
+  // その行のキーで続ける（新しいキーで 2 回目を送らない）
+  let row = await findUsageReportForPeriod(store, input.shop, periodKey);
   if (row?.status === "sent") return { outcome: "already_sent", row };
 
   // 一度でも送ろうとした行は、数を変えない（Shopify 側に届いているかもしれない値と DB を揃える）
