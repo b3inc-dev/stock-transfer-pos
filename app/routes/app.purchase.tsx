@@ -1560,6 +1560,7 @@ export default function PurchasePage() {
                             <label style={{ display: "block", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>日付 <span style={{ color: "#c00" }}>*</span></label>
                             <input
                               type="date"
+                              className="Admin-input"
                               value={newPurchaseDate}
                               onChange={(e) => setNewPurchaseDate(e.target.value)}
                               style={{ width: "100%", padding: 8, fontSize: 14, border: "1px solid #ccc", borderRadius: 4, boxSizing: "border-box", maxWidth: "100%" }}
