@@ -5,7 +5,7 @@
  * app/・extensions/ の .ts・.tsx・.js・.jsx を読み、GraphQL の文の中でこれらを呼ぶ所に
  * @idempotent(key: が付いているかを見る。docs/ と一番上の stock-transfer-loss/（配備されない写し）は見ない。
  *
- * まだ付けていない所は PENDING に「ファイル → mutation → あと何か所」で持つ（段ごとに減らし、最後は空にする）。
+ * まだ付けていない所は PENDING に「ファイル → mutation → あと何か所」で持つ（段ごとに減らし、最後は空にする。4 段目で空になった）。
  * - PENDING に無い所で 1 か所でも付いていなければ失敗（新しく付け忘れた）
  * - PENDING の数より多ければ失敗（付け忘れが増えた）
  * - PENDING の数より少なければ失敗（付けたなら PENDING を減らす）
@@ -44,18 +44,10 @@ export const IDEMPOTENT_REQUIRED_MUTATIONS = [
 
 /**
  * まだ付けていない所（ファイル → mutation → か所の数）。入れる順は docs/IDEMPOTENT_MIGRATION.md 5 章。
- * 2 段目（管理画面 K・L・M）と 3 段目（POS 入庫 G・H・F）は付け終えた。4 段目（POS 出庫 A〜F）で減らす。
+ * 1〜4 段目（サーバー・管理画面・POS 入庫・POS 出庫）で、使っている所は全部付け終えた。
+ * 残りは 5 段目（#109）で消える所だけ（下の PENDING_UNTIL_STAGE_5）。
  */
-const PENDING = {
-  // 4 段目（POS 出庫 A〜F）
-  "extensions/stock-transfer-tile/src/ModalOutbound.jsx": {
-    inventoryTransferCreate: 2,
-    inventoryTransferSetItems: 1,
-    inventoryActivate: 1,
-    inventoryTransferCreateAsReadyToShip: 1,
-    inventoryShipmentCreate: 1,
-  },
-};
+const PENDING = {};
 
 /**
  * 5 段目（#109・呼び出し元が無いコード N）で消える所。#109 が先に入っても後に入っても見張りが通るように、
@@ -118,6 +110,25 @@ const DONE_IN_STAGE_3 = {
   "extensions/common/shipmentReceive.js": ["inventoryShipmentReceive"],
   "extensions/stock-transfer-inbound/src/inboundApi.js": ["inventoryActivate"],
 };
+
+/**
+ * 4 段目（POS 出庫 A〜F）で付け終えたファイル。ModalOutbound.jsx の inventoryTransferDuplicate だけは 5 段目（#109）で消すので見ない。
+ * - A: inventoryTransferCreateAsReadyToShip（1 か所）
+ * - B・C: inventoryTransferCreate（READY の代わりの下書き・下書き保存の 2 か所）
+ * - D: inventoryShipmentCreate（1 か所。作成・補完・配送の追加・編集のどれもここを通る）
+ * - E: inventoryTransferSetItems（1 か所。編集の 5 か所の呼び出しはここを通る）
+ * - F: inventoryActivate（1 か所）
+ */
+const DONE_IN_STAGE_4 = {
+  "extensions/stock-transfer-tile/src/ModalOutbound.jsx": {
+    inventoryTransferCreateAsReadyToShip: 1,
+    inventoryTransferCreate: 2,
+    inventoryShipmentCreate: 1,
+    inventoryTransferSetItems: 1,
+    inventoryActivate: 1,
+  },
+};
+const STAGE_5_ONLY = { "extensions/stock-transfer-tile/src/ModalOutbound.jsx": ["inventoryTransferDuplicate"] };
 
 function listSourceFiles(dir) {
   const out = [];
@@ -275,6 +286,16 @@ describe("@idempotent の付け忘れ（app/・extensions/）", () => {
       .filter(([, calls]) => calls.some((c) => c.name === "inventoryShipmentReceive"))
       .map(([f]) => f);
     assert.deepEqual(receiveFiles, ["extensions/common/shipmentReceive.js"]);
+  });
+
+  it("POS 出庫の作成・下書き・Shipment・明細・有効化（A〜F・4 段目）はすべて付いている。か所の数も変わっていない", () => {
+    for (const [f, want] of Object.entries(DONE_IN_STAGE_4)) {
+      const skip = new Set(STAGE_5_ONLY[f] ?? []);
+      const calls = (scanned[f] ?? []).filter((c) => !skip.has(c.name));
+      const counts = calls.reduce((m, c) => ({ ...m, [c.name]: (m[c.name] ?? 0) + 1 }), {});
+      assert.deepEqual(counts, want, `${f} の在庫の書き込みのか所が思っていたものと違います`);
+      assert.deepEqual(calls.filter((c) => !c.keyed), [], `${f} に付いていない所があります`);
+    }
   });
 
   it("まだ付けていない所は PENDING の数と同じ（増えても減っても PENDING を直す。5 段目の分は #109 の前でも後でも通る）", () => {

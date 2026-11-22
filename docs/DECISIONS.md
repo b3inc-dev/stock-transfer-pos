@@ -35,7 +35,7 @@
 
 | 層 | 方針 |
 |----|------|
-| Transfer create | Shopify API 側 idempotency key **なし**（従来どおり） |
+| Transfer create | POS 出庫（作成・下書き・Shipment・明細・有効化）も `@idempotent` を付けた（D3g。キーはチェックポイントの `attemptId`・編集は編集のチェックポイントの `opId`。24 時間だけ効くので、note の照会・チェックポイントの守りはそのまま） |
 | 二重タップ | `submitLockRef` |
 | 履歴 | `buildStableAppEventId` + DB unique |
 | 数量調整 | `InventoryChangeEvent.appEventId`。サーバーの Shopify への書き込み（`inventorySetQuantities`・`inventoryActivate`）には `@idempotent` も付ける（D3d） |
@@ -140,7 +140,32 @@
 
 **見張り**: `tests/idempotent-directive-guard.test.mjs` の `PENDING` を「ファイル → mutation → 数」にした。5 段目（#109）で消える所は `PENDING_UNTIL_STAGE_5` に持ち、「全部残る」か「全部消える」の両方を通す（#109 とこの段のどちらが先に main に入っても、見張りを直さずに通る）。
 
-**まだ付けていない所**: POS 出庫（4 段目。`ModalOutbound.jsx` の作成・下書き・Shipment・明細・有効化）。
+**まだ付けていない所**: POS 出庫（4 段目。`ModalOutbound.jsx` の作成・下書き・Shipment・明細・有効化）→ D3g で付けた。
+
+### D3g. POS 出庫の作成・下書き・Shipment・明細・有効化に `@idempotent` を付ける（2026-11-23・4 段目）
+
+設計 [`IDEMPOTENT_MIGRATION.md`](./IDEMPOTENT_MIGRATION.md) の 4.1（A〜D）・4.2（E）・4.3（F の出庫）と 5 章の 4 段目。部品は `extensions/stock-transfer-tile/src/outboundIdempotency.js`（キー・送り方）と `outboundCreateCheckpoint.js`（チェックポイント）。
+
+| 層 | 方針 |
+|----|------|
+| 作成（A・B・C・D） | 種類 `outbound_create`、操作の ID はチェックポイントの `attemptId`、段 `transfer_ready`（A）・`transfer_draft_for_ready`（B）・`transfer_draft`（C）・`shipment`（D）、チャンク `i/n`、回は `rounds[i].transfer`・`rounds[i].shipment`（0 は `main`、断られるたびに `rej1`…）。時間切れのあとの Shipment の補完（`afterRecoveredChunk`）も作成のときと同じキー |
+| 回を増やす | **はっきり断られた（userErrors）ときだけ**、そのチャンクの回を 1 つ増やして端末に残してから投げ直す。時間切れ・通信の失敗・5xx・処理中では増やさない（同じキー）。成功するとチェックポイントは消えるので、取り消したあとの作り直しは新しい `attemptId`（新しいキー） |
+| チェックポイントの形 | `v: 1` のまま `rounds`・`startedAt` を足した。前の形（どちらも無い）も読める（0 回・時刻は分からない） |
+| 24 時間 | note の照会（`[pos-cp:…]`）はそのまま。**23 時間より古い続きで note の照会ができないときは作らない**（キーがもう効かないかもしれないため。`startedAt` の無い前の形は前と同じ動き） |
+| 返事 | `IDEMPOTENCY_CONCURRENT_REQUEST` は 1・2・4 秒待って同じキー（全部で 20 秒まで）。待ち切った・`IDEMPOTENCY_KEY_PARAMETER_MISMATCH` は `OutboundIdempotencyError`（送り直さない・回も増やさない・「Shopify で確かめて」）。**このときは READY の代わりの下書き（B）へ進まない**（前の A が通っていたら二重の在庫移動になる） |
+| 編集・配送の追加（E と D） | 種類 `outbound_edit`。作成と同じ形の小さな「編集のチェックポイント」（`stock_transfer_pos_outbound_edit_cp_v1`）に、動き（`edit_in_transit`・`add_shipment_ready` など 8 つ）+ Transfer + 明細の指紋と `opId` を**送る前に**残す。同じ指紋の押し直しは同じ `opId`、成功で消す、断られたら `<段>@<チャンク>` の回を増やす、23 時間より古いものは使わない。段 `set_items`・`shipment`、チャンク `i/n` |
+| 同じキーの押し直しで返った Shipment | もう下書きでない（前の押し直しで IN_TRANSIT まで進んでいた）ときは、追跡番号・発送済みにする所を飛ばす（もう一度送ると断られる） |
+| 250 件を超えて分けるとき | 分ける前に `inventoryItemId` の順に並べ、補足（`lineItemsMeta`）は ID で付け直す（チャンクの中身とキーを読んだ順によらず同じにする。前は補足の並びがずれることがあった）。250 件以下は並べ替えない |
+| 有効化（F・出庫） | 入庫と同じ: 種類 `pos_activate`、有効化の呼び出しごとに新しい ID。初めの数を渡すときは段に入れる（`activate:<置き場所>:<商品>:<数>:<数>`）。2 回目の呼び出しは在庫レベルがあれば先の確認で飛ばすので、初めの数が二重に入ることはない |
+| 版 | **2026-01 のまま** |
+
+**設計と違えたところ（1 つ）**: 設計 4.2 は「操作の ID = transferId + 編集を始めたときに読んだ明細の指紋」でした。実装は**作成と同じく送る前に残す ID（`opId`）**にしました。編集を始める所が画面のあちこちにあり、送る直前に読み直す形にすると、配送の追加の押し直しで前の形（配送の数）が変わって新しいキーになり、配送が 2 つになりうるためです。「同じ押し直しは同じキー・新しい編集は新しいキー・A → B → A の 3 回目は新しいキー」は同じです。
+
+**守りは足すだけ**: `submitLockRef`・指紋と `attemptId`・note の照会・`nextChunkIndex` と `created[]`・250 件ずつの複数の Transfer はそのまま。
+
+**残ること**: 2 台の端末で同じ出庫を確定する（ID が端末ごと）。24 時間を過ぎた押し直し。編集の押し直しの間に別の端末が同じ Transfer の明細を変えたとき、同じキーの押し直しは書かれない（前の答えだけ返る）。
+
+**見張り**: `tests/idempotent-directive-guard.test.mjs` の `PENDING` は空になった（使っている所は全部付けた）。残りは 5 段目（#109）で消える所だけ。
 
 ## D4. POS GraphQL は短 timeout、サーバーは 429 リトライ
 

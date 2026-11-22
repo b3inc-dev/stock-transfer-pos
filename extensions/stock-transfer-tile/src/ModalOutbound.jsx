@@ -47,9 +47,17 @@ import {
 import { logInventoryChangeToApi } from "../../common/logInventoryChange.js";
 import {
   buildShipmentReceiveOperation,
+  newAdhocOperationId,
   OUTBOUND_REJECT_ALL_KIND,
   receiveShipmentIdempotent,
 } from "../../common/shipmentReceive.js";
+import { buildActivateKeyForPos } from "../../common/activateIdempotency.js";
+import {
+  OUTBOUND_STAGE,
+  sendOutboundIdempotent,
+  shouldFallbackToDraftForReady,
+  sortOutboundLinesForChunking,
+} from "./outboundIdempotency.js";
 import { buildStableAppEventId } from "../../common/buildStableAppEventId.js";
 import {
   adjustInventoryAtLocationWithFallback,
@@ -60,6 +68,7 @@ import { ListPageControls } from "../../common/ListPageControls.jsx";
 import {
   clearOutboundCreateCheckpoint,
   runChunkedOutboundCreateWithCheckpoint,
+  runOutboundEditWithCheckpoint,
 } from "./outboundCreateCheckpoint.js";
 
 const SHOPIFY = globalThis?.shopify;
@@ -189,7 +198,10 @@ async function pushScanToQueue_(value) {
   }
 }
 
-async function inventoryTransferCreateDraftSafe({ originLocationId, destinationLocationId, lineItems, note }) {
+/**
+ * 下書きの Transfer を作る（C）。@idempotent のキーは呼び出し側（チェックポイント）から渡す（idem: { key, tag }）。
+ */
+async function inventoryTransferCreateDraftSafe({ originLocationId, destinationLocationId, lineItems, note, idem }) {
   const originId = String(originLocationId || "").trim();
   const destId = String(destinationLocationId || "").trim();
   const items = Array.isArray(lineItems) ? lineItems : [];
@@ -198,49 +210,56 @@ async function inventoryTransferCreateDraftSafe({ originLocationId, destinationL
   if (!destId) throw new Error("destinationLocationId が空です");
   if (items.length === 0) throw new Error("lineItems が空です");
 
-  const data = await adminGraphql(
-    `#graphql
-    mutation InventoryTransferCreate($input: InventoryTransferCreateInput!) {
-      inventoryTransferCreate(input: $input) {
+  const payload = await sendOutboundIdempotent({
+    adminGraphql,
+    query: `#graphql
+    mutation InventoryTransferCreate($input: InventoryTransferCreateInput!, $idempotencyKey: String!) {
+      inventoryTransferCreate(input: $input) @idempotent(key: $idempotencyKey) {
         inventoryTransfer { id status name }
         userErrors { field message }
       }
     }`,
-    {
+    variables: {
       input: {
         originLocationId: originId,
         destinationLocationId: destId,
         lineItems: items,
         note: note ? String(note) : undefined,
       },
-    }
-  );
-
-  const payload = data?.inventoryTransferCreate;
-  assertNoUserErrors(payload, "inventoryTransferCreate");
+    },
+    idempotencyKey: idem?.key,
+    rejectTag: idem?.tag,
+    payloadField: "inventoryTransferCreate",
+    assertNoUserErrors,
+  });
   return payload?.inventoryTransfer;
 }
 
-async function inventoryTransferSetItemsSafe({ id, lineItems }) {
+/**
+ * 今ある Transfer の明細をこの形にする（E）。@idempotent のキーは編集のチェックポイント（runOutboundEditWithCheckpoint）から渡す。
+ */
+async function inventoryTransferSetItemsSafe({ id, lineItems, idem }) {
   const transferId = String(id || "").trim();
   const items = Array.isArray(lineItems) ? lineItems : [];
 
   if (!transferId) throw new Error("Transfer ID が空です");
   if (items.length === 0) throw new Error("lineItems が空です");
 
-  const data = await adminGraphql(
-    `#graphql
-    mutation InventoryTransferSetItems($input: InventoryTransferSetItemsInput!) {
-      inventoryTransferSetItems(input: $input) {
+  const payload = await sendOutboundIdempotent({
+    adminGraphql,
+    query: `#graphql
+    mutation InventoryTransferSetItems($input: InventoryTransferSetItemsInput!, $idempotencyKey: String!) {
+      inventoryTransferSetItems(input: $input) @idempotent(key: $idempotencyKey) {
         inventoryTransfer { id status }
         userErrors { field message }
       }
     }`,
-    { input: { id: transferId, lineItems: items } }
-  );
-
-  const payload = data?.inventoryTransferSetItems;
-  assertNoUserErrors(payload, "inventoryTransferSetItems");
+    variables: { input: { id: transferId, lineItems: items } },
+    idempotencyKey: idem?.key,
+    rejectTag: idem?.tag,
+    payloadField: "inventoryTransferSetItems",
+    assertNoUserErrors,
+  });
   return payload?.inventoryTransfer;
 }
 
@@ -248,8 +267,10 @@ async function inventoryTransferSetItemsSafe({ id, lineItems }) {
 const SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX = 250;
 
 function chunkLineItemsWithMeta(lineItems, lineItemsMeta) {
-  const li = Array.isArray(lineItems) ? lineItems : [];
-  const meta = Array.isArray(lineItemsMeta) ? lineItemsMeta : [];
+  // 250 件を超えるときは inventoryItemId の順に並べてから分ける（チャンクの中身と @idempotent のキーを、読んだ順によらず同じにする）
+  const sorted = sortOutboundLinesForChunking(lineItems, lineItemsMeta, SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX);
+  const li = sorted.lineItems;
+  const meta = sorted.lineItemsMeta;
   const max = SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX;
   const out = [];
   for (let i = 0; i < li.length; i += max) {
@@ -6674,12 +6695,18 @@ function OutboundList({
               arrivesAt: String(outbound.arrivesAtIso || "").trim() || null,
             }
           : null;
-        const shipments = await createInventoryShipmentInTransitChunked({
-          movementId: addingIdForConfirm,
-          lineItems,
-          trackingInput,
-          lineItemsMeta,
-        });
+        // @idempotent: 配送の追加の押し直し（時間切れのあと）は同じキー → 配送が 2 つにならない（4.2・編集のチェックポイント）
+        const shipments = await runOutboundEditWithCheckpoint(
+          { action: "add_shipment_in_transit", transferId: addingIdForConfirm, lineItems },
+          ({ keyFor, tagFor }) =>
+            createInventoryShipmentInTransitChunked({
+              movementId: addingIdForConfirm,
+              lineItems,
+              trackingInput,
+              lineItemsMeta,
+              idemFor: (i, n) => ({ key: keyFor(OUTBOUND_STAGE.SHIPMENT, i, n), tag: tagFor(OUTBOUND_STAGE.SHIPMENT, i, n) }),
+            })
+        );
         const shipment = shipments[shipments.length - 1] ?? null;
         if (shipments.length > 1) {
           toast(`配送を${shipments.length}件のシップメントに分割して追加しました（出庫確定）`);
@@ -6754,21 +6781,33 @@ function OutboundList({
                 : "明細更新と出庫確定を完了しました（IN_TRANSIT）"
           );
         } else {
-          transfer = await inventoryTransferSetItemsSafe({
-            id: editingTransferId,
-            lineItems,
-          });
-
-          if (selectedShipmentIdForConfirm && !isVirtualShipment) {
-            shipment = await inventoryShipmentMarkInTransit(selectedShipmentIdForConfirm);
-          } else {
-            shipment = await createInventoryShipmentInTransit({
-              movementId: editingTransferId,
+          // @idempotent: 明細の書き換えと配送の作成を 1 つの編集の操作にする（4.2・編集のチェックポイント）
+          const useSelectedShipment = !!(selectedShipmentIdForConfirm && !isVirtualShipment);
+          ({ transfer, shipment } = await runOutboundEditWithCheckpoint(
+            {
+              action: "edit_in_transit",
+              transferId: editingTransferId,
               lineItems,
-              trackingInput,
-              lineItemsMeta,
-            });
-          }
+              extra: useSelectedShipment ? `ship=${selectedShipmentIdForConfirm}` : "ship=new",
+            },
+            async ({ keyFor, tagFor }) => {
+              const t = await inventoryTransferSetItemsSafe({
+                id: editingTransferId,
+                lineItems,
+                idem: { key: keyFor(OUTBOUND_STAGE.SET_ITEMS), tag: tagFor(OUTBOUND_STAGE.SET_ITEMS) },
+              });
+              const sh = useSelectedShipment
+                ? await inventoryShipmentMarkInTransit(selectedShipmentIdForConfirm)
+                : await createInventoryShipmentInTransit({
+                    movementId: editingTransferId,
+                    lineItems,
+                    trackingInput,
+                    lineItemsMeta,
+                    idem: { key: keyFor(OUTBOUND_STAGE.SHIPMENT), tag: tagFor(OUTBOUND_STAGE.SHIPMENT) },
+                  });
+              return { transfer: t, shipment: sh };
+            }
+          ));
 
           toast("明細更新と出庫確定を完了しました（IN_TRANSIT）");
         }
@@ -7299,11 +7338,16 @@ function OutboundList({
       // ③配送追加モード：「配送準備完了にする」＝既存 Transfer に DRAFT シップメントを追加（新規 Transfer は作らない）
       const addingId = String(outbound?.addingShipmentToTransferId || "").trim();
       if (addingId) {
-        const shipmentsRts = await createInventoryShipmentDraftChunked({
-          movementId: addingId,
-          lineItems,
-          lineItemsMeta,
-        });
+        const shipmentsRts = await runOutboundEditWithCheckpoint(
+          { action: "add_shipment_ready", transferId: addingId, lineItems },
+          ({ keyFor, tagFor }) =>
+            createInventoryShipmentDraftChunked({
+              movementId: addingId,
+              lineItems,
+              lineItemsMeta,
+              idemFor: (i, n) => ({ key: keyFor(OUTBOUND_STAGE.SHIPMENT, i, n), tag: tagFor(OUTBOUND_STAGE.SHIPMENT, i, n) }),
+            })
+        );
         const shipment = shipmentsRts[shipmentsRts.length - 1] ?? null;
         if (shipmentsRts.length > 1) {
           toast(`配送を${shipmentsRts.length}件のシップメント（下書き）に分割して追加しました`);
@@ -7365,10 +7409,15 @@ function OutboundList({
                 : "配送準備完了で作成しました（元の下書きはキャンセル済み）"
           );
         } else {
-          transfer = await inventoryTransferSetItemsSafe({
-            id: editingTransferId,
-            lineItems,
-          });
+          transfer = await runOutboundEditWithCheckpoint(
+            { action: "edit_ready", transferId: editingTransferId, lineItems },
+            ({ keyFor, tagFor }) =>
+              inventoryTransferSetItemsSafe({
+                id: editingTransferId,
+                lineItems,
+                idem: { key: keyFor(OUTBOUND_STAGE.SET_ITEMS), tag: tagFor(OUTBOUND_STAGE.SET_ITEMS) },
+              })
+          );
 
           const currentTransfer = await fetchTransfer(editingTransferId);
           const currentStatus = String(currentTransfer?.status || "").toUpperCase();
@@ -7434,10 +7483,15 @@ function OutboundList({
                 : "配送準備完了にしました"
           );
         } else {
-          transfer = await inventoryTransferSetItemsSafe({
-            id: currentDraftTransferId,
-            lineItems,
-          });
+          transfer = await runOutboundEditWithCheckpoint(
+            { action: "draft_ready", transferId: currentDraftTransferId, lineItems },
+            ({ keyFor, tagFor }) =>
+              inventoryTransferSetItemsSafe({
+                id: currentDraftTransferId,
+                lineItems,
+                idem: { key: keyFor(OUTBOUND_STAGE.SET_ITEMS), tag: tagFor(OUTBOUND_STAGE.SET_ITEMS) },
+              })
+          );
 
           const currentTransfer = await fetchTransfer(currentDraftTransferId);
           const currentStatus = String(currentTransfer?.status || "").toUpperCase();
@@ -8361,11 +8415,19 @@ function OutboundList({
                     barcode: String(l?.barcode || "").trim(),
                     label: String(l?.label || "").trim(),
                   }));
-                  const draftsAdded = await createInventoryShipmentDraftChunked({
-                    movementId: addingShipmentToTransferId,
-                    lineItems,
-                    lineItemsMeta,
-                  });
+                  const draftsAdded = await runOutboundEditWithCheckpoint(
+                    { action: "add_shipment_draft", transferId: addingShipmentToTransferId, lineItems },
+                    ({ keyFor, tagFor }) =>
+                      createInventoryShipmentDraftChunked({
+                        movementId: addingShipmentToTransferId,
+                        lineItems,
+                        lineItemsMeta,
+                        idemFor: (i, n) => ({
+                          key: keyFor(OUTBOUND_STAGE.SHIPMENT, i, n),
+                          tag: tagFor(OUTBOUND_STAGE.SHIPMENT, i, n),
+                        }),
+                      })
+                  );
                   if (draftsAdded.length > 1) {
                     toast(`配送を${draftsAdded.length}件のシップメント（下書き）に分割して追加しました`);
                   } else {
@@ -8418,7 +8480,15 @@ function OutboundList({
                     onBack?.();
                     return;
                   }
-                  await inventoryTransferSetItemsSafe({ id: editingTransferId, lineItems });
+                  await runOutboundEditWithCheckpoint(
+                    { action: "edit_draft_save", transferId: editingTransferId, lineItems },
+                    ({ keyFor, tagFor }) =>
+                      inventoryTransferSetItemsSafe({
+                        id: editingTransferId,
+                        lineItems,
+                        idem: { key: keyFor(OUTBOUND_STAGE.SET_ITEMS), tag: tagFor(OUTBOUND_STAGE.SET_ITEMS) },
+                      })
+                  );
                   toast("明細を更新しました");
                   try { await clearOutboundDraft?.(); } catch (_) {}
                   setStateSlice(setAppState, "outbound", (prev) => ({
@@ -8462,7 +8532,15 @@ function OutboundList({
                     );
                     return;
                   }
-                  await inventoryTransferSetItemsSafe({ id: draftTransferId, lineItems });
+                  await runOutboundEditWithCheckpoint(
+                    { action: "draft_save", transferId: draftTransferId, lineItems },
+                    ({ keyFor, tagFor }) =>
+                      inventoryTransferSetItemsSafe({
+                        id: draftTransferId,
+                        lineItems,
+                        idem: { key: keyFor(OUTBOUND_STAGE.SET_ITEMS), tag: tagFor(OUTBOUND_STAGE.SET_ITEMS) },
+                      })
+                  );
                   toast("下書きを更新しました（同ID）");
                   return;
                 }
@@ -9340,6 +9418,10 @@ async function ensureInventoryActivatedAtLocation({
     }
   }
 
+  // @idempotent: この呼び出しの ID（親の操作が無い呼び出しなので呼ぶたびに新しい。docs/IDEMPOTENT_MIGRATION.md 4.3 の F。
+  // 入庫と同じ。2 回目の呼び出しは在庫レベルがあれば上の確認で飛ばすので、初めの数が二重に入ることはない）
+  const activateOperationId = newAdhocOperationId();
+
   // 処理が必要なアイテムのみを処理
   for (const item of itemsToProcess) {
     const inventoryItemId = item.inventoryItemId;
@@ -9424,7 +9506,17 @@ async function ensureInventoryActivatedAtLocation({
       }
 
       // 3) inventoryActivate を実行
-      const variables = { inventoryItemId, locationId };
+      const variables = {
+        inventoryItemId,
+        locationId,
+        idempotencyKey: buildActivateKeyForPos({
+          operationId: activateOperationId,
+          locationId,
+          inventoryItemId,
+          available: initialQty,
+          onHand: initialQty,
+        }),
+      };
 
       // Shopify公式：inventoryActivate は available/onHand を渡せる。
       //    渡さないと 0 扱いになりやすいので、初期数量を入れる場合は両方そろえる。
@@ -9440,13 +9532,14 @@ async function ensureInventoryActivatedAtLocation({
             $locationId: ID!
             $available: Int
             $onHand: Int
+            $idempotencyKey: String!
           ) {
             inventoryActivate(
               inventoryItemId: $inventoryItemId
               locationId: $locationId
               available: $available
               onHand: $onHand
-            ) {
+            ) @idempotent(key: $idempotencyKey) {
               inventoryLevel { id }
               userErrors { field message }
             }
@@ -9634,39 +9727,53 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
 /* =========================
 /* Transfer/Shipment */
 
-async function inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note }) {
-  const mutation = `#graphql
-    mutation CreateTransferReady($input: InventoryTransferCreateAsReadyToShipInput!) {
-      inventoryTransferCreateAsReadyToShip(input: $input) {
-        inventoryTransfer { id status }
-        userErrors { field message }
-      }
-    }`;
-
+/** A: READY で作る。idem: { key, tag }（チェックポイントの keyFor(transfer_ready)） */
+async function inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note, idem }) {
   const input = { originLocationId, destinationLocationId, lineItems };
   const noteTrim = note != null && String(note).trim();
   if (noteTrim) input.note = noteTrim;
 
-  const data = await adminGraphql(mutation, { input });
-
-  assertNoUserErrors(data?.inventoryTransferCreateAsReadyToShip, "inventoryTransferCreateAsReadyToShip", lineItemsMeta);
-  return data.inventoryTransferCreateAsReadyToShip.inventoryTransfer;
+  const payload = await sendOutboundIdempotent({
+    adminGraphql,
+    query: `#graphql
+    mutation CreateTransferReady($input: InventoryTransferCreateAsReadyToShipInput!, $idempotencyKey: String!) {
+      inventoryTransferCreateAsReadyToShip(input: $input) @idempotent(key: $idempotencyKey) {
+        inventoryTransfer { id status }
+        userErrors { field message }
+      }
+    }`,
+    variables: { input },
+    idempotencyKey: idem?.key,
+    rejectTag: idem?.tag,
+    payloadField: "inventoryTransferCreateAsReadyToShip",
+    lineItemsMeta,
+    assertNoUserErrors,
+  });
+  return payload.inventoryTransfer;
 }
 
-async function inventoryTransferCreateDraft({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note }) {
-  const mutation = `#graphql
-    mutation CreateTransfer($input: InventoryTransferCreateInput!) {
-      inventoryTransferCreate(input: $input) {
-        inventoryTransfer { id status }
-        userErrors { field message }
-      }
-    }`;
+/** B: READY の代わりに下書きで作る（段は transfer_draft_for_ready。A と違う mutation なので同じキーにしない） */
+async function inventoryTransferCreateDraft({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note, idem }) {
   const input = { originLocationId, destinationLocationId, lineItems };
   const noteTrim = note != null && String(note).trim();
   if (noteTrim) input.note = noteTrim;
-  const data = await adminGraphql(mutation, { input });
-  assertNoUserErrors(data?.inventoryTransferCreate, "inventoryTransferCreate", lineItemsMeta);
-  return data.inventoryTransferCreate.inventoryTransfer;
+  const payload = await sendOutboundIdempotent({
+    adminGraphql,
+    query: `#graphql
+    mutation CreateTransfer($input: InventoryTransferCreateInput!, $idempotencyKey: String!) {
+      inventoryTransferCreate(input: $input) @idempotent(key: $idempotencyKey) {
+        inventoryTransfer { id status }
+        userErrors { field message }
+      }
+    }`,
+    variables: { input },
+    idempotencyKey: idem?.key,
+    rejectTag: idem?.tag,
+    payloadField: "inventoryTransferCreate",
+    lineItemsMeta,
+    assertNoUserErrors,
+  });
+  return payload.inventoryTransfer;
 }
 
 async function inventoryTransferMarkAsReadyToShip(transferId) {
@@ -9682,17 +9789,40 @@ async function inventoryTransferMarkAsReadyToShip(transferId) {
   return data.inventoryTransferMarkAsReadyToShip.inventoryTransfer;
 }
 
-async function createTransferReadyToShipWithFallback({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note }) {
+/**
+ * A → B。idempotency はチェックポイント（runChunkedOutboundCreateWithCheckpoint）が渡すもの（keyFor(段)）。
+ * @idempotent の返事（処理中・中身の違い）のときは B に進まない（前の A が通っていたら二重になる）。
+ */
+async function createTransferReadyToShipWithFallback({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note, idempotency }) {
+  const idemFor = (stage) => ({ key: idempotency?.keyFor?.(stage), tag: "transfer" });
   try {
-    return await inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note });
+    return await inventoryTransferCreateAsReadyToShip({
+      originLocationId,
+      destinationLocationId,
+      lineItems,
+      lineItemsMeta,
+      note,
+      idem: idemFor(OUTBOUND_STAGE.TRANSFER_READY),
+    });
   } catch (e) {
-    const msg = String(e?.message ?? e);
-    if (msg.includes("inventoryTransferCreateAsReadyToShip") || msg.includes("Field") || msg.includes("undefined")) {
-      const draft = await inventoryTransferCreateDraft({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note });
+    if (shouldFallbackToDraftForReady(e)) {
+      const draft = await inventoryTransferCreateDraft({
+        originLocationId,
+        destinationLocationId,
+        lineItems,
+        lineItemsMeta,
+        note,
+        idem: idemFor(OUTBOUND_STAGE.TRANSFER_DRAFT_FOR_READY),
+      });
       return await inventoryTransferMarkAsReadyToShip(draft.id);
     }
     throw e;
   }
+}
+
+/** チェックポイントの Shipment のキー（D）。作成のときも、時間切れのあとの補完のときも同じキー */
+function checkpointShipmentIdem(idempotency) {
+  return { key: idempotency?.keyFor?.(OUTBOUND_STAGE.SHIPMENT), tag: "shipment" };
 }
 
 /**
@@ -9725,29 +9855,32 @@ async function outboundMultipleTransfersWithInTransitShipments({
     splitLabel,
     adminGraphql,
     toastFn: toast,
-    createChunk: async ({ chunk, note }) => {
+    createChunk: async ({ chunk, note, idempotency }) => {
       const t = await createTransferReadyToShipWithFallback({
         originLocationId,
         destinationLocationId,
         lineItems: chunk.lineItems,
         lineItemsMeta: chunk.lineItemsMeta,
         note,
+        idempotency,
       });
       const sh = await createInventoryShipmentInTransit({
         movementId: t.id,
         lineItems: chunk.lineItems,
         trackingInput,
         lineItemsMeta: chunk.lineItemsMeta,
+        idem: checkpointShipmentIdem(idempotency),
       });
       return { transfer: t, shipment: sh };
     },
-    afterRecoveredChunk: async ({ transfer, shipment, chunk }) => {
+    afterRecoveredChunk: async ({ transfer, shipment, chunk, idempotency }) => {
       if (shipment?.id) return { transfer, shipment };
       const sh = await createInventoryShipmentInTransit({
         movementId: transfer.id,
         lineItems: chunk.lineItems,
         trackingInput,
         lineItemsMeta: chunk.lineItemsMeta,
+        idem: checkpointShipmentIdem(idempotency),
       });
       return { transfer, shipment: sh };
     },
@@ -9784,13 +9917,14 @@ async function outboundMultipleTransfersReadyToShip({
     splitLabel,
     adminGraphql,
     toastFn: toast,
-    createChunk: async ({ chunk, note }) => {
+    createChunk: async ({ chunk, note, idempotency }) => {
       const t = await createTransferReadyToShipWithFallback({
         originLocationId,
         destinationLocationId,
         lineItems: chunk.lineItems,
         lineItemsMeta: chunk.lineItemsMeta,
         note,
+        idempotency,
       });
       return { transfer: t, shipment: null };
     },
@@ -9838,13 +9972,14 @@ async function outboundOneTransferWithChunkedShipments({
       splitLabel: label,
       adminGraphql,
       toastFn: toast,
-      createChunk: async ({ chunk, note, chunkIndex1Based, chunkTotal }) => {
+      createChunk: async ({ chunk, note, chunkIndex1Based, chunkTotal, idempotency }) => {
         const noteDraft = note || `POS draft saved 分割${chunkIndex1Based}/${chunkTotal} ${ts}`;
         const t = await inventoryTransferCreateDraftSafe({
           originLocationId,
           destinationLocationId,
           lineItems: chunk.lineItems,
           note: noteDraft,
+          idem: { key: idempotency?.keyFor?.(OUTBOUND_STAGE.TRANSFER_DRAFT), tag: "transfer" },
         });
         return { transfer: t, shipment: null };
       },
@@ -9905,7 +10040,7 @@ async function outboundOneTransferWithChunkedShipments({
     splitLabel: label,
     adminGraphql,
     toastFn: toast,
-    createChunk: async ({ chunk, note }) => {
+    createChunk: async ({ chunk, note, idempotency }) => {
       let transfer;
       if (mode === "draft_transfer") {
         const ts = new Date().toISOString();
@@ -9915,6 +10050,7 @@ async function outboundOneTransferWithChunkedShipments({
           destinationLocationId,
           lineItems: chunk.lineItems,
           note: draftNote,
+          idem: { key: idempotency?.keyFor?.(OUTBOUND_STAGE.TRANSFER_DRAFT), tag: "transfer" },
         });
         return { transfer, shipment: null };
       }
@@ -9924,6 +10060,7 @@ async function outboundOneTransferWithChunkedShipments({
         lineItems: chunk.lineItems,
         lineItemsMeta: chunk.lineItemsMeta,
         note,
+        idempotency,
       });
       if (mode === "in_transit") {
         const sh = await createInventoryShipmentInTransit({
@@ -9931,6 +10068,7 @@ async function outboundOneTransferWithChunkedShipments({
           lineItems: chunk.lineItems,
           trackingInput,
           lineItemsMeta: chunk.lineItemsMeta,
+          idem: checkpointShipmentIdem(idempotency),
         });
         return { transfer, shipment: sh };
       }
@@ -9938,13 +10076,14 @@ async function outboundOneTransferWithChunkedShipments({
     },
     afterRecoveredChunk:
       mode === "in_transit"
-        ? async ({ transfer, shipment, chunk }) => {
+        ? async ({ transfer, shipment, chunk, idempotency }) => {
             if (shipment?.id) return { transfer, shipment };
             const sh = await createInventoryShipmentInTransit({
               movementId: transfer.id,
               lineItems: chunk.lineItems,
               trackingInput,
               lineItemsMeta: chunk.lineItemsMeta,
+              idem: checkpointShipmentIdem(idempotency),
             });
             return { transfer, shipment: sh };
           }
@@ -9963,16 +10102,18 @@ async function outboundOneTransferWithChunkedShipments({
  * 進行中（IN_TRANSIT）: 下書きShipment作成 → 追跡情報 → MarkInTransit。
  * createInTransit 一発より複数Shipment時に状態が揃いやすい。
  */
-async function createInventoryShipmentInTransit({ movementId, lineItems, trackingInput, lineItemsMeta }) {
+async function createInventoryShipmentInTransit({ movementId, lineItems, trackingInput, lineItemsMeta, idem }) {
   return createInventoryShipmentDraftThenMarkInTransit({
     movementId,
     lineItems,
     trackingInput,
     lineItemsMeta,
+    idem,
   });
 }
 
-async function createInventoryShipmentInTransitChunked({ movementId, lineItems, trackingInput, lineItemsMeta }) {
+/** idemFor(i, n) → { key, tag }（編集のチェックポイントの keyFor("shipment", i, n)・tagFor(…)） */
+async function createInventoryShipmentInTransitChunked({ movementId, lineItems, trackingInput, lineItemsMeta, idemFor }) {
   const chunks = chunkLineItemsWithMeta(lineItems, lineItemsMeta);
   const shipments = [];
   for (let i = 0; i < chunks.length; i++) {
@@ -9981,6 +10122,7 @@ async function createInventoryShipmentInTransitChunked({ movementId, lineItems, 
       lineItems: chunks[i].lineItems,
       trackingInput,
       lineItemsMeta: chunks[i].lineItemsMeta,
+      idem: idemFor?.(i, chunks.length),
     });
     shipments.push(sh);
   }
@@ -10000,20 +10142,25 @@ async function inventoryShipmentMarkInTransit(shipmentId) {
   return data?.inventoryShipmentMarkInTransit?.inventoryShipment ?? null;
 }
 
-/** 既存 Transfer に DRAFT シップメントを追加（movementId = Transfer ID） */
-async function createInventoryShipmentDraft({ movementId, lineItems, lineItemsMeta }) {
-  const mutation = `#graphql
-    mutation ShipmentCreateDraft($input: InventoryShipmentCreateInput!) {
-      inventoryShipmentCreate(input: $input) {
+/** 既存 Transfer に DRAFT シップメントを追加（movementId = Transfer ID）。D。idem: { key, tag } */
+async function createInventoryShipmentDraft({ movementId, lineItems, lineItemsMeta, idem }) {
+  const payload = await sendOutboundIdempotent({
+    adminGraphql,
+    query: `#graphql
+    mutation ShipmentCreateDraft($input: InventoryShipmentCreateInput!, $idempotencyKey: String!) {
+      inventoryShipmentCreate(input: $input) @idempotent(key: $idempotencyKey) {
         inventoryShipment { id status }
         userErrors { field message }
       }
-    }`;
-  const data = await adminGraphql(mutation, {
-    input: { movementId, lineItems },
+    }`,
+    variables: { input: { movementId, lineItems } },
+    idempotencyKey: idem?.key,
+    rejectTag: idem?.tag,
+    payloadField: "inventoryShipmentCreate",
+    lineItemsMeta,
+    assertNoUserErrors,
   });
-  assertNoUserErrors(data?.inventoryShipmentCreate, "inventoryShipmentCreate", lineItemsMeta);
-  return data.inventoryShipmentCreate.inventoryShipment;
+  return payload.inventoryShipment;
 }
 
 function normalizeInventoryShipmentTrackingClean(trackingInput) {
@@ -10044,17 +10191,22 @@ async function inventoryShipmentSetTrackingSafe(shipmentId, trackingInput) {
   return data?.inventoryShipmentSetTracking?.inventoryShipment ?? null;
 }
 
-async function createInventoryShipmentDraftThenMarkInTransit({ movementId, lineItems, trackingInput, lineItemsMeta }) {
-  const draft = await createInventoryShipmentDraft({ movementId, lineItems, lineItemsMeta });
+async function createInventoryShipmentDraftThenMarkInTransit({ movementId, lineItems, trackingInput, lineItemsMeta, idem }) {
+  const draft = await createInventoryShipmentDraft({ movementId, lineItems, lineItemsMeta, idem });
   const sid = String(draft?.id || "").trim();
   if (!sid) throw new Error("Shipment（下書き）のIDが取得できません");
+  // 同じキーの押し直しでは、Shopify は前に作った Shipment を今の状態で返す（docs/IDEMPOTENT_MIGRATION.md 3.3）。
+  // もう下書きでない（前の押し直しで IN_TRANSIT まで進んでいる）なら、追跡番号と発送済みにする所は飛ばす（もう一度送ると断られる）
+  const draftStatus = String(draft?.status || "").toUpperCase();
+  if (draftStatus && draftStatus !== "DRAFT") return draft;
   if (Object.keys(normalizeInventoryShipmentTrackingClean(trackingInput)).length > 0) {
     await inventoryShipmentSetTrackingSafe(sid, trackingInput);
   }
   return await inventoryShipmentMarkInTransit(sid);
 }
 
-async function createInventoryShipmentDraftChunked({ movementId, lineItems, lineItemsMeta }) {
+/** idemFor(i, n) → { key, tag }（編集のチェックポイントから） */
+async function createInventoryShipmentDraftChunked({ movementId, lineItems, lineItemsMeta, idemFor }) {
   const chunks = chunkLineItemsWithMeta(lineItems, lineItemsMeta);
   const shipments = [];
   for (let i = 0; i < chunks.length; i++) {
@@ -10062,6 +10214,7 @@ async function createInventoryShipmentDraftChunked({ movementId, lineItems, line
       movementId,
       lineItems: chunks[i].lineItems,
       lineItemsMeta: chunks[i].lineItemsMeta,
+      idem: idemFor?.(i, chunks.length),
     });
     shipments.push(sh);
   }
