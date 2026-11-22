@@ -127,6 +127,38 @@ handle を変えたいときは、環境変数 `APP_EVENTS_HANDLE_LITE` / `APP_E
 
 ---
 
+## 6-2. Partner API で契約を読む（既定オフ・2026-11-22）
+
+shopify.dev の Shopify App Pricing の説明では、店の今の契約を確かめる正しい場所は **Partner API の `activeSubscription(appId:, shopId:)`** です。Admin API の `currentAppInstallation.activeSubscriptions` に App Pricing の契約が出るかは書かれていません（未確認）。そのため、Partner API で読めるようにしました（DECISIONS D16）。**スイッチを入れるまでは今まで通り Admin API だけで読みます。**
+
+### T が作るもの
+
+1. Dev Dashboard → 組織の設定（Organization settings）→ Users → Security → **Partner API clients** → 「Add Partner API client」
+2. 名前を付け、権限は **Manage apps** だけにする（`activeSubscription` に要る権限。View financials は要らない）
+3. 出てきたトークンをすぐ控える（ページを離れると二度と見られない）。必要になったら作り直し（rotate）できる
+   - 作るには、組織の App development の権限・Manage financials の権限・確認済みの仕事用メールが要る
+
+### 環境変数（公開用の Render `pos-stock` だけ。自社用には入れない）
+
+| 名前 | 値 |
+|---|---|
+| `PARTNER_API_SUBSCRIPTION_ENABLED` | `1` で使う。空・ほかの値はオフ（既定） |
+| `PARTNER_API_TOKEN` | 上で控えたトークン（秘密。コミットしない・ログに出さない） |
+| `PARTNER_API_ORG_ID` | **Partner Dashboard**（partners.shopify.com）の URL にある数字。Dev Dashboard の URL の数字（organization ID）ではない |
+| `PARTNER_API_APP_ID` | 公開用アプリの ID（数字、または `gid://shopify/App/<数字>`） |
+| `PARTNER_API_VERSION` | 省略可。既定 `2026-10` |
+
+### 動き
+
+- 公開用で、スイッチがオンで設定がそろっているときだけ聞く。自社用は聞かない
+- 契約が見つかれば、それでプランを決める。**プランの判定は項目の `handle` を使う**ので、料金プランの handle にも `lite` / `pro`（3/10 か所なら `-3` / `-10`）を入れておく（推測: handle は表示名から作られることが多い。必ず Partner Dashboard で確かめる）
+- 「契約なし」と答えたら Admin API の結果を使う（Admin に有効な契約があれば止めない）
+- 失敗（429・5 秒の timeout・権限・公開アプリでない等）のときは今まで通り Admin API だけで決める。両方読めなければ今まで通り「確認できませんでした」で止める（#78）
+- 店ごとに、見つかった結果は 60 秒、契約なしは 15 秒覚える（上限が 1 クライアント 4 回/秒のため）。失敗した店は 30 秒聞き直さず Admin API だけで決める（timeout の 5 秒を毎回待たない）。429 のあとは 10 秒どの店でも聞かない。3 つのアプリ（POS Stock・Location Stock・Review Q&A）は Partner API client を分ける（上限は client ごと）
+- 確かめるとき: `ENABLE_PLAN_DEBUG=1` で `planDebug.planSource`（`partner` / `admin`）と `partnerStatus` が見える
+
+---
+
 ## 7. まとめチェックリスト
 
 - [ ] パートナー → Apps → 対象アプリ → 配布 → 価格 を開いた
@@ -136,6 +168,7 @@ handle を変えたいときは、環境変数 `APP_EVENTS_HANDLE_LITE` / `APP_E
 - [ ] 月額・トライアル日数（Lite 7日・Pro 14日）を設定した
 - [ ] リダイレクトURL を `/app` または `/app/settings` にした
 - [ ] 本番環境に SHOPIFY_APP_HANDLE を設定した（必要なら）
+- [ ] （使うなら）Partner API client を作り、6-2 の環境変数を公開用だけに入れた
 
 より詳しい考え方・無料プランの例・複数プラン例は **docs/APP_PRICING_SETUP_GUIDE.md** を参照してください。
 
@@ -154,14 +187,14 @@ Lite を「3ロケーション用」「10ロケーション用」、Pro も同�
 
 | # | プラン（表示名の例） | 内部ハンドル例 | 月額（USD）例 | トライアル | 備考 |
 |---|----------------------|----------------|---------------|------------|------|
-| 1 | **Lite - 3ロケーション** | `lite-3` | 例: 20 | 7日 | 3ロケーションまで |
-| 2 | **Lite - 10ロケーション** | `lite-10` | 例: 40 | 7日 | 10ロケーションまで。11以上は従量をアプリで報告 |
-| 3 | **Pro - 3ロケーション** | `pro-3` | 例: 60 | 14日 | 3ロケーションまで |
-| 4 | **Pro - 10ロケーション** | `pro-10` | 例: 120 | 14日 | 10ロケーションまで。11以上は従量をアプリで報告 |
+| 1 | **Lite - 3ロケーション** | `lite-3` | 20 | 7日 | 3ロケーションまで |
+| 2 | **Lite - 10ロケーション** | `lite-10` | 40 | 7日 | 10ロケーションまで。11以上は従量をアプリで報告 |
+| 3 | **Pro - 3ロケーション** | `pro-3` | 60 | 14日 | 3ロケーションまで |
+| 4 | **Pro - 10ロケーション** | `pro-10` | 120 | 14日 | 10ロケーションまで。11以上は従量をアプリで報告 |
 
 ※ 内部ハンドルは **必ずハイフン**（`lite-3` / `lite-10` / `pro-3` / `pro-10`）。アンダースコア（`lite_3` / `pro_10`）は使わない。アンダースコアだと 3/10 の判定ができないので、アプリはその handle を受け付けず、サーバーのログに `[billing] plan handle uses underscore` を出す（ロケーション数の制限がかからない）。Lite/Pro の判定は名前に含まれる "Lite"/"Pro" で行う。
 
-**ロケーション数とプランの一致チェック**: 表示名に **「3」または「10」**（例: 「Lite - 3ロケーション」「Lite - 10 locations」や `lite-3` / `lite-10`）が含まれる場合、アプリは「3ロケーション用」「10ロケーション用」を判定します。実際のロケーション数がプランを超えていると、プラン変更の案内が表示され、変更まで設定・在庫・入出庫などの機能は利用できません。
+**ロケーション数とプランの一致チェック**: 表示名に **「3」または「10」**（例: 「Lite - 3ロケーション」「Lite - 10 locations」や `lite-3` / `lite-10`）が含まれる場合、アプリは「3ロケーション用」「10ロケーション用」を判定します。3 ロケーションのプランで実際のロケーションが 4 か所以上あると、プラン変更の案内が表示され、変更まで設定・在庫・入出庫などの機能と POS のタイル（「プランを上げてください」）は利用できません。10 ロケーションのプランは 11 か所以上でも止めず、従量で報告します（DECISIONS D15・D17）。
 
 ### パートナーでの設定手順（4プラン）
 

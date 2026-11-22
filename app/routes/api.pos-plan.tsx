@@ -4,6 +4,8 @@
 // 自社用（inhouse）は GraphQL を呼ばずに allowed を返す。
 // POST { feature } → 200 { ok: true, access: "allowed", plan }
 //                  → 402 { ok: false, errorCode: "plan_required", heading, message }
+//                  → 402 { ok: false, errorCode: "location_limit", heading, message, locationsCount, maxLocations, requiredPlan }
+//                    （3 ロケーションのプランで 4 か所以上。タイルを開くときだけ止める。確定の途中の API では止めない）
 //                  → 503 { ok: false, errorCode: "plan_check_failed", heading, message }（もう一度試してよい）
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { jwtVerify } from "jose";
@@ -89,9 +91,10 @@ export async function action({ request }: ActionFunctionArgs) {
     const { admin } = await unauthenticated.admin(shop);
     return withGraphQLRetry(admin);
   };
-  const blocked = await planBlockedPosResponse({ shop, feature, getAdmin, headers: CORS_HEADERS });
+  // タイルを開くとき＝新しい操作を始める前。ロケーション数の上限もここで見る（atOperationStart）
+  const blocked = await planBlockedPosResponse({ shop, feature, getAdmin, headers: CORS_HEADERS, atOperationStart: true });
   if (blocked) return blocked;
   // 通った（自社用、または契約で使える）。キャッシュ済みなので 2 回目は GraphQL を呼ばない
-  const { shopPlan } = await checkShopFeatureAccess({ shop, feature, getAdmin });
+  const { shopPlan } = await checkShopFeatureAccess({ shop, feature, getAdmin, atOperationStart: true });
   return json({ ok: true, access: "allowed", feature, plan: shopPlan.plan, distribution: shopPlan.distribution }, 200);
 }

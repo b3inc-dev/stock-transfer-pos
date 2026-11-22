@@ -231,7 +231,7 @@ API バージョンバンプとセットで別 PR。
 | apply-change | イベントを作る前に 402（`plan_required`）/ 503（`plan_check_failed`）。在庫も DB も変わらない。completed の再送・処理中・一部反映は今まで通り答える。入出庫の activity は、契約を読めなかっただけなら通す（Shopify の操作のあとの在庫の戻し） |
 | log-inventory-change / pos-stocktake-complete | 未契約とはっきり分かったときだけ 402。読めなかったときは通す |
 
-- **残り（サーバーで止められないもの）**: 出庫の Transfer 作成・入庫の受領は POS から Shopify へ直接送る（D1）。ここはタイルの `PlanGate` だけが止め口。古い版の拡張が端末に残っている間は止まらない（推測。次の `shopify app deploy` で入れ替わる）。ロケーション数とプランの不一致は今まで通り管理画面だけで扱う。
+- **残り（サーバーで止められないもの）**: 出庫の Transfer 作成・入庫の受領は POS から Shopify へ直接送る（D1）。ここはタイルの `PlanGate` だけが止め口。古い版の拡張が端末に残っている間は止まらない（推測。次の `shopify app deploy` で入れ替わる）。ロケーション数とプランの不一致は D17 で POS のタイルでも止めるようにした。
 
 ## D15. 10 か所を超えたロケーションは App Events API で 1 請求期間に 1 回報告する（2026-11-21）
 
@@ -239,13 +239,42 @@ API バージョンバンプとセットで別 PR。
 - **理由**: App Pricing の契約に Billing API の従量は付けられない（App Events API の請求エラー `INVALID_SUBSCRIPTION`）。App Pricing の使用量は月額のみ・上限（cap）なし（shopify.dev 2026-11-21 確認）。
 - **判断**:
   - 送る数は `max(0, ロケーション数 − 10)`。メーターは Lite `extra_location_lite`（$4）・Pro `extra_location_pro`（$12）。handle は env で変えられる。
-  - 1 店・1 請求期間（`activeSubscriptions[].currentPeriodEnd`）に 1 回。DB `AppUsageReport` の `(shop, periodEnd)` 一意 ＋ Shopify の `idempotency_key`（請求イベントは永久に重複しない）。期間の中で最初に数えた時点の数で送る（あとから増えた分は次の期間から）。一度送ろうとした行は数を変えない。
+  - 1 店・1 請求期間（プランを決めた契約の今の請求期間の終わり。D16 の Partner API で決めたときは Partner の期間、そうでなければ `activeSubscriptions[].currentPeriodEnd`）に 1 回。期間がどちらからも分からないときは送らず `missing_period` で数と理由を残す。DB `AppUsageReport` の `(shop, periodEnd)` 一意 ＋ Shopify の `idempotency_key`（請求イベントは永久に重複しない）。期間の中で最初に数えた時点の数で送る（あとから増えた分は次の期間から）。一度送ろうとした行は数を変えない。
   - 外へ送るのは `APP_EVENTS_USAGE_ENABLED=1` のときだけ（既定オフ）。オフでも数は `disabled` で残す。
   - 上限が Shopify に無いので、アプリ側の上限 `APP_EVENTS_USAGE_MAX_UNITS`（既定 50）を超えたら送らず `over_limit` で残す。
   - 失敗は `failed`（HTTP の番号・理由・回数）で残し、10 分おいて同じキー・同じ数で送り直す（最大 8 回。400・403 は自動で送り直さない）。202 は受け取っただけなので、請求の成否は Dev Dashboard の Logs で見る。
   - 呼ぶのは `getShopPlan`（管理画面と POS の API）。待たない。同じ店・同じ期間の DB 確認は 1 つのサーバーで 10 分に 1 回まで。自社用（Ciara）は来ない。開発ストアはテスト課金なので送ってよい。
   - 3 か所プランでロケーションが多い店（`locationPlanMismatch`）には送らない（機能が止まっている。プラン変更の案内のまま）。
 - **残り**: 期間の途中で増えた分は取らない。アプリの uninstall のあと 24 時間で期間が閉じる（送り損ねた `failed` はそこで失う）。shop/redact で `AppUsageReport` を消すかは未決（個人情報は入っていない）。
+
+## D16. 契約は Partner API の activeSubscription でも読めるようにする（既定オフ・2026-11-22）
+
+- **背景**: T の決定（2026-11-21）。shopify.dev の Shopify App Pricing の説明は、店の契約の正しい確かめ方を Partner API の `activeSubscription(appId:, shopId:)` としている。Admin API の `currentAppInstallation.activeSubscriptions` に App Pricing の契約が出るかは書かれていない（未確認）。
+- **判断**:
+  - 読む処理は `app/utils/partner-subscription.server.ts` の 1 か所。同じ形のファイルを location-stock-indicator・review-qa にも置く（リポジトリをまたぐ共通パッケージは作らない）。
+  - 既定オフ。`PARTNER_API_SUBSCRIPTION_ENABLED=1` と `PARTNER_API_TOKEN`・`PARTNER_API_ORG_ID`（Partner Dashboard の URL の数字）・`PARTNER_API_APP_ID` がそろったときだけ、公開用で聞く。版は既定 `2026-10`（`PARTNER_API_VERSION` で変えられる）。
+  - 契約が見つかれば正にする（項目の `handle` を名前として、今と同じ Pro/Lite・3/10 の決まりで読む）。「契約なし」なら Admin API の結果を使う（払っている店を止めない）。失敗なら Admin API だけで決め、両方読めなければ D14 の `plan_check_failed`。
+  - 店の ID は Admin API の `shop { id }` から取る（Admin を読めなければ Partner にも聞けない → D14 のまま）。
+  - 店ごとに見つかった結果は 60 秒・契約なしは 15 秒覚え、同時の呼び出しは 1 回にまとめる（上限 1 client 4 回/秒）。失敗した店は 30 秒聞き直さず Admin API だけで決め、429 のあとは 10 秒どの店でも聞かない（2026-11-22 レビューで追加）。トークンはログに出さない。
+  - 10 か所を超えた分の報告（D15）の請求期間も、プランを決めた契約から取る（`pickUsagePeriodEnd`）。Partner で決めたら Partner の `currentBillingCycle.endTime`、無ければ（試用中など）Admin API の ACTIVE な契約の `currentPeriodEnd`、どちらも無ければ送らず `missing_period` で残す。DB の `periodEnd` と `idempotency_key` は期間の終わりの **UTC の日付**（例 `2026-12-21`、`usagePeriodKey`）にする。Partner と Admin で期間の終わりが秒の単位でずれても同じ行・同じキーになり、2 回送らない。同じ日付の行が無くても前後 1 日の行（送った・送りかけ・止めた）があれば同じ期間としてその行のキーで続ける（UTC の 0 時をまたぐずれ。例 23:59:58 と 00:00:01）。期間の終わり 10 分前の止めは正確な時刻で見る。Admin に App Pricing の契約が出ない店でも送れるように（2026-11-22 レビューで追加）。Admin の期間は、ACTIVE な契約の先頭ではなく**プランを決めた契約**のものだけを使う（`selectPlanSubscription`。Partner の `legacySubscriptionId` と同じ契約 → プランの名前に合う契約 → 2 件あれば `createdAt` が新しい方。決まらず期間も違えば送らず `missing_period`）。古い Billing API の契約と App Pricing の契約が同時に ACTIVE の店（切りかえの途中）で、別の契約の期間とキーを使わないため（2026-11-22 POS Receipt #41 のレビューの P2-1 と同じ直し）。
+- **残り**: 開発ストアのテスト課金が Partner の `activeSubscription` に出るかは未確認（出なければ「契約なし」→ Admin の結果を使うので止まらない）。
+
+## D17. 料金は 4 プラン（$20 / $40 / $60 / $120・無料体験 7 / 14 日）。3 ロケーションのプランで多すぎる店は POS のタイルでも止める（2026-11-22）
+
+- **T の決定（2026-11-22 18:05、#79）**:
+  - 公開版の料金は仮の案のまま正式: Lite - 3ロケーション $20・Lite - 10ロケーション $40・Pro - 3ロケーション $60・Pro - 10ロケーション $120（月額 USD）。無料体験は Lite 7 日・Pro 14 日。10 ロケーションのプランは 11 か所目から 1 か所ごとに Lite $4 / Pro $12（D15）。#73 の案 A（$19 / $59）は使わない。
+  - 3 ロケーションのプランで 3 か所を超えた店は、POS の画面でも止める（「プランを上げてください」を出す）。
+- **判断**:
+  - 判定は 1 か所: `app/utils/billing.ts` の `decideLocationPlanMismatch`（契約の名前から 3/10 を読む）→ `app/utils/shop-plan.server.ts` の `getShopPlan` が `locationPlanMismatch` / `maxLocationsForPlan` を出す。管理画面のレイアウト（`app/routes/app.tsx`）と POS（`/api/pos-plan`）はどちらもこの結果を見る。POS 拡張ではロケーションを数えない。
+  - 止めるのは **3 ロケーションのプランだけ**。10 ロケーションのプランは 11 か所以上でも止めない（従量で払う）。2026-11-22 までは 10 ロケーションのプランで 11 か所以上の店も `locationPlanMismatch` になっていて、管理画面が止まり、D15 の従量も送られなかった（`!locationPlanMismatch` の条件）。ここで直した。
+  - POS で止めるのは **新しい操作を始める前（タイルを開くとき）だけ**。`/api/pos-plan` が `planBlockedPosResponse({ atOperationStart: true })` → `checkShopFeatureAccess` → `decideOperationStartAccess`（`extensions/common/planAccess.js`）で `location_limit` を返す（HTTP 402）。
+  - 書き込みの API（apply-change・log-inventory-change・pos-stocktake-complete）と管理画面の action では **ロケーション数を見ない**（`decideFeatureAccess` のまま）。確定の途中（Shopify で出庫・入庫を済ませたあとの在庫の戻し、履歴の記録、棚卸の完了、250 件ごとの続き）で止めると、半分だけ動いた状態になるため（`STATE_MACHINE.md`）。タイルを開いたあとにロケーションが増えても、その操作は最後まで終わる。
+  - 見出しは「プランを上げてください」。本文に今の上限・ロケーションの数・要るプラン（Lite の機能なら今の種類の 10 ロケーション、Pro だけの機能なら「Pro - 10ロケーション」。`requiredPlanForLocations`）と料金プランへのたどり方を書く。
+  - ロケーション数で止まる店は、サーバーで 60 秒覚えない（プランを上げた直後に「もう一度確認」で通れるように）。
+  - 古い版の拡張: 402 を「契約が要る」として受けるが、サーバーの `heading` / `message` をそのまま出すので、文は新しいものになる（推測ではなく `posPlanGate.js` の旧コードの動き）。
+  - 自社用（Ciara）: 拡張は `APP_MODE = "inhouse"` で聞かない。サーバーも自社用は GraphQL を呼ばずに通す。`getShopPlan` も公開用・`CUSTOM_APP_STORE_IDS` でない店だけ判定する（3 重）。
+- **テスト**: `tests/location-limit.test.mjs`。
+- **残り**: 本番に出るのは T が `shopify app deploy`（公開用）を実行してから。それまでは古い版の拡張（D14 の文）で、ロケーション数では止まらない。
 
 ## D18. 公開用は read_orders を持たない（2026-11-22 T の決定・#79）
 

@@ -62,6 +62,22 @@ export function getPlanFromActiveSubscriptions(subscriptions: ActiveSubscription
 }
 
 /**
+ * この契約がプラン（getPlanFromActiveSubscriptions の結果）を決めた契約か。従量の請求期間をその契約から取るのに使う。
+ * Pro は名前に pro を含む契約。Lite は名前に lite を含む契約（名前から読めず Lite に倒したときは、ACTIVE な契約のどれでも）。
+ */
+export function subscriptionDecidesPlan(
+  sub: { name?: string | null; status?: string | null },
+  plan: "lite" | "pro",
+  allSubscriptions: ReadonlyArray<{ name?: string | null; status?: string | null }>
+): boolean {
+  const name = String(sub?.name ?? "");
+  if (plan === "pro") return /pro/i.test(name);
+  if (/lite/i.test(name)) return true;
+  const active = allSubscriptions.filter((s) => String(s?.status ?? "").toUpperCase() === "ACTIVE");
+  return !active.some((s) => /lite|pro/i.test(String(s?.name ?? "")));
+}
+
+/**
  * サブスクリプション名から「3ロケーション用」か「10ロケーション用」かを判定する。
  * パートナーで lite-3 / lite-10 / pro-3 / pro-10（必ずハイフン）のように設定している場合、名前に "10" または "3" が含まれる想定。
  * アンダースコアの handle（lite_3 / pro_10）は受け付けない（console.error を出して null）。
@@ -88,6 +104,29 @@ export function getMaxLocationsFromSubscriptionName(name: string): 3 | 10 | null
   if (/-3\b|3ロケーション|3\s*locations?/i.test(n)) return 3;
   if (/\b3\b/.test(n)) return 3;
   return null;
+}
+
+/**
+ * ロケーション数がプランの上限を超えているか（管理画面のレイアウト・料金プラン画面・POS のタイルが使う 1 か所。getShopPlan から呼ぶ）。
+ * - ACTIVE な契約の名前から 3/10 を読み、いちばん大きい数を今の上限にする
+ * - 上限で止めるのは 3 ロケーションのプランだけ。10 ロケーションのプランは 11 か所目から従量（D15）なので止めない
+ *   （2026-11-22 まで 10 ロケーションのプランで 11 か所以上の店も止めていて、従量も送られなかった。D17）
+ * - 名前から読めない契約しかないときは止めない（null。今まで通り）
+ */
+export function decideLocationPlanMismatch(
+  subscriptions: ReadonlyArray<{ name?: string | null; status?: string | null }>,
+  locationsCount: number
+): { mismatch: false } | { mismatch: true; maxLocations: 3 } {
+  const active = (Array.isArray(subscriptions) ? subscriptions : []).filter(
+    (s) => String(s?.status || "").toUpperCase() === "ACTIVE"
+  );
+  let maxFromPlans: 3 | 10 | null = null;
+  for (const s of active) {
+    const m = getMaxLocationsFromSubscriptionName(String(s?.name || ""));
+    if (m !== null && (maxFromPlans === null || m > maxFromPlans)) maxFromPlans = m;
+  }
+  if (maxFromPlans === 3 && Number(locationsCount) > 3) return { mismatch: true, maxLocations: 3 };
+  return { mismatch: false };
 }
 
 /** 10 loc 超の従量単価（USD）。送るのは app-events-usage.server.ts（App Events API） */

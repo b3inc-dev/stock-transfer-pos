@@ -73,6 +73,8 @@ npm run deploy:public    # 公開用（POS Stock・shopify.app.public.toml）
 
 POS が使うアプリと Render で動かしているアプリが同じになるよう、上記が一致していることを確認してください。変更した場合は Render で保存し、必要に応じて再デプロイします。
 
+- （任意・既定オフ）Partner API で契約を読むときは、公開用だけに `PARTNER_API_SUBSCRIPTION_ENABLED=1`・`PARTNER_API_TOKEN`・`PARTNER_API_ORG_ID`・`PARTNER_API_APP_ID` を入れる。詳細は [PARTNER_PRICING_SETUP_STEPS.md の 6-2](PARTNER_PRICING_SETUP_STEPS.md)
+
 
 ## Cursor・Codex・Claude Code 共通開発運用
 
