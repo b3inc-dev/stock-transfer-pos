@@ -8,6 +8,8 @@ import {
   PARTNER_API_DEFAULT_VERSION,
   PARTNER_CACHE_FOUND_MS,
   PARTNER_CACHE_NONE_MS,
+  PARTNER_FAILURE_BACKOFF_MS,
+  PARTNER_THROTTLE_COOLDOWN_MS,
   __clearPartnerSubscriptionCacheForTest,
   fetchPartnerActiveSubscription,
   getPartnerActiveSubscription,
@@ -156,7 +158,7 @@ describe("答えの読み方", () => {
 });
 
 describe("店ごとに少し覚える", () => {
-  test("見つかったら 60 秒、なしは 15 秒。失敗は覚えない", async () => {
+  test("見つかったら 60 秒、なしは 15 秒。失敗は 30 秒覚えて聞き直さない", async () => {
     let t = 1_000;
     let calls = 0;
     const fetchImpl = async () => { calls++; return { status: 200, text: async () => JSON.stringify(subBody(["pro"])) }; };
@@ -179,10 +181,47 @@ describe("店ごとに少し覚える", () => {
     __clearPartnerSubscriptionCacheForTest();
     calls = 0;
     const fail = async () => { calls++; return { status: 503, text: async () => "" }; };
-    await captureWarn(async () => {
-      await getPartnerActiveSubscription({ ...args, fetchImpl: fail });
+    const { lines } = await captureWarn(async () => {
+      const first = await getPartnerActiveSubscription({ ...args, fetchImpl: fail });
+      assert.equal(first.ok, false);
+      assert.equal(first.reason, "http_error");
+      const second = await getPartnerActiveSubscription({ ...args, fetchImpl: fail });
+      assert.equal(second.ok, false);
+      assert.equal(second.cached, true);
+      assert.equal(calls, 1);
+      t += PARTNER_FAILURE_BACKOFF_MS + 1;
       await getPartnerActiveSubscription({ ...args, fetchImpl: fail });
     });
+    assert.equal(calls, 2);
+    // ログは実際に聞いて失敗したときだけ
+    assert.equal(lines.length, 2);
+  });
+  test("失敗のあと成功すれば失敗の記憶を消す（ほかの店の結果は混ざらない）", async () => {
+    let t = 1_000;
+    const other = "gid://shopify/Shop/999";
+    const ok = async () => ({ status: 200, text: async () => JSON.stringify(subBody(["pro"])) });
+    const fail = async () => ({ status: 503, text: async () => "" });
+    await captureWarn(() => getPartnerActiveSubscription({ config: config(), shopGid: SHOP, fetchImpl: fail, now: () => t }));
+    // 別の店は失敗の記憶に関係なく聞く
+    const r = await getPartnerActiveSubscription({ config: config(), shopGid: other, fetchImpl: ok, now: () => t });
+    assert.equal(r.ok, true);
+    assert.equal(r.cached, false);
+    t += PARTNER_FAILURE_BACKOFF_MS + 1;
+    const back = await getPartnerActiveSubscription({ config: config(), shopGid: SHOP, fetchImpl: ok, now: () => t });
+    assert.equal(back.ok, true);
+    assert.equal(back.cached, false);
+  });
+  test("429 のあとは 10 秒どの店でも聞かない", async () => {
+    let t = 1_000;
+    let calls = 0;
+    const throttled = async () => { calls++; return { status: 429, text: async () => JSON.stringify({ errors: [{ message: "Too many requests", extensions: { code: "429" } }] }) }; };
+    await captureWarn(() => getPartnerActiveSubscription({ config: config(), shopGid: SHOP, fetchImpl: throttled, now: () => t }));
+    assert.equal(calls, 1);
+    const other = await getPartnerActiveSubscription({ config: config(), shopGid: "gid://shopify/Shop/999", fetchImpl: throttled, now: () => t });
+    assert.deepEqual(other, { ok: false, reason: "throttled", cached: true });
+    assert.equal(calls, 1);
+    t += PARTNER_THROTTLE_COOLDOWN_MS + 1;
+    await captureWarn(() => getPartnerActiveSubscription({ config: config(), shopGid: "gid://shopify/Shop/999", fetchImpl: throttled, now: () => t }));
     assert.equal(calls, 2);
   });
   test("同時の呼び出しは 1 回にまとめる", async () => {

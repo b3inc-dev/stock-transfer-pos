@@ -227,7 +227,7 @@ API バージョンバンプとセットで別 PR。
   - 既定オフ。`PARTNER_API_SUBSCRIPTION_ENABLED=1` と `PARTNER_API_TOKEN`・`PARTNER_API_ORG_ID`（Partner Dashboard の URL の数字）・`PARTNER_API_APP_ID` がそろったときだけ、公開用で聞く。版は既定 `2026-10`（`PARTNER_API_VERSION` で変えられる）。
   - 契約が見つかれば正にする（項目の `handle` を名前として、今と同じ Pro/Lite・3/10 の決まりで読む）。「契約なし」なら Admin API の結果を使う（払っている店を止めない）。失敗なら Admin API だけで決め、両方読めなければ D14 の `plan_check_failed`。
   - 店の ID は Admin API の `shop { id }` から取る（Admin を読めなければ Partner にも聞けない → D14 のまま）。
-  - 店ごとに見つかった結果は 60 秒・契約なしは 15 秒覚え、同時の呼び出しは 1 回にまとめる（上限 4 回/秒）。失敗は覚えない。トークンはログに出さない。
+  - 店ごとに見つかった結果は 60 秒・契約なしは 15 秒覚え、同時の呼び出しは 1 回にまとめる（上限 1 client 4 回/秒）。失敗した店は 30 秒聞き直さず Admin API だけで決め、429 のあとは 10 秒どの店でも聞かない（2026-11-22 レビューで追加）。トークンはログに出さない。
 - **残り**: 開発ストアのテスト課金が Partner の `activeSubscription` に出るかは未確認（出なければ「契約なし」→ Admin の結果を使うので止まらない）。
 
 ---
