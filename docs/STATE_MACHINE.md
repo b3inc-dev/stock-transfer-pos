@@ -276,5 +276,21 @@ Admin 再試行は `pending_complete_v1` からメタのみ適用（在庫 API �
 - activate 成功後に短い settle + `inventoryLevel` 再確認。**確かな missing だけ再 ensure**。verify uncertain / lag では set 前にハード失敗しない（set + not-stocked 1 回再試行へ）。
 - setQuantities が **厳格な** `not stocked at the location` 等で失敗し `partiallyApplied` でないときだけ、再 activate→settle→set を **1 回**。
 - POS 向け `error` は `formatInventoryApiError` で空/Unknown 固定を避け、`errorCode`（`activate_failed` / `not_stocked` / `set_quantities_failed` / `partial_failed`）を付与。
-- **#19 CAS は使わない**。post-success / outer-catch は #22（旧 #20/#21）を維持し、本硬化は activate→set 窓のみ。
-- **残存**: Shopify 伝播遅延・権限・追跡無効・同時売上の絶対上書き（#19）。
+- post-success / outer-catch は #22（旧 #20/#21）を維持する。
+- **残存**: Shopify 伝播遅延・権限・追跡無効。
+
+### 差異あり apply-change: 書く直前の数で条件付きに書く（2026-11-22・#19 の引き継ぎ）
+
+棚卸の確定（`activity: "inventory_count"`）だけ、activate のあと各チャンクを書く直前に今の数を読み、`changeFromQuantity` に入れて書く（`compareWithLive`。詳細は DECISIONS D9 の追記）。
+
+```text
+activate → settle → [チャンクごと] 今の数を読む（50 件ずつ）
+  → 読めない: 1 チャンク目なら 503 current_quantity_unreadable（在庫は動かない・同じ ID で送り直し可）
+  → もう目標の数: 書かない（入った扱い）
+  → changeFromQuantity = 今の数 で書く
+      → STALE（読んでから書くまでに動いた）: 1 回読み直し → 動いた商品は上書きしない・残りを書き直す
+      → 2 回目も断られる: はっきりした失敗（先のチャンクは D3c のとおり戻す）
+→ 動いた商品が 1 件でもあれば partial_failed（成否不明ではない。動いた行は failed・再 set しない）
+```
+
+- 残る危険: 一覧で在庫を読んでから確定で今の数を読むまでの売上は、数えた数で上書きされる（D9 追記の「選ばなかった案」）。

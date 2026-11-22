@@ -196,7 +196,10 @@ describe("公開用／自社用の決まりは 1 つ（レビュー #78 の P2�
     assert.match(plan, /resolvePlanDistribution\(process\.env, shop, getPublicClientId\(\), getInhouseClientId\(\)\)/);
     assert.match(probe, /resolveServerDistribution\(process\.env, shop, getPublicClientId\(\), getInhouseClientId\(\)\)/);
     assert.match(probe, /from "\.\/plan-distribution"/);
-    assert.match(probe, /import\.meta\.url/);
+    // client_id を読むところは app-toml.server.ts（shopify.server.ts からも使うため。D18）
+    assert.match(probe, /from "\.\/app-toml\.server"/);
+    assert.match(read("app/utils/app-toml.server.ts"), /import\.meta\.url/);
+    assert.doesNotMatch(read("app/utils/app-toml.server.ts"), /from "\.\.\/shopify\.server"/, "shopify.server.ts と輪にならない");
     assert.doesNotMatch(read("app/utils/shop-install-probe.ts"), /export function resolveServerDistribution/, "決まりを 2 つ書かない");
   });
 });

@@ -46,23 +46,23 @@
   ```bash
   npm run deploy:public
   ```
-  → APP_MODE を "public" に書き換え → 公開用の config を有効化 → `shopify app deploy` を実行します。
+  → APP_MODE を "public" に書き換え → `scripts/verify-app-mode.js` で APP_MODE と `shopify.app.public.toml` の URL が合うか確かめる（合わなければ deploy せずに止まる）→ 公開用の config を有効化 → `--config shopify.app.public.toml` で deploy します。
 
 - **自社用にデプロイするとき**
   ```bash
   npm run deploy:inhouse
   ```
-  → APP_MODE を "inhouse" に書き換え → 自社用の config を有効化 → `shopify app deploy` を実行します。
+  → APP_MODE を "inhouse" に書き換え → `scripts/verify-app-mode.js` で APP_MODE と `shopify.app.toml` の URL が合うか確かめる（合わなければ deploy せずに止まる）→ 自社用の config を有効化 → `--config shopify.app.toml` で deploy します。
+
+**`npm run deploy` と `shopify app deploy` の直打ちは使いません**（`npm run deploy` は止めてあり、案内を出して終わります。直打ちは APP_MODE の確かめを通らないため。`docs/DEPLOY.md` §3）。
 
 **補足**: スクリプト内では `shopify app config use shopify.app.public.toml` / `shopify app config use shopify.app.toml` を使っています。お使いの CLI で短い名前（`config use public` など）が必要な場合は、`package.json` の `deploy:public` / `deploy:inhouse` を編集してください。
 
 実行後、**ディスク上の appUrl.js は、いまデプロイした方のモード**に変わります。次に別の方をデプロイするときは、もう一方のスクリプトを実行すれば切り替わります。
 
-### 方法B: 手動で appUrl.js を書き換えてからデプロイ
+### 方法B: 手動で appUrl.js を書き換えてからデプロイ（使わない）
 
-1. `extensions/common/appUrl.js` の **APP_MODE** を "public" または "inhouse" に変更。
-2. 公開用なら `shopify app config use public`、自社用なら `shopify app config use shopify.app.toml`（または省略で自社用）。
-3. `shopify app deploy` を実行。
+> **2026-11 から使いません。** `shopify app deploy` を直接打つと、APP_MODE と toml の確かめ（`scripts/verify-app-mode.js`）を通らず、POS が別のアプリのサーバーを呼ぶことがあります（pos-stock-ciara-251 で起きた）。CLI では方法A の `npm run deploy:public` / `npm run deploy:inhouse` を使ってください（`docs/DEPLOY.md` §3）。
 
 ### 方法C: ブランチで切り替える
 
@@ -79,7 +79,7 @@
 |--------|------------|--------|
 | **パートナーダッシュボード** | APP_MODE=public で push → 公開アプリのダッシュボードからデプロイ | APP_MODE=inhouse で push → カスタムアプリのダッシュボードからデプロイ |
 | **CLI（npm スクリプト）** | `npm run deploy:public` | `npm run deploy:inhouse` |
-| **CLI（手動）** | appUrl.js で public に変更 → `shopify app config use public` → `shopify app deploy` | appUrl.js で inhouse に変更 → `shopify app config use shopify.app.toml` → `shopify app deploy` |
+| **CLI（手動）** | 使わない（`npm run deploy:public` を使う） | 使わない（`npm run deploy:inhouse` を使う） |
 
 **どちらのアプリにデプロイするか**と、**appUrl.js の APP_MODE** が一致していれば、パートナーダッシュボードからでも CLI からでも問題ありません。
 

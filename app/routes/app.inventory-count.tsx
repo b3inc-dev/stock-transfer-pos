@@ -6721,13 +6721,9 @@ export default function InventoryCountPage() {
                                             newConfigs.delete(col.id);
                                             setCollectionConfigs(newConfigs);
                                           }}
+                                          className="Admin-tertiary"
                                           style={{
                                             fontSize: "12px",
-                                            color: "#d72c0d",
-                                            background: "none",
-                                            border: "none",
-                                            cursor: "pointer",
-                                            textDecoration: "underline",
                                             padding: "4px 8px",
                                             flexShrink: 0,
                                           }}
@@ -9027,7 +9023,7 @@ export default function InventoryCountPage() {
                                     )}
                                   </div>
                                   {normalItems.length > 0 ? (
-                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
+                                    <table className="History-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
                                       <thead>
                                         <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
                                           <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品グループ</th>
@@ -9052,20 +9048,20 @@ export default function InventoryCountPage() {
                                           const cellStyle: React.CSSProperties = { padding: "8px", borderRight: "1px solid #eee" };
                                           return (
                                             <tr key={`${groupId}-${it.inventoryItemId}-${idx}`} style={{ borderBottom: "1px solid #eee" }}>
-                                              <td style={{ ...cellStyle, fontWeight: "bold", color: isGroupCancelled ? "#666" : isGroupCompleted ? "#28a745" : "#ffc107" }}>
+                                              <td data-label="商品グループ" style={{ ...cellStyle, fontWeight: "bold", color: isGroupCancelled ? "#666" : isGroupCompleted ? "#28a745" : "#ffc107" }}>
                                                 {groupName}
                                                 <div style={{ fontSize: "11px", color: "#666", marginTop: "2px" }}>
                                                   {isGroupCancelled ? "キャンセル" : isGroupCompleted ? "✓ 完了" : "未完了"}
                                                 </div>
                                               </td>
-                                              <td style={cellStyle}>{productName}</td>
-                                              <td style={cellStyle}>{sku || "-"}</td>
-                                              <td style={cellStyle}>{jan || "-"}</td>
-                                              <td style={cellStyle}>{option1 || "-"}</td>
-                                              <td style={cellStyle}>{option2 || "-"}</td>
-                                              <td style={cellStyle}>{option3 || "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>
+                                              <td data-label="商品名" style={cellStyle}>{productName}</td>
+                                              <td data-label="SKU" style={cellStyle}>{sku || "-"}</td>
+                                              <td data-label="JAN" style={cellStyle}>{jan || "-"}</td>
+                                              <td data-label="オプション1" style={cellStyle}>{option1 || "-"}</td>
+                                              <td data-label="オプション2" style={cellStyle}>{option2 || "-"}</td>
+                                              <td data-label="オプション3" style={cellStyle}>{option3 || "-"}</td>
+                                              <td data-label="在庫" style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
+                                              <td data-label="実数" style={{ ...cellStyle, textAlign: "right" }}>
                                                 {modalEditMode && !isGroupCompleted && !isGroupCancelled ? (
                                                   <input
                                                     type="number"
@@ -9084,7 +9080,7 @@ export default function InventoryCountPage() {
                                                   it.actualQuantity ?? "-"
                                                 )}
                                               </td>
-                                              <td style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>
+                                              <td data-label="差分" style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>
                                                 {modalEditMode && !isGroupCompleted && !isGroupCancelled
                                                   ? (Number(modalEditedQuantities[groupId]?.[it.inventoryItemId] ?? it.actualQuantity) ?? 0) - Number(it.currentQuantity ?? 0)
                                                   : it.delta ?? "-"}
@@ -9198,7 +9194,7 @@ export default function InventoryCountPage() {
                                   <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: "#666" }}>
                                     予定外（{extraItemsAll.length}件）
                                   </div>
-                                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
+                                  <table className="History-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
                                     <thead>
                                       <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
                                         <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
@@ -9221,15 +9217,15 @@ export default function InventoryCountPage() {
                                         const jan = String((it as InventoryCountEntryLike).barcode || "").trim();
                                         return (
                                           <tr key={`extra-${idx}`} style={{ borderBottom: "1px solid #eee", backgroundColor: "#ffe6e6" }}>
-                                            <td style={cellStyle}>{productName}</td>
-                                            <td style={cellStyle}>{sku || "-"}</td>
-                                            <td style={cellStyle}>{jan || "-"}</td>
-                                            <td style={cellStyle}>{option1 || "-"}</td>
-                                            <td style={cellStyle}>{option2 || "-"}</td>
-                                            <td style={cellStyle}>{option3 || "-"}</td>
-                                            <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
-                                            <td style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
-                                            <td style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>{it.delta ?? "-"}</td>
+                                            <td data-label="商品名" style={cellStyle}>{productName}</td>
+                                            <td data-label="SKU" style={cellStyle}>{sku || "-"}</td>
+                                            <td data-label="JAN" style={cellStyle}>{jan || "-"}</td>
+                                            <td data-label="オプション1" style={cellStyle}>{option1 || "-"}</td>
+                                            <td data-label="オプション2" style={cellStyle}>{option2 || "-"}</td>
+                                            <td data-label="オプション3" style={cellStyle}>{option3 || "-"}</td>
+                                            <td data-label="在庫" style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
+                                            <td data-label="実数" style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
+                                            <td data-label="差分" style={{ ...cellStyle, textAlign: "right", borderRight: "none" }}>{it.delta ?? "-"}</td>
                                           </tr>
                                         );
                                       })}
@@ -9269,7 +9265,7 @@ export default function InventoryCountPage() {
                                     )}
                                   </div>
                                   {normalItems.length > 0 ? (
-                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
+                                    <table className="History-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
                                       <thead>
                                         <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
                                           <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品グループ</th>
@@ -9297,15 +9293,15 @@ export default function InventoryCountPage() {
                                           const jan = String((it as InventoryCountEntryLike).barcode || "").trim();
                                           return (
                                             <tr key={idx} style={{ borderBottom: "1px solid #eee" }}>
-                                              <td style={{ ...cellStyle, fontWeight: "bold" }}>{groupName}</td>
-                                              <td style={cellStyle}>{productName}</td>
-                                              <td style={cellStyle}>{sku || "-"}</td>
-                                              <td style={cellStyle}>{jan || "-"}</td>
-                                              <td style={cellStyle}>{option1 || "-"}</td>
-                                              <td style={cellStyle}>{option2 || "-"}</td>
-                                              <td style={cellStyle}>{option3 || "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>
+                                              <td data-label="商品グループ" style={{ ...cellStyle, fontWeight: "bold" }}>{groupName}</td>
+                                              <td data-label="商品名" style={cellStyle}>{productName}</td>
+                                              <td data-label="SKU" style={cellStyle}>{sku || "-"}</td>
+                                              <td data-label="JAN" style={cellStyle}>{jan || "-"}</td>
+                                              <td data-label="オプション1" style={cellStyle}>{option1 || "-"}</td>
+                                              <td data-label="オプション2" style={cellStyle}>{option2 || "-"}</td>
+                                              <td data-label="オプション3" style={cellStyle}>{option3 || "-"}</td>
+                                              <td data-label="在庫" style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
+                                              <td data-label="実数" style={{ ...cellStyle, textAlign: "right" }}>
                                                 {modalEditMode && !isGroupCompleted && !isGroupCancelledSingle ? (
                                                   <input
                                                     type="number"
@@ -9324,7 +9320,7 @@ export default function InventoryCountPage() {
                                                   it.actualQuantity ?? "-"
                                                 )}
                                               </td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>
+                                              <td data-label="差分" style={{ ...cellStyle, textAlign: "right" }}>
                                                 {modalEditMode && !isGroupCompleted && !isGroupCancelledSingle
                                                   ? (Number(modalEditedQuantities[singleGroupId]?.[it.inventoryItemId] ?? it.actualQuantity) ?? 0) - Number(it.currentQuantity ?? 0)
                                                   : it.delta ?? "-"}
@@ -9431,7 +9427,7 @@ export default function InventoryCountPage() {
                                     <div style={{ marginBottom: "8px", fontSize: "14px", fontWeight: "bold", color: "#666" }}>
                                       予定外（{extraItems.length}件）
                                     </div>
-                                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
+                                    <table className="History-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px", backgroundColor: "transparent" }}>
                                       <thead>
                                         <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
                                           <th style={{ padding: "8px", textAlign: "left", borderRight: "1px solid #ddd" }}>商品名</th>
@@ -9454,15 +9450,15 @@ export default function InventoryCountPage() {
                                           const jan = String((it as InventoryCountEntryLike).barcode || "").trim();
                                           return (
                                             <tr key={idx} style={{ borderBottom: "1px solid #eee", backgroundColor: "#ffe6e6" }}>
-                                              <td style={cellStyle}>{productName}</td>
-                                              <td style={cellStyle}>{sku || "-"}</td>
-                                              <td style={cellStyle}>{jan || "-"}</td>
-                                              <td style={cellStyle}>{option1 || "-"}</td>
-                                              <td style={cellStyle}>{option2 || "-"}</td>
-                                              <td style={cellStyle}>{option3 || "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
-                                              <td style={{ ...cellStyle, textAlign: "right" }}>{it.delta ?? "-"}</td>
+                                              <td data-label="商品名" style={cellStyle}>{productName}</td>
+                                              <td data-label="SKU" style={cellStyle}>{sku || "-"}</td>
+                                              <td data-label="JAN" style={cellStyle}>{jan || "-"}</td>
+                                              <td data-label="オプション1" style={cellStyle}>{option1 || "-"}</td>
+                                              <td data-label="オプション2" style={cellStyle}>{option2 || "-"}</td>
+                                              <td data-label="オプション3" style={cellStyle}>{option3 || "-"}</td>
+                                              <td data-label="在庫" style={{ ...cellStyle, textAlign: "right" }}>{it.currentQuantity ?? "-"}</td>
+                                              <td data-label="実数" style={{ ...cellStyle, textAlign: "right" }}>{it.actualQuantity ?? "-"}</td>
+                                              <td data-label="差分" style={{ ...cellStyle, textAlign: "right" }}>{it.delta ?? "-"}</td>
                                             </tr>
                                           );
                                         })}

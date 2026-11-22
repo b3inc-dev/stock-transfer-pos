@@ -8,6 +8,8 @@ import { getDateInShopTimezone } from "../utils/timezone";
 import type { LocationNode, TransferLineItem, GroupedLineItemsEntry, TransferHistory } from "../types";
 import { buildTransferSearch, changeHistoryCriteria, resetHistoryPage, TRANSFER_STATUSES, type HistoryFilter } from "../utils/transfer-history-filters";
 import { adminPlanRedirect } from "../utils/plan-gate.server";
+import { StateBadge } from "../components/admin-ui";
+import { TRANSFER_STATUS_LABEL, transferStatusLabel, transferStatusTone } from "../utils/transfer-status";
 
 type TransferEndpoint = { name?: string; location?: LocationNode | null };
 type HistoryTransferNode = {
@@ -829,26 +831,8 @@ export default function HistoryPage() {
     setSearchParams(next, { preventScrollReset: true });
   }
 
-  // ステータスの日本語表記
-  const STATUS_LABEL: Record<string, string> = {
-    DRAFT: "下書き",
-    READY_TO_SHIP: "配送準備完了",
-    IN_PROGRESS: "処理中",
-    IN_TRANSIT: "進行中",
-    RECEIVED: "受領",
-    TRANSFERRED: "入庫済み",
-    CANCELED: "キャンセル",
-    OTHER: "その他",
-  };
-
-  // ステータスバッジ用スタイル（アプリと同様のバッチ表示）
-  const getStatusBadgeStyle = (status: string): React.CSSProperties => {
-    const base = { display: "inline-block" as const, padding: "2px 8px", borderRadius: "9999px", fontSize: "12px", fontWeight: 600 };
-    if (status === "RECEIVED" || status === "TRANSFERRED") return { ...base, backgroundColor: "#d4edda", color: "#155724" };
-    if (status === "CANCELED") return { ...base, backgroundColor: "#f8d7da", color: "#721c24" };
-    if (status === "DRAFT") return { ...base, backgroundColor: "#e2e3e5", color: "#383d41" };
-    return { ...base, backgroundColor: "#cce5ff", color: "#004085" }; // READY_TO_SHIP, IN_PROGRESS, IN_TRANSIT 等
-  };
+  // ステータスの日本語表記（一覧と詳細で同じ言葉。app/utils/transfer-status.ts）
+  const STATUS_LABEL = TRANSFER_STATUS_LABEL;
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
@@ -1443,7 +1427,7 @@ export default function HistoryPage() {
                         </div>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
                           <s-text color="subdued" style={{ whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: "4px" }}>
-                            <span style={getStatusBadgeStyle(history.status)}>{STATUS_LABEL[history.status] || history.status}</span>
+                            <StateBadge label={transferStatusLabel(history.status)} tone={transferStatusTone(history.status)} />
                             {(() => {
                               const extrasCount = Number(history.extrasCount || 0);
                               if (extrasCount > 0) {
@@ -1620,7 +1604,7 @@ export default function HistoryPage() {
                 })()}
                 <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                   <strong>ステータス:</strong>{" "}
-                  <span style={getStatusBadgeStyle(modalHistory.status)}>{STATUS_LABEL[modalHistory.status] || modalHistory.status}</span>
+                  <StateBadge label={transferStatusLabel(modalHistory.status)} tone={transferStatusTone(modalHistory.status)} />
                 </div>
                 <div style={{ fontSize: "14px", marginBottom: "4px" }}>
                   <strong>数量:</strong> {modalHistory.receivedQuantity}/{modalHistory.totalQuantity}
@@ -1723,7 +1707,7 @@ export default function HistoryPage() {
                             )}
                           </div>
                           {grp.items.length > 0 ? (
-                            <table
+                            <table className="History-table"
                               style={{
                                 width: "100%",
                                 borderCollapse: "collapse",
@@ -1752,28 +1736,28 @@ export default function HistoryPage() {
                                       backgroundColor: item.isExtra ? "#ffe6e6" : "transparent",
                                     }}
                                   >
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                    <td data-label="商品名" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                                       {item.title || "（商品名なし）"}
                                     </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                    <td data-label="SKU" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                                       {item.sku || "（SKUなし）"}
                                     </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                    <td data-label="JAN" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                                       {item.barcode || "（JANなし）"}
                                     </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                    <td data-label="オプション1" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                                       {item.option1 || "-"}
                                     </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                    <td data-label="オプション2" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                                       {item.option2 || "-"}
                                     </td>
-                                    <td style={{ padding: "8px", borderRight: "1px solid #eee" }}>
+                                    <td data-label="オプション3" style={{ padding: "8px", borderRight: "1px solid #eee" }}>
                                       {item.option3 || "-"}
                                     </td>
-                                    <td style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #eee" }}>
+                                    <td data-label="予定数" style={{ padding: "8px", textAlign: "right", borderRight: "1px solid #eee" }}>
                                       {item.quantity ?? "-"}
                                     </td>
-                                    <td style={{ padding: "8px", textAlign: "right" }}>
+                                    <td data-label="入庫数" style={{ padding: "8px", textAlign: "right" }}>
                                       {item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity}
                                     </td>
                                   </tr>
@@ -1789,7 +1773,7 @@ export default function HistoryPage() {
                       );
                     })
                   ) : (
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
+                    <table className="History-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "14px" }}>
                       <thead>
                         <tr style={{ backgroundColor: "#f5f5f5", borderBottom: "2px solid #ddd" }}>
                           <th style={{ padding: "8px", textAlign: "left" }}>配送ID</th>
@@ -1807,18 +1791,18 @@ export default function HistoryPage() {
                       <tbody>
                         {modalLineItems.map((item, idx) => (
                           <tr key={item.id || idx} style={{ borderBottom: "1px solid #eee" }}>
-                            <td style={{ padding: "8px" }}>{item.shipmentDisplayId || "-"}</td>
-                            <td style={{ padding: "8px" }}>
+                            <td data-label="配送ID" style={{ padding: "8px" }}>{item.shipmentDisplayId || "-"}</td>
+                            <td data-label="配送ステータス" style={{ padding: "8px" }}>
                               {item.shipmentStatus ? (STATUS_LABEL[item.shipmentStatus] || item.shipmentStatus) : "-"}
                             </td>
-                            <td style={{ padding: "8px" }}>{item.title || "（商品名なし）"}</td>
-                            <td style={{ padding: "8px" }}>{item.sku || "（SKUなし）"}</td>
-                            <td style={{ padding: "8px" }}>{item.barcode || "（JANなし）"}</td>
-                            <td style={{ padding: "8px" }}>{item.option1 || "-"}</td>
-                            <td style={{ padding: "8px" }}>{item.option2 || "-"}</td>
-                            <td style={{ padding: "8px" }}>{item.option3 || "-"}</td>
-                            <td style={{ padding: "8px", textAlign: "right" }}>{item.quantity ?? "-"}</td>
-                            <td style={{ padding: "8px", textAlign: "right" }}>
+                            <td data-label="商品名" style={{ padding: "8px" }}>{item.title || "（商品名なし）"}</td>
+                            <td data-label="SKU" style={{ padding: "8px" }}>{item.sku || "（SKUなし）"}</td>
+                            <td data-label="JAN" style={{ padding: "8px" }}>{item.barcode || "（JANなし）"}</td>
+                            <td data-label="オプション1" style={{ padding: "8px" }}>{item.option1 || "-"}</td>
+                            <td data-label="オプション2" style={{ padding: "8px" }}>{item.option2 || "-"}</td>
+                            <td data-label="オプション3" style={{ padding: "8px" }}>{item.option3 || "-"}</td>
+                            <td data-label="予定数" style={{ padding: "8px", textAlign: "right" }}>{item.quantity ?? "-"}</td>
+                            <td data-label="入庫数" style={{ padding: "8px", textAlign: "right" }}>
                               {item.receivedQuantity !== undefined ? item.receivedQuantity : item.quantity}
                             </td>
                           </tr>

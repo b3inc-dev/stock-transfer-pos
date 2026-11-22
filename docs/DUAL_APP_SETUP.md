@@ -25,10 +25,9 @@ location-stock-indicator と同様に、**同じアプリのコード**を「自
 2. 設定名を `public` と入力
 3. **新規アプリを作成** を選ぶ（CLI がパートナーに新規アプリを作成し、`shopify.app.public.toml` を自動作成）
 4. 公開用のデプロイ先URLを用意したら、`shopify.app.public.toml` の `application_url` と `redirect_urls` をそのURLに合わせて編集
-5. 公開用のデプロイ時は:
+5. 公開用のデプロイ時は（`shopify app deploy` を直接打たない。`docs/DEPLOY.md` §3）:
    ```bash
-   shopify app config use public
-   shopify app deploy
+   npm run deploy:public
    ```
 
 ---
@@ -123,19 +122,15 @@ shopify app config link
 - **自社用**  
   - 自社用の Render（または既存のデプロイ先）にデプロイ  
   - 使用する設定: `shopify.app.toml`  
-  - 例: `shopify app config use shopify.app.toml` のあと `shopify app deploy`
+  - 例: `npm run deploy:inhouse`
 
 - **公開用**  
   - 公開用の Render（別サービス）にデプロイ  
   - 使用する設定: `shopify.app.public.toml`  
-  - 例: `shopify app config use shopify.app.public.toml` のあと `shopify app deploy`  
+  - 例: `npm run deploy:public`  
   - そのサービスでは環境変数 `SHOPIFY_API_KEY` を **公開用の Client ID** にしておく
 
-設定ファイルを指定してデプロイする例:
-
-```bash
-shopify app deploy --config=shopify.app.public.toml
-```
+`shopify app deploy`（`--config` を付けても）を直接打たず、上の npm スクリプトを使います。スクリプトは APP_MODE を書きかえ、`scripts/verify-app-mode.js` で toml の URL と合うか確かめてから、`--config` で同じ toml を渡して deploy します（合わなければ deploy せずに止まる。`docs/DEPLOY.md` §3）。
 
 ---
 
