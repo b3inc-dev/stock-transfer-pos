@@ -57,6 +57,7 @@ export function PlanGate({ feature, heading, getModalApi, children }) {
   }
 
   const failed = state.access === "plan_check_failed";
+  // plan_required・location_limit は「要確認」（プランを選ぶ・上げる）。プランを変えたあとは「もう一度確認」で通れる
   return (
     <s-page heading={heading}>
       <s-box padding="base">

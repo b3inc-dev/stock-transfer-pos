@@ -106,6 +106,29 @@ export function getMaxLocationsFromSubscriptionName(name: string): 3 | 10 | null
   return null;
 }
 
+/**
+ * ロケーション数がプランの上限を超えているか（管理画面のレイアウト・料金プラン画面・POS のタイルが使う 1 か所。getShopPlan から呼ぶ）。
+ * - ACTIVE な契約の名前から 3/10 を読み、いちばん大きい数を今の上限にする
+ * - 上限で止めるのは 3 ロケーションのプランだけ。10 ロケーションのプランは 11 か所目から従量（D15）なので止めない
+ *   （2026-11-22 まで 10 ロケーションのプランで 11 か所以上の店も止めていて、従量も送られなかった。D17）
+ * - 名前から読めない契約しかないときは止めない（null。今まで通り）
+ */
+export function decideLocationPlanMismatch(
+  subscriptions: ReadonlyArray<{ name?: string | null; status?: string | null }>,
+  locationsCount: number
+): { mismatch: false } | { mismatch: true; maxLocations: 3 } {
+  const active = (Array.isArray(subscriptions) ? subscriptions : []).filter(
+    (s) => String(s?.status || "").toUpperCase() === "ACTIVE"
+  );
+  let maxFromPlans: 3 | 10 | null = null;
+  for (const s of active) {
+    const m = getMaxLocationsFromSubscriptionName(String(s?.name || ""));
+    if (m !== null && (maxFromPlans === null || m > maxFromPlans)) maxFromPlans = m;
+  }
+  if (maxFromPlans === 3 && Number(locationsCount) > 3) return { mismatch: true, maxLocations: 3 };
+  return { mismatch: false };
+}
+
 /** 10 loc 超の従量単価（USD）。送るのは app-events-usage.server.ts（App Events API） */
 export const USAGE_PRICE_PER_LOCATION = {
   lite: 4,

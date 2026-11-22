@@ -2,8 +2,8 @@
 // 元は app/routes/app.tsx の getShopPlan。決まりは extensions/common/planAccess.js（POS 拡張と同じもの）。
 import type { ActiveSubscription } from "./billing";
 import {
+  decideLocationPlanMismatch,
   getPlanFromActiveSubscriptions,
-  getMaxLocationsFromSubscriptionName,
   subscriptionDecidesPlan,
 } from "./billing";
 import {
@@ -23,6 +23,7 @@ import {
 import { getInhouseClientId, getPublicClientId } from "./shop-install-probe.server";
 import {
   decideFeatureAccess,
+  decideOperationStartAccess,
   featuresForPlanState,
 } from "../../extensions/common/planAccess.js";
 
@@ -41,7 +42,8 @@ export type PlanFeature =
   | "stocktake"
   | "adjustment";
 
-export type PlanAccess = "allowed" | "plan_required" | "plan_check_failed";
+/** location_limit は「新しい操作を始めるとき」だけ（checkShopFeatureAccess の atOperationStart）。書き込みの API では出ない */
+export type PlanAccess = "allowed" | "plan_required" | "plan_check_failed" | "location_limit";
 
 export type ShopPlanFeatures = Record<PlanFeature, boolean>;
 
@@ -54,9 +56,12 @@ export type ShopPlan = {
   isDevelopmentStore: boolean;
   /** 公開用で、Shopify から契約の状態を読めなかったとき true。未契約とは分けて「もう一度試す」を案内する */
   planCheckFailed?: boolean;
-  /** ロケーション数が契約プラン（3 or 10）を超えている場合 true。プラン変更案内を表示し機能を制限する */
+  /**
+   * 3 ロケーションのプランで、ロケーションが 4 か所以上ある場合 true。管理画面は料金プランへ回し、POS はタイルを開くときに止める。
+   * 10 ロケーションのプランは 11 か所以上でも false（従量。D15）
+   */
   locationPlanMismatch?: boolean;
-  /** 現在のプランが対象とする最大ロケーション数（3 or 10）。locationPlanMismatch 時のみ意味を持つ */
+  /** 現在のプランが対象とする最大ロケーション数（今は 3 だけ）。locationPlanMismatch 時のみ意味を持つ */
   maxLocationsForPlan?: 3 | 10;
   /**
    * 公開用・Lite/Pro で 10 か所を超えた分（App Events API で 1 請求期間に 1 回報告する数）。
@@ -228,21 +233,16 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
 
   const features = featuresForPlanState({ distribution, plan, planCheckFailed }) as ShopPlanFeatures;
 
-  // ロケーション数とプラン（3/10）の一致チェック。公開アプリ・Lite/Pro のときのみ
+  // ロケーション数とプランの一致チェック。公開アプリ・Lite/Pro のときのみ。
+  // 止めるのは 3 ロケーションのプランで 4 か所以上のときだけ（10 ロケーションのプランは 11 か所目から従量。D15・D17）。
+  // 管理画面（app.tsx のレイアウト）と POS のタイル（/api/pos-plan → decideOperationStartAccess）はどちらもこの結果を見る。
   let locationPlanMismatch = false;
   let maxLocationsForPlan: 3 | 10 | undefined;
   if (distribution === "public" && !forceInhouse && (plan === "lite" || plan === "pro")) {
-    const active = planSubscriptions.filter((s) => String(s?.status || "").toUpperCase() === "ACTIVE");
-    let maxFromPlans: 3 | 10 | null = null;
-    for (const s of active) {
-      const m = getMaxLocationsFromSubscriptionName(String(s?.name || ""));
-      if (m !== null) {
-        if (maxFromPlans === null || m > maxFromPlans) maxFromPlans = m;
-      }
-    }
-    if (maxFromPlans !== null && locationsCount > maxFromPlans) {
+    const decided = decideLocationPlanMismatch(planSubscriptions, locationsCount);
+    if (decided.mismatch) {
       locationPlanMismatch = true;
-      maxLocationsForPlan = maxFromPlans;
+      maxLocationsForPlan = decided.maxLocations;
     }
   }
 
@@ -310,14 +310,19 @@ export async function getShopPlan(admin: AdminGraphql, currentShop?: string): Pr
 
 /**
  * ShopPlan で機能が使えるか。
- * ロケーション数とプランの不一致（locationPlanMismatch）はここでは見ない（今まで通り管理画面のレイアウトだけが料金プランへ回す）。
+ * atOperationStart=false（既定。書き込みの API・管理画面の action）: ロケーション数とプランの不一致（locationPlanMismatch）は見ない。
+ *   確定の途中（Shopify で出庫・入庫を済ませたあとの在庫の戻し・履歴の記録・棚卸の完了・250 件ごとの続き）で止めると、
+ *   半分だけ動いた状態になるため（docs/STATE_MACHINE.md）。管理画面は今まで通りレイアウトが料金プランへ回す。
+ * atOperationStart=true（POS のタイルを開くとき＝/api/pos-plan）: 3 ロケーションのプランで多すぎれば location_limit。
  */
-export function accessForShopPlan(shopPlan: ShopPlan, feature: PlanFeature): PlanAccess {
+export function accessForShopPlan(shopPlan: ShopPlan, feature: PlanFeature, atOperationStart = false): PlanAccess {
+  if (atOperationStart) return decideOperationStartAccess(shopPlan, feature) as PlanAccess;
   return decideFeatureAccess(shopPlan, feature) as PlanAccess;
 }
 
 // 使えると分かった店だけ少しのあいだ覚える（POS の 1 回の確定で API が何度も呼ばれるため）。
-// 止めた結果は覚えない（契約した直後にすぐ使えるように）。
+// 止めた結果は覚えない（契約した直後にすぐ使えるように）。ロケーション数で止まる店（locationPlanMismatch）も覚えない
+// （プランを上げた直後に「もう一度確認」で通れるように）。
 const ALLOWED_CACHE_MS = 60_000;
 const allowedCache = new Map<string, { plan: ShopPlan; at: number }>();
 
@@ -329,6 +334,8 @@ export async function checkShopFeatureAccess(args: {
   shop: string;
   feature: PlanFeature;
   getAdmin: () => Promise<AdminGraphql> | AdminGraphql;
+  /** 新しい操作を始めるとき（POS のタイルを開くとき）だけ true。ロケーション数の上限も見る */
+  atOperationStart?: boolean;
 }): Promise<{ access: PlanAccess; shopPlan: ShopPlan }> {
   const { distribution } = getPlanDistribution(args.shop);
   if (distribution === "inhouse") return { access: "allowed", shopPlan: inhouseShopPlan() };
@@ -345,15 +352,18 @@ export async function checkShopFeatureAccess(args: {
       console.warn("[checkShopFeatureAccess] getShopPlan failed:", e instanceof Error ? e.message : String(e));
       shopPlan = fallbackShopPlan(args.shop);
     }
-    if (shopPlan.plan && !shopPlan.planCheckFailed) {
+    if (shopPlan.plan && !shopPlan.planCheckFailed && !shopPlan.locationPlanMismatch) {
       allowedCache.set(key, { plan: shopPlan, at: Date.now() });
     } else {
       allowedCache.delete(key);
     }
   }
-  const access = accessForShopPlan(shopPlan, args.feature);
+  const access = accessForShopPlan(shopPlan, args.feature, args.atOperationStart === true);
   if (access !== "allowed") {
-    console.warn(`[plan-gate] blocked: shop=${args.shop} feature=${args.feature} access=${access} plan=${shopPlan.plan ?? "none"}`);
+    console.warn(
+      `[plan-gate] blocked: shop=${args.shop} feature=${args.feature} access=${access} plan=${shopPlan.plan ?? "none"}` +
+        (access === "location_limit" ? ` locations=${shopPlan.locationsCount} max=${shopPlan.maxLocationsForPlan ?? "?"}` : "")
+    );
   }
   return { access, shopPlan };
 }

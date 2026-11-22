@@ -14,7 +14,7 @@ import {
   type UsageReportStore,
 } from "../utils/app-events-usage.server";
 import prisma from "../db.server";
-import { ALL_FEATURES, FEATURE_LABELS } from "../../extensions/common/planAccess.js";
+import { ALL_FEATURES, FEATURE_LABELS, requiredPlanForLocations } from "../../extensions/common/planAccess.js";
 
 type NoticeTone = "critical" | "warning" | "info";
 const NOTICE_STYLES: Record<NoticeTone, { background: string; border: string }> = {
@@ -191,7 +191,9 @@ export default function PlanPage() {
               ロケーション数がプランと一致していません
             </div>
             <div style={{ fontSize: "14px", color: "#202223", marginBottom: "12px", lineHeight: 1.5 }}>
-              現在のプランは<strong>{maxLocationsForPlan}ロケーション</strong>までです。ストアのロケーション数は<strong>{locationsCount}</strong>のため、プラン変更が必要です。変更が反映されるまで設定・在庫・入出庫などの機能はご利用いただけません。
+              現在のプランは<strong>{maxLocationsForPlan}ロケーション</strong>までです。ストアのロケーション数は<strong>{locationsCount}</strong>のため、プラン変更が必要です。
+              「<strong>{requiredPlanForLocations(plan, "settings").name}</strong>」{plan === "lite" ? "（全機能なら Pro - 10ロケーション）" : ""}に変更してください。
+              変更が反映されるまで、設定・在庫・入出庫などの機能と POS のタイルはご利用いただけません。
             </div>
             {canOpenPricing && pricingPlansUrl ? (
               <a
