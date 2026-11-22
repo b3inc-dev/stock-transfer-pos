@@ -162,6 +162,7 @@ pending → applying → completed
 - 250 件を超える補正で元に戻すときの危険: 控えの数を「その数にする」で条件なしに書くと、書いてから戻すまでに店で売れた・入庫した分が消える。なので戻す書き込みは `changeFromQuantity` に「さっきこのアプリが書いた数」を入れた条件付きにする。合わなければ Shopify が `CHANGE_FROM_QUANTITY_STALE`（userErrors）で 1 件も書かずに断るので、そのチャンクは戻さず（入ったまま）`partial_failed` にして管理者に回す（errorSummary に `CHANGE_FROM_QUANTITY_STALE` が入る）。戻す書き込みは 429 のときだけ送り直す（5xx のあとに送り直すと、1 回目が入っていたときに 2 回目が STALE で断られ「戻せなかった」と取り違えるため。5xx・応答なしは `application_uncertain`）
 - 残る危険: 控えを読んでから前に進む書き込み（`changeFromQuantity: null`、D9）までに売れた・入庫した分は、前に進む書き込みでもう上書きされているので、戻しても戻らない
 - サーバー GraphQL は 429/503 を `withGraphQLRetry`（最大 3 回、指数バックオフ）
+- Shopify への書き込み（`inventorySetQuantities`・`inventoryActivate`）には `@idempotent(key:)` を付ける（DECISIONS D3d）。キーの操作の ID は行の `id`。同じ呼び出しの中の 429・5xx・`IDEMPOTENCY_CONCURRENT_REQUEST` の送り直しは同じキー（Shopify は 1 回目が通っていれば 2 回目を動かさない）。在庫が無いと断られたあと（`ns1`）・一時の失敗の丸ごとの呼び直し（`tr1`）・STALE のあとの書き直し（`.stale1`）は新しいキー。`IDEMPOTENCY_KEY_PARAMETER_MISMATCH`・待ち切った処理中は `partial_failed` + `application_uncertain`（新しいキーで送り直さない）
 
 ---
 
@@ -179,7 +180,7 @@ pending → applying → completed
 | 同時実行（2 端末） | 二重 | 端末ローカル lock / CP のみ | **高**（分散ロックなし） |
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
 | 入庫受領の再実行 | 二重受領・二重調整 | delta vs alreadyAccepted + 安定 appEventId + note マーカー + **確定のあとの伝票の読み直しが終わるまでロックを外さない**（読み直し失敗時は読み直せるまで確定不可。`receiveReloadGate.js`） | 比較的低い（2 端末同時は残る） |
-| apply-change 再送 | 二重 set | `appEventId` unique | 設計意図どおり |
+| apply-change 再送 | 二重 set | `appEventId` unique。サーバーの書き込みは `@idempotent`（同じ呼び出しの中の 429・5xx・処理中の送り直しを Shopify が 1 回にする。D3d） | 設計意図どおり（キーは 24 時間だけ。`appEventId` の守りはそのまま） |
 | ロス・仕入れ・調整の応答なし | 押し直しで新 ID → 二重 | 送る前に ID を端末へ保存し、完了かはっきりした断りまで同じ ID（D3c） | 2 端末は未カバー |
 | ロス・仕入れ・調整の一部だけ反映 | 押し直しで新 ID → 反映済みの分が二重 | ID を手放さず同じ ID で送る（サーバーは在庫を動かさない）。リセットで取りやめたときだけ ID を捨てる（D3c） | 取りやめ後に同じ明細を入れ直すと二重 |
 | 今の在庫数の読み取り失敗（delta） | 0 + delta で在庫を上書き | イベント前に 503 で止める（D3c） | — |
@@ -194,9 +195,10 @@ pending → applying → completed
   InventoryChangeEvent.appEventId
   Webhook 系 idempotencyKey
   入庫 receive の差分計算
+  サーバー apply-change の inventorySetQuantities / inventoryActivate の @idempotent（D3d。24 時間）
 
 [弱い / 端末ローカル]
-  inventoryTransferCreate*（Shopify 側 idempotency key なし。アプリは CP + note マーカー）
+  inventoryTransferCreate*（Shopify 側 idempotency key まだなし＝IDEMPOTENT_MIGRATION の 4 段目。アプリは CP + note マーカー）
   inventoryShipmentCreate* / MarkInTransit（Transfer 回復後の Shipment 補完あり）
   出庫 UI ロック（永続・分散なし）
 ```

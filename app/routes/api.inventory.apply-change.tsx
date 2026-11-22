@@ -633,15 +633,25 @@ export async function action({ request }: ActionFunctionArgs) {
     const toItemGid = (id: string) =>
       /^\d+$/.test(String(id).trim()) ? `gid://shopify/InventoryItem/${String(id).trim()}` : String(id).trim();
 
+    // @idempotent のキー（docs/IDEMPOTENT_MIGRATION.md 4.5）。操作の ID は appEventId でなく行の id。
+    // failed の送り直しは行を作り直す（id が変わる）ので、24 時間の中でも前の失敗の答えが返らない。
+    // round は呼ぶ場所ごとに分ける。同じ呼び出しの中の 429・5xx・処理中の送り直しは同じキー。
+    const idem = (round: string) => ({ shop, operationId: event.id, round });
+
     // 在庫レベルがないアイテムを先に有効化（調整・棚卸で「not stocked at the location」エラーを防ぐ）
-    let activateResult = await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems);
+    let activateResult = await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems, idem("main"));
     const maxActivateRetries = 2;
     for (let r = 0; r < maxActivateRetries && (activateResult.errors?.length ?? 0) > 0; r++) {
       const failedGids = new Set(activateResult.errors?.map((e) => e.inventoryItemId) ?? []);
       const failedItems = shopifyItems.filter((q) => failedGids.has(toItemGid(q.inventoryItemId)));
       if (failedItems.length === 0) break;
       await new Promise((resolve) => setTimeout(resolve, 1000 * (r + 1)));
-      activateResult = await ensureInventoryActivatedAtLocation(admin, locationId, failedItems);
+      activateResult = await ensureInventoryActivatedAtLocation(
+        admin,
+        locationId,
+        failedItems,
+        idem(`act_retry${r + 1}`)
+      );
     }
     if ((activateResult.errors?.length ?? 0) > 0) {
       const errSummary = formatInventoryApiError(
@@ -704,7 +714,7 @@ export async function action({ request }: ActionFunctionArgs) {
         console.warn(
           `[api.inventory.apply-change] post-activate confident missing (${missingItems.length}); re-ensure + settle (no hard abort)`
         );
-        await ensureInventoryActivatedAtLocation(admin, locationId, missingItems);
+        await ensureInventoryActivatedAtLocation(admin, locationId, missingItems, idem("verify1"));
         await new Promise((r) => setTimeout(r, POST_ACTIVATE_SETTLE_BEFORE_SET_MS));
       }
     } else if (levelVerify.uncertainInventoryItemIds.length > 0) {
@@ -716,10 +726,13 @@ export async function action({ request }: ActionFunctionArgs) {
     const refUri = referenceDocumentUriForActivity(activity, referenceDocumentUri);
     // 棚卸の確定は「書く直前の今の数」を changeFromQuantity に入れて書く（#19 の引き継ぎ）。
     // 読んでから書くまでに売れた・入庫した商品は上書きせず残す。ほかの activity はこれまでどおり。
-    const setOptions = { compareWithLive: activity === "inventory_count" };
+    const setOptions = (round: string) => ({
+      compareWithLive: activity === "inventory_count",
+      idempotency: idem(round),
+    });
     let result: Awaited<ReturnType<typeof setInventoryQuantitiesServer>>;
     try {
-      result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, setOptions);
+      result = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, setOptions("main"));
     } catch (setErr: unknown) {
       // ヘルパー外への例外は成否不明（再 set 禁止）— #22 post-success
       result = {
@@ -735,10 +748,17 @@ export async function action({ request }: ActionFunctionArgs) {
       console.warn(
         "[api.inventory.apply-change] setQuantities not-stocked; re-activate once before retry"
       );
-      await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems);
+      // 在庫が無いとはっきり断られたあと → 有効化も書き込みも新しい回（ns1）。同じキーだと前の断りが返る
+      await ensureInventoryActivatedAtLocation(admin, locationId, shopifyItems, idem("ns1"));
       await new Promise((r) => setTimeout(r, POST_ACTIVATE_SETTLE_BEFORE_SET_MS));
       try {
-        const stockedRetry = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, setOptions);
+        const stockedRetry = await setInventoryQuantitiesServer(
+          admin,
+          locationId,
+          shopifyItems,
+          refUri,
+          setOptions("ns1")
+        );
         result = stockedRetry;
       } catch (stockedErr: unknown) {
         result = {
@@ -752,9 +772,18 @@ export async function action({ request }: ActionFunctionArgs) {
     }
     if (!result.ok && isTransientError(result.error) && !result.partiallyApplied) {
       // partial 適用済みを再 set すると二重になるため、完全失敗（または rollback 済み）のみリトライ
+      // ここに来るのは「在庫が動いていないとはっきりしている」ときだけ（はっきり断られた・元に戻せた・読めずに止めた）。
+      // 結果が分からないときは partiallyApplied なので来ない。なので新しい回（tr1）にする:
+      // 同じキーだと、元に戻したチャンクに Shopify が前の成功の答えだけ返し、書かないまま completed になるため。
       await new Promise((r) => setTimeout(r, 1500));
       try {
-        const retryResult = await setInventoryQuantitiesServer(admin, locationId, shopifyItems, refUri, setOptions);
+        const retryResult = await setInventoryQuantitiesServer(
+          admin,
+          locationId,
+          shopifyItems,
+          refUri,
+          setOptions("tr1")
+        );
         if (retryResult.ok || retryResult.partiallyApplied) result = retryResult;
       } catch (retryErr: unknown) {
         result = {
@@ -1044,6 +1073,8 @@ export async function action({ request }: ActionFunctionArgs) {
           appliedInventoryItemIds: result.appliedInventoryItemIds ?? [],
           // 棚卸の確定で、読んでから書くまでに店の在庫が動いたので上書きしなかった商品の数
           concurrentChangedCount: result.concurrentChangedInventoryItemIds?.length ?? 0,
+          // @idempotent の返事で止めたとき（"mismatch" | "concurrent"）。在庫が動いたかは分からない
+          ...(result.idempotencyIssue ? { idempotencyIssue: result.idempotencyIssue } : {}),
         }),
         { status: 400, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
       );

@@ -11,6 +11,17 @@ import type {
 } from "../types/graphql-responses";
 import { isDefiniteUnaappliedRejection } from "./apply-change-outer-catch-guard";
 import { readAvailableFromResponse, type CurrentQuantityRead } from "./current-quantity-read";
+import { retryWhileIdempotencyConcurrent } from "./graphql-with-retry";
+import {
+  buildIdempotencyKeyServer,
+  classifyIdempotencyErrors,
+  formatIdempotencyChunk,
+  resolveIdempotencyContext,
+  IDEMPOTENCY_CONCURRENT_REQUEST,
+  IDEMPOTENCY_KEY_PARAMETER_MISMATCH,
+  type IdempotencyContext,
+  type IdempotencyIssue,
+} from "./idempotency-key.server";
 
 const INVENTORY_SET_QUANTITIES_MAX = 250;
 
@@ -28,6 +39,42 @@ function delay(ms: number): Promise<void> {
 }
 
 export type AdminGraphql = (query: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response>;
+
+/**
+ * inventorySetQuantities（前に進む書き込みも、元に戻す書き込みも同じ文）。
+ * Admin API 2026-04 から @idempotent が無いと実行時にエラーになる。2026-01 でも付けてよい（docs/IDEMPOTENT_MIGRATION.md）。
+ */
+export const INVENTORY_SET_QUANTITIES_MUTATION = `#graphql
+  mutation InventorySetQuantities($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+      inventoryAdjustmentGroup { id }
+      userErrors { field message code }
+    }
+  }
+`;
+
+/** apply-change のキーの「操作の種類」 */
+export const APPLY_CHANGE_IDEMPOTENCY_KIND = "apply_change";
+
+type SetJsonLike = {
+  errors?: Array<{ message?: string; extensions?: { code?: unknown } }>;
+  data?: { inventorySetQuantities?: { userErrors?: Array<{ code?: unknown; message?: unknown }> } | null } | null;
+};
+
+function idempotencyIssueOfSetJson(json: unknown): IdempotencyIssue | null {
+  const j = (json && typeof json === "object" ? json : {}) as SetJsonLike;
+  return classifyIdempotencyErrors(
+    j?.data?.inventorySetQuantities?.userErrors ?? [],
+    Array.isArray(j?.errors) ? j.errors : []
+  );
+}
+
+function idempotencyIssueMessage(issue: IdempotencyIssue, concurrentExhausted: boolean): string {
+  if (issue === "mismatch") {
+    return `${IDEMPOTENCY_KEY_PARAMETER_MISMATCH}: 同じキーで中身の違う書き込みが送られました（新しいキーでは送り直していません。Shopify で在庫を確かめてください）`;
+  }
+  return `${IDEMPOTENCY_CONCURRENT_REQUEST}: 同じキーの前の書き込みが処理中のままでした${concurrentExhausted ? "（待っても終わりませんでした）" : ""}（結果が分かりません。Shopify で在庫を確かめてください）`;
+}
 
 /**
  * admin.graphql を 429/5xx 時にリトライして実行し、レスポンスと JSON を返す。
@@ -236,6 +283,11 @@ export type SetInventoryQuantitiesResult = {
    * 上書きせずに残した（appliedInventoryItemIds には入れない）。1 件でもあれば partiallyApplied。
    */
   concurrentChangedInventoryItemIds?: string[];
+  /**
+   * @idempotent の返事で止めたとき（IDEMPOTENCY_KEY_PARAMETER_MISMATCH・待ち切った IDEMPOTENCY_CONCURRENT_REQUEST）。
+   * どちらも在庫が動いたか分からないので applicationUncertain と一緒に返す。新しいキーでは送り直さない。
+   */
+  idempotencyIssue?: IdempotencyIssue;
 };
 
 export type SetInventoryQuantitiesOptions = {
@@ -248,6 +300,12 @@ export type SetInventoryQuantitiesOptions = {
    * false（既定）: これまでどおり changeFromQuantity: null で書く。
    */
   compareWithLive?: boolean;
+  /**
+   * @idempotent のキーの材料（docs/IDEMPOTENT_MIGRATION.md 4.5）。
+   * apply-change は shop・InventoryChangeEvent.id・呼ぶ場所ごとの round を渡す。
+   * 渡さないときは、呼ぶたびに新しい操作の ID にする（同じ呼び出しの中の送り直しだけ同じキー）。
+   */
+  idempotency?: IdempotencyContext;
 };
 
 const CHANGE_FROM_QUANTITY_STALE = "CHANGE_FROM_QUANTITY_STALE";
@@ -308,6 +366,18 @@ export async function setInventoryQuantitiesServer(
   options: SetInventoryQuantitiesOptions = {}
 ): Promise<SetInventoryQuantitiesResult> {
   const compareWithLive = options.compareWithLive === true;
+  const idem = resolveIdempotencyContext(options.idempotency);
+  /** 前に進む書き込み・元に戻す書き込みのキー（チャンクごと・段ごとに違う。送り直しでは同じ） */
+  const keyFor = (stage: "set_fwd" | "set_rb", index0: number, total: number, round: string) =>
+    buildIdempotencyKeyServer({
+      shop: idem.shop,
+      kind: APPLY_CHANGE_IDEMPOTENCY_KIND,
+      operationId: idem.operationId,
+      stage,
+      chunk: formatIdempotencyChunk(index0, total),
+      round,
+    });
+  let idempotencyIssue: IdempotencyIssue | undefined;
   const locationGid = toLocationGid(locationId);
   const quantities = (items ?? [])
     .filter((x) => x?.inventoryItemId && Number.isFinite(Number(x?.quantity)))
@@ -438,19 +508,32 @@ export async function setInventoryQuantitiesServer(
         };
         if (refUri) input.referenceDocumentUri = refUri;
         let staleRefused = false;
+        // 回: 1 回目は呼び出し側の round。STALE のあとに読み直して中身（changeFromQuantity）を変えて書き直すときだけ変える。
+        // 429・5xx・処理中の送り直しは同じキー（graphqlWithRetry・retryWhileIdempotencyConcurrent が同じ variables を送る）。
+        const idempotencyKey = keyFor(
+          "set_fwd",
+          chunkIndex,
+          chunks.length,
+          attempt === 0 ? idem.round : `${idem.round}.stale${attempt}`
+        );
         try {
-          const { response: resp, json } = await graphqlWithRetry(admin, `#graphql
-              mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-                inventorySetQuantities(input: $input) {
-                  inventoryAdjustmentGroup { id }
-                  userErrors { field message code }
-                }
-              }
-            `, { input });
+          const sent = await retryWhileIdempotencyConcurrent(
+            () => graphqlWithRetry(admin, INVENTORY_SET_QUANTITIES_MUTATION, { input, idempotencyKey }),
+            (r) => idempotencyIssueOfSetJson(r.json) === "concurrent",
+            idem.concurrentRetryDelaysMs
+          );
+          const { response: resp, json } = sent.result;
           const errJson = json as InventorySetQuantitiesJson;
           const topLevelErrors = Array.isArray(errJson?.errors) ? errJson.errors : [];
           const data = errJson?.data?.inventorySetQuantities;
-          if (!resp.ok) {
+          const issue = idempotencyIssueOfSetJson(json);
+          if (issue) {
+            // 処理中のまま・中身の違い: はっきりした断りではない（在庫が動いたか分からない）。
+            // chunkHadUserErrors を立てないので、下で「結果が分からない」（partial）になり、新しいキーで送り直さない。
+            chunkError = idempotencyIssueMessage(issue, sent.concurrentExhausted);
+            chunkFailed = true;
+            idempotencyIssue = issue;
+          } else if (!resp.ok) {
             chunkError = topLevelErrors[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
             chunkFailed = true;
             // HTTP エラーは適用済みの可能性を否定できない（userErrors なし）
@@ -518,6 +601,7 @@ export async function setInventoryQuantitiesServer(
             // 先行成功分は確実。当該チャンクは不明のため含めない
             appliedInventoryItemIds: [...appliedInventoryItemIds],
             failedChunkIndex: chunkIndex,
+            ...(idempotencyIssue ? { idempotencyIssue } : {}),
           };
         }
 
@@ -557,19 +641,30 @@ export async function setInventoryQuantitiesServer(
           try {
             // 送り直すのは 429（Shopify が受け付けていない）だけ。5xx のあとに送り直すと、
             // 1 回目が入っていた場合に 2 回目が STALE で断られ、「戻せなかった」と取り違えるため。
-            const { response: rbResp, json: rbJson } = await graphqlWithRetry(admin, `#graphql
-                mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
-                  inventorySetQuantities(input: $input) {
-                    inventoryAdjustmentGroup { id }
-                    userErrors { field message code }
-                  }
-                }
-              `, { input: rollbackInput }, (status) => status === 429);
+            // 戻す書き込みのキーは前に進む書き込みと別（段 set_rb）。チャンクごとに違う。
+            const rollbackKey = keyFor("set_rb", ri, chunks.length, idem.round);
+            const rbSent = await retryWhileIdempotencyConcurrent(
+              () =>
+                graphqlWithRetry(
+                  admin,
+                  INVENTORY_SET_QUANTITIES_MUTATION,
+                  { input: rollbackInput, idempotencyKey: rollbackKey },
+                  (status) => status === 429
+                ),
+              (r) => idempotencyIssueOfSetJson(r.json) === "concurrent",
+              idem.concurrentRetryDelaysMs
+            );
+            const { response: rbResp, json: rbJson } = rbSent.result;
             const rbErrJson = rbJson as InventorySetQuantitiesJson;
             const rbTopErrors = Array.isArray(rbErrJson?.errors) ? rbErrJson.errors : [];
             const rbData = rbErrJson?.data?.inventorySetQuantities;
             const rbErrs = rbData?.userErrors ?? [];
-            if (!rbResp.ok) {
+            const rbIssue = idempotencyIssueOfSetJson(rbJson);
+            if (rbIssue) {
+              // 戻ったか分からない（はっきりした断りにしない → application_uncertain）
+              rollbackErrorMsg = idempotencyIssueMessage(rbIssue, rbSent.concurrentExhausted);
+              idempotencyIssue = rbIssue;
+            } else if (!rbResp.ok) {
               rollbackErrorMsg = rbTopErrors[0]?.message ?? rbResp.statusText ?? `HTTP ${rbResp.status}`;
             } else if (rbTopErrors.length > 0 && !rbData) {
               rollbackErrorMsg =
@@ -614,6 +709,7 @@ export async function setInventoryQuantitiesServer(
             applicationUncertain: !rollbackRefused,
             appliedInventoryItemIds: stillApplied,
             failedChunkIndex: chunkIndex,
+            ...(idempotencyIssue ? { idempotencyIssue } : {}),
           };
         }
         // ロールバック成功: Shopify 上は適用前に戻った

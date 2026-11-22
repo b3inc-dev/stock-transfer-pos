@@ -38,7 +38,7 @@
 | Transfer create | Shopify API 側 idempotency key **なし**（従来どおり） |
 | 二重タップ | `submitLockRef` |
 | 履歴 | `buildStableAppEventId` + DB unique |
-| 数量調整 | `InventoryChangeEvent.appEventId` |
+| 数量調整 | `InventoryChangeEvent.appEventId`。サーバーの Shopify への書き込み（`inventorySetQuantities`・`inventoryActivate`）には `@idempotent` も付ける（D3d） |
 
 **意図**: 履歴・調整の再送安全性を先に固めた（Phase0/1）。
 
@@ -72,6 +72,26 @@
 **意図**: 応答が届かないまま新しい ID を発行すると、前の送信が届いていた場合に在庫がもう一度動く。サーバーは同じ ID の completed に 200 を返す（STATE_MACHINE §6）ので、同じ ID で送り直せば在庫は 1 回だけ動く。
 
 **残ギャップ**: 2 台の端末で同じ明細を別々に確定するのは防げない（端末ごとの保存）。`partial_failed` のあとにリセットして同じ明細を入れ直して確定すると、新しい ID として反映済みの分がもう一度動く（画面の文で止めるだけ）。`applying` のまま止まったイベントなど、印の無い結果待ちの操作は今もリセットできない（片づけはデータベースを直す）。
+
+### D3d. サーバー apply-change の在庫の書き込みに `@idempotent` を付ける（2026-11-23・1 段目）
+
+設計は [`IDEMPOTENT_MIGRATION.md`](./IDEMPOTENT_MIGRATION.md)（#107。T さん 11/23 4:40 承認・★）。その 5 章の 1 段目だけ。
+
+| 層 | 方針 |
+|----|------|
+| キー | `UUIDv5(c5bcfcd2-b8f6-422b-a82c-b16e257f07a2, "pst1|shop|操作の種類|操作の ID|段|チャンク|回")`。材料の並べ方は `extensions/common/idempotencyKey.js`（POS でも使える JS の SHA-1）。サーバーは `app/utils/idempotency-key.server.ts`（node:crypto）。同じ答えになることを `tests/fixtures/idempotency-key-vectors.json`（Python の `uuid.uuid5` で作った答え）で確かめる |
+| 操作の ID | `InventoryChangeEvent.id`（行の id。`appEventId` ではない）。`failed` の送り直しは行を作り直すので、24 時間の中でも前の失敗の答えが返らない |
+| 段・チャンク | 前に進む書き込み `set_fwd`・元に戻す書き込み `set_rb`・有効化 `activate:<置き場所>:<商品>:<初めの数>:<初めの数>`。チャンクは `i/n`（1 から） |
+| 回 | 呼ぶ場所ごと。書き込みは 1 回目 `main`・在庫が無いと断られたあと `ns1`・一時の失敗の丸ごとの呼び直し `tr1`。棚卸の STALE のあとの書き直しは `<回>.stale1`。有効化は `main`・`act_retry1`/`act_retry2`・`verify1`・`ns1`、はっきり断られるたびに `.rej1`… |
+| 同じキー | 429・5xx（`graphqlWithRetry`・`withGraphQLRetry`）と `IDEMPOTENCY_CONCURRENT_REQUEST`（1 秒・2 秒・4 秒待つ。`retryWhileIdempotencyConcurrent`）の送り直し。有効化の通信の失敗・トップの errors のあとの送り直し |
+| 返事 | `IDEMPOTENCY_KEY_PARAMETER_MISMATCH` と待ち切った `IDEMPOTENCY_CONCURRENT_REQUEST` は、はっきりした断りにしない → `partial_failed` + `application_uncertain`（POS は ID を手放さない。D3c）。応答に `idempotencyIssue` を足す（`errorCode` は `partial_failed` のまま）。新しいキーでは送り直さない。有効化で中身の違いが返ったら、その商品は有効化の失敗（`activate_failed`。在庫の数は書かない） |
+| 版 | **2026-01 のまま**（2026-01 では `@idempotent` は付けても付けなくてもよい）。配備の動きは変えない |
+
+**設計と違えたところ（1 つ）**: 設計 4.5 の表は「`isTransientError` の丸ごとの送り直し → 同じ（`main`）」。実装は **`tr1`（新しい回）**にした。この送り直しに来るのは、在庫が動いていないとはっきりしているとき（はっきり断られた・元に戻せた・読めずに止めた）だけで、結果が分からないときは `partiallyApplied` なので来ない。250 件を超えて先のチャンクを書いてから戻したあとに同じキーで送ると、Shopify は戻したチャンクに前の成功の答えだけを返して書かず、在庫が元のまま `completed` になる。`tr1` なら今までと同じく書き直す（`tests/apply-change-idempotency.test.mjs`）。
+
+**守りは足すだけ**: `appEventId`・`InventoryChangeEvent` の状態・`partial_failed` で止める決まりはそのまま（キーは 24 時間しか効かないため）。元に戻す書き込みの送り直しは今のまま 429 だけ（5xx も送り直すのは後の PR で決める）。
+
+**まだ付けていない所**: 管理画面（2 段目）・POS 入庫（3 段目）・POS 出庫（4 段目）・使っていないコード（5 段目）。`tests/idempotent-directive-guard.test.mjs` の `PENDING` に、ファイルごとの残りの数を持つ（付けたら減らす）。
 
 ## D4. POS GraphQL は短 timeout、サーバーは 429 リトライ
 

@@ -12,6 +12,45 @@ import type {
   InventoryItemUpdatePayload,
   InventoryActivatePayload,
 } from "../types/graphql-responses";
+import {
+  buildIdempotencyKeyServer,
+  classifyIdempotencyErrors,
+  resolveIdempotencyContext,
+  type IdempotencyContext,
+} from "./idempotency-key.server";
+
+/** apply-change の有効化のキーの「操作の種類」（前に進む書き込みと同じ操作の ID を使う） */
+export const ACTIVATE_IDEMPOTENCY_KIND = "apply_change";
+
+function rawIdOf(gid: string): string {
+  const s = String(gid || "").trim();
+  return s.startsWith("gid://") ? s.split("/").pop() || s : s;
+}
+
+/**
+ * inventoryActivate のキー（docs/IDEMPOTENT_MIGRATION.md 4.3）。
+ * 段に置き場所・商品・初めの数（available/onHand）を入れる（初めの数を渡す 1 回目と、渡さない 2 回目以降は中身が違うので別のキー）。
+ * 回は呼び出し側の round に、はっきり断られた（userErrors）回数を足す。
+ */
+export function buildActivateIdempotencyKey(opts: {
+  shop: string;
+  operationId: string;
+  round: string;
+  locationGid: string;
+  inventoryItemGid: string;
+  initialQuantity: number | null;
+  rejections: number;
+}): string {
+  const q = opts.initialQuantity == null ? "-" : String(opts.initialQuantity);
+  return buildIdempotencyKeyServer({
+    shop: opts.shop,
+    kind: ACTIVATE_IDEMPOTENCY_KIND,
+    operationId: opts.operationId,
+    stage: `activate:${rawIdOf(opts.locationGid)}:${rawIdOf(opts.inventoryItemGid)}:${q}:${q}`,
+    chunk: "1/1",
+    round: opts.rejections > 0 ? `${opts.round}.rej${opts.rejections}` : opts.round,
+  });
+}
 
 function toLocationGid(locationId: string): string {
   const s = String(locationId || "").trim();
@@ -135,8 +174,14 @@ export async function verifyInventoryLevelsAtLocation(
 export async function ensureInventoryActivatedAtLocation(
   admin: { graphql: AdminGraphql },
   locationId: string,
-  items: EnsureItem[]
+  items: EnsureItem[],
+  /**
+   * @idempotent のキーの材料。apply-change は shop・InventoryChangeEvent.id・呼ぶ場所ごとの round を渡す。
+   * 渡さないときは呼ぶたびに新しい操作の ID（同じ呼び出しの中の送り直しだけ同じキー）。
+   */
+  idempotency?: IdempotencyContext
 ): Promise<EnsureResult> {
+  const idem = resolveIdempotencyContext(idempotency);
   const errors: Array<{ inventoryItemId: string; message: string }> = [];
   const locationGid = toLocationGid(locationId);
   if (!locationGid || !items?.length) {
@@ -234,6 +279,8 @@ export async function ensureInventoryActivatedAtLocation(
 
     let lastError: string | null = null;
     let succeeded = false;
+    /** inventoryActivate がはっきり断られた（userErrors）回数。増えたら次は新しいキー（同じキーだと同じ断りが返るため） */
+    let activateRejections = 0;
     // needsTrackedUpdate が失敗した場合に needsActivate をスキップするためのフラグ
     let trackedUpdateFailed = false;
 
@@ -296,6 +343,16 @@ export async function ensureInventoryActivatedAtLocation(
           vars.available = q;
           vars.onHand = q;
         }
+        // 通信の失敗・トップの errors のあとの送り直しは同じキー。はっきり断られたあとだけ新しいキー。
+        vars.idempotencyKey = buildActivateIdempotencyKey({
+          shop: idem.shop,
+          operationId: idem.operationId,
+          round: idem.round,
+          locationGid,
+          inventoryItemGid: inventoryItemId,
+          initialQuantity: withQty ? Math.floor(Number(initialQty)) : null,
+          rejections: activateRejections,
+        });
 
         const actRes = await graphql(
           admin,
@@ -305,19 +362,45 @@ export async function ensureInventoryActivatedAtLocation(
               $locationId: ID!
               $available: Int
               $onHand: Int
+              $idempotencyKey: String!
             ) {
               inventoryActivate(
                 inventoryItemId: $inventoryItemId
                 locationId: $locationId
                 available: $available
                 onHand: $onHand
-              ) {
+              ) @idempotent(key: $idempotencyKey) {
                 inventoryLevel { id }
                 userErrors { field message }
               }
             }`,
           vars
         );
+        const payloadForIssue = (actRes?.data as { inventoryActivate?: InventoryActivatePayload } | undefined)
+          ?.inventoryActivate;
+        const activateIssue = classifyIdempotencyErrors(
+          (payloadForIssue?.userErrors ?? []) as Array<{ message?: unknown }>,
+          actRes?.errors ?? []
+        );
+        if (activateIssue === "mismatch") {
+          // 同じキーで中身が違う＝作りの間違い。新しいキーで送り直さない（有効化は失敗として返す。
+          // apply-change は activate_failed にし、在庫の数は書かない）
+          lastError =
+            "IDEMPOTENCY_KEY_PARAMETER_MISMATCH: 在庫の有効化で、同じキーで中身の違う書き込みが送られました";
+          console.error(`[ensureInventoryActivatedAtLocation] ${lastError} item=${inventoryItemId}`);
+          errors.push({ inventoryItemId, message: lastError });
+          break;
+        }
+        if (activateIssue === "concurrent") {
+          // 前の送信が処理中。待って同じキーで送り直す（断りの回数は増やさない）
+          lastError = "IDEMPOTENCY_CONCURRENT_REQUEST: 在庫の有効化が処理中のままでした";
+          if (attempt < maxAttempts) {
+            await delayMs(800 * attempt);
+            continue;
+          }
+          errors.push({ inventoryItemId, message: lastError });
+          break;
+        }
         if (actRes?.errors?.length) {
           lastError = actRes.errors.map((e) => e?.message ?? String(e)).join(", ");
           if (attempt < maxAttempts) {
@@ -368,6 +451,8 @@ export async function ensureInventoryActivatedAtLocation(
             }
           }
           lastError = errMsg;
+          // はっきり断られた。次に送るなら新しいキー（同じキーだと前の断りがそのまま返る）
+          activateRejections++;
           if (attempt < maxAttempts) {
             await delayMs(800 * attempt);
             continue;
@@ -388,6 +473,8 @@ export async function ensureInventoryActivatedAtLocation(
           succeeded = true;
         } else {
           lastError = "inventoryLevel が返されませんでした";
+          // 答えが返ったが level が無い。同じキーだと同じ答えが返るので、送り直すなら新しいキー（有効化は 2 回しても在庫の数は変わらない）
+          activateRejections++;
           if (attempt < maxAttempts) {
             await delayMs(800 * attempt);
             continue;

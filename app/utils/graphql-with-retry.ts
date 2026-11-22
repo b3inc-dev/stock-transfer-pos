@@ -33,6 +33,8 @@ export type AdminWithRetry = {
 
 /**
  * Response を返す関数を実行し、429/503 のときだけ指数バックオフでリトライする。
+ * fn は同じ query・同じ variables を送り直す。@idempotent のキーも variables に入っているので、
+ * 送り直しは同じキーになる（Shopify は 1 回目が通っていれば 2 回目を動かさない）。
  */
 export async function executeWithRetry(
   fn: () => Promise<Response>,
@@ -58,6 +60,38 @@ export async function executeWithRetry(
   }
 
   return lastResponse!;
+}
+
+/**
+ * @idempotent の付いた mutation で、Shopify が IDEMPOTENCY_CONCURRENT_REQUEST
+ * （同じキーの前の送信がまだ処理中）を返したときに、待ってから **同じ中身・同じキーで** 送り直す。
+ * docs/IDEMPOTENT_MIGRATION.md 3.3。
+ *
+ * - キーは呼び出し側が variables に入れる。send は毎回同じ variables で送ること（キーを作り直さない）。
+ * - 429/503 の送り直し（executeWithRetry / withGraphQLRetry）も同じ variables をそのまま送るので、同じキーになる。
+ * - 待ち切っても処理中のままなら concurrentExhausted: true を返す。呼び出し側は「結果が分からない」として扱い、
+ *   新しいキーで送り直さない（送り直すと二重になりうる）。
+ */
+export async function retryWhileIdempotencyConcurrent<T>(
+  send: () => Promise<T>,
+  isConcurrent: (result: T) => boolean,
+  delaysMs: readonly number[] = [1000, 2000, 4000]
+): Promise<{ result: T; concurrentExhausted: boolean; concurrentRetries: number }> {
+  let result = await send();
+  let retries = 0;
+  while (isConcurrent(result)) {
+    if (retries >= delaysMs.length) {
+      return { result, concurrentExhausted: true, concurrentRetries: retries };
+    }
+    const waitMs = delaysMs[retries];
+    retries++;
+    console.warn(
+      `[graphql-with-retry] IDEMPOTENCY_CONCURRENT_REQUEST (retry ${retries}/${delaysMs.length}), same key in ${waitMs}ms`
+    );
+    await delay(waitMs);
+    result = await send();
+  }
+  return { result, concurrentExhausted: false, concurrentRetries: retries };
 }
 
 /**

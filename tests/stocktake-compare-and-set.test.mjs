@@ -327,9 +327,11 @@ describe("apply-change: 棚卸だけ compareWithLive", () => {
     assert.match(src, /compareWithLive:\s*activity === "inventory_count"/);
   });
   it("setInventoryQuantitiesServer の 3 か所（最初・not stocked の再試行・一時エラーの再試行）すべてに渡す", () => {
-    const calls = src.match(/setInventoryQuantitiesServer\(admin, locationId, shopifyItems, refUri(, setOptions)?\)/g) ?? [];
+    // 3 か所は @idempotent の回（main・ns1・tr1）が違う（tests/apply-change-idempotency.test.mjs）
+    const calls =
+      src.match(/setInventoryQuantitiesServer\(\s*admin,\s*locationId,\s*shopifyItems,\s*refUri(,\s*setOptions\("[a-z0-9]+"\))?\s*\)/g) ?? [];
     assert.equal(calls.length, 3);
-    assert.ok(calls.every((c) => c.includes("setOptions")));
+    assert.ok(calls.every((c) => c.includes("setOptions(")));
   });
   it("書く直前に読めなかったときは current_quantity_unreadable（503・在庫は動いていない）", () => {
     assert.match(src, /liveUnreadable\s*\n?\s*\? "current_quantity_unreadable"/);
