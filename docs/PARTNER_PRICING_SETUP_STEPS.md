@@ -40,7 +40,7 @@
 
 | 項目 | 入力する値 |
 |------|------------|
-| **内部計画ハンドル**（Plan handle） | `lite` または `lite_monthly`（30文字以内・後から変更不可。英小文字・数字・アンダースコア） |
+| **内部計画ハンドル**（Plan handle） | `lite-3` / `lite-10`（30文字以内・後から変更不可。英小文字・数字・**ハイフン**。アンダースコアは使わない。下の「4 プランの構成」を参照） |
 | **請求する**（Billing） | **「毎月の継続払い」**（Monthly） |
 | **月額料金**（Monthly charge） | 例: `40`（USD）。設計書の例では $40/月（10ロケーションまで） |
 | **年間料金** | 月額のみなら `0` のまま |
@@ -55,7 +55,7 @@
 
 | 項目 | 入力する値 |
 |------|------------|
-| **内部計画ハンドル** | `pro` または `pro_monthly` |
+| **内部計画ハンドル** | `pro-3` / `pro-10`（**ハイフン**。アンダースコアは使わない） |
 | **請求する** | **「毎月の継続払い」**（Monthly） |
 | **月額料金** | 例: `120`（USD）。設計書の例では $120/月（10ロケーションまで） |
 | **年間料金** | 月額のみなら `0` |
@@ -89,10 +89,19 @@
 
 | プラン | 月額（USD）目安 | トライアル | 備考 |
 |--------|-----------------|------------|------|
-| Lite   | $40             | 7日        | 10ロケーションまで。超えた分はアプリ側で Usage 報告の実装あり |
-| Pro    | $120            | 14日       | 同上 |
+| Lite   | $40             | 7日        | 10ロケーションまで。超えた分は 1 か所 $4（使用量のメーター） |
+| Pro    | $120            | 14日       | 10ロケーションまで。超えた分は 1 か所 $12（使用量のメーター） |
 
-※ 10ロケーション超の従量課金は、Managed pricing の「月額」とは別に、アプリ側の Billing API（Usage）で報告している場合はそのまま運用できます。Managed で設定するのは「基本の月額」と「トライアル日数」です。
+### 5.1 10 か所を超えた分（使用量のメーター。2026-11-21 T 決定・DECISIONS D15）
+
+Billing API の従量（appUsageRecordCreate）は App Pricing の契約には使えないので消しました。超えた分はアプリが **App Events API** で 1 請求期間に 1 回だけ送ります。Partner Dashboard でやること:
+
+1. 10 ロケーションの Lite プランに使用量のメーターを足す: handle `extra_location_lite`、Fixed（1 単位 $4）
+2. 10 ロケーションの Pro プランに使用量のメーターを足す: handle `extra_location_pro`、Fixed（1 単位 $12）
+3. 3 ロケーションのプランにはメーターを付けない（アプリも送らない）
+4. 使用量のあるプランは **月額だけ**（年額だけのプランとは組み合わせられない）。Shopify 側に上限（cap）は無い
+
+handle を変えたいときは、環境変数 `APP_EVENTS_HANDLE_LITE` / `APP_EVENTS_HANDLE_PRO` を同じ値にしてください。送った結果（請求に載ったか）は Dev Dashboard の **Logs**（Type: App billing event）で見ます。API の 202 は「受け取った」だけです。
 
 ---
 
@@ -103,6 +112,18 @@
 - **設定場所**: Render など、アプリのバックエンドの環境変数
 - **値**: パートナーダッシュボードの **アプリのハンドル**（URL や設定画面に表示される英数字の識別子）
 - 未設定の場合は `app` が使われます。本番ではパートナーで確認したハンドルを設定してください。
+
+### 6.1 使用量（App Events API）の環境変数（公開用の Render だけ）
+
+| 名前 | 値 | 既定 |
+|---|---|---|
+| `APP_EVENTS_USAGE_ENABLED` | `1` で Shopify へ送る。それ以外は送らず、数だけ DB（`AppUsageReport`）に `disabled` で残す | 未設定＝オフ |
+| `APP_EVENTS_CLIENT_ID` / `APP_EVENTS_CLIENT_SECRET` | **公開用アプリ自身の client ID と client secret**（client_credentials でトークンを取る。[shopify.dev](https://shopify.dev/docs/apps/build/app-events/send-events) の「Use your app's client ID and client secret」）。別に API キーを作る必要はない。`SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET` と同じ値なので、**入れなくてよい**（無いときはそれを使う）。入れるときは両方入れる | 未設定なら `SHOPIFY_API_KEY` / `SHOPIFY_API_SECRET`（それも無いと `failed` で理由を残す） |
+| `APP_EVENTS_API_VERSION` | App Events API の版 | `2026-10` |
+| `APP_EVENTS_HANDLE_LITE` / `APP_EVENTS_HANDLE_PRO` | メーターの handle | `extra_location_lite` / `extra_location_pro` |
+| `APP_EVENTS_USAGE_MAX_UNITS` | アプリ側の上限（1 期間に送る「超えた か所」）。超えたら送らず `over_limit` で残す | `50` |
+
+自社用（Ciara）の Render には入れません（自社用は送る処理に来ません。`APP_DISTRIBUTION=inhouse` のときは鍵があっても送りません）。
 
 ---
 
@@ -138,7 +159,7 @@ Lite を「3ロケーション用」「10ロケーション用」、Pro も同�
 | 3 | **Pro - 3ロケーション** | `pro-3` | 例: 60 | 14日 | 3ロケーションまで |
 | 4 | **Pro - 10ロケーション** | `pro-10` | 例: 120 | 14日 | 10ロケーションまで。11以上は従量をアプリで報告 |
 
-※ 内部ハンドルはパートナー画面でアンダースコアが使えない場合は **ハイフン**（`lite-3` など）でよい。アプリはハンドルではなく**表示名**に含まれる "Lite"/"Pro" で判定するため、コードの変更は不要。
+※ 内部ハンドルは **必ずハイフン**（`lite-3` / `lite-10` / `pro-3` / `pro-10`）。アンダースコア（`lite_3` / `pro_10`）は使わない。アンダースコアだと 3/10 の判定ができないので、アプリはその handle を受け付けず、サーバーのログに `[billing] plan handle uses underscore` を出す（ロケーション数の制限がかからない）。Lite/Pro の判定は名前に含まれる "Lite"/"Pro" で行う。
 
 **ロケーション数とプランの一致チェック**: 表示名に **「3」または「10」**（例: 「Lite - 3ロケーション」「Lite - 10 locations」や `lite-3` / `lite-10`）が含まれる場合、アプリは「3ロケーション用」「10ロケーション用」を判定します。実際のロケーション数がプランを超えていると、プラン変更の案内が表示され、変更まで設定・在庫・入出庫などの機能は利用できません。
 

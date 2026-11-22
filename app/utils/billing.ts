@@ -2,7 +2,7 @@
  * 公開アプリ用 Billing ユーティリティ
  * - サブスクリプション名からプラン（lite/pro）を判定
  * - Managed Pricing（Shopify App Pricing）のプラン選択 URL
- * - Usage-based: 基本料金＋(ロケーション数−10)×単価（10 loc 超）
+ * - 10 loc 超: (ロケーション数−10)×単価を App Events API の使用量で報告（app-events-usage.server.ts）
  * 設計: docs/PUBLIC_APP_PLAN_FEATURES_DESIGN.md
  */
 
@@ -37,12 +37,6 @@ export type ActiveSubscription = {
   id: string;
   name: string;
   status: string;
-  lineItems?: Array<{
-    id: string;
-    plan?: {
-      pricingDetails?: { __typename?: string };
-    };
-  }>;
 };
 
 /**
@@ -69,12 +63,24 @@ export function getPlanFromActiveSubscriptions(subscriptions: ActiveSubscription
 
 /**
  * サブスクリプション名から「3ロケーション用」か「10ロケーション用」かを判定する。
- * パートナーで lite-3 / lite-10 / pro-3 / pro-10 のように設定している場合、名前に "10" または "3" が含まれる想定。
+ * パートナーで lite-3 / lite-10 / pro-3 / pro-10（必ずハイフン）のように設定している場合、名前に "10" または "3" が含まれる想定。
+ * アンダースコアの handle（lite_3 / pro_10）は受け付けない（console.error を出して null）。
  * 判定できない場合は null（制限しない）。
  */
 export function getMaxLocationsFromSubscriptionName(name: string): 3 | 10 | null {
   const n = String(name || "").trim();
   if (!n) return null;
+  // プランの handle はハイフン（lite-3 / pro-10）。アンダースコア（lite_3 / pro_10）は受け付けない。
+  // そのまま読むと 3/10 が取れず「制限なし」に黙って倒れるので、はっきりログを出す（判定は null のまま）。
+  const underscored = findUnderscorePlanHandles(n);
+  if (underscored.length > 0) {
+    console.error(
+      `[billing] plan handle uses underscore (${underscored.join(", ")}); POS Stock plan handles must use hyphens ` +
+        `(${underscored.map((h) => h.replace(/_/g, "-")).join(", ")}). Location limit NOT applied for:`,
+      n
+    );
+    return null;
+  }
   // 先に 10 を判定（lite-10, "10 locations", "10ロケーション" など）
   if (/-10\b|10ロケーション|10\s*locations?/i.test(n)) return 10;
   if (/\b10\b/.test(n)) return 10;
@@ -84,13 +90,13 @@ export function getMaxLocationsFromSubscriptionName(name: string): 3 | 10 | null
   return null;
 }
 
-/** 10 loc 超の従量単価（USD） */
+/** 10 loc 超の従量単価（USD）。送るのは app-events-usage.server.ts（App Events API） */
 export const USAGE_PRICE_PER_LOCATION = {
   lite: 4,
   pro: 12,
 } as const;
 
-/** 基本料金（10ロケーションまで・USD/30日） */
+/** 基本料金（10ロケーションまで・USD/30日）。料金は Partner Dashboard の App Pricing で決まる（ここは画面の目安） */
 export const BASE_PRICE_UP_TO_10 = {
   lite: 40,
   pro: 120,
@@ -109,156 +115,15 @@ export function calculateUsageAmount(
   return { amountUsd: extra * unit, extraLocations: extra };
 }
 
-/** クエリで取得するサブスクに currentPeriodEnd を含める場合の型 */
-export type ActiveSubscriptionWithPeriod = ActiveSubscription & {
-  currentPeriodEnd?: string | null;
-};
-
-/**
- * Usage 用の LineItem（AppUsagePricing の __typename を持つ行）の id を取得する。
- * appUsageRecordCreate の subscriptionLineItemId に渡す。
- */
-export function getUsageLineItemId(subscription: ActiveSubscription): string | null {
-  const items = subscription?.lineItems ?? [];
-  for (const item of items) {
-    const typename = item?.plan?.pricingDetails?.__typename ?? "";
-    if (typename === "AppUsagePricing") {
-      return item.id ?? null;
-    }
-  }
-  return null;
-}
-
-/**
- * 10ロケーション超の従量課金を 1 件報告する。
- * 同一請求期間に複数回呼ばれないよう、idempotencyKey で 1 回だけ請求される。
- * @param admin - GraphQL を実行する admin オブジェクト
- * @param subscriptionLineItemId - Usage 用 line item の ID（AppUsagePricing）
- * @param amountUsd - 請求する金額（USD）
- * @param description - 説明（例: "11+ locations (15 loc): $50.00"）
- * @param idempotencyKey - 同一期間の重複報告を防ぐキー（例: "usage-{subscriptionId}-{currentPeriodEnd}"）
- */
-export async function reportUsageRecord(
-  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
-  subscriptionLineItemId: string,
-  amountUsd: number,
-  description: string,
-  idempotencyKey: string
-): Promise<{ success: boolean; userErrors?: Array<{ message: string }> }> {
-  if (amountUsd <= 0) return { success: true };
-  const mutation = `#graphql
-    mutation AppUsageRecordCreate(
-      $subscriptionLineItemId: ID!,
-      $price: MoneyInput!,
-      $description: String!,
-      $idempotencyKey: String
-    ) {
-      appUsageRecordCreate(
-        subscriptionLineItemId: $subscriptionLineItemId,
-        price: $price,
-        description: $description,
-        idempotencyKey: $idempotencyKey
-      ) {
-        userErrors { message }
-        appUsageRecord { id }
-      }
-    }
-  `;
-  const resp = await admin.graphql(mutation, {
-    variables: {
-      subscriptionLineItemId,
-      price: { amount: amountUsd.toFixed(2), currencyCode: "USD" },
-      description,
-      idempotencyKey,
-    },
-  });
-  const data = await resp.json();
-  if (data?.errors?.length) {
-    console.error("[reportUsageRecord] GraphQL errors:", data.errors);
-    return { success: false, userErrors: data.errors.map((e: { message?: string }) => ({ message: e?.message ?? String(e) })) };
-  }
-  const payload = data?.data?.appUsageRecordCreate;
-  const userErrors = payload?.userErrors ?? [];
-  if (userErrors.length > 0) {
-    return { success: false, userErrors };
-  }
-  return { success: true };
-}
-
 /** トライアル日数（設計書どおり） */
 export const TRIAL_DAYS = { lite: 7, pro: 14 } as const;
 
-/** Usage 従量の上限（USD/月）。11 loc 目以降の合計がこの値を超えないようにする目安 */
-export const USAGE_CAP_USD = { lite: 200, pro: 500 } as const;
+// 2026-11-21（T の決定）: 料金は Shopify App Pricing。Billing API の
+// appSubscriptionCreate（createAppSubscription）と appUsageRecordCreate（reportUsageRecord）は消した。
+// App Pricing の契約に Billing API の従量を付けることはできない（App Events API では INVALID_SUBSCRIPTION）。
+// 10 か所を超えた分は app/utils/app-events-usage.server.ts が App Events API で送る。
 
-/**
- * サブスクリプションを作成し、承認用 URL を返す。
- * 基本料金（Recurring）＋10 loc 超用の従量（Usage、キャップ付き）の 2 本立て。
- * 開発ストアでは呼ばない想定（呼んでも test: true にはしていない。呼び出し側で制御すること）。
- */
-export async function createAppSubscription(
-  admin: { graphql: (q: string, opts?: { variables?: Record<string, unknown> }) => Promise<Response> },
-  plan: PlanType,
-  returnUrl: string
-): Promise<{ confirmationUrl: string | null; userErrors: Array<{ message: string }> }> {
-  const name = plan === "pro" ? "Pro - up to 10 locations + usage" : "Lite - up to 10 locations + usage";
-  const basePrice = BASE_PRICE_UP_TO_10[plan];
-  const trialDays = TRIAL_DAYS[plan];
-  const usageCap = USAGE_CAP_USD[plan];
-  const terms = plan === "pro" ? "$12 per location for 11+ locations" : "$4 per location for 11+ locations";
-
-  const mutation = `#graphql
-    mutation AppSubscriptionCreate(
-      $name: String!,
-      $returnUrl: URL!,
-      $lineItems: [AppSubscriptionLineItemInput!]!,
-      $trialDays: Int
-    ) {
-      appSubscriptionCreate(
-        name: $name,
-        returnUrl: $returnUrl,
-        lineItems: $lineItems,
-        trialDays: $trialDays
-      ) {
-        userErrors { message }
-        confirmationUrl
-        appSubscription { id }
-      }
-    }
-  `;
-  const lineItems = [
-    {
-      plan: {
-        appUsagePricingDetails: {
-          terms,
-          cappedAmount: { amount: String(usageCap), currencyCode: "USD" },
-        },
-      },
-    },
-    {
-      plan: {
-        appRecurringPricingDetails: {
-          price: { amount: String(basePrice), currencyCode: "USD" },
-          interval: "EVERY_30_DAYS",
-        },
-      },
-    },
-  ];
-  const resp = await admin.graphql(mutation, {
-    variables: { name, returnUrl, lineItems, trialDays },
-  });
-  const data = await resp.json();
-  if (data?.errors?.length) {
-    console.error("[createAppSubscription] GraphQL errors:", data.errors);
-    return {
-      confirmationUrl: null,
-      userErrors: data.errors.map((e: { message?: string }) => ({ message: e?.message ?? String(e) })),
-    };
-  }
-  const payload = data?.data?.appSubscriptionCreate;
-  const userErrors = payload?.userErrors ?? [];
-  if (userErrors.length > 0) {
-    return { confirmationUrl: null, userErrors };
-  }
-  return { confirmationUrl: payload?.confirmationUrl ?? null, userErrors: [] };
+/** アンダースコアで書かれたプランの handle（lite_3 / pro_10 など）を拾う。正しい形はハイフン（lite-3 / pro-10） */
+export function findUnderscorePlanHandles(name: string): string[] {
+  return Array.from(String(name || "").matchAll(/(?:^|[^a-z0-9])((?:lite|pro)_(?:3|10))(?![a-z0-9])/gi), (m) => m[1]);
 }

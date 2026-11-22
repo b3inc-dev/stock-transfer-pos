@@ -179,3 +179,26 @@ model InventoryCountDocumentChunk {
   @@unique([documentId, chunkIndex])
   @@index([documentId])
 }
+
+/// 10 か所を超えたロケーションの従量を App Events API で報告した記録（公開用だけ）。
+/// 1 店・1 請求期間（Shopify の currentPeriodEnd）に 1 行。status: disabled / sending / sent / failed / over_limit
+model AppUsageReport {
+  id             String    @id @default(cuid())
+  shop           String
+  periodEnd      String
+  plan           String
+  eventHandle    String
+  locationsCount Int
+  units          Int
+  idempotencyKey String    @unique
+  status         String
+  httpStatus     Int?
+  lastError      String?
+  attempts       Int       @default(0)
+  sentAt         DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([shop, periodEnd])
+  @@index([status])
+}
