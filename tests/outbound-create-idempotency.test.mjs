@@ -720,6 +720,108 @@ describe("編集のチェックポイントの直し（#114 の見直し P2・P3
     assert.equal(marks.length, 2);
   });
 
+  it("#115 P2: 配送の追加（在庫移動中）が時間切れ → 同じ Transfer で下書き保存の配送の追加 → 一度注意して送らない。次は送る。元のボタンに戻った押し直しは同じキー", async () => {
+    const sh = fakeShopify({ reply: dropFirst("ShipmentCreateDraft") });
+    sh.transfers.push({ id: T1, status: "READY_TO_SHIP", shipments: { nodes: [] } });
+    await assert.rejects(addShip(sh, T1, L, { action: "add_shipment_in_transit" }), /timeout/);
+    assert.equal(sh.shipments.length, 1, "じつは配送ができている");
+    const before = sh.calls.length;
+    await assert.rejects(addShip(sh, T1, L, { action: "add_shipment_draft" }), (e) => {
+      assert.ok(cp.isOutboundEditStaleWarning(e));
+      assert.equal(e.staleReason, "other_action");
+      assert.match(e.message, /別のボタン/);
+      assert.match(e.message, /管理画面/);
+      assert.equal(oi.shouldFallbackToDraftForReady(e), false);
+      assert.equal(cp.isTimeoutLikeError(e), false);
+      return true;
+    });
+    assert.equal(sh.calls.length, before, "注意のときに送った");
+    const sib = store.get(cp.outboundEditCheckpointKey("add_shipment_in_transit", T1));
+    assert.ok(sib?.warnedAt, "前の入れ物に注意の印が付いていない");
+    assert.equal(sib.outcome, "unknown", "前の入れ物の結果を変えた");
+    // 注意は一度だけ: 次の押し直しは送る（人が管理画面で確かめたあと）
+    await addShip(sh, T1, L, { action: "add_shipment_draft" });
+    assert.equal(sh.shipments.length, 2);
+    // 元のボタンに戻った押し直しは前と同じキー（Shopify は前の答えを返し、配送を増やさない）。注意も重ねない
+    await addShip(sh, T1, L, { action: "add_shipment_in_transit" });
+    const k = keysOf(sh, "ShipmentCreateDraft");
+    assert.equal(k.length, 3);
+    assert.equal(k[0], k[2], "元のボタンの押し直しが新しいキーになった");
+    assert.notEqual(k[0], k[1]);
+    assert.equal(sh.shipments.length, 2, "元のボタンの押し直しで配送が増えた");
+  });
+
+  it("#115 P2: edit_in_transit の新しい配送の結果が分からないまま配送準備完了に切り替えても一度注意。今ある Shipment を選んだ形は注意しない", async () => {
+    const sh = fakeShopify();
+    const fail502 = async () => {
+      throw new Error("HTTP 502");
+    };
+    await assert.rejects(
+      cp.runOutboundEditWithCheckpoint(
+        { action: "edit_in_transit", transferId: T1, lineItems: L, extra: "ship=new", createsShipment: true },
+        fail502
+      ),
+      /502/
+    );
+    await assert.rejects(addShip(sh, T1, L), (e) => cp.isOutboundEditStaleWarning(e) && e.staleReason === "other_action");
+    await addShip(sh, T1, L);
+    assert.equal(sh.shipments.length, 1);
+
+    // 今ある Shipment を選んだ edit_in_transit（配送を作らない）の続きは、ほかの配送を作る動きを止めない
+    await assert.rejects(
+      cp.runOutboundEditWithCheckpoint(
+        { action: "edit_in_transit", transferId: T2, lineItems: L, extra: "ship=gid://shopify/InventoryShipment/5" },
+        fail502
+      ),
+      /502/
+    );
+    assert.equal(store.get(cp.outboundEditCheckpointKey("edit_in_transit", T2)).createsShipment, false);
+    await addShip(sh, T2, L);
+    // 同じ入れ物で新しい配送に切り替えても、前の続きは配送を作っていないので注意しない
+    await assert.rejects(
+      cp.runOutboundEditWithCheckpoint(
+        { action: "edit_in_transit", transferId: T2, lineItems: L, extra: "ship=gid://shopify/InventoryShipment/5" },
+        fail502
+      ),
+      /502/
+    );
+    await assert.rejects(
+      cp.runOutboundEditWithCheckpoint(
+        { action: "edit_in_transit", transferId: T2, lineItems: L, extra: "ship=new", createsShipment: true },
+        fail502
+      ),
+      (e) => !cp.isOutboundEditStaleWarning(e)
+    );
+  });
+
+  it("#115 P2: ほかの動きの続きでも、別の Transfer・はっきり断られただけ・注意ずみ・明細の書き換えだけの動きなら注意しない", async () => {
+    // 別の Transfer の配送の追加が時間切れでも、T1 は止めない
+    const sh = fakeShopify({ reply: dropFirst("ShipmentCreateDraft") });
+    await assert.rejects(addShip(sh, T2, L, { action: "add_shipment_in_transit" }), /timeout/);
+    await addShip(sh, T1, L, { action: "add_shipment_draft" });
+
+    // 1 つ目の配送ではっきり断られた続き（配送はまだ無い）は注意しない
+    let n = 0;
+    const sh2 = fakeShopify({ reply: (c) => (c.name === "ShipmentCreateDraft" && n++ === 0 ? userErr("inventoryShipmentCreate") : null) });
+    const T3 = "gid://shopify/InventoryTransfer/103";
+    await assert.rejects(addShip(sh2, T3, L, { action: "add_shipment_in_transit" }), /failed/);
+    await addShip(sh2, T3, L, { action: "add_shipment_ready" });
+    assert.equal(sh2.shipments.length, 1);
+
+    // 明細の書き換えだけの動き（下書き保存）は、配送の追加の続きがあっても止めない（配送を作らない）
+    const sh3 = fakeShopify({ reply: dropFirst("ShipmentCreateDraft") });
+    const T4 = "gid://shopify/InventoryTransfer/104";
+    sh3.transfers.push({ id: T4, status: "DRAFT", shipments: { nodes: [] } });
+    await assert.rejects(addShip(sh3, T4, L, { action: "add_shipment_in_transit" }), /timeout/);
+    await setItems(sh3, T4, items(1), "edit_draft_save");
+    assert.equal(store.get(cp.outboundEditCheckpointKey("add_shipment_in_transit", T4)).warnedAt, undefined);
+
+    // 2 つの動きの続きが残っていても、注意は 1 回ずつ（同じ入れ物で重ねない）
+    await assert.rejects(addShip(sh3, T4, L, { action: "add_shipment_ready" }), (e) => e.staleReason === "other_action");
+    await addShip(sh3, T4, L, { action: "add_shipment_ready" });
+    await addShip(sh3, T4, L, { action: "add_shipment_draft" });
+  });
+
   it("残った入れ物は一覧で片付ける（7 日より古いもの・30 を超えた古いもの）", async () => {
     const t0 = Date.now();
     const sh = fakeShopify({ reply: () => new Error("HTTP 502") });

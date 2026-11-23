@@ -648,7 +648,8 @@ export function isCheckpointOlderThanKeyTrust(cp, now = Date.now()) {
  * 配送が 2 つになりうるため。作成は note の照会で守れるが、編集には照会が無い。
  *
  * 配送を作る動き（createsShipment: true）で、結果の分からない前の続きを使わずに新しい opId にするとき
- * （23 時間より古い・明細を変えた・中身の違いで止まった）は、一度だけ注意を出して止める（P2-2）。
+ * （23 時間より古い・明細を変えた・中身の違いで止まった）は、一度だけ注意を出して止める（P2-2。配送は送らない）。
+ * 同じ Transfer の配送を作るほかの動きの入れ物に、結果が分からずまだ注意していないものがあるときも同じく一度注意する（#115 の見直し P2）。
  * 次の押し直しで新しい opId で送る。前の配送の追加がはっきり断られただけ（1 つ目の配送か明細の書き換えで断られた）のときは出さない。
  *
  * 設計（4.2）では「操作の ID = transferId + 編集を始めたときに読んだ明細の指紋」としていたが、編集を始める所が画面のあちこちにあり、
@@ -662,6 +663,17 @@ export const OUTBOUND_EDIT_CHECKPOINT_INDEX_KEY = "stock_transfer_pos_outbound_e
 /** 残った入れ物を片付けるまでの長さと数 */
 export const OUTBOUND_EDIT_CHECKPOINT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 export const OUTBOUND_EDIT_CHECKPOINT_MAX = 30;
+
+/**
+ * 配送を作る動き。同じ Transfer でこのうちの別の動きに切り替えたときも、結果の分からない前の続きで一度注意する（#115 の見直し P2）。
+ * `edit_in_transit` は新しい配送（ship=new）のときだけ配送を作る（入れ物の `createsShipment` で見分ける）。
+ */
+export const OUTBOUND_SHIPMENT_CREATING_ACTIONS = Object.freeze([
+  "add_shipment_in_transit",
+  "add_shipment_ready",
+  "add_shipment_draft",
+  "edit_in_transit",
+]);
 
 /** 動き + Transfer ごとの入れ物の名前 */
 export function outboundEditCheckpointKey(action, transferId) {
@@ -702,7 +714,9 @@ export function isCleanEditRejection(tag) {
 export class OutboundEditStaleWarning extends Error {
   constructor(reason) {
     super(
-      reason === "stale"
+      reason === "other_action"
+        ? "この在庫移動で、前に別のボタンで行った配送の追加の結果が分かっていません。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると新しく送ります。"
+        : reason === "stale"
         ? "前回の配送の追加から 23 時間より時間がたっていて、前回の結果を確かめられません。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると新しく送ります。"
         : reason === "mismatch"
           ? "前回の配送の追加の結果を確かめられませんでした。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると新しく送ります。"
@@ -719,6 +733,35 @@ export function isOutboundEditStaleWarning(e) {
 
 function readEditCheckpoint(raw) {
   return raw && typeof raw === "object" && Number(raw.v) === 1 && raw.opId && raw.fingerprint ? raw : null;
+}
+
+/** その入れ物が配送を作る動きのものか（`createsShipment` が無い形は、配送の追加 3 つだけを配送を作るとみる） */
+function editCheckpointCreatesShipment(cp, action) {
+  if (typeof cp?.createsShipment === "boolean") return cp.createsShipment;
+  return String(action || cp?.action || "").startsWith("add_shipment_");
+}
+
+/**
+ * 同じ Transfer の、配送を作るほかの動きの入れ物で、結果が分からずまだ注意していないものを探す（#115 の見直し P2）。
+ * 読めないものは飛ばす（止めない）。
+ */
+async function findUnwarnedSiblingShipmentCheckpoint({ action, transferId }) {
+  const own = String(action || "").trim();
+  for (const other of OUTBOUND_SHIPMENT_CREATING_ACTIONS) {
+    if (other === own) continue;
+    const key = outboundEditCheckpointKey(other, transferId);
+    let cp = null;
+    try {
+      cp = readEditCheckpoint(await storageGet(key));
+    } catch (_) {
+      cp = null;
+    }
+    if (!cp) continue;
+    if (!editCheckpointCreatesShipment(cp, other)) continue;
+    if (cp.outcome !== "unknown" || cp.warnedAt) continue;
+    return { key, cp };
+  }
+  return null;
 }
 
 /** 入れ物の一覧に足して、古いもの・多すぎるものを片付ける（失敗しても止めない） */
@@ -772,12 +815,38 @@ export async function runOutboundEditWithCheckpoint(
   const reusable = !!(prev && prev.fingerprint === fingerprint && fresh && !prev.noReuse);
 
   // P2-2: 配送を作る動きで、結果の分からない前の続きを捨てるときは一度だけ注意して止める
-  if (prev && !reusable && createsShipment && prev.outcome !== "rejected_clean" && !prev.warnedAt) {
+  // 前の続きが配送を作らない形（edit_in_transit で今ある Shipment を選んだとき）なら、前の配送は無いので出さない
+  if (
+    prev &&
+    !reusable &&
+    createsShipment &&
+    editCheckpointCreatesShipment(prev, action) &&
+    prev.outcome !== "rejected_clean" &&
+    !prev.warnedAt
+  ) {
     const reason = prev.noReuse ? "mismatch" : !fresh ? "stale" : "changed";
     try {
       await storageSet(key, { ...prev, warnedAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString() });
     } catch (_) {}
     throw new OutboundEditStaleWarning(reason);
+  }
+
+  // #115 の見直し P2: 同じ Transfer で別の配送を作るボタン（配送の追加の在庫移動中・配送準備完了・下書き保存、
+  // edit_in_transit の新しい配送）に切り替えたとき、そちらの結果が分からないままなら一度だけ注意して止める。
+  // 入れ物は動きごとなので、ここで見ないと新しい opId で送られて配送が 2 つになりうる。
+  // 注意した入れ物には warnedAt を付ける（次の押し直しは止めない）。その入れ物は消さないので、元のボタンに戻った押し直しは同じキーのまま。
+  if (createsShipment && String(transferId || "").trim()) {
+    const sibling = await findUnwarnedSiblingShipmentCheckpoint({ action, transferId });
+    if (sibling) {
+      try {
+        await storageSet(sibling.key, {
+          ...sibling.cp,
+          warnedAt: new Date(nowMs).toISOString(),
+          updatedAt: new Date(nowMs).toISOString(),
+        });
+      } catch (_) {}
+      throw new OutboundEditStaleWarning("other_action");
+    }
   }
 
   let cp = reusable
@@ -791,8 +860,8 @@ export async function runOutboundEditWithCheckpoint(
         rounds: {},
         startedAt: new Date(nowMs).toISOString(),
       };
-  // 送る前に残す（応答なしのあとも同じ opId を使うため）。outcome は送っている間は「分からない」
-  cp = { ...cp, outcome: "unknown" };
+  // 送る前に残す（createsShipment は、同じ Transfer のほかの動きが注意するかを見分けるため）（応答なしのあとも同じ opId を使うため）。outcome は送っている間は「分からない」
+  cp = { ...cp, outcome: "unknown", createsShipment: !!createsShipment };
   await storageSet(key, { ...cp, updatedAt: new Date(nowMs).toISOString() });
   await touchEditCheckpointIndex(key, nowMs);
 
