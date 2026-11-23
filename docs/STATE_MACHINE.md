@@ -87,6 +87,8 @@ activate / wait
 
 **チェックポイントあり（E3）:** 各チャンク成功後に `nextChunkIndex` / `created[]` を永続化。i=2 で失敗しても i=1 は Shopify に残るが、**同一指紋で再確定すると i=2 から再開**する（先頭チャンクの二重作成を避ける）。
 
+**@idempotent（D3g・4 段目）:** 各チャンクの Transfer・Shipment の作成に `attemptId` + 段 + `i/n` + 回のキーを付ける。分ける前に `inventoryItemId` の順に並べる（チャンクの中身とキーが読んだ順によらない）。i=2 がはっきり断られたら `rounds[1]` だけ増やして残す（再確定では i=1 は作らず、i=2 だけ新しいキー）。時間切れ・通信の失敗のあとの再確定は同じキーなので、note の照会で見つからなくても 24 時間の中なら Shopify が前の Transfer・Shipment をそのまま返す。
+
 ---
 
 ## 4. Timeout → retry → resume → 完了（E3 以降）
@@ -172,10 +174,13 @@ pending → applying → completed
 |----------|--------|------------|------------|
 | 二重タップ | 二重 Transfer | `submitLockRef` | ロックはメモリのみ |
 | API 成功後・状態保存（ログ）失敗 | 履歴欠落。在庫は Transfer 済み | log の idempotency | Transfer ロールバックなし |
-| timeout 直前に Shopify のみ成功 | ユーザー再実行で二重 | note attempt マーカー照会 + CP | **中**（端末ローカル CP。他端末は未カバー） |
-| retry 重複（出庫作成） | 二重 Transfer | 同一指紋 CP 再開 / 作成前照会 | **中**（指紋不一致の編集後再確定は新規 attempt） |
+| timeout 直前に Shopify のみ成功 | ユーザー再実行で二重 | note attempt マーカー照会 + CP + **`@idempotent`（`attemptId` のキー。照会で見えなくても 24 時間の中なら Shopify が前の Transfer・Shipment を返す。D3g）** | 低〜中（端末ローカル CP。他端末・24 時間を過ぎた再実行は未カバー。23 時間より古い続きで照会できないときは作らない） |
+| retry 重複（出庫作成） | 二重 Transfer | 同一指紋 CP 再開 / 作成前照会 / `@idempotent`（断られたときだけ回を増やす。D3g） | **中**（指紋不一致の編集後再確定は新規 attempt） |
+| 出庫の Shipment の補完（Transfer はあるのに Shipment が記録できなかった） | 二重の Shipment | 補完の Shipment も作成のときと同じキー（D3g）。同じキーで返った Shipment がもう下書きでなければ発送済みにし直さない | 24 時間を過ぎた補完 |
+| 出庫の編集・配送の追加の押し直し | 二重の配送（Shipment）・A → B → A の 3 回目が書かれない | 編集のチェックポイント（動き + Transfer + 明細の指紋 → `opId`。**入れ物は動き + Transfer ごと**・送る前に残す・成功で消す・断られたら回を増やす・23 時間で使わない）から作る `@idempotent`。配送を作る動きで結果の分からない前の続きを捨てるとき（23 時間より古い・明細を変えた・同じ Transfer の配送を作る別の動きの続きが残っている・`edit_in_transit` の新しい配送の続きを今ある Shipment を選んだ押し直しで上書きする）は一度だけ「管理画面で確かめて」と出して止める（配送は送らない）。今ある Shipment は状態を読んでから発送済みにする（D3g） | 2 端末。押し直しの間に別の端末が明細を変えたとき、同じキーの押し直しは書かれない。注意のあとの押し直しは人の確かめ頼み |
 | 完了済ロケーションの再実行 | 出庫は「ロケ完了フラグ」モデルではない | — | 該当 job なし。再確定は新規作成扱い |
-| 部分成功（250 分割） | 先頭チャンクのみ成功 | CP `nextChunkIndex` + created[] | **中**（成功分はスキップして再開） |
+| 部分成功（250 分割） | 先頭チャンクのみ成功 | CP `nextChunkIndex` + created[] + 並べてから分ける + チャンクごとのキーと回（D3g） | **中**（成功分はスキップして再開。明細を変えると新しい attempt で先頭チャンクから作る＝前の先頭の Transfer は残る） |
+| 配送の追加の 250 分割の途中失敗 | 1 つ目の配送はできたのに 2 つ目で失敗 → 押し直しで 1 つ目が二重 | 編集のチェックポイントのチャンクごとのキー（1 つ目は同じキー → Shopify が前の配送を返す。2 つ目だけ回を増やす。D3g） | 24 時間を過ぎた押し直し・明細を変えた押し直し |
 | 途中停止（アプリクラッシュ） | 上に同じ | CP + 下書きが残れば再開容易 | Shopify 側の掃除は手動（孤児 Transfer） |
 | 同時実行（2 端末） | 二重 | 端末ローカル lock / CP のみ | **高**（分散ロックなし） |
 | trigger 重複 | Cron は snapshot のみ | 移管トリガーはユーザー操作 | Cron による移管二重はなし |
@@ -200,10 +205,11 @@ pending → applying → completed
   POS 入庫・出庫の全部拒否の inventoryShipmentReceive と入庫の inventoryActivate の @idempotent（D3f。24 時間）
   サーバー apply-change の inventorySetQuantities / inventoryActivate の @idempotent（D3d。24 時間）
   管理画面の棚卸・発注から移管・仕入れの @idempotent（画面の opKey。D3e。24 時間）
+  POS 出庫の inventoryTransferCreate* / inventoryShipmentCreate / inventoryTransferSetItems / inventoryActivate の @idempotent（attemptId・編集の opId。D3g。24 時間）
 
 [弱い / 端末ローカル]
-  inventoryTransferCreate*（POS 出庫は Shopify 側 idempotency key まだなし＝IDEMPOTENT_MIGRATION の 4 段目。アプリは CP + note マーカー。管理画面の発注から移管は D3e で付けた）
-  inventoryShipmentCreate* / MarkInTransit（Transfer 回復後の Shipment 補完あり）
+  POS 出庫の CP + note マーカー（キーは 24 時間だけなので、こちらの守りも残す）
+  inventoryShipmentMarkInTransit / inventoryShipmentSetTracking（@idempotent の一覧に無い。同じキーで返った Shipment がもう下書きでなければ送らない）
   出庫 UI ロック（永続・分散なし）
 ```
 
