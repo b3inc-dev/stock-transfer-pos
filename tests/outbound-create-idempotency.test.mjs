@@ -777,7 +777,7 @@ describe("編集のチェックポイントの直し（#114 の見直し P2・P3
     );
     assert.equal(store.get(cp.outboundEditCheckpointKey("edit_in_transit", T2)).createsShipment, false);
     await addShip(sh, T2, L);
-    // 同じ入れ物で新しい配送に切り替えても、前の続きは配送を作っていないので注意しない
+    // 同じ入れ物で新しい配送に切り替えても、前の続きは配送を作っていないので注意しない（下で 1 回目を失敗させてから）
     await assert.rejects(
       cp.runOutboundEditWithCheckpoint(
         { action: "edit_in_transit", transferId: T2, lineItems: L, extra: "ship=gid://shopify/InventoryShipment/5" },
@@ -792,6 +792,55 @@ describe("編集のチェックポイントの直し（#114 の見直し P2・P3
       ),
       (e) => !cp.isOutboundEditStaleWarning(e)
     );
+  });
+
+  it("#115 2 回目 P3: edit_in_transit の新しい配送が時間切れ → 今ある Shipment を選んで押し直すときも、上書きの前に一度注意。次は送り、ほかの動きは止めない", async () => {
+    const T5 = "gid://shopify/InventoryTransfer/105";
+    const key = cp.outboundEditCheckpointKey("edit_in_transit", T5);
+    const ok = async () => "ok";
+    const fail502 = async () => {
+      throw new Error("HTTP 502");
+    };
+    await assert.rejects(
+      cp.runOutboundEditWithCheckpoint({ action: "edit_in_transit", transferId: T5, lineItems: L, extra: "ship=new", createsShipment: true }, fail502),
+      /502/
+    );
+    let sent = 0;
+    const count = async () => (sent++, "ok");
+    const pickExisting = (body) =>
+      cp.runOutboundEditWithCheckpoint({ action: "edit_in_transit", transferId: T5, lineItems: L, extra: "ship=gid://shopify/InventoryShipment/5" }, body);
+    await assert.rejects(pickExisting(count), (e) => {
+      assert.ok(cp.isOutboundEditStaleWarning(e));
+      assert.equal(e.staleReason, "existing_shipment");
+      assert.match(e.message, /管理画面/);
+      assert.equal(oi.shouldFallbackToDraftForReady(e), false);
+      assert.equal(cp.isTimeoutLikeError(e), false);
+      return true;
+    });
+    assert.equal(sent, 0, "注意のときに送った");
+    assert.ok(store.get(key).warnedAt, "注意の印が付いていない");
+    assert.equal(store.get(key).createsShipment, true, "注意の前に続きを上書きした");
+    // 次の押し直しは送る（注意は一度だけ）
+    assert.equal(await pickExisting(count), "ok");
+    assert.equal(sent, 1);
+    // 注意ずみなので、そのあとの配送の追加は止めない（見直しの B の流れ）
+    const sh = fakeShopify();
+    sh.transfers.push({ id: T5, status: "IN_TRANSIT", shipments: { nodes: [] } });
+    await addShip(sh, T5, L);
+    assert.equal(sh.shipments.length, 1);
+
+    // 見直しの A の流れ: 時間切れ → 今ある Shipment（注意）→ それも失敗 → ship=new に戻ると、もう注意ずみなので送る（人が確かめたあと）
+    const T6 = "gid://shopify/InventoryTransfer/106";
+    await assert.rejects(
+      cp.runOutboundEditWithCheckpoint({ action: "edit_in_transit", transferId: T6, lineItems: L, extra: "ship=new", createsShipment: true }, fail502),
+      /502/
+    );
+    await assert.rejects(
+      cp.runOutboundEditWithCheckpoint({ action: "edit_in_transit", transferId: T6, lineItems: L, extra: "ship=gid://shopify/InventoryShipment/5" }, ok),
+      (e) => cp.isOutboundEditStaleWarning(e)
+    );
+    // 注意なしに新しい配送の続きが消える道はない（注意が出たあとだけ上書き）
+    assert.ok(store.get(cp.outboundEditCheckpointKey("edit_in_transit", T6)).warnedAt);
   });
 
   it("#115 P2: ほかの動きの続きでも、別の Transfer・はっきり断られただけ・注意ずみ・明細の書き換えだけの動きなら注意しない", async () => {

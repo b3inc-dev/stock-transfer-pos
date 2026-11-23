@@ -714,7 +714,9 @@ export function isCleanEditRejection(tag) {
 export class OutboundEditStaleWarning extends Error {
   constructor(reason) {
     super(
-      reason === "other_action"
+      reason === "existing_shipment"
+        ? "前回の確定で新しく作ろうとした配送の結果が分かっていません。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると選んだ配送で送ります。"
+        : reason === "other_action"
         ? "この在庫移動で、前に別のボタンで行った配送の追加の結果が分かっていません。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると新しく送ります。"
         : reason === "stale"
         ? "前回の配送の追加から 23 時間より時間がたっていて、前回の結果を確かめられません。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると新しく送ります。"
@@ -815,16 +817,17 @@ export async function runOutboundEditWithCheckpoint(
   const reusable = !!(prev && prev.fingerprint === fingerprint && fresh && !prev.noReuse);
 
   // P2-2: 配送を作る動きで、結果の分からない前の続きを捨てるときは一度だけ注意して止める
-  // 前の続きが配送を作らない形（edit_in_transit で今ある Shipment を選んだとき）なら、前の配送は無いので出さない
+  // 前の続きが配送を作らない形（edit_in_transit で今ある Shipment を選んだとき）なら、前の配送は無いので出さない。
+  // 今が配送を作らない形でも、前の続きが配送を作る形なら上書きの前に一度出す（#115 の 2 回目の見直し P3:
+  // edit_in_transit の ship=new が時間切れ → 今ある Shipment を選んで押し直す、で注意なしに続きが消えないように）
   if (
     prev &&
     !reusable &&
-    createsShipment &&
     editCheckpointCreatesShipment(prev, action) &&
     prev.outcome !== "rejected_clean" &&
     !prev.warnedAt
   ) {
-    const reason = prev.noReuse ? "mismatch" : !fresh ? "stale" : "changed";
+    const reason = prev.noReuse ? "mismatch" : !fresh ? "stale" : !createsShipment ? "existing_shipment" : "changed";
     try {
       await storageSet(key, { ...prev, warnedAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString() });
     } catch (_) {}
