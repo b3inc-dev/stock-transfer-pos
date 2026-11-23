@@ -103,6 +103,15 @@ export function isOutboundIdempotencyError(e) {
   return e instanceof OutboundIdempotencyError || e?.name === "OutboundIdempotencyError";
 }
 
+/**
+ * IDEMPOTENCY_KEY_PARAMETER_MISMATCH のときに付ける印（送ろうとした所の rejectTag）。
+ * 作成のチェックポイントは見ない（前と同じ）。編集のチェックポイントは、明細の書き換えなら回を増やし、配送ならその続きを使わない（#114 の見直し P3-3）。
+ */
+export function getOutboundMismatchTag(e) {
+  const t = e?.outboundMismatchTag;
+  return typeof t === "string" && t ? t : null;
+}
+
 /** はっきり断られた（userErrors）ときに付ける印。チェックポイントはこれを見て回を増やす */
 export function getOutboundRejectedTag(e) {
   const t = e?.outboundRejectedTag;
@@ -114,6 +123,11 @@ function defaultAssertNoUserErrors(payload, label) {
   if (!Array.isArray(errs) || errs.length === 0) return;
   const msg = errs.map((e) => e?.message).filter(Boolean).join(" / ");
   throw new Error(`${label} failed: ${msg || JSON.stringify(errs)}`);
+}
+
+function withMismatchTag(err, rejectTag) {
+  if (typeof rejectTag === "string" && rejectTag) err.outboundMismatchTag = rejectTag;
+  return err;
 }
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -149,12 +163,12 @@ export async function sendOutboundIdempotent({
       payload = data?.[payloadField];
     } catch (e) {
       const issue = classifyReceiveIdempotencyIssue(null, e?.message ?? e);
-      if (issue === "mismatch") throw new OutboundIdempotencyError("mismatch", label);
+      if (issue === "mismatch") throw withMismatchTag(new OutboundIdempotencyError("mismatch", label), rejectTag);
       if (issue !== "concurrent") throw e;
       payload = { userErrors: [{ code: "IDEMPOTENCY_CONCURRENT_REQUEST", message: String(e?.message ?? e) }] };
     }
     const issue = classifyReceiveIdempotencyIssue(payload?.userErrors, "");
-    if (issue === "mismatch") throw new OutboundIdempotencyError("mismatch", label);
+    if (issue === "mismatch") throw withMismatchTag(new OutboundIdempotencyError("mismatch", label), rejectTag);
     if (issue === "concurrent") {
       const waitMs = concurrentDelaysMs[attempt];
       if (waitMs == null || Date.now() - startedAt + waitMs > budgetMs) throw new OutboundIdempotencyError("concurrent", label);

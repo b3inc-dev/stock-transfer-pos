@@ -68,6 +68,8 @@ import { ListPageControls } from "../../common/ListPageControls.jsx";
 import {
   clearOutboundCreateCheckpoint,
   runChunkedOutboundCreateWithCheckpoint,
+  isOutboundEditStaleWarning,
+  markShipmentInTransitUnlessAlready,
   runOutboundEditWithCheckpoint,
 } from "./outboundCreateCheckpoint.js";
 
@@ -6697,7 +6699,7 @@ function OutboundList({
           : null;
         // @idempotent: 配送の追加の押し直し（時間切れのあと）は同じキー → 配送が 2 つにならない（4.2・編集のチェックポイント）
         const shipments = await runOutboundEditWithCheckpoint(
-          { action: "add_shipment_in_transit", transferId: addingIdForConfirm, lineItems },
+          { action: "add_shipment_in_transit", transferId: addingIdForConfirm, lineItems, createsShipment: true },
           ({ keyFor, tagFor }) =>
             createInventoryShipmentInTransitChunked({
               movementId: addingIdForConfirm,
@@ -6789,6 +6791,7 @@ function OutboundList({
               transferId: editingTransferId,
               lineItems,
               extra: useSelectedShipment ? `ship=${selectedShipmentIdForConfirm}` : "ship=new",
+              createsShipment: !useSelectedShipment,
             },
             async ({ keyFor, tagFor }) => {
               const t = await inventoryTransferSetItemsSafe({
@@ -6797,7 +6800,12 @@ function OutboundList({
                 idem: { key: keyFor(OUTBOUND_STAGE.SET_ITEMS), tag: tagFor(OUTBOUND_STAGE.SET_ITEMS) },
               });
               const sh = useSelectedShipment
-                ? await inventoryShipmentMarkInTransit(selectedShipmentIdForConfirm)
+                ? // 前の押し直しでもう発送済みなら送らない（#114 の見直し P3-4）
+                  await markShipmentInTransitUnlessAlready({
+                    adminGraphql,
+                    shipmentId: selectedShipmentIdForConfirm,
+                    markInTransit: inventoryShipmentMarkInTransit,
+                  })
                 : await createInventoryShipmentInTransit({
                     movementId: editingTransferId,
                     lineItems,
@@ -7121,9 +7129,16 @@ function OutboundList({
       return { transfer, shipment };
     } catch (e) {
       const msg = String(e?.message || e || "unknown error");
-      toast(`確定に失敗: ${msg}`);
+      // 配送の追加の前回の結果が分からないときの注意（一度だけ。次の確定で新しく送る）
+      const staleWarn = isOutboundEditStaleWarning(e);
+      toast(staleWarn ? msg : `確定に失敗: ${msg}`);
       try {
-        await dialog?.alert?.({ type: "error", title: "確定に失敗", content: msg, actionText: "OK" });
+        await dialog?.alert?.({
+          type: staleWarn ? "default" : "error",
+          title: staleWarn ? "前回の配送の追加を確かめてください" : "確定に失敗",
+          content: msg,
+          actionText: "OK",
+        });
       } catch (_) {}
       return null;
     } finally {
@@ -7339,7 +7354,7 @@ function OutboundList({
       const addingId = String(outbound?.addingShipmentToTransferId || "").trim();
       if (addingId) {
         const shipmentsRts = await runOutboundEditWithCheckpoint(
-          { action: "add_shipment_ready", transferId: addingId, lineItems },
+          { action: "add_shipment_ready", transferId: addingId, lineItems, createsShipment: true },
           ({ keyFor, tagFor }) =>
             createInventoryShipmentDraftChunked({
               movementId: addingId,
@@ -7571,9 +7586,16 @@ function OutboundList({
       return { transfer, shipment: null };
     } catch (e) {
       const msg = String(e?.message || e || "unknown error");
-      toast(`配送準備完了に失敗: ${msg}`);
+      // 配送の追加の前回の結果が分からないときの注意（一度だけ。次の確定で新しく送る）
+      const staleWarn = isOutboundEditStaleWarning(e);
+      toast(staleWarn ? msg : `配送準備完了に失敗: ${msg}`);
       try {
-        await dialog?.alert?.({ type: "error", title: "配送準備完了に失敗", content: msg, actionText: "OK" });
+        await dialog?.alert?.({
+          type: staleWarn ? "default" : "error",
+          title: staleWarn ? "前回の配送の追加を確かめてください" : "配送準備完了に失敗",
+          content: msg,
+          actionText: "OK",
+        });
       } catch (_) {}
       return null;
     } finally {
@@ -8416,7 +8438,7 @@ function OutboundList({
                     label: String(l?.label || "").trim(),
                   }));
                   const draftsAdded = await runOutboundEditWithCheckpoint(
-                    { action: "add_shipment_draft", transferId: addingShipmentToTransferId, lineItems },
+                    { action: "add_shipment_draft", transferId: addingShipmentToTransferId, lineItems, createsShipment: true },
                     ({ keyFor, tagFor }) =>
                       createInventoryShipmentDraftChunked({
                         movementId: addingShipmentToTransferId,
@@ -8574,6 +8596,11 @@ function OutboundList({
                 );
               } catch (e) {
                 toast(toUserMessage(e));
+                if (isOutboundEditStaleWarning(e)) {
+                  try {
+                    await dialog?.alert?.({ type: "default", title: "前回の配送の追加を確かめてください", content: toUserMessage(e), actionText: "OK" });
+                  } catch (_) {}
+                }
               }
             }}
           >

@@ -15,6 +15,7 @@ import {
   buildOutboundEditKey,
   bumpCheckpointRound,
   getCheckpointRounds,
+  getOutboundMismatchTag,
   getOutboundRejectedTag,
   outboundRoundGroup,
 } from "./outboundIdempotency.js";
@@ -642,11 +643,30 @@ export function isCheckpointOlderThanKeyTrust(cp, now = Date.now()) {
  * - はっきり断られたら、その段・チャンクの回を 1 つ増やして残す
  * - 違う指紋・23 時間より古いものは新しい opId
  *
+ * 入れ物は「動き + Transfer」ごとに分ける（#114 の見直し P2-1）。1 つだけだと、配送の追加が時間切れ（じつは通っていた）
+ * → 別の Transfer の下書きを保存（入れ物が上書きされて成功で消える）→ 戻って同じ配送の追加を押す、で opId が新しくなり、
+ * 配送が 2 つになりうるため。作成は note の照会で守れるが、編集には照会が無い。
+ *
+ * 配送を作る動き（createsShipment: true）で、結果の分からない前の続きを使わずに新しい opId にするとき
+ * （23 時間より古い・明細を変えた・中身の違いで止まった）は、一度だけ注意を出して止める（P2-2）。
+ * 次の押し直しで新しい opId で送る。前の配送の追加がはっきり断られただけ（1 つ目の配送か明細の書き換えで断られた）のときは出さない。
+ *
  * 設計（4.2）では「操作の ID = transferId + 編集を始めたときに読んだ明細の指紋」としていたが、編集を始める所が画面のあちこちにあり、
  * 送る直前に読み直すと、配送の追加のあとの押し直しで前の形が変わって新しいキーになる（配送が 2 つになりうる）。
  * なので作成と同じく「送る前に残す ID」にした。守りの考え（同じ押し直しは同じキー・新しい編集は新しいキー）は同じ。
  */
-export const OUTBOUND_EDIT_CHECKPOINT_KEY = "stock_transfer_pos_outbound_edit_cp_v1";
+/** 入れ物の名前の頭（動き + Transfer を後ろに付ける）。#114 の 1 つの入れ物（…_v1）は出していないので読み替えない */
+export const OUTBOUND_EDIT_CHECKPOINT_PREFIX = "stock_transfer_pos_outbound_edit_cp_v2";
+/** 入れ物の一覧（古いものを片付けるため） */
+export const OUTBOUND_EDIT_CHECKPOINT_INDEX_KEY = "stock_transfer_pos_outbound_edit_cp_index_v1";
+/** 残った入れ物を片付けるまでの長さと数 */
+export const OUTBOUND_EDIT_CHECKPOINT_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+export const OUTBOUND_EDIT_CHECKPOINT_MAX = 30;
+
+/** 動き + Transfer ごとの入れ物の名前 */
+export function outboundEditCheckpointKey(action, transferId) {
+  return `${OUTBOUND_EDIT_CHECKPOINT_PREFIX}|${String(action || "").trim() || "unknown"}|${String(transferId || "").trim()}`;
+}
 
 export function buildOutboundEditOpId() {
   const rand = Math.random().toString(36).slice(2, 10);
@@ -669,36 +689,112 @@ function editRoundSlot(stage, chunkIndex0, chunkTotal) {
 }
 
 /**
+ * 断られた所から「この操作でまだ配送ができていない」と言えるか。
+ * 明細の書き換え（配送より前）か、1 つ目の配送で断られたときだけ（同じキーの 2 回目は前の答えを返すので、
+ * 断りが返ったなら前の押し直しでもその所は通っていない。2 つ目以降で断られたときは 1 つ目の配送ができている）。
+ */
+export function isCleanEditRejection(tag) {
+  const t = String(tag || "");
+  return t.startsWith("set_items@") || /^shipment@1\/\d+$/.test(t);
+}
+
+/** 配送の追加のやり直しの前に一度出す注意（P2-2）。message は B へ進む見分け・時間切れの見分けに当たらない日本語だけ */
+export class OutboundEditStaleWarning extends Error {
+  constructor(reason) {
+    super(
+      reason === "stale"
+        ? "前回の配送の追加から 23 時間より時間がたっていて、前回の結果を確かめられません。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると新しく送ります。"
+        : reason === "mismatch"
+          ? "前回の配送の追加の結果を確かめられませんでした。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると新しく送ります。"
+          : "前回の配送の追加の結果が分からないまま、明細が変わりました。Shopify の管理画面で、この在庫移動に前回の配送ができていないかを確かめてください。できていなければ、もう一度確定すると今の明細で新しく送ります。"
+    );
+    this.name = "OutboundEditStaleWarning";
+    this.staleReason = reason;
+  }
+}
+
+export function isOutboundEditStaleWarning(e) {
+  return e instanceof OutboundEditStaleWarning || e?.name === "OutboundEditStaleWarning";
+}
+
+function readEditCheckpoint(raw) {
+  return raw && typeof raw === "object" && Number(raw.v) === 1 && raw.opId && raw.fingerprint ? raw : null;
+}
+
+/** 入れ物の一覧に足して、古いもの・多すぎるものを片付ける（失敗しても止めない） */
+async function touchEditCheckpointIndex(storageKey, nowMs, { remove = false } = {}) {
+  try {
+    const raw = await storageGet(OUTBOUND_EDIT_CHECKPOINT_INDEX_KEY);
+    let list = Array.isArray(raw) ? raw.filter((x) => x && typeof x.key === "string") : [];
+    list = list.filter((x) => x.key !== storageKey);
+    if (!remove) list.push({ key: storageKey, at: nowMs });
+    const keep = [];
+    const drop = [];
+    for (const x of list) {
+      const at = Number(x.at);
+      if (x.key !== storageKey && (!Number.isFinite(at) || nowMs - at > OUTBOUND_EDIT_CHECKPOINT_KEEP_MS)) drop.push(x);
+      else keep.push(x);
+    }
+    keep.sort((a, b) => Number(a.at) - Number(b.at));
+    while (keep.length > OUTBOUND_EDIT_CHECKPOINT_MAX) {
+      const i = keep.findIndex((x) => x.key !== storageKey);
+      if (i < 0) break;
+      drop.push(keep.splice(i, 1)[0]);
+    }
+    for (const x of drop) {
+      try {
+        await storageDelete(x.key);
+      } catch (_) {}
+    }
+    await storageSet(OUTBOUND_EDIT_CHECKPOINT_INDEX_KEY, keep);
+  } catch (_) {}
+}
+
+/**
  * 編集・配送の追加をチェックポイント付きで行う。
  * body({ opId, keyFor(stage, chunkIndex0?, chunkTotal?), tagFor(stage, chunkIndex0?, chunkTotal?) }) の中で、
  * sendOutboundIdempotent の idempotencyKey に keyFor(…)、rejectTag に tagFor(…) を渡す。
+ * createsShipment: 配送を作る動き（配送の追加・明細の書き換えと新しい配送）。結果の分からない前の続きを捨てるときに一度注意を出す。
  */
 export async function runOutboundEditWithCheckpoint(
-  { action, transferId, lineItems, extra = "", storageKey = OUTBOUND_EDIT_CHECKPOINT_KEY, now = () => Date.now() },
+  { action, transferId, lineItems, extra = "", createsShipment = false, storageKey, now = () => Date.now() },
   body
 ) {
+  const key = storageKey || outboundEditCheckpointKey(action, transferId);
   const fingerprint = buildOutboundEditFingerprint({ action, transferId, lineItems, extra });
-  let cp = null;
+  let prev = null;
   try {
-    const raw = await storageGet(storageKey);
-    if (raw && typeof raw === "object" && Number(raw.v) === 1 && raw.opId && raw.fingerprint) cp = raw;
+    prev = readEditCheckpoint(await storageGet(key));
   } catch (_) {}
-  const startedMs = Date.parse(String(cp?.startedAt || ""));
-  const reusable =
-    cp && cp.fingerprint === fingerprint && Number.isFinite(startedMs) && now() - startedMs <= OUTBOUND_KEY_TRUST_MS;
-  if (!reusable) {
-    cp = {
-      v: 1,
-      opId: buildOutboundEditOpId(),
-      fingerprint,
-      action: String(action || ""),
-      transferId: String(transferId || ""),
-      rounds: {},
-      startedAt: new Date(now()).toISOString(),
-    };
+  const nowMs = now();
+  const startedMs = Date.parse(String(prev?.startedAt || ""));
+  const fresh = Number.isFinite(startedMs) && nowMs - startedMs <= OUTBOUND_KEY_TRUST_MS;
+  const reusable = !!(prev && prev.fingerprint === fingerprint && fresh && !prev.noReuse);
+
+  // P2-2: 配送を作る動きで、結果の分からない前の続きを捨てるときは一度だけ注意して止める
+  if (prev && !reusable && createsShipment && prev.outcome !== "rejected_clean" && !prev.warnedAt) {
+    const reason = prev.noReuse ? "mismatch" : !fresh ? "stale" : "changed";
+    try {
+      await storageSet(key, { ...prev, warnedAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString() });
+    } catch (_) {}
+    throw new OutboundEditStaleWarning(reason);
   }
-  // 送る前に残す（応答なしのあとも同じ opId を使うため）
-  await storageSet(storageKey, { ...cp, updatedAt: new Date(now()).toISOString() });
+
+  let cp = reusable
+    ? prev
+    : {
+        v: 1,
+        opId: buildOutboundEditOpId(),
+        fingerprint,
+        action: String(action || ""),
+        transferId: String(transferId || ""),
+        rounds: {},
+        startedAt: new Date(nowMs).toISOString(),
+      };
+  // 送る前に残す（応答なしのあとも同じ opId を使うため）。outcome は送っている間は「分からない」
+  cp = { ...cp, outcome: "unknown" };
+  await storageSet(key, { ...cp, updatedAt: new Date(nowMs).toISOString() });
+  await touchEditCheckpointIndex(key, nowMs);
 
   const tagFor = (stage, chunkIndex0 = 0, chunkTotal = 1) => editRoundSlot(stage, chunkIndex0, chunkTotal);
   const keyFor = (stage, chunkIndex0 = 0, chunkTotal = 1) =>
@@ -715,19 +811,66 @@ export async function runOutboundEditWithCheckpoint(
     result = await body({ opId: cp.opId, keyFor, tagFor });
   } catch (e) {
     const tag = getOutboundRejectedTag(e);
+    const mismatchTag = getOutboundMismatchTag(e);
+    let thrown = e;
     if (tag) {
       const rounds = { ...(cp.rounds || {}) };
       rounds[tag] = Math.max(0, Math.floor(Number(rounds[tag]) || 0)) + 1;
+      cp = { ...cp, rounds, outcome: isCleanEditRejection(tag) ? "rejected_clean" : "unknown" };
+    } else if (mismatchTag && mismatchTag.startsWith("set_items@")) {
+      // P3-3: 明細の書き換えの中身の違い（250 件以下で明細の並びが変わったときなど）。書き換えは何度送っても同じ形になるので、
+      // 回を増やして次の押し直しは新しいキーにする（同じキーのままだと 23 時間ずっと止まる）
+      const rounds = { ...(cp.rounds || {}) };
+      rounds[mismatchTag] = Math.max(0, Math.floor(Number(rounds[mismatchTag]) || 0)) + 1;
       cp = { ...cp, rounds };
+      thrown = new Error(
+        "明細の並びが前回の確定と違うため、前回の明細の書き換えの結果を確かめられませんでした。もう一度確定すると、今の明細で新しく送ります（明細の書き換えは何度送っても同じ形になります）。"
+      );
+      thrown.name = "OutboundIdempotencyError";
+      thrown.idempotencyIssue = "mismatch";
+      thrown.cause = e;
+    } else if (mismatchTag) {
+      // P3-3: 配送の作成の中身の違い。前の配送ができているかもしれないので、同じ続きは使わない。
+      // 文で「管理画面で確かめて」と出しているので、次の押し直しで注意は重ねずに新しい opId で送る
+      cp = { ...cp, noReuse: true, warnedAt: new Date(now()).toISOString() };
+    }
+    if (tag || mismatchTag) {
       try {
-        await storageSet(storageKey, { ...cp, updatedAt: new Date(now()).toISOString() });
+        await storageSet(key, { ...cp, updatedAt: new Date(now()).toISOString() });
       } catch (_) {}
     }
-    throw e;
+    throw thrown;
   }
   try {
-    await storageDelete(storageKey);
+    await storageDelete(key);
   } catch (_) {}
+  await touchEditCheckpointIndex(key, now(), { remove: true });
   return result;
 }
 
+/**
+ * 今ある Shipment を発送済みにする（P3-4）。前の押し直しでもう IN_TRANSIT などになっていれば送らない
+ * （inventoryShipmentMarkInTransit は @idempotent に対応していないので、2 回目は断られて止まる）。
+ * 状態を読めなかったときは前と同じく送る。
+ */
+export async function markShipmentInTransitUnlessAlready({ adminGraphql, shipmentId, markInTransit }) {
+  const sid = String(shipmentId || "").trim();
+  if (!sid) throw new Error("Shipment ID が空です");
+  let current = null;
+  try {
+    const data = await adminGraphql(
+      `#graphql
+      query OutboundShipmentStatus($id: ID!) {
+        inventoryShipment(id: $id) { id status }
+      }`,
+      { id: sid },
+      { timeoutMs: 20000 }
+    );
+    current = data?.inventoryShipment ?? null;
+  } catch (_) {
+    current = null;
+  }
+  const status = String(current?.status || "").toUpperCase();
+  if (current?.id && status && status !== "DRAFT") return { id: String(current.id), status };
+  return await markInTransit(sid);
+}
