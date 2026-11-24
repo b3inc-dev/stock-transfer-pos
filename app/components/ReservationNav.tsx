@@ -16,7 +16,7 @@ export function ReservationNav({ selected }: { selected: "settings" | "receipt" 
   return <><style>{`
 .Reservation-tabs {display:flex;gap:8px;padding:0 16px 8px;border-bottom:1px solid #e1e3e5;margin-bottom:24px;overflow-x:auto;}
 .Admin-body .Reservation-tabs a:not(.Admin-primary):not(.Admin-secondary) {flex:0 0 auto;border-radius:8px;padding:6px 12px;color:inherit;text-decoration:none;font-size:14px;font-weight:500;}
-.Reservation-tabs a.is-active {background:#e5e7eb;font-weight:600;}
+.Admin-body .Reservation-tabs a.is-active:not(.Admin-primary):not(.Admin-secondary) {background:#e5e7eb;font-weight:600;}
 .Reservation-history {display:grid;grid-template-columns:minmax(260px,2fr) minmax(0,3fr);gap:24px;align-items:start;}
 .Reservation-history > * {min-width:0;}
 .Reservation-history-card {margin-bottom:16px;font-size:14px;line-height:1.5;}
