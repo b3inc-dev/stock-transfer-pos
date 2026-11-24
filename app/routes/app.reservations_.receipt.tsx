@@ -55,7 +55,11 @@ function ReceiptEditor({ initial }: { initial: { layout: ReservationReceiptSetti
   const result = useActionData<typeof action>();
   const busy = useNavigation().state !== "idle";
   useEffect(() => { if (result?.ok && "layout" in result) { baseline.current = result.layout; setVersion(result.version); } }, [result]);
-  const discard = () => { setLayout(baseline.current); setEditorInitial(baseline.current); };
+  const discard = () => {
+    // A fresh object makes both mounted copy editors reset even before the first save.
+    const restored = structuredClone(baseline.current);
+    setLayout(restored); setEditorInitial(restored);
+  };
   return <s-page heading="取置レシート"><BackAction to="/app/reservations" label="取置へ戻る" /><div className="Admin-body"><ReservationNav selected="receipt" />
     {result?.error ? <StatusBanner tone="critical" heading="レシート設定を保存できませんでした">{result.error}</StatusBanner> : null}
     <Form method="post"><SaveBar status={result?.ok ? result.saved : undefined} failed={!busy && result?.ok === false} onDiscard={discard} />
