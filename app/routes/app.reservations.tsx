@@ -7,7 +7,7 @@ import db from "../db.server";
 import { adminPlanRedirect } from "../utils/plan-gate.server";
 import { reservationsEnabled } from "../utils/reservations.server";
 import { RESERVATION_LABELS } from "../../extensions/common/reservations.js";
-import { AdminBlock, GuardedLink, SecondaryLink, StateBadge, StatusBanner, SuccessToast } from "../components/admin-ui";
+import { GuardedLink, SecondaryLink, StateBadge, StatusBanner, SuccessToast } from "../components/admin-ui";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   if (!reservationsEnabled()) throw new Response("Not found", { status: 404 });
@@ -58,7 +58,7 @@ export default function Reservations() {
       <p><strong>取置履歴</strong></p><p className="Admin-note">店舗・ステータスで絞り込み、取置の詳細を確認できます。</p>
       <Form key={search} method="get" onChange={event => event.currentTarget.requestSubmit()}>
         <fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0 }}>
-          <AdminBlock wide title="フィルター" description="条件を選ぶと一覧が絞り込まれます。">
+          <div className="Admin-card Reservation-history-card"><h2 className="Admin-title">フィルター</h2><p className="Admin-note">条件を選ぶと一覧が絞り込まれます。</p>
             <p>店舗</p><div className="Reservation-options">
               <label className="Reservation-option"><input type="checkbox" checked={!selectedLocations.length} onChange={event => { if (event.currentTarget.checked) { const form = event.currentTarget.form; form?.querySelectorAll<HTMLInputElement>('input[name="locations"]').forEach(input => { input.checked = false; }); } }} />全て</label>
               {locations.map(location => <label className="Reservation-option" key={location.locationId}><input type="checkbox" name="locations" value={location.locationId} defaultChecked={selectedLocations.includes(location.locationId)} />{location.locationName}</label>)}
@@ -67,14 +67,14 @@ export default function Reservations() {
               <label className="Reservation-option"><input type="checkbox" checked={!selectedStatuses.length && !ended} onChange={event => { if (event.currentTarget.checked) event.currentTarget.form?.querySelectorAll<HTMLInputElement>('input[name="statuses"]').forEach(input => { input.checked = false; }); }} />全て</label>
               {Object.entries(RESERVATION_LABELS).map(([key, label]) => <label className="Reservation-option" key={key}><input type="checkbox" name="statuses" value={key} defaultChecked={selectedStatuses.includes(key) || (ended && ["sold", "cancelled", "failed"].includes(key))} />{label}{["reserving", "cancelling", "completing"].includes(key) ? key === "reserving" ? "（登録）" : key === "cancelling" ? "（解除）" : "（販売）" : ""}</label>)}
             </div>
-          </AdminBlock>
-          <AdminBlock wide title="ソート" description="受付日時の表示順を選びます。"><div className="Reservation-options">
+          </div>
+          <div className="Admin-card Reservation-history-card"><h2 className="Admin-title">ソート</h2><p className="Admin-note">受付日時の表示順を選びます。</p><div className="Reservation-options">
             <label className="Reservation-option"><input type="radio" name="sort" value="desc" defaultChecked={sort === "desc"} />受付日時 降順（新しい順）</label>
             <label className="Reservation-option"><input type="radio" name="sort" value="asc" defaultChecked={sort === "asc"} />受付日時 昇順（古い順）</label>
-          </div></AdminBlock>
+          </div></div>
         </fieldset>
       </Form>
-    </aside><section aria-label="取置履歴一覧"><AdminBlock wide title={`表示: ${total}件 / ${allTotal}件`}>
+    </aside><section aria-label="取置履歴一覧"><div className="Admin-card Reservation-history-card"><p className="Admin-note">表示: {total}件 / {allTotal}件</p>
       <Suspense fallback={<p role="status">読み込んでいます。</p>}><Await resolve={rows} errorElement={<StatusBanner tone="critical" heading="取置を取得できませんでした">画面を更新してもう一度お試しください。</StatusBanner>}>{items => <>
         {!items.length ? <><p className="Admin-note">条件に一致する取置はありません。</p><SecondaryLink to="/app/reservations">すべて表示する</SecondaryLink></> : items.map(row => {
           const lines = Array.isArray(row.lines) ? row.lines as { quantity?: number }[] : [];
@@ -88,6 +88,6 @@ export default function Reservations() {
         })}
         <div className="Admin-pager">{page > 0 ? <SecondaryLink to={pageLink(page - 1)}>前へ</SecondaryLink> : null}{(page + 1) * 25 < total ? <SecondaryLink to={pageLink(page + 1)}>次へ</SecondaryLink> : null}</div>
       </>}</Await></Suspense>
-    </AdminBlock></section></div>
+    </div></section></div>
   </div></s-page>;
 }
