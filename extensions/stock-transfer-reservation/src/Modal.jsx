@@ -380,7 +380,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
           <s-text>{storeName}・{updatedAt ? `${updatedAt} に更新` : "まだ更新していません"}</s-text>
 
         </> : <>
-          <s-stack direction="inline" justifyContent="space-between"><s-text>店舗: {storeName}</s-text>{screen === "products" ? <s-button disabled={busy || scanBusy} onClick={() => setImages(!images)}>{images ? "画像ON" : "画像OFF"}</s-button> : null}</s-stack>
+          <s-stack direction="inline" justifyContent="space-between"><s-text>ロケーション: {storeName}</s-text>{screen === "products" ? <s-button disabled={busy || scanBusy} onClick={() => setImages(!images)}>{images ? "画像ON" : "画像OFF"}</s-button> : null}</s-stack>
           {screen === "products" ? <>
             <s-box inlineSize="100%" paddingBlockStart="small-200"><s-search-field placeholder="商品名 / SKU / バーコード" value={search} onInput={event => changeSearch(event.currentTarget.value)} onChange={event => changeSearch(event.currentTarget.value)} /></s-box>
             <s-text>{search.trim() ? `検索結果: ${products.length}件` : `追加済み: ${draft.lines.length}件`}</s-text>
@@ -393,7 +393,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         {listLoaded && !rows.length && !busy ? <><s-text>条件に合う取置はありません。対象の全体は{allTotal}件です。</s-text><s-button onClick={() => { setMode("active"); setQuery(""); setQueryInput(""); setPage(0); }}>すべて表示する</s-button></> : null}
         {(listLoaded ? rows : []).map(row => <s-box key={row.id}><s-clickable onClick={() => open(row)} disabled={busy}><s-box padding="base"><s-stack gap="small" direction="block">
           <s-stack direction="inline" justifyContent="space-between"><s-text type="strong">{reservationDisplayNumber(row)} ›</s-text><s-text>登録 {new Date(row.createdAt).toLocaleDateString("ja-JP", { timeZone: row.timezone || "Asia/Tokyo" })}</s-text></s-stack>
-          <s-text>受取期限: {row.dueDate}</s-text><s-text>{row.name}・{japanesePhoneDisplay(row.phone)}</s-text><s-text>店舗: {row.locationName}</s-text>
+          <s-text>受取期限: {row.dueDate}</s-text><s-text>{row.name}・{japanesePhoneDisplay(row.phone)}</s-text><s-text>ロケーション: {row.locationName}</s-text>
           <s-stack direction="inline" justifyContent="space-between"><s-badge tone={row.needsFollowUp ? "warning" : reservationStatusTone(row.status)}>{row.needsFollowUp ? "要対応" : RESERVATION_LABELS[row.status]}</s-badge><s-text>{row.lines.length}件・合計{row.lines.reduce((sum, line) => sum + line.quantity, 0)}点</s-text></s-stack>
         </s-stack></s-box></s-clickable><s-divider /></s-box>)}
       </> : null}
@@ -476,7 +476,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     </s-stack></s-box></s-scroll-box>
     <s-divider />
     <s-box padding="base"><s-stack gap="base" direction="block">
-      {screen !== "products" ? <s-stack direction="inline" justifyContent="space-between"><s-text>店舗: {storeName}</s-text>{screen === "list" ? <s-text>{listLoaded ? `${total}件` : "未取得"}</s-text> : <s-text>{detail && ["detail", "actions", "cancel"].includes(screen) ? detail.lines.length : draft.lines.length}件</s-text>}</s-stack> : null}
+      {screen !== "products" ? <s-stack direction="inline" justifyContent="space-between"><s-text>ロケーション: {storeName}</s-text>{screen === "list" ? <s-text>{listLoaded ? `${total}件` : "未取得"}</s-text> : <s-text>{detail && ["detail", "actions", "cancel"].includes(screen) ? detail.lines.length : draft.lines.length}件</s-text>}</s-stack> : null}
       {notice ? <s-text tone="critical">{notice}</s-text> : null}
       {canAddToCart ? <s-text>追加後はPOSのカートでお会計してください。</s-text> : null}
       <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">

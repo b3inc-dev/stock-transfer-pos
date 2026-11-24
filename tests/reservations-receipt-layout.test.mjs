@@ -136,7 +136,7 @@ test("customer copy receives the store address while store copy omits address an
 });
 test("fixed number and deadline are centered, emphasized together, with one dotted footer divider", () => {
   const html = receipt.renderConfiguredReservationReceipt({ ...row, number: 1 }, receipt.normalizeReservationReceiptSettings(null), "customer");
-  assert.match(html, /\.reservation-details\{text-align:center;border-top:2px dotted #000\}/);
+  assert.match(html, /\.reservation-details\{text-align:center\}/);
   assert.match(html, /\.reservation-required \.reservation-number\{font-size:1\.3em;font-weight:700/);
   assert.match(html, /\.reservation-details \.reservation-due\{font-size:1\.3em;font-weight:700/);
   assert.match(html, /class="reservation-due"/);
@@ -150,7 +150,7 @@ test("block and code modes share the exact protected product list", () => {
   const section = html => html.match(/<section class="reservation-required reservation-items">[\s\S]*?<\/section>/)[0];
   assert.equal(section(blockHtml), section(codeHtml));
   assert.match(section(codeHtml), /required-item-header.*アイテム.*数量/);
-  assert.match(section(codeHtml), /class="required-title"/); assert.match(section(codeHtml), /class="required-code">SKU: SKU1/);
+  assert.match(section(codeHtml), /class="required-title"/); assert.match(section(codeHtml), /class="required-code">SKU1/);
 });
 test("standard reservation blocks follow print order without a redundant divider", async () => {
   const { defaultLayout } = await vite.ssrLoadModule("/app/services/receiptLayoutPresets.ts");
@@ -164,4 +164,24 @@ test("standard store note does not ask staff to present a customer copy", () => 
   assert.doesNotMatch(html, /ご来店時にこの控えをご提示/);
   assert.match(html, /商品・数量と受取期限をご確認/);
   assert.match(html, /class="reservation-due-label">受取期限/);
+});
+test("customer and store copies render name, variant and SKU on separate lines with right quantity and solid rules", () => {
+  const entry = { ...row, lines: [{ title: "旧結合名", productTitle: "シェルインナーシート", variantTitle: "ShellBlue / iPhone15", sku: "SKU-0001-BL-15", quantity: 2 }] };
+  for (const mm of [58, 80]) for (const copy of ["customer", "store"]) {
+    const settings = receipt.normalizeReservationReceiptSettings(null); settings[copy].paperWidthMm = mm;
+    const html = receipt.renderConfiguredReservationReceipt(entry, settings, copy);
+    assert.match(html, /required-title">シェルインナーシート<\/span><div class="required-variant">ShellBlue \/ iPhone15<\/div><div class="required-code">SKU-0001-BL-15<\/div>/);
+    assert.match(html, /required-quantity">2点/); assert.doesNotMatch(html, /旧結合名/);
+    assert.match(html, /required-item-header\{[^}]*border-bottom:1px solid #000/);
+    assert.match(html, /reservation-items\{[^}]*border-bottom:3px solid #000/);
+  }
+});
+test("SKU marker opts into three-line code receipts without overwriting saved block settings", () => {
+  const settings = receipt.normalizeReservationReceiptSettings(null);
+  settings.customer.blocks.find(block => block.type === "reservation_items").settings.show_sku = false;
+  settings.customer.mode = "code"; settings.customer.code = "<p>上</p><!-- reservation-items:sku --><p>案内</p>";
+  const html = receipt.renderConfiguredReservationReceipt(row, settings, "customer");
+  assert.match(html, /required-code">SKU1/); assert.equal((html.match(/class="required-item"/g) || []).length, 1);
+  assert.ok(html.indexOf('class="required-item"') < html.indexOf("案内"));
+  assert.equal(settings.customer.blocks.find(block => block.type === "reservation_items").settings.show_sku, false);
 });

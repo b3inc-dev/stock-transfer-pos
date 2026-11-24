@@ -142,12 +142,12 @@ export async function reservationLocation(admin: ReservationAdmin, id: string) {
 async function loadLines(admin: ReservationAdmin, locationId: string, requested: { variantId: string; quantity: number }[]) {
   const data = await reservationQuery(admin, `#graphql
     query ReservationVariants($ids: [ID!]!, $location: ID!) { nodes(ids: $ids) { ... on ProductVariant {
-      id displayName sku barcode inventoryItem { id tracked inventoryLevel(locationId: $location) { quantities(names: ["available", "reserved"]) { name quantity } } }
+      id displayName title product { title } sku barcode inventoryItem { id tracked inventoryLevel(locationId: $location) { quantities(names: ["available", "reserved"]) { name quantity } } }
     } } }`, { ids: requested.map(line => line.variantId), location: locationId });
   return requested.map(line => {
     const variant = data.nodes.find((v: { id?: string } | null) => v?.id === line.variantId);
     if (!variant?.inventoryItem?.tracked || !variant.inventoryItem.inventoryLevel) throw new Error("この店舗で在庫追跡している商品だけを取置できます");
-    return { ...line, title: String(variant.displayName), sku: String(variant.sku || ""), barcode: String(variant.barcode || ""), inventoryItemId: String(variant.inventoryItem.id),
+    return { ...line, title: String(variant.displayName), productTitle: String(variant.product?.title || variant.displayName), variantTitle: variant.title === "Default Title" ? "" : String(variant.title || ""), sku: String(variant.sku || ""), barcode: String(variant.barcode || ""), inventoryItemId: String(variant.inventoryItem.id),
       quantities: Object.fromEntries(variant.inventoryItem.inventoryLevel.quantities.map((q: { name: string; quantity: number }) => [q.name, q.quantity])) as Record<string, number> };
   });
 }
@@ -252,7 +252,7 @@ export async function createReservation(args: { shop: string; locationId: string
   }
   const settings = await db.stockReservationSettings.findUnique({ where: { shop } });
   const data = { id, requestHash, intakeMethod, customerPhoneSaveState, shop, locationId, locationName: location.name, timezone, status: "reserving", customerId, guestName, contactPhone,
-    lines: lines.map(line => ({ variantId: line.variantId, inventoryItemId: line.inventoryItemId, title: line.title, sku: line.sku, barcode: line.barcode, quantity: line.quantity })), dueDate: addDays(today, settings?.days ?? 7), createdBy: actor };
+    lines: lines.map(line => ({ variantId: line.variantId, inventoryItemId: line.inventoryItemId, title: line.title, productTitle: line.productTitle, variantTitle: line.variantTitle, sku: line.sku, barcode: line.barcode, quantity: line.quantity })), dueDate: addDays(today, settings?.days ?? 7), createdBy: actor };
   // Materialize exact input before inserting, so there's never a row eligible for two different reserve operations.
   const provisional = { ...data, version: 1 } as unknown as StockReservation;
   const operation: Operation = { key: randomUUID(), startedAt: new Date().toISOString(), input: await moveInput(admin, provisional, true), success: "held", rejected: "failed", actor };
