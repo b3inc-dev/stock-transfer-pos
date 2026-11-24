@@ -19,7 +19,7 @@ export function AppNavBar({ shopPlan, showReservations, showReservationPrivacy }
   const search = location.search || "";
   const { features, distribution } = shopPlan;
 
-  const items: { path: string; label: string }[] = [{ path: "/app", label: "ホーム" }];
+  const items: { path: string; label: string; match?: string[] }[] = [{ path: "/app", label: "ホーム" }];
   if (features.settings) {
     items.push({ path: "/app/settings", label: "設定" });
   }
@@ -44,8 +44,7 @@ export function AppNavBar({ shopPlan, showReservations, showReservationPrivacy }
   if (features.adjustment) {
     items.push({ path: "/app/adjustment", label: "調整" });
   }
-  if (showReservationPrivacy) items.push({ path: "/app/reservation-privacy", label: "顧客データ" });
-  if (showReservations && features.reservation) items.push({ path: "/app/reservations", label: "取置" });
+  if ((showReservations && features.reservation) || showReservationPrivacy) items.push({ path: showReservations && features.reservation ? "/app/reservations" : "/app/reservations/customer-data", label: "取置", match: ["/app/reservations", "/app/reservation-privacy"] });
   if (distribution === "public") {
     items.push({ path: "/app/plan", label: "料金プラン" });
   }

@@ -1,9 +1,10 @@
+import { ReservationNav } from "../components/ReservationNav";
 import { Suspense } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Await, Form, data, useActionData, useLoaderData, useNavigation } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { AdminBlock, ConfirmAction, StatusBanner, SuccessToast } from "../components/admin-ui";
+import { AdminBlock, BackAction, ConfirmAction, StatusBanner, SuccessToast } from "../components/admin-ui";
 
 // Mandatory privacy controls remain accessible without Pro or the reservation feature flag.
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -27,7 +28,7 @@ export default function ReservationPrivacy() {
   const { content } = useLoaderData<typeof loader>();
   const result = useActionData<typeof action>();
   const busy = useNavigation().state !== "idle";
-  return <s-page heading="顧客データ"><div className="Admin-body">
+  return <s-page heading="取置"><BackAction to="/app/reservations" label="取置へ戻る" /><div className="Admin-body"><ReservationNav selected="customers" />
     <SuccessToast message={result?.ok ? "連絡先を削除しました" : null} trigger={result} />
     <Suspense fallback={<p role="status">読み込んでいます。</p>}><Await resolve={content} errorElement={<StatusBanner tone="critical" heading="顧客データを取得できませんでした">画面を更新してもう一度お試しください。</StatusBanner>}>{([requests, ended]) => <>
       {result?.error ? <StatusBanner tone="critical" heading="連絡先を削除できませんでした">{result.error}</StatusBanner> : null}

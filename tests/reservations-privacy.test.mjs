@@ -25,6 +25,7 @@ test("shop redact deletes reservations (events cascade), settings and request ID
 });
 test("mandatory privacy pages are independent of subscription plan and feature switch", async () => {
   const { featureForAdminPath } = await import("../extensions/common/planAccess.js");
+  assert.equal(featureForAdminPath("/app/reservations/customer-data"), null);
   assert.equal(featureForAdminPath("/app/reservation-privacy"), null);
   assert.equal(featureForAdminPath("/app/reservations/privacy"), null);
   assert.equal(featureForAdminPath("/app/reservations"), "reservation");
