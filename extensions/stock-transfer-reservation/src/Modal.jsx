@@ -480,7 +480,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       {notice ? <s-text tone="critical">{notice}</s-text> : null}
       {canAddToCart ? <s-text>追加後はPOSのカートでお会計してください。</s-text> : null}
       <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-        {screen === "create" || (screen === "detail" && detail?.endedAt) ? <s-box /> : <s-button variant="secondary" onClick={goBack} disabled={busy}>{screen === "cancel" ? "やめる" : "戻る"}</s-button>}
+        {screen === "create" ? null : screen === "detail" && detail?.endedAt ? <s-box /> : <s-button variant="secondary" onClick={goBack} disabled={busy}>{screen === "cancel" ? "やめる" : "戻る"}</s-button>}
         {screen === "create" ? <s-button disabled={busy} onClick={() => { setScreen("list"); setDetail(null); setError(""); }}>履歴一覧</s-button> : screen === "detail" && receiptOptions?.storeCopy && ["held", "checkout", "sold", "cancelled"].includes(detail?.status) ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "store"); shopify.toast.show("店舗控えの印刷を送信しました"); })}>店舗控えを印刷</s-button> : screen === "products" ? null : screen === "list" && (error || slow) ? <s-button disabled={busy} onClick={() => run(refresh)}>再読み込み</s-button> : <s-box />}
         {screen === "products" ? <s-text>明細 {draft.lines.length} / 合計 {draft.lines.reduce((sum, line) => sum + line.quantity, 0)}</s-text> : null}
         {primary || <s-box />}
