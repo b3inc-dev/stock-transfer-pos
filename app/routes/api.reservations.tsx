@@ -1,3 +1,4 @@
+import db from "../db.server";
 import { buildVariantSearchQuery } from "../../extensions/common/variantSearch.js";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate, unauthenticated } from "../shopify.server";
@@ -32,7 +33,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (!id || !locationId) return json({ error: "Method not allowed" }, 405);
     const row = await getReservation(shop, locationId, id);
     if (!["held", "checkout", "sold", "cancelled"].includes(row.status)) return json({ error: "登録を確認してから印刷してください" }, 409);
-    return new Response(receiptHtml({ ...row, lines: row.lines }), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'", "X-Content-Type-Options": "nosniff" } });
+    const settings = await db.stockReservationSettings.findUnique({ where: { shop }, select: { receiptLayout: true } });
+    return new Response(receiptHtml({ ...row, lines: row.lines }, settings?.receiptLayout), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src https:", "X-Content-Type-Options": "nosniff" } });
   } catch (error) {
     if (error instanceof Response) return error;
     return json({ ok: false, error: "取置控えを取得できません。店舗と登録内容を確認してください" }, 400);

@@ -1,3 +1,4 @@
+import { renderReservationReceipt } from "./reservationReceipt.js";
 /** Pure rules shared by server and POS; no PII in error messages. */
 export const RESERVATION_LABELS = Object.freeze({ reserving: "確認中", held: "取置中", checkout: "会計中", cancelling: "確認中", completing: "確認中", sold: "販売完了", cancelled: "キャンセル", failed: "登録できませんでした" });
 export const TERMINAL_RESERVATIONS = ["sold", "cancelled", "failed"];
@@ -74,10 +75,7 @@ export function cartCanReceive(row, cart) {
   if (row.lines.some(line => (counts.get(line.variantId) || 0) > line.quantity)) throw new Error("カートの数量が取置を超えています");
   return row.lines.map(line => ({ ...line, quantity: line.quantity - (counts.get(line.variantId) || 0) })).filter(line => line.quantity > 0);
 }
-export function receiptHtml(row) {
-  const escape = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-  return `<!doctype html><html lang="ja"><meta charset="utf-8"><title>取置控え</title><style>body{font:14px sans-serif;width:260px;margin:12px auto}td{padding:6px 0}td:last-child{text-align:right}table{width:100%}</style><h1>取置控え</h1><p>${escape(row.locationName)}</p><p>取置番号 ${escape(row.id)}</p><p>受付 ${escape(localDate(row.createdAt, row.timezone))}<br>受取期限 ${escape(row.dueDate)}</p><table>${row.lines.map(line => `<tr><td>${escape(line.title)}</td><td>${escape(line.quantity)}点</td></tr>`).join("")}</table><p>担当 ${escape(row.createdBy)}</p><p>ご来店時にこの控えをご提示ください。</p></html>`;
-}
+export function receiptHtml(row, layout) { return renderReservationReceipt(row, layout); }
 
 /** A marked cart precedes the server claim, so a lost claim response can resume without releasing stock. */
 export async function handoffReservationCart(detail, pos, api, update = () => {}) {
