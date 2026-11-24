@@ -1,3 +1,4 @@
+import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type StockReservation } from "@prisma/client";
 import db from "../db.server";
@@ -83,8 +84,8 @@ export async function publicReservation(row: StockReservation, admin: Reservatio
   let phone = row.contactPhone || "";
   if (row.customerId) {
     const data = customers ? { customer: customers.get(row.customerId) } : await reservationQuery(admin, `#graphql
-      query ReservationCustomer($id: ID!) { customer(id: $id) { displayName phone } }`, { id: row.customerId });
-    name = data.customer?.displayName || "顧客情報を取得できません";
+      query ReservationCustomer($id: ID!) { customer(id: $id) { firstName lastName displayName phone } }`, { id: row.customerId });
+    name = japaneseCustomerName(data.customer) || "顧客情報を取得できません";
     phone = phone || data.customer?.phone || "";
   }
   // Explicit whitelist: never expose the persisted mutation input or checkout key in list results.
@@ -123,7 +124,7 @@ export async function listReservations(shop: string, locationId: string, admin: 
   const customers = new Map<string, { displayName: string; phone?: string }>();
   if (ids.length) {
     const data = await reservationQuery(admin, `#graphql
-      query ReservationCustomers($ids: [ID!]!) { nodes(ids: $ids) { ... on Customer { id displayName phone } } }`, { ids });
+      query ReservationCustomers($ids: [ID!]!) { nodes(ids: $ids) { ... on Customer { id firstName lastName displayName phone } } }`, { ids });
     for (const customer of data.nodes) if (customer) customers.set(customer.id, customer);
   }
   const mapped = await Promise.all(pageRows.map(meta => publicReservation(full.find(row => row.id === meta.id)!, admin, false, customers)));

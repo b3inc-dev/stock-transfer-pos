@@ -27,8 +27,8 @@ export async function reservationApi(input = {}) {
     throw error;
   } finally { clearTimeout(timer); }
 }
-export async function printReservation(row) {
+export async function printReservation(row, copy = "customer") {
   const printers = await shopify.printing.getPrinters();
   const printer = printers.find(item => item.connected);
-  await shopify.printing.print(`${getAppUrl()}/api/reservations?receipt=${encodeURIComponent(row.id)}&locationId=${encodeURIComponent(locationId())}`, printer ? { printer } : undefined);
+  await shopify.printing.print(`${getAppUrl()}/api/reservations?receipt=${encodeURIComponent(row.id)}&locationId=${encodeURIComponent(locationId())}&copy=${encodeURIComponent(copy)}`, printer ? { printer } : undefined);
 }

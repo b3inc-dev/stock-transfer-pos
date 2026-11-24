@@ -1,3 +1,4 @@
+import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
 import type { Prisma } from "@prisma/client";
 import { maskPhone, RESERVATION_LABELS, reservationStatusTone } from "../../extensions/common/reservations.js";
 import { reservationAccountAccess, reservationQuery, type ReservationAdmin } from "./reservations.server";
@@ -55,8 +56,8 @@ export async function reservationAdminDetail(args: { row: DetailRecord; shop: st
   else if (row.customerId) {
     try {
       const data = await reservationQuery(admin, `#graphql
-        query ReservationAdminCustomer($id: ID!) { customer(id: $id) { displayName phone } }`, { id: row.customerId });
-      name = data.customer?.displayName || "顧客情報を取得できません";
+        query ReservationAdminCustomer($id: ID!) { customer(id: $id) { firstName lastName displayName phone } }`, { id: row.customerId });
+      name = japaneseCustomerName(data.customer) || "顧客情報を取得できません";
       phone = phone || data.customer?.phone || "";
       if (!data.customer) warnings.push("顧客が削除されているか、顧客情報を読み取れません。取置の商品と履歴は確認できます。");
     } catch {

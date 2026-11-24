@@ -26,8 +26,15 @@ export function ReservationNav({ selected }: { selected: "settings" | "receipt" 
 .Reservation-history-card > p:not(.Admin-note) {margin:16px 0 8px;}
 .Reservation-history-card {margin-bottom:16px;font-size:14px;line-height:1.5;}
 .Reservation-history-card input {flex:0 0 auto;margin:0;}
-.Reservation-options {display:grid;gap:4px;margin:12px 0;}
-.Reservation-option {display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #e1e3e5;border-radius:8px;cursor:pointer;min-width:0;overflow-wrap:anywhere;}
+.Reservation-options {max-height:200px;overflow-y:auto;border:1px solid #e1e3e5;border-radius:8px;padding:6px;}
+.Reservation-status-options {max-height:180px;}
+.Reservation-sort-options {display:flex;flex-direction:column;gap:6px;margin-top:16px;}
+.Reservation-option:first-child {margin-top:0;}
+.Reservation-option input {width:16px;height:16px;flex-shrink:0;}
+.Reservation-option span {font-weight:500;overflow:hidden;text-overflow:ellipsis;}
+.Reservation-option:has(input:checked) span {font-weight:600;}
+.Reservation-sort-options .Reservation-option {margin-top:0;border-color:#e1e3e5;}
+.Reservation-option {display:flex;align-items:center;gap:8px;padding:10px 12px;border:1px solid transparent;border-radius:6px;margin-top:4px;cursor:pointer;min-width:0;overflow-wrap:anywhere;}
 .Reservation-option:has(input:checked) {background:#eff6ff;border-color:#2563eb;}
 .Admin-body a.Reservation-row:not(.Admin-primary):not(.Admin-secondary) {color:inherit;text-decoration:none;overflow-wrap:anywhere;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 16px;padding:20px 12px;border-bottom:1px solid #e1e3e5;}
 .Reservation-row p {margin:0;}
