@@ -18,7 +18,7 @@ async function context(request: Request, metadataOnly = false) {
   const { admin } = await unauthenticated.admin(shop);
   const blocked = await planBlockedPosResponse({ shop, feature: "reservation", getAdmin: () => withGraphQLRetry(admin), headers });
   if (blocked) throw blocked;
-  const access = reservationAccountAccess(shop, actor);
+  const access = reservationAccountAccess(shop, actor, true);
   if (!access && !metadataOnly) throw new Response(JSON.stringify({ ok: false, error: "このPOSアカウントには取置の利用権限がありません。管理者に確認してください" }), { status: 403, headers: { ...headers, "Content-Type": "application/json" } });
   return { shop, actor, admin, access: access || { locations: [], contact: false }, reveal: access?.contact === true };
 }

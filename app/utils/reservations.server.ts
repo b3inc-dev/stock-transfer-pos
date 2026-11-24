@@ -14,9 +14,13 @@ export async function reservationPrivacyAvailable(shop: string) {
     return await db.stockReservationPrivacyRequest.count({ where: { shop } }) > 0 || await db.stockReservation.count({ where: { shop, anonymizedAt: null } }) > 0;
   } catch { return false; } // Direct privacy URL remains available even if the navigation count fails.
 }
-export function reservationAccountAccess(shop: string, subject: string): { locations: string[]; contact: boolean } | null {
+export function reservationAccountAccess(shop: string, subject: string, allowShopDefault = false): { locations: string[]; contact: boolean } | null {
   try {
-    const entry = JSON.parse(process.env.RESERVATION_POS_ACCESS || "{}")[shop]?.[subject];
+    if (!subject || subject === "*") return null;
+    const accounts = JSON.parse(process.env.RESERVATION_POS_ACCESS || "{}")[shop];
+    // Account-specific restrictions win, including null or malformed deny entries.
+    // Shop defaults are opt-in for signed POS requests, never for Admin detail access.
+    const entry = accounts && Object.hasOwn(accounts, subject) ? accounts[subject] : allowShopDefault ? accounts?.["*"] : null;
     if (!Array.isArray(entry?.locations) || entry.locations.some((id: unknown) => typeof id !== "string" || !/^gid:\/\/shopify\/Location\/\d+$/.test(id))) return null;
     return { locations: entry.locations, contact: entry.contact === true };
   } catch { return null; }

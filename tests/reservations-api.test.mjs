@@ -1,4 +1,5 @@
 /* global globalThis */
+import process from "node:process";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { createServer } from "vite";
@@ -20,12 +21,12 @@ before(async () => {
   }, load(id) {
     if (id === "\0api-db") return "export default globalThis.reservationApiFixture.db";
     if (id === "\0api-shopify") return `export const authenticate = { pos: async () => ({sessionToken:globalThis.reservationApiFixture.token}) }; export const unauthenticated = { admin: async () => ({admin: {graphql: async (query, options) => globalThis.reservationApiFixture.graphql(query, options)}}) };`;
-    if (id === "\0api-plan") return "export const planBlockedPosResponse = async () => null";
+    if (id === "\0api-plan") return "export const planBlockedPosResponse = async () => globalThis.reservationApiFixture.planBlocked ? new Response(\"plan blocked\", {status:403}) : null";
   } }] });
   ({ action, loader } = await vite.ssrLoadModule("/app/routes/api.reservations.tsx"));
 });
 after(async () => { delete globalThis.reservationApiFixture; delete process.env.RESERVATIONS_ENABLED; delete process.env.RESERVATION_POS_ACCESS; await vite?.close(); });
-beforeEach(() => { globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async () => { throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
+beforeEach(() => { globalThis.reservationApiFixture.planBlocked = false; globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async () => { throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
 const request = (body) => new Request("https://app.invalid/api/reservations", { method: "POST", body: JSON.stringify({ locationId, ...body }), headers: { "Content-Type": "application/json" } });
 const post = body => action({ request: request(body) });
 test("disabled feature performs no database access", async () => { delete process.env.RESERVATIONS_ENABLED; assert.equal((await post({ command: "detail", id: row.id })).status, 404); assert.equal(dbReads, 0); });
@@ -93,4 +94,44 @@ test("selected customer display respects signed contact grants and distinguishes
   assert.equal(masked.customer.name, "選択されたお客様"); assert.equal(masked.customer.phone, "•••• 5678");
   phone = null; const noPhone = await (await post({ command: "sessionDisplay", customerId: "gid://shopify/Customer/1" })).json();
   assert.equal(noPhone.customer.hasPhone, false); assert.equal(noPhone.customer.phone, "");
+});
+
+test("shop POS default permits authenticated POS users only at configured locations", async () => {
+  process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { "*": { locations: [locationId], contact: true } } });
+  const result = await (await post({ command: "detail", id: row.id })).json();
+  assert.equal(result.row.phone, row.contactPhone);
+  assert.equal((await post({ command: "count" })).status, 200);
+  assert.equal((await post({ command: "detail", id: row.id, locationId: "gid://shopify/Location/2" })).status, 403);
+  globalThis.reservationApiFixture.token.dest = "https://other.myshopify.com";
+  assert.equal((await post({ command: "detail", id: row.id })).status, 403);
+});
+test("explicit account restrictions cannot inherit shop POS default contact or locations", async () => {
+  for (const account of [null, { locations: [], contact: false }, { locations: ["invalid"], contact: true }]) {
+    process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { "*": { locations: [locationId], contact: true }, 123: account } });
+    assert.equal((await post({ command: "detail", id: row.id, staffMemberId: "456" })).status, 403);
+  }
+  process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { "*": { locations: [locationId], contact: true }, 123: { locations: [locationId], contact: false } } });
+  const result = await (await post({ command: "detail", id: row.id })).json();
+  assert.equal(result.row.phone, "•••• 5678");
+});
+test("shop POS defaults never grant Admin contact access or permit an anonymous subject", async () => {
+  process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { "*": { locations: [locationId], contact: true } } });
+  const { reservationAccountAccess } = await vite.ssrLoadModule("/app/utils/reservations.server.ts");
+  assert.equal(reservationAccountAccess(shop, "123"), null);
+  assert.equal(reservationAccountAccess(shop, "", true), null);
+  assert.equal(reservationAccountAccess(shop, "*", true), null);
+  globalThis.reservationApiFixture.token.sub = "";
+  assert.equal((await post({ command: "detail", id: row.id })).status, 401);
+});
+
+test("shop POS defaults retain plan gate and support receipt access for another signed POS account", async () => {
+  process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { "*": { locations: [locationId], contact: true } } });
+  globalThis.reservationApiFixture.token.sub = "789";
+  const receipt = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=${encodeURIComponent(locationId)}`) });
+  assert.equal(receipt.status, 200);
+  assert.ok(!(await receipt.text()).includes(row.contactPhone));
+  dbReads = 0;
+  globalThis.reservationApiFixture.planBlocked = true;
+  assert.equal((await post({ command: "count" })).status, 403);
+  assert.equal(dbReads, 0);
 });
