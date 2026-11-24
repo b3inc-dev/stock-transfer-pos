@@ -182,6 +182,7 @@ model InventoryCountDocumentChunk {
 
 // Issue #59: 店舗の取置。操作入力を送信前に保存し、結果不明でも同じキーで再送する。
 model StockReservation {
+  customerPhoneSaveState String?
   intakeMethod   String?
   number         Int?
   id             String   @id

@@ -249,3 +249,19 @@ test("receipt options and copy endpoint honor merchant switches", async () => {
   const store = await loader({ request: new Request(`${base}&copy=store`) }); assert.equal(store.status, 200); assert.match(await store.text(), /店舗保管用/);
   assert.equal((await loader({ request: new Request(`${base}&copy=invalid`) })).status, 400);
 });
+test("customer phone endpoint requires contact access, write scope and exact authorized location", async () => {
+  let reads = 0;
+  globalThis.reservationApiFixture.graphql = async query => { reads++; parse(query); return Response.json({ data: { currentAppInstallation: { accessScopes: [] } } }); };
+  assert.equal((await post({ command: "saveCustomerPhone", id: row.id })).status, 403); assert.equal(reads, 0);
+  process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: true } } });
+  assert.equal((await post({ command: "saveCustomerPhone", id: row.id })).status, 403);
+  globalThis.reservationApiFixture.graphql = async query => { reads++; parse(query); return Response.json({ data: { currentAppInstallation: { accessScopes: [{ handle: "write_customers" }] } } }); };
+  const prior = reads;
+  assert.equal((await post({ command: "saveCustomerPhone", id: row.id, locationId: "gid://shopify/Location/2" })).status, 403); assert.equal(reads, prior);
+  // Inventing an intent, customer ID or phone in this command cannot update an unconsented reservation.
+  const result = await post({ command: "saveCustomerPhone", id: row.id, customerId: "gid://shopify/Customer/999", phone: "+819099999999", saveCustomerPhone: true });
+  assert.equal(result.status, 200); assert.equal((await result.json()).row.customerPhoneSaveState, null);
+});
+test("requesting customer phone registration cannot bypass contact permission during create", async () => {
+  assert.equal((await post({ command: "create", ...row, saveCustomerPhone: true })).status, 403); assert.equal(dbReads, 0);
+});

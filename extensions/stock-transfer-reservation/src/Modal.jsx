@@ -1,3 +1,4 @@
+import { CUSTOMER_PHONE_EVENT_LABELS, customerPhoneSaveMessage, normalizeCustomerPhone } from "../../common/customerPhone.js";
 import { reservationReceiptNotice } from "../../common/reservationReceipt.js";
 import { japanesePhoneDisplay } from "../../common/customerDisplay.js";
 import { ReservationCustomerScreen } from "./CustomerPicker.jsx";
@@ -31,7 +32,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const [page, setPage] = useState(0);
 
   const [detail, setDetail] = useState(null);
-  const [draft, setDraft] = useState({ id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "" });
+  const [draft, setDraft] = useState({ id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "", saveCustomerPhone: false });
   const [products, setProducts] = useState([]);
   const [pendingProduct, setPendingProduct] = useState(null);
   const [search, setSearch] = useState("");
@@ -71,6 +72,8 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const [allTotal, setAllTotal] = useState(0);
   const [slow, setSlow] = useState(false);
   const [storeLabel, setStoreLabel] = useState("");
+  const [canSaveCustomerPhone, setCanSaveCustomerPhone] = useState(false);
+  const [customerPhoneNotice, setCustomerPhoneNotice] = useState("");
   const [customerId, setCustomerId] = useState(() => shopify.cart.current.value.customer?.id || null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const customerIdRef = useRef(customerId);
@@ -80,7 +83,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const storeName = detail?.locationName || storeLabel || rows[0]?.locationName || "店舗名を読み込み中…";
   useEffect(() => {
     const current = shopify.cart.current;
-    const update = cart => { const next = cart.customer?.id || null; if (customerIdRef.current !== next) { customerIdRef.current = next; sessionRevision.current += 1; setSelectedCustomer(null); setCustomerId(next); } };
+    const update = cart => { const next = cart.customer?.id || null; if (customerIdRef.current !== next) { customerIdRef.current = next; sessionRevision.current += 1; setSelectedCustomer(null); setCanSaveCustomerPhone(false); setCustomerId(next); if (!("submitted" in latestDraft.current && latestDraft.current.submitted)) { const changed = { ...latestDraft.current, saveCustomerPhone: false, memberPhone: "", memberPhoneCustomerId: "" }; latestDraft.current = changed; setDraft(changed); } } };
     update(current.value);
     return current.subscribe?.(update);
   }, []);
@@ -93,7 +96,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       try {
         const result = await reservationApi({ command: "sessionDisplay", locationId: draftLocation.current, customerId: customerId ? `gid://shopify/Customer/${customerId}` : null });
         if (!alive || request !== sessionRevision.current || customerIdRef.current !== customerId) return;
-        setStoreLabel(result.locationName); setSelectedCustomer(result.customer); setSessionNotice(result.notice || "");
+        setStoreLabel(result.locationName); setSelectedCustomer(result.customer); setCanSaveCustomerPhone(result.canSaveCustomerPhone === true); setSessionNotice(result.notice || "");
       } catch (error) { if (alive && request === sessionRevision.current && customerIdRef.current === customerId) { setSessionNotice(error.message); setStoreLabel(previous => previous || "店舗名を取得できません"); } }
       finally { if (alive && request === sessionRevision.current && customerIdRef.current === customerId) setSessionLoading(false); }
     };
@@ -130,7 +133,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       }
       try {
         const result = fromProduct
-          ? await loadProductReservationDraft({ storage: shopify.storage, storageKey, product: initialProduct, productSearch: shopify.productSearch, createDraft: () => ({ id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "" }) })
+          ? await loadProductReservationDraft({ storage: shopify.storage, storageKey, product: initialProduct, productSearch: shopify.productSearch, createDraft: () => ({ id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "", saveCustomerPhone: false }) })
           : { draft: await shopify.storage.get(storageKey), kind: "ready" };
         if (!alive) return;
         if (result.draft) {
@@ -187,6 +190,8 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         if (!Number.isSafeInteger(id) || id <= 0) throw new Error("お客様を選び直してください");
         await shopify.cart.setCustomer({ id });
       } else await shopify.cart.removeCustomer();
+      const nextDraft = { ...latestDraft.current, saveCustomerPhone: false, memberPhone: "", memberPhoneCustomerId: "" };
+      latestDraft.current = nextDraft; setDraft(nextDraft);
       changed = true; if (customer) setScreen("create");
     }).then(() => changed);
   };
@@ -197,7 +202,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     reservationApi({ command: "receiptOptions" }).then(result => { if (alive) setReceiptOptions(result); }).catch(error => { if (alive) setError(error.message); });
     return () => { alive = false; };
   }, [screen]);
-  const open = row => run(async () => { const result = await reservationApi({ command: "detail", id: row.id }); setDetail(result.row); setConfirm(false); setScreen("detail"); });
+  const open = row => run(async () => { setCustomerPhoneNotice(""); const result = await reservationApi({ command: "detail", id: row.id }); setDetail(result.row); setConfirm(false); setScreen("detail"); });
   useEffect(() => {
     if (screen !== "products") return;
     let alive = true;
@@ -274,16 +279,16 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     if (!ready) throw new Error("前回の下書きを確認しています");
     const customer = shopify.cart.current.value.customer;
     if (!submitted && String(customer?.id || "") !== String(customerId || "")) throw new Error("POSのお客様が変わりました。受付画面から確認してください");
-    const payload = submitted || { ...latestDraft.current, guestDraftPhone: draft.phone, submitted: true, locationId: draftLocation.current, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, customerId: customer?.id ? `gid://shopify/Customer/${customer.id}` : null, phone: customer?.id ? (latestDraft.current.memberPhoneCustomerId === String(customer.id) ? latestDraft.current.memberPhone || "" : "") : latestDraft.current.phone };
+    const payload = submitted || { ...latestDraft.current, guestDraftPhone: draft.phone, submitted: true, locationId: draftLocation.current, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, customerId: customer?.id ? `gid://shopify/Customer/${customer.id}` : null, saveCustomerPhone: Boolean(customer?.id && latestDraft.current.memberPhoneCustomerId === String(customer.id) && latestDraft.current.saveCustomerPhone === true), phone: customer?.id ? (latestDraft.current.memberPhoneCustomerId === String(customer.id) ? latestDraft.current.memberPhone || "" : "") : latestDraft.current.phone };
     // Persist the exact submitted draft before sending. Retrying always reuses its registration number.
     const previousSubmitted = submitted;
     latestDraft.current = payload; setSubmitted(payload);
     try { await writer.save(payload); }
     catch (e) { latestDraft.current = previousSubmitted || draft; setSubmitted(previousSubmitted); throw e; }
     const data = await reservationApi({ command: "create", ...payload });
-    setDetail(data.row);
+    setDetail(data.row); setCustomerPhoneNotice(data.customerPhoneWarning || "");
     if (data.row.status === "held") {
-      const empty = { id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "" };
+      const empty = { id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "", saveCustomerPhone: false };
       latestDraft.current = empty; setSubmitted(null); setDraft(empty);
       try { await writer.save(empty); } catch { setError("取置は登録済みです。下書きの消去を確認できませんでした。同じ番号で結果を確認してください"); }
       shopify.toast.show("取置を登録しました。商品を取置棚へ移してください");
@@ -294,12 +299,16 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     }
     setScreen("detail");
   });
+  const savePhone = () => run(async () => {
+    const result = await reservationApi({ command: "saveCustomerPhone", id: detail.id });
+    setDetail(result.row); setCustomerPhoneNotice(result.customerPhoneWarning || "");
+  });
   const command = (name, extra = {}) => run(async () => {
     const result = await reservationApi({ command: name, id: detail.id, version: detail.version, ...extra });
     setDetail(result.row); setConfirm(false);
     if (name === "cancel") setScreen("detail");
     if (name === "resume" && result.row.status === "held" && draft.id === result.row.id) {
-      const empty = { id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "" };
+      const empty = { id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "", saveCustomerPhone: false };
       latestDraft.current = empty; setSubmitted(null); setDraft(empty);
       await writer.save(empty);
     }
@@ -310,7 +319,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       await reservationApi({ command: "checkoutAccess" });
       await handoffReservationCart(detail, shopify, reservationApi, setDetail);
       shopify.toast.show("取置商品をカートへ追加しました。カートでお会計してください");
-      await shopify.action.dismissModal();
+      window.close();
     } finally { setAddingToCart(false); }
   });
   const notice = error || sessionNotice || detail?.lastError;
@@ -319,7 +328,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     if (fromProduct) {
       run(async () => {
         if (ready) await writer.save(latestDraft.current);
-        await shopify.action.dismissModal();
+        window.close();
       });
       return;
     }
@@ -334,12 +343,15 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     if (screen === "products") { setScreen("create"); setError(""); return; }
     if (screen === "cancel" || screen === "actions") { setScreen("detail"); setConfirm(false); setError(""); return; }
     if (screen === "list") { setScreen("create"); setError(""); return; }
-    if (screen === "create" || (screen === "detail" && detail?.endedAt)) { run(async () => { if (ready) await writer.save(latestDraft.current); await shopify.action.dismissModal(); }); return; }
     back();
   };
   const next = () => {
     if (submitted) { void save(); return; }
     if (!shopify.cart.current.value.customer?.id && (!draft.name.trim() || !draft.phone.trim())) { setError("お名前と電話番号を入力してください"); return; }
+    if (customerId && selectedCustomer?.hasPhone === false) {
+      if (!draft.memberPhone?.trim() || draft.memberPhoneCustomerId !== String(customerId)) { setError("連絡用の電話番号を入力してください"); return; }
+      if (draft.saveCustomerPhone === true) { try { normalizeCustomerPhone(draft.memberPhone); } catch (error) { setError(error.message); return; } }
+    }
     setError(""); setScreen("products");
   };
   const titles = { create: "取置の受付", products: "取置する商品", list: "取置履歴", detail: "取置の詳細", actions: "連絡・印刷", cancel: "取置を解除", "product-choice": "商品を追加" };
@@ -398,7 +410,11 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
           <s-text type="small" color="subdued">お客様</s-text><s-text type="strong">{selectedCustomer?.name || "POSでお客様を選択済みです"}</s-text>
           {selectedCustomer?.phone ? <s-text>{japanesePhoneDisplay(selectedCustomer.phone)}</s-text> : null}
           {!selectedCustomer ? <s-text type="small">{sessionLoading ? "お客様の情報を確認しています。" : "お客様の情報を取得できませんでした。表示された理由を確認してください。"}</s-text> : null}
-          {selectedCustomer?.hasPhone === false ? <s-text-field disabled={busy || !ready || Boolean(submitted)} label="連絡用の電話番号（未登録）" value={draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone || "" : ""} onInput={e => patch({ memberPhone: e.currentTarget.value, memberPhoneCustomerId: String(customerId) })} /> : null}
+          {selectedCustomer?.hasPhone === false ? <>
+            <s-text-field disabled={busy || !ready || Boolean(submitted)} label="連絡用の電話番号（未登録）" value={draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone || "" : ""} onInput={e => patch({ memberPhone: e.currentTarget.value, memberPhoneCustomerId: String(customerId), saveCustomerPhone: false })} />
+            <s-switch label="顧客情報にも登録する" disabled={busy || !ready || Boolean(submitted) || !canSaveCustomerPhone || !draft.memberPhone?.trim() || draft.memberPhoneCustomerId !== String(customerId)} checked={draft.memberPhoneCustomerId === String(customerId) && draft.saveCustomerPhone === true} onChange={e => patch({ saveCustomerPhone: e.currentTarget.checked })} />
+            <s-text type="small" color="subdued">{canSaveCustomerPhone ? "お客様に番号を確認してから選択してください。取置登録時に顧客情報へ保存します。ほかの端末で同時に編集しないでください。" : "取置の連絡先として保存できます。顧客情報への登録は、管理者が「取置 → 設定」で権限を許可すると利用できます。"}</s-text>
+          </> : null}
           <s-stack direction="inline" justifyContent="space-between"><s-button disabled={busy || !ready || Boolean(submitted)} onClick={() => { setError(""); setScreen("customers"); }}>お客様を変更</s-button><s-button tone="critical" disabled={busy || !ready || Boolean(submitted)} onClick={() => customerChange(null)}>カートから解除</s-button></s-stack><s-text type="small" color="subdued">お客様の登録情報は削除されません。</s-text>
         </> : <>
           <s-text type="strong">お客様</s-text><s-button disabled={busy || !ready || Boolean(submitted)} onClick={() => { setError(""); setScreen("customers"); }}>お客様を選択</s-button><s-text type="small" color="subdued">既存のお客様を選ぶか、ゲストのお名前と電話番号を入力してください。</s-text>
@@ -430,11 +446,13 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       {screen === "cancel" && detail ? <><s-text>表示した商品の取置を解除し、販売可能在庫に戻します。</s-text>{detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}</> : null}
       {(screen === "detail" || screen === "actions") && detail ? <>
         <s-text type="strong">{reservationDisplayNumber(detail)}</s-text><s-badge tone={detail.needsFollowUp ? "warning" : reservationStatusTone(detail.status)}>{RESERVATION_LABELS[detail.status]}</s-badge>
-        <s-text>{detail.name}</s-text><s-text>{japanesePhoneDisplay(detail.phone)}</s-text>{!detail.contactVisible ? <s-text>連絡先の確認には権限が必要です。</s-text> : null}
+        <s-text>{detail.name}</s-text><s-text>{japanesePhoneDisplay(detail.phone)}</s-text>
+        {customerPhoneNotice || detail.customerPhoneSaveState ? <s-text color="subdued">{customerPhoneNotice || customerPhoneSaveMessage(detail.customerPhoneSaveState)}</s-text> : null}
+        {detail.contactVisible && ["held", "checkout"].includes(detail.status) && detail.customerPhoneSaveState && detail.customerPhoneSaveState !== "saved" && detail.customerPhoneSaveState !== "conflict" ? <s-button disabled={busy || !ready} onClick={savePhone}>{["pending", "failed"].includes(detail.customerPhoneSaveState) ? "顧客へ電話番号を登録" : "登録結果を確認"}</s-button> : null}{!detail.contactVisible ? <s-text>連絡先の確認には権限が必要です。</s-text> : null}
         <s-text>{reservationIntakeLabel(detail)}</s-text><s-text>{detail.locationName}・受取期限 {detail.dueDate}</s-text>
         {detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}
         {detail.nextFollowDate ? <s-text>次回確認 {detail.nextFollowDate}</s-text> : null}
-        {detail.events.map(event => <s-text key={event.id}>{new Date(event.createdAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}・{event.kind === "unreachable" ? "不通" : event.kind === "planned" ? "来店予定" : RESERVATION_LABELS[event.kind] || "対応記録"}・担当 {event.actor}{event.followDate ? `・次回 ${event.followDate}` : ""}</s-text>)}
+        {detail.events.map(event => <s-text key={event.id}>{new Date(event.createdAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}・{event.kind === "unreachable" ? "不通" : event.kind === "planned" ? "来店予定" : CUSTOMER_PHONE_EVENT_LABELS[event.kind] || RESERVATION_LABELS[event.kind] || "対応記録"}・担当 {event.actor}{event.followDate ? `・次回 ${event.followDate}` : ""}</s-text>)}
 
         {screen === "actions" && detail.status === "held" ? <>
           <s-button disabled={busy} onClick={() => command("unreachable")}>不通を記録</s-button>
@@ -462,7 +480,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       {notice ? <s-text tone="critical">{notice}</s-text> : null}
       {canAddToCart ? <s-text>追加後はPOSのカートでお会計してください。</s-text> : null}
       <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-        <s-button variant="secondary" onClick={goBack} disabled={busy}>{screen === "cancel" ? "やめる" : screen === "detail" && detail?.endedAt ? "閉じる" : "戻る"}</s-button>
+        {screen === "create" || (screen === "detail" && detail?.endedAt) ? <s-box /> : <s-button variant="secondary" onClick={goBack} disabled={busy}>{screen === "cancel" ? "やめる" : "戻る"}</s-button>}
         {screen === "create" ? <s-button disabled={busy} onClick={() => { setScreen("list"); setDetail(null); setError(""); }}>履歴一覧</s-button> : screen === "detail" && receiptOptions?.storeCopy && ["held", "checkout", "sold", "cancelled"].includes(detail?.status) ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "store"); shopify.toast.show("店舗控えの印刷を送信しました"); })}>店舗控えを印刷</s-button> : screen === "products" ? null : screen === "list" && (error || slow) ? <s-button disabled={busy} onClick={() => run(refresh)}>再読み込み</s-button> : <s-box />}
         {screen === "products" ? <s-text>明細 {draft.lines.length} / 合計 {draft.lines.reduce((sum, line) => sum + line.quantity, 0)}</s-text> : null}
         {primary || <s-box />}
@@ -474,6 +492,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         <s-text type="small" color="subdued">表示した商品の在庫を確保して、取置を登録します。</s-text>
         <s-text type="strong">{customerId ? selectedCustomer?.name || "POSで選択したお客様" : draft.name}</s-text>
         <s-text>{japanesePhoneDisplay(customerId ? selectedCustomer?.phone || (draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone : "") : draft.phone)}</s-text>
+        {customerId && draft.saveCustomerPhone === true && draft.memberPhoneCustomerId === String(customerId) ? <s-text>電話番号を顧客情報にも登録します。</s-text> : null}
         <s-text>明細 {draft.lines.length} / 合計 {draft.lines.reduce((sum, line) => sum + line.quantity, 0)}</s-text>
         {draft.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}
         <s-divider /><s-button command="--hide" commandFor="reservation-register-confirm" disabled={busy}>戻る</s-button>

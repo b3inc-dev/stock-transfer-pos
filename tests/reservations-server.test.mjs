@@ -38,6 +38,7 @@ function makeDb() {
 const admin = {
   async graphql(query, { variables }) {
     parse(query);
+    if (query.includes("ReservationCustomerContact")) return Response.json({ data: { customer: { id: variables.id, phone: null } } });
     if (query.includes("ReservationStoreTimezone")) return Response.json({ data: { shop: { ianaTimezone: shopTimezone } } });
     if (query.includes("ReservationLocation")) return Response.json({ data: { location: { id: locationId, name: "店", isActive: true } } });
     if (query.includes("ReservationVariants")) return Response.json({ data: { nodes: variables.ids.map(id => ({ id, displayName: "Tシャツ", inventoryItem: { id: `gid://shopify/InventoryItem/${id.split("/").pop()}`, tracked: true, inventoryLevel: { quantities: Object.entries(stock).map(([name, quantity]) => ({ name, quantity })) } } })) } });
@@ -196,4 +197,17 @@ test("intake method is persisted and changed retries cannot reserve twice", asyn
 test("legacy retries without a recorded intake remain unknown", async () => {
   assert.equal((await create()).intakeMethod, null);
   assert.equal((await create({ ...input(), faceToFace: true })).intakeMethod, null);
+});
+
+test("customer phone consent is fixed to the reservation replay and never enrolls guests", async () => {
+  const body = { ...input(), customerId: "gid://shopify/Customer/1", saveCustomerPhone: true };
+  assert.equal((await create(body)).customerPhoneSaveState, "pending");
+  assert.equal((await create(body)).customerPhoneSaveState, "pending");
+  await assert.rejects(() => create({ ...body, saveCustomerPhone: false }), /登録内容が変わっています/);
+  assert.deepEqual(stock, { available: 3, reserved: 2 });
+});
+test("guest consent and invalid customer phone cannot create a reservation", async () => {
+  await assert.rejects(() => create({ ...input(), saveCustomerPhone: true }), /お客様を選択/);
+  await assert.rejects(() => create({ ...input(), customerId: "gid://shopify/Customer/1", saveCustomerPhone: true, phone: "123456" }), /電話番号/);
+  assert.equal(rows.size, 0); assert.equal(stock.reserved, 0);
 });
