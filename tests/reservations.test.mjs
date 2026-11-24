@@ -144,3 +144,12 @@ test("cart changes between product additions use the latest missing quantity", a
   await handoffReservationCart(detail, pos, async () => { throw new Error("must reuse existing checkout"); });
   assert.deepEqual(writes, [{ variantId: 1, quantity: 2 }, { variantId: 2, quantity: 2 }]);
 });
+
+test("reservation badge tones distinguish failure, cancellation, completion and pending checks", async () => {
+  const { reservationStatusTone } = await import("../extensions/common/reservations.js");
+  assert.equal(reservationStatusTone("failed"), "critical");
+  assert.equal(reservationStatusTone("cancelled"), "neutral");
+  assert.equal(reservationStatusTone("sold"), "success");
+  assert.equal(reservationStatusTone("checkout"), "info");
+  assert.equal(reservationStatusTone("reserving"), "warning");
+});

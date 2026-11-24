@@ -2,7 +2,10 @@ import { getAppUrl } from "../../common/appUrl.js";
 export function locationId() {
   const value = shopify.session.currentSession.locationId;
   if (!value) throw new Error("POS店舗を取得できません");
-  return `gid://shopify/Location/${value}`;
+  const id = String(value);
+  if (/^gid:\/\/shopify\/Location\/\d+$/.test(id)) return id;
+  if (/^\d+$/.test(id)) return `gid://shopify/Location/${id}`;
+  throw new Error("POS店舗を取得できません");
 }
 export async function reservationApi(input = {}) {
   const currentLocation = locationId();

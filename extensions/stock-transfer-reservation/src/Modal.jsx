@@ -1,4 +1,4 @@
-import { ReservationHistoryDate, ReservationPageControls } from "./HistoryControls.jsx";
+import { ReservationPageControls } from "./HistoryControls.jsx";
 import { ReservationProductRow } from "./ProductRow.jsx";
 import { addReservationProduct, exactScanProduct, createReservationScanQueue } from "./productList.js";
 import { getListPageSlice } from "../../common/listDisplayPagination.js";
@@ -9,7 +9,7 @@ import { render } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { locationId, reservationApi, printReservation } from "./api.js";
 import { appendProductToDraft, createReservationDraftWriter, loadProductReservationDraft, restoreReservationInputDraft } from "./productEntry.js";
-import { handoffReservationCart, RESERVATION_LABELS, validDate } from "../../common/reservations.js";
+import { handoffReservationCart, RESERVATION_LABELS, reservationStatusTone } from "../../common/reservations.js";
 
 const DRAFT_KEY = "pos_stock_reservation_draft_v1";
 const newId = () => `R-${crypto.randomUUID()}`;
@@ -31,6 +31,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const [pendingProduct, setPendingProduct] = useState(null);
   const [search, setSearch] = useState("");
   const [searching, setSearching] = useState(false);
+  const [searchLoaded, setSearchLoaded] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [images, setImages] = useState(true);
   const [cameraVisible, setCameraVisible] = useState(false);
@@ -60,10 +61,8 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const [confirm, setConfirm] = useState(false);
   const [updatedAt, setUpdatedAt] = useState("");
   const [total, setTotal] = useState(0);
+  const [listLoaded, setListLoaded] = useState(false);
   const [allTotal, setAllTotal] = useState(0);
-  const [dueDate, setDueDate] = useState("");
-  const [dateParts, setDateParts] = useState(["", "", ""]);
-  const [storeToday, setStoreToday] = useState("");
   const [slow, setSlow] = useState(false);
   const [storeLabel, setStoreLabel] = useState("");
   const [customerId, setCustomerId] = useState(() => shopify.cart.current.value.customer?.id || null);
@@ -71,7 +70,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const customerIdRef = useRef(customerId);
   const sessionRevision = useRef(0);
   const [sessionNotice, setSessionNotice] = useState("");
-  const [availableDates, setAvailableDates] = useState([]);
+  const [sessionLoading, setSessionLoading] = useState(true);
   const storeName = detail?.locationName || storeLabel || rows[0]?.locationName || "店舗名を読み込み中…";
   useEffect(() => {
     const current = shopify.cart.current;
@@ -84,12 +83,13 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     const refreshSession = async () => {
       if (customerIdRef.current !== customerId) return;
       const request = ++sessionRevision.current;
+      setSessionLoading(true);
       try {
         const result = await reservationApi({ command: "sessionDisplay", locationId: draftLocation.current, customerId: customerId ? `gid://shopify/Customer/${customerId}` : null });
         if (!alive || request !== sessionRevision.current || customerIdRef.current !== customerId) return;
         setStoreLabel(result.locationName); setSelectedCustomer(result.customer); setSessionNotice(result.notice || "");
-        if (result.today) { setStoreToday(result.today); setDateParts(previous => previous.some(Boolean) ? previous : result.today.split("-")); }
       } catch (error) { if (alive && request === sessionRevision.current && customerIdRef.current === customerId) { setSessionNotice(error.message); setStoreLabel(previous => previous || "店舗名を取得できません"); } }
+      finally { if (alive && request === sessionRevision.current && customerIdRef.current === customerId) setSessionLoading(false); }
     };
     void refreshSession(); globalThis.addEventListener?.("focus", refreshSession);
     return () => { alive = false; globalThis.removeEventListener?.("focus", refreshSession); };
@@ -147,13 +147,13 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   useEffect(() => { if (draftReady.current) writer.save(latestDraft.current).catch(e => setError(e.message)); }, [draft, submitted, writer]);
   const refresh = useCallback(async () => {
     const revision = ++listRevision.current;
+    setListLoaded(false);
     let result;
-    try { result = await reservationApi({ command: "list", mode, query, page, dueDate: query ? "" : dueDate }); }
+    try { result = await reservationApi({ command: "list", mode, query, page }); }
     catch (error) { if (revision !== listRevision.current || screenRef.current !== "list") return; throw error; }
     if (revision !== listRevision.current || screenRef.current !== "list") return;
-    if (result.today) setStoreToday(result.today); setAvailableDates(result.availableDates || []); if (result.today) setDateParts(previous => previous.some(Boolean) ? previous : result.today.split("-"));
-    setRows(result.rows); if (Number.isInteger(result.page) && result.page !== page) setPage(result.page); setTotal(result.total); setAllTotal(result.allTotal ?? result.total); setUpdatedAt(new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date()));
-  }, [mode, query, page, dueDate]);
+    setListLoaded(true); setRows(result.rows); if (Number.isInteger(result.page) && result.page !== page) setPage(result.page); setTotal(result.total); setAllTotal(result.allTotal ?? result.total); setUpdatedAt(new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date()));
+  }, [mode, query, page]);
   useEffect(() => {
     if (screen !== "list") return;
     const load = () => { if (lock.current) pendingListRefresh.current = () => run(refresh); else void run(refresh); };
@@ -190,9 +190,11 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const searchProducts = useCallback(async (value, after = null) => {
     const revision = ++searchRevision.current;
     setSearching(true); setError("");
+    if (!after) { setSearchLoaded(false); setProducts([]); setProductPageInfo({ hasNextPage: false, endCursor: null }); }
     try {
       const data = await reservationApi({ command: "products", query: value, after, first: limits.searchLimit, images });
       if (revision !== searchRevision.current) return;
+      setSearchLoaded(true);
       setProducts(previous => after ? [...new Map([...previous, ...data.products].map(product => [product.id, product])).values()] : data.products);
       setProductPageInfo(data.pageInfo);
       if (!after) setProductPage(1);
@@ -201,6 +203,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   }, [images, limits.searchLimit]);
   useEffect(() => {
     searchRevision.current += 1;
+    setSearchLoaded(false);
     if (screen !== "products" || !search.trim()) { setProducts([]); setProductPageInfo({ hasNextPage: false, endCursor: null }); setSearching(false); return; }
     setSearching(true);
     const timer = setTimeout(() => { void searchProducts(search); }, 300);
@@ -309,11 +312,6 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     if (!shopify.cart.current.value.customer?.id && (!draft.name.trim() || !draft.phone.trim())) { setError("お名前と電話番号を入力してください"); return; }
     setError(""); setScreen("products");
   };
-  const applyDate = (parts = dateParts) => {
-    const value = parts.map((part, index) => index ? String(part).padStart(2, "0") : part).join("-");
-    if (!validDate(value)) { setError("受取期限の日付を確認してください"); return; }
-    setDateParts(parts); setDueDate(value); setPage(0); setError("");
-  };
   const titles = { create: "取置の受付", products: "取置する商品", review: "取置を登録", list: "取置履歴", detail: "取置の詳細", actions: "連絡・印刷", cancel: "取置を解除", "product-choice": "商品を追加" };
   let primary = null;
   if (screen === "create") primary = <s-button variant="primary" disabled={busy || !ready} onClick={next}>次へ</s-button>;
@@ -333,8 +331,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         {screen === "list" ? <>
           <s-text-field label="取置番号・名前で検索" value={queryInput} onInput={e => setQueryInput(e.currentTarget.value)} />
           {queryInput.trim().length === 1 ? <s-text type="small">あと1文字入力すると検索します。</s-text> : null}
-          <ReservationHistoryDate parts={dateParts} today={storeToday} dates={availableDates} disabled={busy || Boolean(query)} onSelect={parts => applyDate(parts)} />
-          {query ? <s-text type="small">日付を使わず、この店舗の取置から検索しています。</s-text> : <s-stack direction="inline" gap="small"><s-text type="small">受取期限: {dueDate || "すべての日付"}</s-text>{dueDate ? <s-button disabled={busy} onClick={() => { setDueDate(""); setPage(0); }}>日付を解除</s-button> : null}</s-stack>}
+          <s-text type="small">登録日時が古い順に表示します。</s-text>
           <s-stack direction="inline" gap="none" inlineSize="100%">{[["due", "要対応"], ["active", "取置中"], ["ended", "終了"]].map(([value, label]) => <s-box key={value} inlineSize="33.33%"><s-button variant={mode === value ? "primary" : "secondary"} disabled={busy} onClick={() => { setMode(value); setPage(0); }}>{label}</s-button></s-box>)}</s-stack>
           <s-text>{storeName}・{updatedAt ? `${updatedAt} に更新` : "まだ更新していません"}</s-text>
 
@@ -348,12 +345,12 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       </s-stack></s-box><s-divider />
       <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0"><s-box padding="base"><s-stack gap="base" direction="block">
       {screen === "list" ? <>
-        <ReservationPageControls page={page} total={total} disabled={busy} onChange={setPage} />
-        {!rows.length && !busy ? <><s-text>条件に合う取置はありません。対象の全体は{allTotal}件です。</s-text><s-button onClick={() => { setMode("active"); setQuery(""); setQueryInput(""); setDueDate(""); setPage(0); }}>すべて表示する</s-button></> : null}
-        {rows.map(row => <s-box key={row.id}><s-clickable onClick={() => open(row)} disabled={busy}><s-box padding="base"><s-stack gap="small" direction="block">
-          <s-stack direction="inline" justifyContent="space-between"><s-text type="strong">{row.id} ›</s-text><s-text>{row.dueDate}</s-text></s-stack>
-          <s-text>{row.name}・{row.phone}</s-text><s-text>店舗: {row.locationName}</s-text>
-          <s-stack direction="inline" justifyContent="space-between"><s-badge tone={row.needsFollowUp ? "warning" : "info"}>{row.needsFollowUp ? "要対応" : RESERVATION_LABELS[row.status]}</s-badge><s-text>{row.lines.length}件・合計{row.lines.reduce((sum, line) => sum + line.quantity, 0)}点</s-text></s-stack>
+        {listLoaded ? <ReservationPageControls page={page} total={total} disabled={busy} onChange={setPage} /> : <s-text>一覧を取得できていません。</s-text>}
+        {listLoaded && !rows.length && !busy ? <><s-text>条件に合う取置はありません。対象の全体は{allTotal}件です。</s-text><s-button onClick={() => { setMode("active"); setQuery(""); setQueryInput(""); setPage(0); }}>すべて表示する</s-button></> : null}
+        {(listLoaded ? rows : []).map(row => <s-box key={row.id}><s-clickable onClick={() => open(row)} disabled={busy}><s-box padding="base"><s-stack gap="small" direction="block">
+          <s-stack direction="inline" justifyContent="space-between"><s-text type="strong">{row.id} ›</s-text><s-text>登録 {new Date(row.createdAt).toLocaleDateString("ja-JP", { timeZone: row.timezone || "Asia/Tokyo" })}</s-text></s-stack>
+          <s-text>受取期限: {row.dueDate}</s-text><s-text>{row.name}・{row.phone}</s-text><s-text>店舗: {row.locationName}</s-text>
+          <s-stack direction="inline" justifyContent="space-between"><s-badge tone={row.needsFollowUp ? "warning" : reservationStatusTone(row.status)}>{row.needsFollowUp ? "要対応" : RESERVATION_LABELS[row.status]}</s-badge><s-text>{row.lines.length}件・合計{row.lines.reduce((sum, line) => sum + line.quantity, 0)}点</s-text></s-stack>
         </s-stack></s-box></s-clickable><s-divider /></s-box>)}
       </> : null}
       {screen === "product-choice" ? <>
@@ -368,7 +365,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         {customerId ? <>
           <s-text type="strong">{selectedCustomer?.name || "POSでお客様を選択済みです"}</s-text>
           {selectedCustomer?.phone ? <s-text>{selectedCustomer.phone}</s-text> : null}
-          {!selectedCustomer ? <s-text type="small">お客様の情報を確認しています。取得できない場合は利用権限を確認してください。</s-text> : null}
+          {!selectedCustomer ? <s-text type="small">{sessionLoading ? "お客様の情報を確認しています。" : "お客様の情報を取得できませんでした。表示された理由を確認してください。"}</s-text> : null}
           {selectedCustomer?.hasPhone === false ? <s-text-field disabled={busy || !ready || Boolean(submitted)} label="連絡用の電話番号（未登録）" value={draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone || "" : ""} onInput={e => patch({ memberPhone: e.currentTarget.value, memberPhoneCustomerId: String(customerId) })} /> : null}
           <s-text type="small">お客様の変更はPOSのカートで行えます。</s-text>
         </> : <>
@@ -378,7 +375,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         </>}
       </> : null}
       {screen === "products" ? <>
-        {search.trim() && !searching && !products.length ? <s-text>一致する商品はありません。</s-text> : null}
+        {search.trim() && searchLoaded && !searching && !products.length ? <s-text>一致する商品はありません。</s-text> : null}
         {!search.trim() && !draft.lines.length ? <s-text>商品名・SKU・バーコードで検索するか、スキャンして追加してください。</s-text> : null}
         {productView.displayed.map(product => <ReservationProductRow key={product.id || product.variantId} product={product} images={images} candidate={Boolean(search.trim())} disabled={busy || scanBusy || !ready || Boolean(submitted)} quantity={search.trim() ? draft.lines.find(line => line.variantId === product.id)?.quantity || 0 : product.quantity}
           onAdd={quantity => add(product, quantity)} onSet={quantity => setQuantity(product.variantId, quantity)} onRemove={() => patch({ lines: latestDraft.current.lines.filter(line => line.variantId !== product.variantId) })} />)}
@@ -401,7 +398,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       </> : null}
       {screen === "cancel" && detail ? <><s-text>表示した商品の取置を解除し、販売可能在庫に戻します。</s-text>{detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}</> : null}
       {(screen === "detail" || screen === "actions") && detail ? <>
-        <s-text type="strong">{detail.id}</s-text><s-badge tone={detail.needsFollowUp ? "warning" : "info"}>{RESERVATION_LABELS[detail.status]}</s-badge>
+        <s-text type="strong">{detail.id}</s-text><s-badge tone={detail.needsFollowUp ? "warning" : reservationStatusTone(detail.status)}>{RESERVATION_LABELS[detail.status]}</s-badge>
         <s-text>{detail.name}</s-text><s-text>{detail.phone}</s-text>{!detail.contactVisible ? <s-text>連絡先の確認には権限が必要です。</s-text> : null}
         <s-text>{detail.locationName}・受取期限 {detail.dueDate}</s-text>
         {detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}
@@ -426,7 +423,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     </s-stack></s-box></s-scroll-box>
     <s-divider />
     <s-box padding="base"><s-stack gap="base" direction="block">
-      <s-stack direction="inline" justifyContent="space-between"><s-text>店舗: {storeName}</s-text>{screen === "list" ? <s-text>{total}件</s-text> : <s-text>{detail && ["detail", "actions", "cancel"].includes(screen) ? detail.lines.length : draft.lines.length}件</s-text>}</s-stack>
+      <s-stack direction="inline" justifyContent="space-between"><s-text>店舗: {storeName}</s-text>{screen === "list" ? <s-text>{listLoaded ? `${total}件` : "未取得"}</s-text> : <s-text>{detail && ["detail", "actions", "cancel"].includes(screen) ? detail.lines.length : draft.lines.length}件</s-text>}</s-stack>
       {notice ? <s-text tone="critical">{notice}</s-text> : null}
       {canAddToCart ? <s-text>追加後はPOSのカートでお会計してください。</s-text> : null}
       <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">

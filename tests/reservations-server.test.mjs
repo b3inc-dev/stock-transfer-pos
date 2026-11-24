@@ -1,7 +1,9 @@
 /* global globalThis */
+import process from "node:process";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { createServer } from "vite";
+import { parse } from "graphql";
 import { Prisma } from "@prisma/client";
 let vite, service, db;
 let rows, events, stock, responses, calls, failTransport, failDb;
@@ -34,6 +36,7 @@ function makeDb() {
 }
 const admin = {
   async graphql(query, { variables }) {
+    parse(query);
     if (query.includes("ReservationLocation")) return Response.json({ data: { location: { id: locationId, name: "店", isActive: true } } });
     if (query.includes("ReservationVariants")) return Response.json({ data: { nodes: variables.ids.map(id => ({ id, displayName: "Tシャツ", inventoryItem: { id: `gid://shopify/InventoryItem/${id.split("/").pop()}`, tracked: true, inventoryLevel: { quantities: Object.entries(stock).map(([name, quantity]) => ({ name, quantity })) } } })) } });
     if (query.includes("ReservationMove")) {
@@ -144,4 +147,16 @@ test("history clamps a stale second page after another device reduces results", 
   rows.delete("row-0");
   const result = await service.listReservations(shop, locationId, admin, "active", "", 1);
   assert.equal(result.page, 0); assert.equal(result.total, 25); assert.equal(result.rows.length, 25); assert.equal(result.hasNextPage, false);
+});
+
+test("GraphQL marker is removed before parsing single-line and multiline operations", async () => {
+  for (const query of ["#graphql query { shop { name } }", "#graphql\nquery { shop { name } }"]) {
+    const result = await service.reservationQuery({ graphql: async document => { parse(document); return Response.json({ data: { shop: { name: "店" } } }); } }, query);
+    assert.equal(result.shop.name, "店");
+  }
+});
+test("history is oldest registration first regardless of due date and follow-up", async () => {
+  for (const [id, createdAt, dueDate] of [["new", "2026-11-24", "2020-01-01"], ["old", "2026-11-20", "2030-01-01"]]) rows.set(id, { id, shop, locationId, status: "held", timezone: "Asia/Tokyo", guestName: "Guest", customerId: null, dueDate, createdAt: new Date(createdAt), lines: [], nextFollowDate: null });
+  const result = await service.listReservations(shop, locationId, admin, "active", "", 0);
+  assert.deepEqual(result.rows.map(row => row.id), ["old", "new"]);
 });

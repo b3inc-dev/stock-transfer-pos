@@ -22,7 +22,7 @@ export function reservationAccountAccess(shop: string, subject: string): { locat
   } catch { return null; }
 }
 export async function reservationQuery(admin: ReservationAdmin, query: string, variables: Record<string, unknown> = {}) {
-  const response = await admin.graphql(query, { variables });
+  const response = await admin.graphql(query.replace(/^\s*#graphql\b\s*/, "").trim(), { variables });
   // Do not propagate API response bodies into logs: customer query responses contain PII.
   if (!response.ok) throw new Error(`Shopifyとの通信に失敗しました（HTTP ${response.status}）。もう一度確認してください`);
   const body = await response.json();
@@ -58,8 +58,8 @@ export async function reservationDueCount(shop: string, locationId: string) {
 export async function listReservations(shop: string, locationId: string, admin: ReservationAdmin, mode: string, query: string, page: number, dueDate = "") {
   const rows = await db.stockReservation.findMany({ where: { shop, locationId,
     status: mode === "ended" ? { in: TERMINAL_RESERVATIONS } : { notIn: TERMINAL_RESERVATIONS } },
-    select: { id: true, customerId: true, guestName: true, status: true, dueDate: true, nextFollowDate: true, timezone: true },
-    orderBy: [{ dueDate: "asc" }, { createdAt: "asc" }] });
+    select: { id: true, createdAt: true, customerId: true, guestName: true, status: true, dueDate: true, nextFollowDate: true, timezone: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
   const text = query.trim().toLocaleLowerCase();
   let customerIds = new Set<string>();
   if (text && !text.startsWith("r-")) {
@@ -70,7 +70,7 @@ export async function listReservations(shop: string, locationId: string, admin: 
   }
   if (dueDate && !validDate(dueDate)) throw new Error("受取期限の日付を確認してください");
   const filtered = rows.filter(row => (!dueDate || row.dueDate === dueDate) && (mode !== "due" || needsFollowUp(row)) && (!text || row.id.toLowerCase().includes(text) || row.guestName?.toLocaleLowerCase().includes(text) || (row.customerId && customerIds.has(row.customerId))))
-    .sort((a, b) => Number(needsFollowUp(b)) - Number(needsFollowUp(a)) || (a.nextFollowDate || a.dueDate).localeCompare(b.nextFollowDate || b.dueDate));
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
   const requestedPage = Number.isSafeInteger(page) && page >= 0 ? page : 0;
   const currentPage = Math.min(requestedPage, Math.max(0, Math.ceil(filtered.length / 25) - 1));
   const pageRows = filtered.slice(currentPage * 25, (currentPage + 1) * 25);
