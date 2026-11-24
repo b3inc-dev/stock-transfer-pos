@@ -95,3 +95,52 @@ test("definite claim rejection removes only its empty cart markers, unknown resp
     assert.equal(Boolean(cart.properties[RESERVATION_PROPERTY]), !definite);
   }
 });
+
+test("purchasing from a hold detail adds all variants and quantities, but does not complete the sale", async () => {
+  const { handoffReservationCart } = await import("../extensions/common/reservations.js");
+  const detail = { ...row, checkoutKey: null, customerId: "gid://shopify/Customer/9", lines: [...row.lines, { variantId: "gid://shopify/ProductVariant/2", quantity: 3 }] };
+  const cart = { properties: {}, lineItems: [], customer: { id: 9 }, editable: true };
+  const commands = [];
+  const pos = { session: { deviceId: 1 }, cart: { current: { value: cart },
+    async addCartProperties(props) { Object.assign(cart.properties, props); },
+    async setCustomer() { throw new Error("should preserve the selected customer"); },
+    async addLineItem(variantId, quantity) { cart.lineItems.push({ variantId, quantity }); return `line-${variantId}`; } } };
+  const api = async input => { commands.push(input.command); return { row: { ...detail, status: "checkout", checkoutKey: input.checkoutKey, checkoutDevice: "1" } }; };
+  const result = await handoffReservationCart(detail, pos, api);
+  assert.deepEqual(cart.lineItems, [{ variantId: 1, quantity: 2 }, { variantId: 2, quantity: 3 }]);
+  assert.deepEqual(commands, ["checkout"]); assert.equal(result.status, "checkout");
+  assert.equal(cart.properties[RESERVATION_PROPERTY], detail.id); assert.equal(cart.customer.id, 9);
+});
+
+test("partial cart addition with a lost response resumes missing variants without duplication", async () => {
+  const { handoffReservationCart } = await import("../extensions/common/reservations.js");
+  const detail = { ...row, checkoutKey: null, lines: [...row.lines, { variantId: "gid://shopify/ProductVariant/2", quantity: 3 }] };
+  const cart = { properties: {}, lineItems: [], editable: true };
+  let saved, loseResponse = true;
+  const writes = [];
+  const pos = { session: { deviceId: 1 }, cart: { current: { value: cart },
+    async addCartProperties(props) { Object.assign(cart.properties, props); },
+    async addLineItem(variantId, quantity) {
+      cart.lineItems.push({ variantId, quantity }); writes.push(variantId);
+      if (loseResponse) { loseResponse = false; throw new Error("response lost after first addition"); }
+      return `line-${variantId}`;
+    } } };
+  const api = async input => { saved = { ...detail, status: "checkout", checkoutKey: input.checkoutKey, checkoutDevice: "1" }; return { row: saved }; };
+  await assert.rejects(handoffReservationCart(detail, pos, api), /response lost/);
+  await handoffReservationCart(saved, pos, api);
+  assert.deepEqual(writes, [1, 2]); assert.deepEqual(cart.lineItems, [{ variantId: 1, quantity: 2 }, { variantId: 2, quantity: 3 }]);
+});
+
+test("cart changes between product additions use the latest missing quantity", async () => {
+  const { handoffReservationCart } = await import("../extensions/common/reservations.js");
+  const detail = { ...row, status: "checkout", checkoutDevice: "1", lines: [...row.lines, { variantId: "gid://shopify/ProductVariant/2", quantity: 3 }] };
+  const cart = { properties: { [RESERVATION_PROPERTY]: detail.id, [CHECKOUT_PROPERTY]: detail.checkoutKey }, lineItems: [], editable: true };
+  const writes = [];
+  const pos = { session: { deviceId: 1 }, cart: { current: { value: cart }, async addLineItem(variantId, quantity) {
+    writes.push({ variantId, quantity }); cart.lineItems.push({ variantId, quantity });
+    if (variantId === 1) cart.lineItems.push({ variantId: 2, quantity: 1 }); // native POS update during await
+    return `line-${variantId}`;
+  } } };
+  await handoffReservationCart(detail, pos, async () => { throw new Error("must reuse existing checkout"); });
+  assert.deepEqual(writes, [{ variantId: 1, quantity: 2 }, { variantId: 2, quantity: 2 }]);
+});

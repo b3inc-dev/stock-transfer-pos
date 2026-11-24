@@ -109,9 +109,10 @@ export async function handoffReservationCart(detail, pos, api, update = () => {}
   };
   const current = assertSameCart();
   if (row.customerId && !current.customer) await pos.cart.setCustomer({ id: Number(row.customerId.split("/").pop()) });
-  const missing = cartCanReceive(row, assertSameCart());
-  for (const line of missing) {
-    assertSameCart();
+  for (const target of row.lines) {
+    // Native cart updates can arrive between awaited additions. Re-read before each item.
+    const line = cartCanReceive(row, assertSameCart()).find(item => item.variantId === target.variantId);
+    if (!line) continue;
     const uuid = await pos.cart.addLineItem(Number(line.variantId.split("/").pop()), line.quantity);
     if (!uuid) throw new Error("商品をカートに追加できませんでした。同じ取置から会計を再開してください");
   }

@@ -25,6 +25,7 @@ function Modal() {
   const [orders, setOrders] = useState([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [addingToCart, setAddingToCart] = useState(false);
   const [submitted, setSubmitted] = useState(null);
   const [ready, setReady] = useState(false);
   const [confirm, setConfirm] = useState(false);
@@ -105,16 +106,22 @@ function Modal() {
     }
   });
   const checkout = () => run(async () => {
-    await handoffReservationCart(detail, shopify, reservationApi, setDetail);
-    shopify.toast.show("取置商品を会計へ引き継ぎました");
-    await shopify.action.dismissModal();
+    setAddingToCart(true);
+    try {
+      await handoffReservationCart(detail, shopify, reservationApi, setDetail);
+      shopify.toast.show("取置商品をカートへ追加しました。カートでお会計してください");
+      await shopify.action.dismissModal();
+    } finally { setAddingToCart(false); }
   });
   const notice = error || detail?.lastError;
+  const canAddToCart = screen === "detail" && ["held", "checkout"].includes(detail?.status) && !confirm;
   const back = () => { setScreen("list"); setDetail(null); setError(""); };
   return <s-page heading={screen === "create" ? "取置を登録" : "取置"}>
-    <s-scroll-box><s-box padding="base"><s-stack gap="base" direction="block">
-      {screen !== "list" ? <s-button variant="secondary" onClick={back} disabled={busy}>戻る</s-button> : null}
-      {notice ? <s-banner tone="critical" heading="操作を確認してください">{notice}</s-banner> : null}
+    <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
+    {busy && !notice ? <s-box padding="base"><s-banner tone="info" heading="読み込み中です。少しお待ちください。" /></s-box> : null}
+    <s-scroll-box blockSize="auto" maxBlockSize="100%" minBlockSize="0"><s-box padding="base"><s-stack gap="base" direction="block">
+      {screen !== "list" && screen !== "detail" ? <s-button variant="secondary" onClick={back} disabled={busy}>戻る</s-button> : null}
+      {screen !== "detail" && notice ? <s-banner tone="critical" heading="操作を確認してください">{notice}</s-banner> : null}
       {screen === "list" ? <>
         <s-button variant="primary" onClick={() => setScreen("create")} disabled={busy || !ready}>取置を登録</s-button>
         <s-text>表示</s-text><s-choice-list values={[mode]} onChange={e => { setMode(e.currentTarget.values[0]); setPage(0); }}><s-choice value="due">要対応</s-choice><s-choice value="active">取置中すべて</s-choice><s-choice value="ended">終了</s-choice></s-choice-list>
@@ -153,11 +160,9 @@ function Modal() {
           <s-button disabled={busy} onClick={() => command("unreachable")}>不通を記録</s-button>
           <s-text-field label="次回確認日（YYYY-MM-DD）" value={followDate} onInput={e => setFollowDate(e.currentTarget.value)} />
           <s-button disabled={busy} onClick={() => command("planned", { followDate })}>来店予定を記録</s-button>
-          <s-button variant="primary" disabled={busy} onClick={checkout}>{busy ? "処理中…" : "会計へ"}</s-button>
           {confirm ? <><s-text>上の商品と数量の取置を解除し、販売可能在庫に戻しますか？</s-text><s-button tone="critical" disabled={busy} onClick={() => command("cancel")}>解除を確定</s-button><s-button onClick={() => setConfirm(false)}>やめる</s-button></> : <s-button disabled={busy} onClick={() => setConfirm(true)}>取置をキャンセル</s-button>}
         </> : null}
         {detail.status === "checkout" ? <>
-          <s-button variant="primary" disabled={busy} onClick={checkout}>{busy ? "処理中…" : "同じカートで会計を再開"}</s-button>
           <s-text-field label="決済後の注文番号" value={orderSearch} onInput={e => setOrderSearch(e.currentTarget.value)} />
           <s-button disabled={busy} onClick={() => run(async () => { const result = await reservationApi({ command: "orders", query: orderSearch }); setOrders(result.orders); })}>注文を探す</s-button>
           {orders.map(order => <s-button key={order.id} disabled={busy} onClick={() => command("complete", { orderId: order.id })}>{order.name}を照合</s-button>)}
@@ -167,5 +172,17 @@ function Modal() {
         {detail.endedAt ? <s-text>終了 {new Date(detail.endedAt).toLocaleString("ja-JP")}・担当 {detail.endedBy}</s-text> : null}
       </> : null}
     </s-stack></s-box></s-scroll-box>
+    {screen === "detail" ? <>
+      <s-divider />
+      <s-box padding="base"><s-stack gap="base" direction="block">
+        {notice ? <s-banner tone="critical" heading="操作を確認してください">{notice}</s-banner> : null}
+        {canAddToCart ? <s-text>追加後はPOSのカートでお会計してください。</s-text> : null}
+        <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
+          <s-button variant="secondary" onClick={back} disabled={busy}>戻る</s-button>
+          {canAddToCart ? <s-button variant="primary" disabled={busy} loading={addingToCart} onClick={checkout}>{addingToCart ? "追加中…" : "カートへ追加"}</s-button> : null}
+        </s-stack>
+      </s-stack></s-box>
+    </> : null}
+    </s-stack>
   </s-page>;
 }
