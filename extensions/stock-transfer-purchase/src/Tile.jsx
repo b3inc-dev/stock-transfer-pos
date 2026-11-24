@@ -8,7 +8,7 @@ function Extension() {
   return (
     <s-tile
       heading="仕入"
-      subheading="在庫処理"
+      subheading="処理・履歴"
       onClick={() => shopify.action.presentModal()}
     />
   );

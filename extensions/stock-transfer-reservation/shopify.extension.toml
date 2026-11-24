@@ -3,9 +3,9 @@ api_version = "2026-07"
 [[extensions]]
 uid = "af398960-fbbc-6c89-bf1c-ac1b2bc491163cc0dcee"
 type = "ui_extension"
-name = "商品の取置"
+name = "取置 / 登録・履歴"
 handle = "stock-transfer-reservation"
-description = "店舗の取置・期限・会計を管理"
+description = "取置 / 登録・履歴"
 
 [[extensions.targeting]]
 module = "./src/Tile.jsx"
