@@ -55,7 +55,7 @@ export async function reservationDueCount(shop: string, locationId: string) {
   const rows = await db.stockReservation.findMany({ where: { shop, locationId, status: { notIn: TERMINAL_RESERVATIONS } }, select: { status: true, dueDate: true, nextFollowDate: true, timezone: true } });
   return rows.filter(row => needsFollowUp(row)).length;
 }
-export async function listReservations(shop: string, locationId: string, admin: ReservationAdmin, mode: string, query: string, page: number) {
+export async function listReservations(shop: string, locationId: string, admin: ReservationAdmin, mode: string, query: string, page: number, dueDate = "") {
   const rows = await db.stockReservation.findMany({ where: { shop, locationId,
     status: mode === "ended" ? { in: TERMINAL_RESERVATIONS } : { notIn: TERMINAL_RESERVATIONS } },
     select: { id: true, customerId: true, guestName: true, status: true, dueDate: true, nextFollowDate: true, timezone: true },
@@ -68,7 +68,8 @@ export async function listReservations(shop: string, locationId: string, admin: 
     if (data.customers.pageInfo.hasNextPage) throw new Error("お名前をもう少し詳しく入力してください");
     customerIds = new Set(data.customers.nodes.map((customer: { id: string }) => customer.id));
   }
-  const filtered = rows.filter(row => (mode !== "due" || needsFollowUp(row)) && (!text || row.id.toLowerCase().includes(text) || row.guestName?.toLocaleLowerCase().includes(text) || (row.customerId && customerIds.has(row.customerId))))
+  if (dueDate && !validDate(dueDate)) throw new Error("受取期限の日付を確認してください");
+  const filtered = rows.filter(row => (!dueDate || row.dueDate === dueDate) && (mode !== "due" || needsFollowUp(row)) && (!text || row.id.toLowerCase().includes(text) || row.guestName?.toLocaleLowerCase().includes(text) || (row.customerId && customerIds.has(row.customerId))))
     .sort((a, b) => Number(needsFollowUp(b)) - Number(needsFollowUp(a)) || (a.nextFollowDate || a.dueDate).localeCompare(b.nextFollowDate || b.dueDate));
   const pageRows = filtered.slice(page * 25, (page + 1) * 25);
   const full = await db.stockReservation.findMany({ where: { shop, locationId, id: { in: pageRows.map(row => row.id) } } });
@@ -80,7 +81,9 @@ export async function listReservations(shop: string, locationId: string, admin: 
     for (const customer of data.nodes) if (customer) customers.set(customer.id, customer);
   }
   const mapped = await Promise.all(pageRows.map(meta => publicReservation(full.find(row => row.id === meta.id)!, admin, false, customers)));
-  return { rows: mapped, hasNextPage: filtered.length > (page + 1) * 25, count: rows.filter(row => needsFollowUp(row)).length, total: filtered.length };
+  let today: string | null = null;
+  try { const timezone = JSON.parse(process.env.RESERVATION_LOCATION_TIMEZONES || "{}")[shop]?.[locationId]; if (timezone) today = localDate(Date.now(), timezone); } catch { /* Without a configured zone, don't guess the store's date. */ }
+  return { today, rows: mapped, hasNextPage: filtered.length > (page + 1) * 25, count: rows.filter(row => needsFollowUp(row)).length, total: filtered.length, allTotal: rows.length };
 }
 export async function reservationLocation(admin: ReservationAdmin, id: string) {
   const data = await reservationQuery(admin, `#graphql

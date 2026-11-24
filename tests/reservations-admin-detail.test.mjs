@@ -111,8 +111,12 @@ test("malformed page values and product data fail safely without exposing raw ke
   fixture.row.lines.push({ title: "broken", quantity: "no" }); fixture.row.events[0].kind = "INTERNAL_UNKNOWN_EVENT";
   const detail = (await view()).detail; assert.equal(detail.totalQuantity, 2); assert.ok(detail.notice.message.includes("商品明細")); assert.equal(detail.events[0].label, "対応記録");
 });
-test("list links preserve page state and keep contact deletion separate from navigation", () => {
+test("detail preserves validated list filters and pagination without accepting arbitrary redirect data", async () => {
+  const result = await view("?page=2&locations=gid%3A%2F%2Fshopify%2FLocation%2F1&statuses=held&sort=asc&redirect=https://bad.example");
+  const back = new URL(result.backTo, "https://test");
+  assert.equal(back.pathname, "/app/reservations"); assert.equal(back.searchParams.get("page"), "2");
+  assert.equal(back.searchParams.get("locations"), locationId); assert.equal(back.searchParams.get("statuses"), "held");
+  assert.equal(back.searchParams.get("sort"), "asc"); assert.equal(back.searchParams.has("redirect"), false);
   const source = readFileSync("app/routes/app.reservations.tsx", "utf8");
-  assert.match(source, /<GuardedLink to=\{`\/app\/reservations\//); assert.match(source, /ended=\$\{ended/); assert.match(source, /page=\$\{page\}/);
-  assert.ok(source.indexOf("</GuardedLink>") < source.indexOf("<ConfirmAction label="));
+  assert.match(source, /className="Reservation-row"/); assert.doesNotMatch(source, /<ConfirmAction/);
 });

@@ -9,7 +9,7 @@ export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
 
-type OutletContext = { shopPlan: ShopPlan; storeHandle?: string };
+type OutletContext = { shopPlan: ShopPlan; storeHandle?: string; reservationsEnabled?: boolean };
 
 /** 販売チャネルPOSの設定画面（POSアプリの追加はここ）。ストアによっては販売チャネル一覧に誘導される場合あり */
 const getPosChannelUrl = (storeHandle: string) =>
@@ -19,8 +19,8 @@ const getChannelsUrl = (storeHandle: string) =>
   `https://admin.shopify.com/store/${encodeURIComponent(storeHandle)}/settings/channels`;
 
 export default function HomePage() {
-  const { shopPlan, storeHandle } = useOutletContext<OutletContext>();
-  const { distribution, plan, features, locationsCount, isDevelopmentStore } = shopPlan;
+  const { shopPlan, storeHandle, reservationsEnabled } = useOutletContext<OutletContext>();
+  const { distribution, plan, locationsCount, isDevelopmentStore } = shopPlan;
   const isInhouse = distribution === "inhouse";
   const showPlanStep = !isInhouse;
   const showBillingNote = !isInhouse && isDevelopmentStore;
@@ -119,6 +119,10 @@ export default function HomePage() {
         to: "/app/settings?tab=adjustment",
         buttonLabel: "調整設定を開く",
       });
+      if (reservationsEnabled) {
+      num++;
+      steps.push({ num, title: "取置設定", description: "設定できる項目：標準取置日数、顧客・注文の利用権限。顧客データと履歴も取置メニューから確認できます。", to: "/app/reservations/settings", buttonLabel: "取置設定を開く" });
+      }
     }
     num++;
     steps.push({

@@ -33,6 +33,13 @@ function actorLabel(value: string | null) {
   if (/^\d+$/.test(value)) return `ログイン担当番号 ${value}`;
   return "担当者名を取得できません";
 }
+export function reservationFilterQuery(url: URL) {
+  const result = new URLSearchParams();
+  for (const value of new Set(url.searchParams.getAll("locations"))) if (/^gid:\/\/shopify\/Location\/\d+$/.test(value)) result.append("locations", value);
+  for (const value of new Set(url.searchParams.getAll("statuses"))) if (Object.hasOwn(RESERVATION_LABELS, value)) result.append("statuses", value);
+  if (url.searchParams.get("sort") === "asc") result.set("sort", "asc");
+  return result.size ? `&${result}` : "";
+}
 export function reservationListState(url: URL) {
   const page = Number(url.searchParams.get("page"));
   const history = Number(url.searchParams.get("historyPage"));

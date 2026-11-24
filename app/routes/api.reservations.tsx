@@ -50,7 +50,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const command = String(body.command || "list");
     if (command === "count") return json({ ok: true, count: await reservationDueCount(shop, locationId) });
     if (command === "list") {
-      return json({ ok: true, ...await listReservations(shop, locationId, withGraphQLRetry(admin), String(body.mode || "due"), String(body.query || "").slice(0, 100), Math.max(0, Math.floor(Number(body.page) || 0))) });
+      return json({ ok: true, ...await listReservations(shop, locationId, withGraphQLRetry(admin), String(body.mode || "due"), String(body.query || "").slice(0, 100), Math.max(0, Math.floor(Number(body.page) || 0)), String(body.dueDate || "")) });
     }
     if (command === "products") {
       const query = String(body.query || "").trim().slice(0, 100);
