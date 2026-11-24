@@ -22,7 +22,7 @@ test("both paper sizes and each copy render through same Liquid engine with no c
     const settings = receipt.normalizeReservationReceiptSettings(null);
     settings[copy].paperWidthMm = mm;
     const html = receipt.renderConfiguredReservationReceipt(row, settings, copy);
-    assert.match(html, copy === "customer" ? /お客様お渡し用/ : /店舗保管用/);
+    assert.match(html, copy === "customer" ? /お客様控え/ : /店舗保管用/);
     assert.equal(html.split("R-TEST-1").length - 1, 1); assert.equal(html.split("2026-12-02").length - 1, 1); assert.match(html, /商品&lt;&amp;/); assert.match(html, /2点/);
     assert.doesNotMatch(html, /秘密氏名|09099999999|secret-customer|secret-key/);
     assert.equal(render.paperWidthPx(mm), mm === 58 ? 181 : 272);
@@ -64,7 +64,7 @@ test("comments, hidden CSS and document metadata cannot remove the fixed require
   settings.customer.mode = "code";
   settings.customer.code = '<html><head><style>html,body {display:none!important} .reservation-required {display:none!important} @media print {section{display:none!important}}</style><meta http-equiv="refresh" content="0;https://example.invalid"></head><body>{% comment %}reservation.number{% endcomment %}<script>alert(1)</script><p>自由編集</p></body></html>';
   const html = receipt.renderConfiguredReservationReceipt(row, settings, "customer");
-  assert.match(html, /class="reservation-required"/); assert.equal(html.split("R-TEST-1").length - 1, 1); assert.equal(html.split("2026-12-02").length - 1, 1); assert.match(html, /2点/);
+  assert.match(html, /class="reservation-required(?: |")/); assert.equal(html.split("R-TEST-1").length - 1, 1); assert.equal(html.split("2026-12-02").length - 1, 1); assert.match(html, /2点/);
   assert.doesNotMatch(html, /<script|http-equiv="refresh"/);
   assert.match(html, /\.reservation-design \.reservation-required/);
 });
@@ -104,4 +104,24 @@ test("code printing keeps fixed typography and both 58mm printer corrections", (
   }
   const legacy = receipt.normalizeReservationReceiptSettings(null);
   assert.match(receipt.renderConfiguredReservationReceipt(row, legacy, "customer"), /html,body\{[^}]*font-size:14px/);
+});
+test("inquiry forbids customer copy and store copy records the intake method", () => {
+  const settings = receipt.normalizeReservationReceiptSettings(null);
+  assert.throws(() => receipt.renderConfiguredReservationReceipt({ ...row, intakeMethod: "inquiry" }, settings, "customer"), /お問い合わせ/);
+  for (const [method, label] of [["in_person", "店頭で受付"], ["inquiry", "お問い合わせでの受付"], [null, "受付方法未記録"]]) {
+    const html = receipt.renderConfiguredReservationReceipt({ ...row, number: 12, intakeMethod: method }, settings, "store");
+    assert.match(html, new RegExp(label)); assert.match(html, /取置番号 #R0012/);
+  }
+  const customer = receipt.renderConfiguredReservationReceipt({ ...row, intakeMethod: "in_person" }, settings, "customer");
+  assert.match(customer, /お客様控え/); assert.doesNotMatch(customer, /お客様お渡し用|店頭で受付/);
+});
+test("protected products render once in the middle and reservation information remains at the bottom", () => {
+  const settings = receipt.normalizeReservationReceiptSettings(null);
+  settings.customer.mode = "code";
+  settings.customer.code = '<p>見出し</p><!-- reservation-items --><p>下部案内</p><!-- reservation-items -->';
+  const html = receipt.renderConfiguredReservationReceipt({ ...row, number: 1 }, settings, "customer");
+  assert.equal((html.match(/class="required-item"/g) || []).length, 1);
+  assert.ok(html.indexOf("見出し") < html.indexOf('class="required-item"'));
+  assert.ok(html.indexOf('class="required-item"') < html.indexOf("下部案内"));
+  assert.ok(html.indexOf("下部案内") < html.indexOf("取置番号 #R0001"));
 });

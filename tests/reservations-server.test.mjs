@@ -184,3 +184,16 @@ test("public timezone keeps explicit location override and rejects invalid confi
   delete process.env.APP_DISTRIBUTION; shopTimezone = "Asia/Tokyo";
   await assert.rejects(() => service.reservationTimezone(shop, locationId, admin), /未設定/);
 });
+test("intake method is persisted and changed retries cannot reserve twice", async () => {
+  const original = { ...input(), faceToFace: false };
+  const first = await create(original);
+  assert.equal(first.intakeMethod, "inquiry");
+  assert.equal((await create(original)).intakeMethod, "inquiry");
+  const before = calls.length;
+  await assert.rejects(() => create({ ...original, faceToFace: true }), /登録内容が変わっています/);
+  assert.equal(calls.length, before); assert.deepEqual(stock, { available: 3, reserved: 2 });
+});
+test("legacy retries without a recorded intake remain unknown", async () => {
+  assert.equal((await create()).intakeMethod, null);
+  assert.equal((await create({ ...input(), faceToFace: true })).intakeMethod, null);
+});

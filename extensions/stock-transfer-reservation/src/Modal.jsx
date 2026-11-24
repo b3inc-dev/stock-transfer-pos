@@ -1,5 +1,6 @@
+import { reservationReceiptNotice } from "../../common/reservationReceipt.js";
 import { japanesePhoneDisplay } from "../../common/customerDisplay.js";
-import { ReservationCustomerPicker, CUSTOMER_PICKER_ID } from "./CustomerPicker.jsx";
+import { ReservationCustomerScreen } from "./CustomerPicker.jsx";
 import { ReservationPageControls } from "./HistoryControls.jsx";
 import { ReservationProductRow } from "./ProductRow.jsx";
 import { addReservationProduct, exactScanProduct, createReservationScanQueue } from "./productList.js";
@@ -11,7 +12,7 @@ import { render } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { locationId, reservationApi, printReservation } from "./api.js";
 import { appendProductToDraft, createReservationDraftWriter, loadProductReservationDraft, restoreReservationInputDraft } from "./productEntry.js";
-import { handoffReservationCart, RESERVATION_LABELS, reservationStatusTone, RESERVATION_PROPERTY, CHECKOUT_PROPERTY } from "../../common/reservations.js";
+import { handoffReservationCart, RESERVATION_LABELS, reservationStatusTone, reservationDisplayNumber, reservationIntakeLabel, RESERVATION_PROPERTY, RESERVATION_ID_PROPERTY, CHECKOUT_PROPERTY } from "../../common/reservations.js";
 
 const DRAFT_KEY = "pos_stock_reservation_draft_v1";
 const newId = () => `R-${crypto.randomUUID()}`;
@@ -20,7 +21,6 @@ export default async () => render(<ReservationModal />, document.body);
 // Preact component props are documented above and checked by the local SDK build.
 // eslint-disable-next-line react/prop-types
 export function ReservationModal({ fromProduct = false, initialProduct = null }) {
-  const customerPickerRef = useRef(null);
   const confirmRegistrationRef = useRef(null);
   const [receiptOptions, setReceiptOptions] = useState(null);
   const [screen, setScreenState] = useState("create");
@@ -178,16 +178,16 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const customerChange = customer => {
     let changed = false;
     return run(async () => {
-      if (!ready || submitted || screenRef.current !== "create") throw new Error("受付画面でお客様を確認してください");
+      if (!ready || submitted || !["create", "customers"].includes(screenRef.current)) throw new Error("受付画面でお客様を確認してください");
       if (locationId() !== draftLocation.current) throw new Error("POS店舗が変わっています。元の店舗で開いてください");
       const cart = shopify.cart.current.value;
-      if (cart.editable === false || cart.properties?.[RESERVATION_PROPERTY] || cart.properties?.[CHECKOUT_PROPERTY]) throw new Error("取置の会計中です。カートのお会計を先に完了してください");
+      if (cart.editable === false || cart.properties?.[RESERVATION_PROPERTY] || cart.properties?.[RESERVATION_ID_PROPERTY] || cart.properties?.[CHECKOUT_PROPERTY]) throw new Error("取置の会計中です。カートのお会計を先に完了してください");
       if (customer) {
         const id = Number(customer.id.split("/").pop());
         if (!Number.isSafeInteger(id) || id <= 0) throw new Error("お客様を選び直してください");
         await shopify.cart.setCustomer({ id });
       } else await shopify.cart.removeCustomer();
-      changed = true; customerPickerRef.current?.hideOverlay?.();
+      changed = true; if (customer) setScreen("create");
     }).then(() => changed);
   };
   useEffect(() => {
@@ -289,7 +289,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       shopify.toast.show("取置を登録しました。商品を取置棚へ移してください");
       try {
         const options = await reservationApi({ command: "receiptOptions" });
-        if (options.customerCopy) await printReservation(data.row, "customer");
+        if (options.customerCopy && data.row.intakeMethod !== "inquiry") await printReservation(data.row, "customer");
       } catch { setError("取置は登録済みです。お客様控えを印刷できませんでした。詳細の「連絡・印刷」から再印刷してください"); }
     }
     setScreen("detail");
@@ -353,6 +353,8 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   if (screen === "cancel") primary = <s-button variant="primary" tone="critical" disabled={busy} onClick={() => command("cancel")}>{busy ? "解除中…" : "取置を解除"}</s-button>;
   if (screen === "detail" && ["reserving", "cancelling", "completing"].includes(detail?.status)) primary = <s-button variant="primary" disabled={busy} onClick={() => command("resume")}>反映を確認</s-button>;
 
+  if (screen === "customers") return <s-page heading="お客様を選択"><ReservationCustomerScreen locationId={draftLocation.current} storeName={storeName} busy={busy || !ready || Boolean(submitted)} selectionError={error} onSelect={customerChange} onBack={() => { setError(""); setScreen("create"); }} /></s-page>;
+
   return <s-page heading={titles[screen] || "取置"}>
     {screen === "products" ? <s-button slot="secondary-actions" disabled={busy || scanBusy || Boolean(submitted)} onClick={toggleCamera}>{cameraVisible ? "カメラを閉じる" : "カメラスキャン"}</s-button> : null}
     <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
@@ -378,7 +380,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         {listLoaded ? <ReservationPageControls page={page} total={total} disabled={busy} onChange={setPage} /> : <s-text>一覧を取得できていません。</s-text>}
         {listLoaded && !rows.length && !busy ? <><s-text>条件に合う取置はありません。対象の全体は{allTotal}件です。</s-text><s-button onClick={() => { setMode("active"); setQuery(""); setQueryInput(""); setPage(0); }}>すべて表示する</s-button></> : null}
         {(listLoaded ? rows : []).map(row => <s-box key={row.id}><s-clickable onClick={() => open(row)} disabled={busy}><s-box padding="base"><s-stack gap="small" direction="block">
-          <s-stack direction="inline" justifyContent="space-between"><s-text type="strong">{row.id} ›</s-text><s-text>登録 {new Date(row.createdAt).toLocaleDateString("ja-JP", { timeZone: row.timezone || "Asia/Tokyo" })}</s-text></s-stack>
+          <s-stack direction="inline" justifyContent="space-between"><s-text type="strong">{reservationDisplayNumber(row)} ›</s-text><s-text>登録 {new Date(row.createdAt).toLocaleDateString("ja-JP", { timeZone: row.timezone || "Asia/Tokyo" })}</s-text></s-stack>
           <s-text>受取期限: {row.dueDate}</s-text><s-text>{row.name}・{japanesePhoneDisplay(row.phone)}</s-text><s-text>店舗: {row.locationName}</s-text>
           <s-stack direction="inline" justifyContent="space-between"><s-badge tone={row.needsFollowUp ? "warning" : reservationStatusTone(row.status)}>{row.needsFollowUp ? "要対応" : RESERVATION_LABELS[row.status]}</s-badge><s-text>{row.lines.length}件・合計{row.lines.reduce((sum, line) => sum + line.quantity, 0)}点</s-text></s-stack>
         </s-stack></s-box></s-clickable><s-divider /></s-box>)}
@@ -397,9 +399,9 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
           {selectedCustomer?.phone ? <s-text>{japanesePhoneDisplay(selectedCustomer.phone)}</s-text> : null}
           {!selectedCustomer ? <s-text type="small">{sessionLoading ? "お客様の情報を確認しています。" : "お客様の情報を取得できませんでした。表示された理由を確認してください。"}</s-text> : null}
           {selectedCustomer?.hasPhone === false ? <s-text-field disabled={busy || !ready || Boolean(submitted)} label="連絡用の電話番号（未登録）" value={draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone || "" : ""} onInput={e => patch({ memberPhone: e.currentTarget.value, memberPhoneCustomerId: String(customerId) })} /> : null}
-          <s-stack direction="inline" justifyContent="space-between"><s-button disabled={busy || !ready || Boolean(submitted)} command="--show" commandFor={CUSTOMER_PICKER_ID}>お客様を変更</s-button><s-button tone="critical" disabled={busy || !ready || Boolean(submitted)} onClick={() => customerChange(null)}>カートから解除</s-button></s-stack><s-text type="small" color="subdued">お客様の登録情報は削除されません。</s-text>
+          <s-stack direction="inline" justifyContent="space-between"><s-button disabled={busy || !ready || Boolean(submitted)} onClick={() => { setError(""); setScreen("customers"); }}>お客様を変更</s-button><s-button tone="critical" disabled={busy || !ready || Boolean(submitted)} onClick={() => customerChange(null)}>カートから解除</s-button></s-stack><s-text type="small" color="subdued">お客様の登録情報は削除されません。</s-text>
         </> : <>
-          <s-text type="strong">お客様</s-text><s-button disabled={busy || !ready || Boolean(submitted)} command="--show" commandFor={CUSTOMER_PICKER_ID}>お客様を選択</s-button><s-text type="small" color="subdued">既存のお客様を選ぶか、ゲストのお名前と電話番号を入力してください。</s-text>
+          <s-text type="strong">お客様</s-text><s-button disabled={busy || !ready || Boolean(submitted)} onClick={() => { setError(""); setScreen("customers"); }}>お客様を選択</s-button><s-text type="small" color="subdued">既存のお客様を選ぶか、ゲストのお名前と電話番号を入力してください。</s-text>
           <s-text-field disabled={busy || !ready || Boolean(submitted)} label="ゲストのお名前" value={draft.name} onInput={e => patch({ name: e.currentTarget.value })} />
           <s-text-field disabled={busy || !ready || Boolean(submitted)} label="取置用の電話番号" value={draft.phone} onInput={e => patch({ phone: e.currentTarget.value })} />
         </>}
@@ -419,17 +421,17 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         </s-stack> : <s-text color="subdued">まだ追加されていません</s-text>}
       </> : null}
       {screen === "create" ? <>
-        <s-divider /><s-text type="small" color="subdued">受付方法</s-text><s-switch disabled={busy || !ready || Boolean(submitted)} label="対面で受付" checked={draft.faceToFace} onChange={e => patch({ faceToFace: e.currentTarget.checked, print: false })} />
-        <s-text type="small" color="subdued">お客様控えは登録後、店舗控えは詳細画面から印刷します。発行の有無は管理画面の設定に従います。</s-text>
+        <s-divider /><s-text type="small" color="subdued">受付方法</s-text><s-switch disabled={busy || !ready || Boolean(submitted)} label={draft.faceToFace ? "店頭で受付" : "お問い合わせでの受付"} checked={draft.faceToFace} onChange={e => patch({ faceToFace: e.currentTarget.checked, print: false })} />
+        {reservationReceiptNotice(receiptOptions, draft.faceToFace) ? <s-text type="small" color="subdued">{reservationReceiptNotice(receiptOptions, draft.faceToFace)}</s-text> : null}
         <s-text>保存すると販売可能在庫から取置分を確保します。</s-text>
 
         {submitted ? <s-text>送信済みの内容を保持しています。再度登録を押すと同じ番号で結果を確認します。</s-text> : null}
       </> : null}
       {screen === "cancel" && detail ? <><s-text>表示した商品の取置を解除し、販売可能在庫に戻します。</s-text>{detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}</> : null}
       {(screen === "detail" || screen === "actions") && detail ? <>
-        <s-text type="strong">{detail.id}</s-text><s-badge tone={detail.needsFollowUp ? "warning" : reservationStatusTone(detail.status)}>{RESERVATION_LABELS[detail.status]}</s-badge>
+        <s-text type="strong">{reservationDisplayNumber(detail)}</s-text><s-badge tone={detail.needsFollowUp ? "warning" : reservationStatusTone(detail.status)}>{RESERVATION_LABELS[detail.status]}</s-badge>
         <s-text>{detail.name}</s-text><s-text>{japanesePhoneDisplay(detail.phone)}</s-text>{!detail.contactVisible ? <s-text>連絡先の確認には権限が必要です。</s-text> : null}
-        <s-text>{detail.locationName}・受取期限 {detail.dueDate}</s-text>
+        <s-text>{reservationIntakeLabel(detail)}</s-text><s-text>{detail.locationName}・受取期限 {detail.dueDate}</s-text>
         {detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}
         {detail.nextFollowDate ? <s-text>次回確認 {detail.nextFollowDate}</s-text> : null}
         {detail.events.map(event => <s-text key={event.id}>{new Date(event.createdAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}・{event.kind === "unreachable" ? "不通" : event.kind === "planned" ? "来店予定" : RESERVATION_LABELS[event.kind] || "対応記録"}・担当 {event.actor}{event.followDate ? `・次回 ${event.followDate}` : ""}</s-text>)}
@@ -447,7 +449,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         </> : null}
         {screen === "detail" ? <s-button disabled={busy} onClick={() => setScreen("actions")}>連絡・印刷</s-button> : null}
         {screen === "actions" && ["held", "checkout", "sold", "cancelled"].includes(detail.status) ? <>
-          {receiptOptions?.customerCopy ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "customer"); shopify.toast.show("お客様控えの印刷を送信しました"); })}>お客様控えを印刷</s-button> : null}
+          {receiptOptions?.customerCopy && detail.intakeMethod !== "inquiry" ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "customer"); shopify.toast.show("お客様控えの印刷を送信しました"); })}>お客様控えを印刷</s-button> : null}
           {receiptOptions?.storeCopy ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "store"); shopify.toast.show("店舗控えの印刷を送信しました"); })}>店舗控えを印刷</s-button> : null}
         </> : null}
         {detail.status === "failed" ? <s-button disabled={busy} onClick={() => { setSubmitted(null); setDraft(previous => ({ ...previous, submitted: false, id: newId() })); setScreen("create"); setDetail(null); }}>内容を直して登録</s-button> : null}
@@ -467,7 +469,6 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       </s-stack>
     </s-stack></s-box>
     </s-stack>
-    <ReservationCustomerPicker locationId={draftLocation.current} busy={busy || !ready || Boolean(submitted)} modalRef={customerPickerRef} onSelect={customerChange} />
     <s-modal id="reservation-register-confirm" heading="取置を確定しますか？" ref={confirmRegistrationRef}>
       <s-box padding="base"><s-stack gap="base">
         <s-text type="small" color="subdued">表示した商品の在庫を確保して、取置を登録します。</s-text>

@@ -1,3 +1,4 @@
+import { reservationDisplayNumber , RESERVATION_LABELS, reservationStatusTone } from "../../extensions/common/reservations.js";
 import { ReservationNav } from "../components/ReservationNav";
 import { Suspense } from "react";
 import { Await, Form, data, useActionData, useLoaderData, useNavigation, useLocation } from "react-router";
@@ -7,7 +8,6 @@ import db from "../db.server";
 import { adminPlanRedirect } from "../utils/plan-gate.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { reservationQuery, reservationsEnabled } from "../utils/reservations.server";
-import { RESERVATION_LABELS, reservationStatusTone } from "../../extensions/common/reservations.js";
 import { GuardedLink, SecondaryLink, StateBadge, StatusBanner, SuccessToast } from "../components/admin-ui";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -41,7 +41,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const requestedPage = Number(url.searchParams.get("page"));
   const page = Math.min(Number.isSafeInteger(requestedPage) && requestedPage >= 0 ? requestedPage : 0, Math.max(0, Math.ceil(total / 25) - 1));
   const rows = db.stockReservation.findMany({ where, orderBy: [{ createdAt: sort }, { id: sort }], take: 25, skip: page * 25,
-    select: { id: true, locationName: true, status: true, dueDate: true, createdAt: true, lines: true } });
+    select: { id: true, number: true, locationName: true, status: true, dueDate: true, createdAt: true, lines: true } });
   return data({ rows, page, ended, selectedLocations, selectedStatuses, sort, total, allTotal, locations, locationError }, { headers: { "Cache-Control": "private, no-store" } });
 }
 export async function action({ request }: ActionFunctionArgs) {
@@ -93,8 +93,8 @@ export default function Reservations() {
         {!items.length ? <><p className="Admin-note">条件に一致する取置はありません。</p><SecondaryLink to="/app/reservations">すべて表示する</SecondaryLink></> : items.map(row => {
           const lines = Array.isArray(row.lines) ? row.lines as { quantity?: number }[] : [];
           const quantity = lines.reduce((sum, line) => sum + (Number(line.quantity) || 0), 0);
-          return <GuardedLink key={row.id} to={`/app/reservations/${encodeURIComponent(row.id)}${pageLink(page)}`} className="Reservation-row" aria-label={`${row.id}の詳細`}>
-            <strong>{row.id}</strong><span className="Reservation-row-end Admin-note">{new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(row.createdAt))}</span>
+          return <GuardedLink key={row.id} to={`/app/reservations/${encodeURIComponent(row.id)}${pageLink(page)}`} className="Reservation-row" aria-label={`${reservationDisplayNumber(row)}の詳細`}>
+            <strong>{reservationDisplayNumber(row)}</strong><span className="Reservation-row-end Admin-note">{new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(row.createdAt))}</span>
             <p className="Admin-note">ロケーション: {row.locationName}</p><span />
             <p className="Admin-note">受取期限: {row.dueDate}</p><span />
             <span><StateBadge label={RESERVATION_LABELS[row.status as keyof typeof RESERVATION_LABELS] || "確認中"} tone={reservationStatusTone(row.status)} /></span><span className="Reservation-row-end Admin-note">{lines.length}件・合計{quantity}点</span>

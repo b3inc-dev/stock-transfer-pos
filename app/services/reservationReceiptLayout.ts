@@ -1,3 +1,4 @@
+import { reservationDisplayNumber, reservationIntakeLabel } from "../../extensions/common/reservations.js";
 /** POS Receipt live 6df3d07 を基準にした取置用の設定と、印刷データの許可リスト。 */
 import { normalizeReservationReceipt } from "../../extensions/common/reservationReceipt.js";
 import { defaultLayout } from "./receiptLayoutPresets";
@@ -7,7 +8,7 @@ import { validateLayoutInput } from "./receiptLayoutValidate";
 import { renderReceiptLayout } from "./receiptLayoutRender";
 import { applyPrinterProfile, normalizePrinterProfile, printerGeometry, type ReceiptPrinterProfile } from "./receiptPrinterProfile";
 export type ReservationReceiptSettings = { version: 2; customerCopy: boolean; storeCopy: boolean; printerProfile: ReceiptPrinterProfile; customer: ReceiptLayout; store: ReceiptLayout };
-export type ReservationReceiptRow = { id: string; locationName: string; timezone: string; createdAt: string | Date; dueDate: string; createdBy: string; lines: unknown };
+export type ReservationReceiptRow = { id: string; number?: number | null; intakeMethod?: string | null; locationName: string; timezone: string; createdAt: string | Date; dueDate: string; createdBy: string; lines: unknown };
 export function normalizeReservationReceiptSettings(input: unknown, strict = false): ReservationReceiptSettings {
   const raw = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   if (raw.version === 2) {
@@ -49,16 +50,17 @@ export function reservationReceiptData(row: ReservationReceiptRow, copy: "custom
   // Do not spread row here: it contains customer PII and internal operation/checkout keys.
   return { kind: "reservation", document: { title: "取置控え" }, shop: { name: row.locationName, currency: "JPY", logo_url: "" },
     location: { name: row.locationName, zip: "", address_lines: [], phone: "" }, staff: { name: row.createdBy }, printed_at: "",
-    reservation: { number: row.id, due_date: row.dueDate, created_at_label: new Intl.DateTimeFormat("ja-JP", { timeZone: row.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(row.createdAt)), copy_label: copy === "customer" ? "お客様お渡し用" : "店舗保管用",
+    reservation: { number: reservationDisplayNumber(row), due_date: row.dueDate, created_at_label: new Intl.DateTimeFormat("ja-JP", { timeZone: row.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(row.createdAt)), copy_label: copy === "customer" ? "お客様控え" : "店舗保管用", intake_label: copy === "store" ? reservationIntakeLabel(row) : "",
       items: receiptLines(row.lines) } };
 }
 export function reservationSampleData(copy: "customer" | "store") {
   const data = sampleTemplateData("reservation");
-  if (data.kind === "reservation") data.reservation.copy_label = copy === "customer" ? "お客様お渡し用" : "店舗保管用";
+  if (data.kind === "reservation") { data.reservation.copy_label = copy === "customer" ? "お客様控え" : "店舗保管用"; data.reservation.intake_label = copy === "store" ? "店頭で受付" : ""; }
   return data;
 }
 export function renderConfiguredReservationReceipt(row: ReservationReceiptRow, raw: unknown, copy: "customer" | "store") {
   const settings = normalizeReservationReceiptSettings(raw);
+  if (copy === "customer" && row.intakeMethod === "inquiry") throw new Error("お問い合わせでの受付は、お客様控えを発行しません");
   if (!(copy === "customer" ? settings.customerCopy : settings.storeCopy)) throw new Error("この控えは管理画面で発行しない設定です");
   const layout = settings[copy];
   const result = renderReceiptLayout(layout, reservationReceiptData(row, copy));

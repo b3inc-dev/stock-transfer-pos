@@ -5,12 +5,12 @@ const row = { id: "R-TEST", locationName: "店舗A", timezone: "Asia/Tokyo", cre
 test("defaults print customer and store copies with page boundaries, fixed reservation number and expiry", () => {
   const html = renderReservationReceipt(row);
   assert.equal((html.match(/<section class="copy">/g) || []).length, 2);
-  for (const label of ["お客様お渡し用", "店舗保管用", "取置番号 R-TEST", "受取期限 2026-12-02", "2026/11/25", "page-break-after:always"]) assert.ok(html.includes(label));
+  for (const label of ["お客様控え", "店舗保管用", "取置番号 R-TEST", "受取期限 2026-12-02", "2026/11/25", "page-break-after:always"]) assert.ok(html.includes(label));
   for (const secret of [row.guestName, row.contactPhone, row.customerId]) assert.ok(!html.includes(secret));
 });
 test("copy selection and display choices are reflected by the same renderer", () => {
   const html = renderReservationReceipt(row, { ...DEFAULT_RESERVATION_RECEIPT, customerCopy: false, paperWidth: 58, showIssueDate: false, showStaff: false, showSku: true, showBarcode: true, receiptTitle: "店舗の取置票" });
-  assert.equal((html.match(/<section class="copy">/g) || []).length, 1); assert.ok(!html.includes("お客様お渡し用"));
+  assert.equal((html.match(/<section class="copy">/g) || []).length, 1); assert.ok(!html.includes("お客様控え"));
   assert.ok(html.includes("店舗保管用")); assert.ok(html.includes("width:384px")); assert.ok(html.includes("SKU: SKU-1")); assert.ok(html.includes("JAN: 12345678"));
   assert.ok(!html.includes("受付 2026")); assert.ok(!html.includes("担当 123"));
 });

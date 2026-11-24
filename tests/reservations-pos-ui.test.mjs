@@ -24,7 +24,7 @@ test("POS customer association, confirmation registration and independent copy p
     const input = JSON.parse(options.body); calls.push(input.command);
     if (input.command === "sessionDisplay") return Response.json({ ok: true, locationName: "店舗", customer: cart.customer ? { name: "姓 名", phone: "+818012345678", hasPhone: true } : null });
     if (input.command === "receiptOptions") return Response.json({ ok: true, customerCopy: true, storeCopy: true });
-    if (input.command === "customers") return Response.json({ ok: true, customers: [{ id: "gid://shopify/Customer/1", name: "姓 名", phone: "+818012345678" }], hasNextPage: false });
+    if (input.command === "customers") return Response.json({ ok: true, customers: [{ id: "gid://shopify/Customer/1", name: "姓 名", phone: "+818012345678" }], pageInfo: { hasNextPage: false, endCursor: null } });
     if (input.command === "productSettings") return Response.json({ ok: true, searchLimit: 50, productLimit: 250 });
     if (input.command === "products") return Response.json({ ok: true, products: [], pageInfo: { hasNextPage: false } });
     if (input.command === "create") return Response.json({ ok: true, row });
@@ -38,8 +38,10 @@ test("POS customer association, confirmation registration and independent copy p
   };
   try {
     ui.mount(); await wait(150);
-    const search = document.querySelector('s-text-field[label="氏名・電話番号で検索"]'); search.value = "姓 名"; search.dispatchEvent(new window.Event("input")); await wait(450);
-    const customer = document.querySelector("s-modal s-clickable"); assert.ok(customer); customer.dispatchEvent(new window.Event("click")); await wait(150);
+    click("お客様を選択"); await wait(100);
+    const search = document.querySelector('s-search-field[placeholder="氏名・電話番号で検索"]'); search.value = "姓 名"; search.dispatchEvent(new window.Event("input")); await wait(450);
+    const customer = document.querySelector("s-clickable"); assert.ok(customer); customer.dispatchEvent(new window.Event("click")); await wait(150);
+    assert.equal(cart.customer, null); click("このお客様を選択"); await wait(150);
     assert.equal(cart.customer.id, 1); assert.ok(document.body.textContent.includes("080-1234-5678"));
     cart.properties["取置番号"] = "existing"; click("カートから解除"); await wait(100); assert.equal(cart.customer.id, 1);
     delete cart.properties["取置番号"]; click("カートから解除"); await wait(150); assert.equal(cart.customer, null);

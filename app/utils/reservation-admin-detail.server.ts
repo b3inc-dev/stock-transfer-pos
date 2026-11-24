@@ -1,10 +1,10 @@
+import { reservationDisplayNumber, reservationIntakeLabel , maskPhone, RESERVATION_LABELS, reservationStatusTone } from "../../extensions/common/reservations.js";
 import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
 import type { Prisma } from "@prisma/client";
-import { maskPhone, RESERVATION_LABELS, reservationStatusTone } from "../../extensions/common/reservations.js";
 import { reservationAccountAccess, reservationQuery, type ReservationAdmin } from "./reservations.server";
 
 export const reservationDetailSelect = {
-  id: true, status: true, locationId: true, locationName: true, timezone: true,
+  id: true, number: true, intakeMethod: true, status: true, locationId: true, locationName: true, timezone: true,
   customerId: true, guestName: true, contactPhone: true, anonymizedAt: true,
   lines: true, dueDate: true, nextFollowDate: true, createdAt: true, createdBy: true,
   checkoutBy: true, endedAt: true, endedBy: true, orderId: true, lastError: true,
@@ -85,7 +85,7 @@ export async function reservationAdminDetail(args: { row: DetailRecord; shop: st
   if (!lines.length || lines.length !== rawLines.length) warnings.push("商品明細の一部を読み取れません。POSの取置内容を確認してください。");
   // Explicit view model: raw contacts, persisted mutation input and checkout keys never reach unauthorized browsers.
   return {
-    id: row.id, locationName: row.locationName,
+    id: row.id, intakeLabel: reservationIntakeLabel(row), displayNumber: reservationDisplayNumber(row), locationName: row.locationName,
     statusLabel: RESERVATION_LABELS[row.status as keyof typeof RESERVATION_LABELS] || "要確認", statusTone: reservationStatusTone(row.status),
     dueDate: row.dueDate, nextFollowDate: row.nextFollowDate || "—", createdAt: dateTime(row.createdAt), createdBy: actorLabel(row.createdBy),
     checkoutBy: actorLabel(row.checkoutBy), endedAt: dateTime(row.endedAt), endedBy: actorLabel(row.endedBy),
