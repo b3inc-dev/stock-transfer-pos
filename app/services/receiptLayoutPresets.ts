@@ -34,10 +34,10 @@ export function defaultLayout(kind: ReceiptKind): ReceiptLayout {
   switch (kind) {
     case "reservation":
       return layout("reservation", [
-        block("title", "heading", { text: "取置控え", size: "l" }),
+        block("title", "heading", { text: "取置控え", size: "m", bold: false, align: "center" }),
         block("store", "store_info"), block("meta", "reservation_info"),
-        block("hr", "divider", { style: "dashed" }), block("items", "reservation_items"),
-        block("footer", "text", { text: "ご来店時にこの控えをご提示ください。", size: "s" }),
+        block("items", "reservation_items"),
+        block("footer", "text", { text: "ご来店時にこの控えをご提示ください。", size: "s", align: "center" }),
       ]);
     case "sales":
       return layout("sales", [

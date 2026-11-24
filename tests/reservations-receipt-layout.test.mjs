@@ -125,3 +125,30 @@ test("protected products render once in the middle and reservation information r
   assert.ok(html.indexOf('class="required-item"') < html.indexOf("下部案内"));
   assert.ok(html.indexOf("下部案内") < html.indexOf("取置番号 #R0001"));
 });
+test("customer copy receives the store address while store copy omits address and phone", () => {
+  const entry = { ...row, locationAddress: { countryCode: "JP", zip: "150-0001", province: "東京都", city: "渋谷区", address1: "神宮前1-2-3", address2: "建物2F", phone: "+81312345678" } };
+  const customer = receipt.reservationReceiptData(entry, "customer");
+  assert.deepEqual(customer.location.address_lines, ["東京都渋谷区神宮前1-2-3", "建物2F"]);
+  assert.equal(customer.location.phone, "03-1234-5678");
+  const store = receipt.reservationReceiptData(entry, "store");
+  assert.deepEqual(store.location, { name: row.locationName, zip: "", address_lines: [], phone: "" });
+  assert.deepEqual(receipt.reservationSampleData("store").location.address_lines, []);
+});
+test("fixed number and deadline are centered, emphasized together, with one dotted footer divider", () => {
+  const html = receipt.renderConfiguredReservationReceipt({ ...row, number: 1 }, receipt.normalizeReservationReceiptSettings(null), "customer");
+  assert.match(html, /\.reservation-details\{text-align:center;border-top:2px dotted #000\}/);
+  assert.match(html, /\.reservation-required \.reservation-number\{font-size:1\.3em;font-weight:700/);
+  assert.match(html, /\.reservation-details \.reservation-due\{font-size:1\.3em;font-weight:700/);
+  assert.match(html, /class="reservation-due"/);
+});
+test("block and code modes share the exact protected product list", () => {
+  const settings = receipt.normalizeReservationReceiptSettings(null);
+  settings.customer.blocks.find(block => block.type === "reservation_items").settings.show_sku = true;
+  const blockHtml = receipt.renderConfiguredReservationReceipt(row, settings, "customer");
+  settings.customer.code = render.blocksToCode(settings.customer); settings.customer.mode = "code";
+  const codeHtml = receipt.renderConfiguredReservationReceipt(row, settings, "customer");
+  const section = html => html.match(/<section class="reservation-required reservation-items">[\s\S]*?<\/section>/)[0];
+  assert.equal(section(blockHtml), section(codeHtml));
+  assert.match(section(codeHtml), /required-item-header.*アイテム.*数量/);
+  assert.match(section(codeHtml), /class="required-title"/); assert.match(section(codeHtml), /class="required-code">SKU: SKU1/);
+});

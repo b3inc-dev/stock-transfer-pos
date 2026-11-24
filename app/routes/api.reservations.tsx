@@ -40,7 +40,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
   try {
     const url = new URL(request.url);
-    const { shop, access } = await context(request, url.searchParams.get("locationId") || "");
+    const { shop, access, admin } = await context(request, url.searchParams.get("locationId") || "");
     const id = url.searchParams.get("receipt");
     const locationId = url.searchParams.get("locationId");
     if (locationId && !access.locations.includes(locationId)) return json({ error: "この店舗の取置を利用する権限がありません" }, 403);
@@ -52,7 +52,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (requestedCopy && !["customer", "store"].includes(requestedCopy)) return json({ ok: false, error: "控えの種類を選んでください" }, 400);
     const options = normalizeReservationReceiptSettings(settings?.receiptLayout);
     const copy = requestedCopy === "store" ? "store" : requestedCopy === "customer" ? "customer" : options.customerCopy ? "customer" : "store";
-    return new Response(renderConfiguredReservationReceipt(row, settings?.receiptLayout, copy), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:", "X-Content-Type-Options": "nosniff" } });
+    let locationAddress;
+    if (copy === "customer" && row.intakeMethod !== "inquiry" && options.customerCopy) {
+      const result = await reservationQuery(withGraphQLRetry(admin), `#graphql
+        query ReservationReceiptLocation($id: ID!) { location(id: $id) { id address { zip province city address1 address2 phone countryCode formatted } } }`, { id: row.locationId });
+      if (result?.location?.id !== row.locationId) throw new Error("取置店舗の住所を取得できません");
+      locationAddress = result.location.address;
+    }
+    return new Response(renderConfiguredReservationReceipt({ ...row, locationAddress }, settings?.receiptLayout, copy), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:", "X-Content-Type-Options": "nosniff" } });
   } catch (error) {
     if (error instanceof Response) return error;
     return json({ ok: false, error: "取置控えを取得できません。店舗と登録内容を確認してください" }, 400);

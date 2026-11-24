@@ -27,7 +27,7 @@ before(async () => {
   ({ action, loader } = await vite.ssrLoadModule("/app/routes/api.reservations.tsx"));
 });
 after(async () => { delete globalThis.reservationApiFixture; delete process.env.RESERVATIONS_ENABLED; delete process.env.RESERVATION_POS_ACCESS; delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; await vite?.close(); });
-beforeEach(() => { delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; globalThis.reservationApiFixture.planBlocked = false; globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async () => { throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
+beforeEach(() => { delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; globalThis.reservationApiFixture.planBlocked = false; globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async query => { if(query.includes("ReservationReceiptLocation")) return Response.json({data:{location:{id:locationId,address:null}}}); throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
 const request = (body) => new Request("https://app.invalid/api/reservations", { method: "POST", body: JSON.stringify({ locationId, ...body }), headers: { "Content-Type": "application/json" } });
 const post = body => action({ request: request(body) });
 test("disabled feature performs no database access", async () => { delete process.env.RESERVATIONS_ENABLED; assert.equal((await post({ command: "detail", id: row.id })).status, 404); assert.equal(dbReads, 0); });
@@ -48,8 +48,9 @@ test("another signed shop cannot read a reservation even when its account ID and
 });
 test("tile count is database-only; receipt excludes PII and enforces store grant", async () => {
   assert.equal((await post({ command: "count" })).status, 200);
+  globalThis.reservationApiFixture.graphql = async (_query, { variables }) => Response.json({ data: { location: { id: variables.id, address: { countryCode: "JP", zip: "150-0001", province: "東京都", city: "渋谷区", address1: "神宮前1-2-3", phone: "+81312345678" } } } });
   const response = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=${encodeURIComponent(locationId)}`) });
-  const html = await response.text(); assert.equal(response.status, 200); assert.ok(!html.includes(row.guestName)); assert.ok(!html.includes(row.contactPhone));
+  const html = await response.text(); assert.equal(response.status, 200); assert.ok(!html.includes(row.guestName)); assert.ok(!html.includes(row.contactPhone)); assert.ok(html.includes("東京都渋谷区神宮前1-2-3")); assert.ok(html.includes("03-1234-5678"));
   const denied = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=gid://shopify/Location/2`) }); assert.equal(denied.status, 403);
 });
 
@@ -143,6 +144,7 @@ function publicInstall(scopes = ["read_customers", "read_orders"]) {
   globalThis.reservationApiFixture.graphql = async query => {
     parse(query);
     if (query.includes("ReservationPosSetup")) return Response.json({ data: { location: { id: locationId, name: "導入店", isActive: true }, shop: { ianaTimezone: "America/New_York" }, currentAppInstallation: { accessScopes: scopes.map(handle => ({ handle })) } } });
+    if (query.includes("ReservationReceiptLocation")) return Response.json({ data: { location: { id: locationId, address: null } } });
     if (query.includes("ReservationSelectedCustomer")) return Response.json({ data: { customer: { displayName: "お客様", phone: "09012345678" } } });
     throw new Error("unexpected public query");
   };
