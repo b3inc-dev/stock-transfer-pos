@@ -26,6 +26,8 @@ const save = () => service.saveReservationCustomerPhone(structuredClone(row), ad
 test("customer phone canonicalization accepts domestic and fullwidth inputs without changing stored contact", () => {
   assert.equal(normalizeCustomerPhone("０９０－１２３４－５６７８"), "+819012345678");
   assert.equal(normalizeCustomerPhone("+81 90-1234-5678"), "+819012345678");
+  assert.equal(normalizeCustomerPhone("03-6434-7277"), "+81364347277");
+  assert.equal(normalizeCustomerPhone("0364347277"), "+81364347277");
   for (const invalid of ["123", "abc", "+000000000", "090;DROP", ""]) assert.throws(() => normalizeCustomerPhone(invalid));
 });
 test("opted-in phone saves only id and phone and replay never mutates inventory or duplicates writes", async () => {
@@ -66,4 +68,10 @@ test("no intent, anonymized data, invalid status and read failure cannot write a
   row = { ...initial(), anonymizedAt: new Date() }; await assert.rejects(save); assert.equal(writes, 0);
   row = { ...initial(), status: "cancelled" }; await assert.rejects(save); assert.equal(writes, 0);
   row = initial(); readFailure = true; await assert.rejects(save); assert.equal(row.customerPhoneSaveState, "pending"); assert.equal(writes, 0);
+});
+test("03 and 090 can be entered as-is and are converted only in the customerUpdate payload", async () => {
+  for (const [entered, expected] of [["03-6434-7277", "+81364347277"], ["09012345678", "+819012345678"]]) {
+    row = { ...initial(), contactPhone: entered }; phone = null;
+    assert.equal((await save()).customerPhoneSaveState, "saved"); assert.equal(phone, expected); assert.equal(row.contactPhone, entered);
+  }
 });

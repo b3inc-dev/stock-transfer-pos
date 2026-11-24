@@ -38,6 +38,7 @@ test("POS customer association, confirmation registration and independent copy p
   };
   try {
     ui.mount(); await wait(150);
+    assert.ok(document.body.textContent.includes("ロケーション:")); assert.ok(!document.body.textContent.includes("店舗:"));
     assert.equal([...document.querySelectorAll("s-button")].filter(node => node.textContent === "戻る" && !node.closest("s-modal")).length, 0, "intake has no previous screen");
     click("お客様を選択"); await wait(100);
     const search = document.querySelector('s-search-field[placeholder="氏名・電話番号で検索"]'); search.value = "姓 名"; search.dispatchEvent(new window.Event("input")); await wait(450);

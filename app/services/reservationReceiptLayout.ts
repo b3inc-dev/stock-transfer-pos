@@ -77,6 +77,6 @@ function receiptLines(input: unknown) {
   if (!Array.isArray(input)) throw new Error("取置商品の記録を確認してください");
   return input.map(line => {
     if (!line || typeof line !== "object" || typeof line.title !== "string" || !Number.isInteger(line.quantity) || line.quantity < 1) throw new Error("取置商品の記録を確認してください");
-    return { title: line.title, quantity: line.quantity, sku: typeof line.sku === "string" ? line.sku : "", barcode: typeof line.barcode === "string" ? line.barcode : "" };
+    return { title: typeof line.productTitle === "string" && line.productTitle ? line.productTitle : line.title, variant_title: typeof line.variantTitle === "string" && line.variantTitle !== "Default Title" ? line.variantTitle : "", quantity: line.quantity, sku: typeof line.sku === "string" ? line.sku : "", barcode: typeof line.barcode === "string" ? line.barcode : "" };
   });
 }

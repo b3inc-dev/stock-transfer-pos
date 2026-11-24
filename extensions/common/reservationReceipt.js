@@ -5,7 +5,7 @@ export const DEFAULT_RESERVATION_RECEIPT = Object.freeze({
   customerCopy: true, storeCopy: true,
   templateName: "取置控え", receiptTitle: "取置控え", logoUrl: "", companyName: "", postalCode: "", address: "", address2: "", phone: "",
   paperWidth: 80, fontSize: 14, headerAlignment: "center", logoPosition: "top", companyInfoPosition: "bottom", bodySpacing: "normal",
-  showIssueDate: true, showLocationName: true, showStaff: true, showSku: false, showBarcode: false,
+  showIssueDate: true, showLocationName: true, showStaff: true, showSku: true, showBarcode: false,
   footerNote: "ご来店時にこの控えをご提示ください。",
 });
 const enums = { headerAlignment: ["left", "center", "right"], logoPosition: ["top", "inline"], companyInfoPosition: ["top", "bottom"], bodySpacing: ["compact", "normal", "relaxed"] };
