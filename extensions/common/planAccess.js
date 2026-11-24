@@ -123,7 +123,7 @@ const ADMIN_PATH_FEATURES = [
   ["/app/inventory-count", "stocktake"],
   ["/app/adjustment", "adjustment"],
 ];
-const ADMIN_OPEN_PATHS = ["/app/reservation-privacy", "/app/reservations/privacy", "/app", "/app/plan", "/app/keepalive"];
+const ADMIN_OPEN_PATHS = ["/app/reservations/customer-data", "/app/reservation-privacy", "/app/reservations/privacy", "/app", "/app/plan", "/app/keepalive"];
 
 /**
  * @param {string} pathname

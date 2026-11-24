@@ -1,3 +1,4 @@
+import { ReservationNav } from "../components/ReservationNav";
 import { Suspense } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import { Await, data, isRouteErrorResponse, useLoaderData, useRouteError } from "react-router";
@@ -26,7 +27,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 }
 export default function ReservationDetail() {
   const { detail, backTo, historyBase, historyPage } = useLoaderData<typeof loader>();
-  return <s-page heading="取置の詳細"><BackAction to={backTo} label="取置へ戻る" /><div className="Admin-body">
+  return <s-page heading="取置の詳細"><BackAction to={backTo} label="取置へ戻る" /><div className="Admin-body"><ReservationNav selected="history" />
     <Suspense fallback={<p role="status">読み込んでいます。</p>}><Await resolve={detail} errorElement={<StatusBanner tone="critical" heading="取置を取得できませんでした">画面を更新してもう一度お試しください。</StatusBanner>}>{entry => <>
       {entry.notice ? <StatusBanner tone={entry.notice.tone} heading={entry.notice.heading}>{entry.notice.message}</StatusBanner> : null}
       <div className="Admin-home">
@@ -54,5 +55,5 @@ export default function ReservationDetail() {
 export function ErrorBoundary() {
   const error = useRouteError();
   const missing = isRouteErrorResponse(error) && error.status === 404;
-  return <s-page heading="取置の詳細"><BackAction to="/app/reservations" label="取置へ戻る" /><div className="Admin-body"><StatusBanner tone="critical" heading={missing ? "取置が見つかりませんでした" : "取置を取得できませんでした"}>{missing ? "一覧へ戻り、取置を選び直してください。" : "通信状態を確認して、もう一度お試しください。"}</StatusBanner></div></s-page>;
+  return <s-page heading="取置の詳細"><BackAction to="/app/reservations" label="取置へ戻る" /><div className="Admin-body"><ReservationNav selected="history" /><StatusBanner tone="critical" heading={missing ? "取置が見つかりませんでした" : "取置を取得できませんでした"}>{missing ? "一覧へ戻り、取置を選び直してください。" : "通信状態を確認して、もう一度お試しください。"}</StatusBanner></div></s-page>;
 }

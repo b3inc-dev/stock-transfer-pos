@@ -1,3 +1,6 @@
+import { useState } from "react";
+import { ReservationNav } from "../components/ReservationNav";
+import { ReservationScopeAccess } from "../components/ReservationScopeAccess";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { Form, data, useActionData, useLoaderData, useNavigation } from "react-router";
 import { authenticate } from "../shopify.server";
@@ -27,10 +30,11 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 export default function ReservationSettings() {
   const { days } = useLoaderData<typeof loader>();
+  const [scopeError, setScopeError] = useState("");
   const result = useActionData<typeof action>();
   const busy = useNavigation().state !== "idle";
-  return <s-page heading="取置の期限"><BackAction to="/app/reservations" label="取置へ戻る" /><div className="Admin-body">
-    {result?.error ? <StatusBanner tone="critical" heading="設定を保存できませんでした">{result.error}</StatusBanner> : null}
+  return <s-page heading="取置の期限"><BackAction to="/app/reservations" label="取置へ戻る" /><div className="Admin-body"><ReservationNav selected="settings" /><ReservationScopeAccess onError={setScopeError} />
+    {result?.error || scopeError ? <StatusBanner tone="critical" heading="設定・権限を確認してください">{result?.error || scopeError}</StatusBanner> : null}
     <Form method="post"><SaveBar status={result?.ok ? result.saved : undefined} failed={result?.ok === false} />
       <AdminBlock title="受取期限" description="登録日の何日後まで取り置くかを全店舗共通で設定します。変更は新しい取置に適用されます。">
         <UnitInput label="標準取置日数" unit="日" name="days" type="number" min={1} max={365} step={1} defaultValue={days} required disabled={busy} />
