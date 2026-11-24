@@ -1,3 +1,4 @@
+import { normalizeCustomerPhone } from "../../extensions/common/customerPhone.js";
 import { reservationDisplayNumber , addDays, assertOrderMatches, localDate, maskPhone, needsFollowUp, normalizeReservationLines, TERMINAL_RESERVATIONS, validDate } from "../../extensions/common/reservations.js";
 import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -89,7 +90,7 @@ export async function publicReservation(row: StockReservation, admin: Reservatio
     phone = phone || data.customer?.phone || "";
   }
   // Explicit whitelist: never expose the persisted mutation input or checkout key in list results.
-  return { id: row.id, number: row.number, intakeMethod: row.intakeMethod, displayNumber: reservationDisplayNumber(row), locationId: row.locationId, locationName: row.locationName, timezone: row.timezone,
+  return { customerPhoneSaveState: row.customerPhoneSaveState || null, id: row.id, number: row.number, intakeMethod: row.intakeMethod, displayNumber: reservationDisplayNumber(row), locationId: row.locationId, locationName: row.locationName, timezone: row.timezone,
     status: row.status, version: row.version, customerId: row.customerId, name,
     phone: reveal ? phone : maskPhone(phone), contactVisible: reveal, lines: row.lines,
     dueDate: row.dueDate, nextFollowDate: row.nextFollowDate, needsFollowUp: needsFollowUp(row),
@@ -220,7 +221,7 @@ export async function createReservation(args: { shop: string; locationId: string
   if (existing) {
     if (existing.shop !== shop || existing.locationId !== locationId) throw new Error("登録番号が重複しています");
     // Never replace PII or quantities on a replay, especially after a response was lost.
-    if (existing.requestHash !== requestHash || (existing.intakeMethod && existing.intakeMethod !== intakeMethod)) throw new Error("登録内容が変わっています。元の取置を確認してください");
+    if (existing.requestHash !== requestHash || (existing.intakeMethod && existing.intakeMethod !== intakeMethod) || Boolean(existing.customerPhoneSaveState) !== (input.saveCustomerPhone === true)) throw new Error("登録内容が変わっています。元の取置を確認してください");
     return existing.operation ? resumeReservationMove(existing, admin) : existing;
   }
   const timezone = await reservationTimezone(shop, locationId, admin, args.storeTimezone);
@@ -231,19 +232,26 @@ export async function createReservation(args: { shop: string; locationId: string
   let guestName: string | null = null;
   let contactPhone: string | null = String(input.phone || "").trim() || null;
   if (contactPhone && (!/^[+\d\s()ー-]{6,40}$/.test(contactPhone) || contactPhone.replace(/\D/g, "").length < 6)) throw new Error("連絡用電話番号を確認してください");
+  let customerPhoneSaveState: string | null = null;
+  if (input.saveCustomerPhone === true && !input.customerId) throw new Error("顧客情報への登録はお客様を選択してから行ってください");
   if (input.customerId) {
     customerId = String(input.customerId);
     if (!/^gid:\/\/shopify\/Customer\/\d+$/.test(customerId)) throw new Error("POSで顧客を選択してください");
     const data = await reservationQuery(admin, `#graphql
       query ReservationCustomerContact($id: ID!) { customer(id: $id) { id phone } }`, { id: customerId });
     if (!data.customer || (!data.customer.phone && !contactPhone)) throw new Error("取置用の連絡先を入力してください");
+    if (input.saveCustomerPhone === true) {
+      const desired = normalizeCustomerPhone(contactPhone);
+      if (data.customer.phone && normalizeCustomerPhone(data.customer.phone) !== desired) throw new Error("顧客の電話番号が更新されています。受付画面でお客様を確認してください");
+      customerPhoneSaveState = data.customer.phone ? "saved" : "pending";
+    }
     if (data.customer.phone) contactPhone = null;
   } else {
     guestName = String(input.name || "").trim();
     if (!guestName || guestName.length > 100 || !contactPhone) throw new Error("ゲストのお名前と連絡用電話番号を入力してください");
   }
   const settings = await db.stockReservationSettings.findUnique({ where: { shop } });
-  const data = { id, requestHash, intakeMethod, shop, locationId, locationName: location.name, timezone, status: "reserving", customerId, guestName, contactPhone,
+  const data = { id, requestHash, intakeMethod, customerPhoneSaveState, shop, locationId, locationName: location.name, timezone, status: "reserving", customerId, guestName, contactPhone,
     lines: lines.map(line => ({ variantId: line.variantId, inventoryItemId: line.inventoryItemId, title: line.title, sku: line.sku, barcode: line.barcode, quantity: line.quantity })), dueDate: addDays(today, settings?.days ?? 7), createdBy: actor };
   // Materialize exact input before inserting, so there's never a row eligible for two different reserve operations.
   const provisional = { ...data, version: 1 } as unknown as StockReservation;

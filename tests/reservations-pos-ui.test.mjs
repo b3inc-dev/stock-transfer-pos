@@ -38,6 +38,7 @@ test("POS customer association, confirmation registration and independent copy p
   };
   try {
     ui.mount(); await wait(150);
+    assert.equal([...document.querySelectorAll("s-button")].filter(node => node.textContent === "戻る" && !node.closest("s-modal")).length, 0, "intake has no previous screen");
     click("お客様を選択"); await wait(100);
     const search = document.querySelector('s-search-field[placeholder="氏名・電話番号で検索"]'); search.value = "姓 名"; search.dispatchEvent(new window.Event("input")); await wait(450);
     const customer = document.querySelector("s-clickable"); assert.ok(customer); customer.dispatchEvent(new window.Event("click")); await wait(150);
@@ -53,6 +54,7 @@ test("POS customer association, confirmation registration and independent copy p
     cart.properties["取置番号"] = "existing"; click("カートから解除"); await wait(100); assert.equal(cart.customer.id, 1);
     delete cart.properties["取置番号"]; click("カートから解除"); await wait(150); assert.equal(cart.customer, null);
     click("次へ"); await wait(150); assert.equal(document.querySelector('s-page').getAttribute("heading"), "取置する商品");
+    assert.ok([...document.querySelectorAll("s-button")].some(node => node.textContent === "戻る" && !node.closest("s-modal")));
     assert.equal(calls.filter(call => call === "create").length, 0);
     click("確定する", true); await wait(200);
     assert.equal(calls.filter(call => call === "create").length, 1);

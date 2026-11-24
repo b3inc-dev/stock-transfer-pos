@@ -37,7 +37,7 @@ export default function ReservationDetail() {
           <dl className="Admin-member-grid"><div><dt>取置番号</dt><dd>{entry.displayNumber}</dd></div><div><dt>受付方法</dt><dd>{entry.intakeLabel}</dd></div><div><dt>店舗</dt><dd>{entry.locationName}</dd></div><div><dt>受取期限</dt><dd>{entry.dueDate}</dd></div><div><dt>次回確認日</dt><dd>{entry.nextFollowDate}</dd></div><div><dt>点数</dt><dd>{entry.totalQuantity}点</dd></div></dl>
         </AdminBlock></div>
         <div className="Admin-home-main"><AdminBlock wide title="お客様">
-          <dl className="Admin-member-grid"><div><dt>お名前</dt><dd>{entry.name}</dd></div><div><dt>連絡用電話番号</dt><dd>{entry.phone}</dd></div></dl>
+          <dl className="Admin-member-grid"><div><dt>お名前</dt><dd>{entry.name}</dd></div><div><dt>連絡用電話番号</dt><dd>{entry.phone}</dd></div>{entry.customerPhoneMessage ? <div><dt>顧客情報への登録</dt><dd>{entry.customerPhoneMessage}</dd></div> : null}</dl>
           {!entry.contactVisible && !entry.anonymized ? <p className="Admin-note">連絡先の全文表示には、この店舗の連絡先を参照する権限が必要です。</p> : null}
         </AdminBlock></div>
       </div>

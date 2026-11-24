@@ -1,10 +1,11 @@
+import { CUSTOMER_PHONE_EVENT_LABELS, customerPhoneSaveMessage } from "../../extensions/common/customerPhone.js";
 import { reservationDisplayNumber, reservationIntakeLabel , maskPhone, RESERVATION_LABELS, reservationStatusTone } from "../../extensions/common/reservations.js";
 import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
 import type { Prisma } from "@prisma/client";
 import { reservationAccountAccess, reservationQuery, type ReservationAdmin } from "./reservations.server";
 
 export const reservationDetailSelect = {
-  id: true, number: true, intakeMethod: true, status: true, locationId: true, locationName: true, timezone: true,
+  customerPhoneSaveState: true, id: true, number: true, intakeMethod: true, status: true, locationId: true, locationName: true, timezone: true,
   customerId: true, guestName: true, contactPhone: true, anonymizedAt: true,
   lines: true, dueDate: true, nextFollowDate: true, createdAt: true, createdBy: true,
   checkoutBy: true, endedAt: true, endedBy: true, orderId: true, lastError: true,
@@ -85,13 +86,13 @@ export async function reservationAdminDetail(args: { row: DetailRecord; shop: st
   if (!lines.length || lines.length !== rawLines.length) warnings.push("商品明細の一部を読み取れません。POSの取置内容を確認してください。");
   // Explicit view model: raw contacts, persisted mutation input and checkout keys never reach unauthorized browsers.
   return {
-    id: row.id, intakeLabel: reservationIntakeLabel(row), displayNumber: reservationDisplayNumber(row), locationName: row.locationName,
+    customerPhoneMessage: row.anonymizedAt ? "" : customerPhoneSaveMessage(row.customerPhoneSaveState), id: row.id, intakeLabel: reservationIntakeLabel(row), displayNumber: reservationDisplayNumber(row), locationName: row.locationName,
     statusLabel: RESERVATION_LABELS[row.status as keyof typeof RESERVATION_LABELS] || "要確認", statusTone: reservationStatusTone(row.status),
     dueDate: row.dueDate, nextFollowDate: row.nextFollowDate || "—", createdAt: dateTime(row.createdAt), createdBy: actorLabel(row.createdBy),
     checkoutBy: actorLabel(row.checkoutBy), endedAt: dateTime(row.endedAt), endedBy: actorLabel(row.endedBy),
     name, phone: row.anonymizedAt ? "削除済み" : reveal ? phone || "—" : maskPhone(phone), contactVisible: reveal && !row.anonymizedAt,
     anonymized: Boolean(row.anonymizedAt), lines, totalQuantity: lines.reduce((sum, line) => sum + line.quantity, 0), order,
-    events: row.events.slice(0, 25).map(event => ({ id: event.id, label: EVENT_LABELS[event.kind] || "対応記録", actor: actorLabel(event.actor), at: dateTime(event.createdAt), followDate: event.followDate || "—" })),
+    events: row.events.slice(0, 25).map(event => ({ id: event.id, label: CUSTOMER_PHONE_EVENT_LABELS[event.kind] || EVENT_LABELS[event.kind] || "対応記録", actor: actorLabel(event.actor), at: dateTime(event.createdAt), followDate: event.followDate || "—" })),
     hasNextHistory: row.events.length > 25,
     notice: row.lastError ? { heading: "在庫の反映を確認してください", message: row.lastError, tone: "warning" as const }
       : warnings.length ? { heading: "一部の情報を取得できませんでした", message: warnings.join(" "), tone: "warning" as const } : null,

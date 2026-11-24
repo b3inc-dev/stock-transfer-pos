@@ -1,3 +1,5 @@
+import { customerPhoneSaveMessage } from "../../extensions/common/customerPhone.js";
+import { customerPhoneWriteAllowed, saveReservationCustomerPhone } from "../utils/reservation-customer-phone.server";
 import { buildCustomerSearchQuery, normalizeCustomerSearch } from "../../extensions/common/customerSearch.js";
 import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
 import { normalizeReservationReceiptSettings, renderConfiguredReservationReceipt } from "../services/reservationReceiptLayout";
@@ -91,7 +93,11 @@ export async function action({ request }: ActionFunctionArgs) {
           if (data.customer) customer = { name: japaneseCustomerName(data.customer), phone: data.customer.phone ? (reveal ? data.customer.phone : maskPhone(data.customer.phone)) : "", hasPhone: Boolean(data.customer.phone) };
         } catch { notice = "選択済み顧客の情報を取得できません。顧客データの利用権限を確認してください。"; }
       }
-      return json({ ok: true, locationName: info.location.name, today, customer, accessReady: permitted && !missingScopes.length, notice });
+      let canSaveCustomerPhone = false;
+      if (permitted && reveal && customer?.hasPhone === false) {
+        try { canSaveCustomerPhone = await customerPhoneWriteAllowed(admin); } catch { /* Contact-only intake still works without write access. */ }
+      }
+      return json({ ok: true, canSaveCustomerPhone, locationName: info.location.name, today, customer, accessReady: permitted && !missingScopes.length, notice });
     }
     if (!access.locations.includes(locationId)) return json({ ok: false, error: "この店舗の取置を利用する権限がありません" }, 403);
     const pinned = /^\d+$/.test(String(body.staffMemberId || "")) ? String(body.staffMemberId) : "未取得";
@@ -152,10 +158,25 @@ export async function action({ request }: ActionFunctionArgs) {
         query ReservationOrderSearch($query: String!) { orders(first: 10, query: $query) { nodes { id name } } }`, { query: `name:${search}` });
       return json({ ok: true, orders: data.orders.nodes });
     }
+    if (command === "saveCustomerPhone") {
+      if (!reveal) return json({ ok: false, error: "顧客の電話番号を登録する権限がありません" }, 403);
+      const row = await getReservation(shop, locationId, String(body.id || ""));
+      if (!await customerPhoneWriteAllowed(admin)) return json({ ok: false, error: "ストア管理者が「取置 → 設定」で顧客情報への登録を許可してください" }, 403);
+      const updated = await saveReservationCustomerPhone(row, admin, actor);
+      return json({ ok: true, row: await publicReservation(updated, admin, reveal), customerPhoneWarning: customerPhoneSaveMessage(updated.customerPhoneSaveState) });
+    }
     if (command === "create") {
+      if (body.saveCustomerPhone === true && !reveal) return json({ ok: false, error: "顧客の電話番号を登録する権限がありません" }, 403);
       try {
-        const row = await createReservation({ shop, locationId, actor, admin, input: body, storeTimezone: publicSetup?.shop?.ianaTimezone });
-        return json({ ok: true, row: await publicReservation(row, admin, reveal) });
+        let row = await createReservation({ shop, locationId, actor, admin, input: body, storeTimezone: publicSetup?.shop?.ianaTimezone });
+        let customerPhoneWarning = "";
+        if (row.status === "held" && row.customerPhoneSaveState && row.customerPhoneSaveState !== "saved") {
+          try {
+            if (reveal && await customerPhoneWriteAllowed(admin)) row = await saveReservationCustomerPhone(row, admin, actor);
+            else customerPhoneWarning = "取置は登録済みです。顧客への電話番号登録には、管理画面の「取置 → 設定」で顧客情報への登録を許可してください。";
+          } catch { customerPhoneWarning = "取置は登録済みです。顧客情報への電話番号登録を確認できません。詳細画面から登録結果を確認してください。"; }
+        }
+        return json({ ok: true, row: await publicReservation(row, admin, reveal), customerPhoneWarning: customerPhoneWarning || customerPhoneSaveMessage(row.customerPhoneSaveState) });
       } catch (error) {
         let resetAllowed = false;
         try { await getReservation(shop, locationId, String(body.id || "")); }
