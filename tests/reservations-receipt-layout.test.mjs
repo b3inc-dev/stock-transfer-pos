@@ -68,3 +68,40 @@ test("comments, hidden CSS and document metadata cannot remove the fixed require
   assert.doesNotMatch(html, /<script|http-equiv="refresh"/);
   assert.match(html, /\.reservation-design \.reservation-required/);
 });
+
+test("fixed fields follow settlement typography for every font, weight, paper and copy", () => {
+  for (const family of ["sans", "serif", "mono"]) for (const weight of [400, 600, 700]) for (const mm of [58, 80]) for (const copy of ["customer", "store"]) {
+    const settings = receipt.normalizeReservationReceiptSettings(null);
+    const layout = settings[copy]; layout.paperWidthMm = mm;
+    layout.style.fontFamily = family; layout.style.fontWeight = weight;
+    layout.paperStyles = { 58: { fontSizePt: 12, amountFontSizePt: 18, logoWidthMm: 30, marginXMm: 1, marginYMm: 3, lineHeight: 1.4 }, 80: { fontSizePt: 14, amountFontSizePt: 20, logoWidthMm: 36, marginXMm: 1.5, marginYMm: 3, lineHeight: 1.5 } };
+    const html = receipt.renderConfiguredReservationReceipt(row, settings, copy);
+    const rootRule = /html,body\{([^}]+)\}/.exec(html)[1];
+    const settlementBody = /\nbody\{([^}]+)\}/.exec(render.baseCss(layout))[1];
+    for (const property of ["font-family", "font-size", "font-weight", "line-height"]) {
+      const declaration = new RegExp(`${property}:([^;]+)`);
+      assert.equal(declaration.exec(rootRule)[1], declaration.exec(settlementBody)[1], `${copy}/${mm}/${family}/${weight}/${property}`);
+    }
+    assert.match(rootRule, new RegExp(`font-weight:${weight}`));
+    assert.ok(rootRule.includes({ sans: "Hiragino Sans", serif: "Hiragino Mincho ProN", mono: "SFMono-Regular" }[family]));
+    assert.match(html, new RegExp(`required-quantity\\{[^}]*font-size:${mm === 58 ? 18 : 20}pt`));
+    assert.match(html, /\.reservation-required b\{font-weight:inherit\}/);
+    assert.match(html, /<span class="required-quantity">2点<\/span>/);
+    assert.equal(html.split("R-TEST-1").length - 1, 1);
+  }
+});
+test("code printing keeps fixed typography and both 58mm printer corrections", () => {
+  for (const profile of ["standard", "mpop_58", "mcp31lb_58"]) {
+    const settings = receipt.normalizeReservationReceiptSettings(null);
+    settings.printerProfile = profile; settings.store.paperWidthMm = 58; settings.store.mode = "code";
+    settings.store.style.fontFamily = "serif"; settings.store.style.fontWeight = 600;
+    settings.store.code = '<style>body{font:1px monospace}.required-quantity{font-size:1px}</style><p>店舗の文言</p>';
+    const html = receipt.renderConfiguredReservationReceipt(row, settings, "store");
+    assert.match(html, /html,body\{[^}]*Hiragino Mincho ProN[^}]*font-weight:600/);
+    assert.match(html, /\.reservation-required .required-item .required-quantity\{[^}]*font-size:11pt/);
+    if (profile === "mpop_58") assert.match(html, /content="width=400, initial-scale=1"/);
+    if (profile === "mcp31lb_58") { assert.match(html, /content="width=600, initial-scale=1"/); assert.match(html, /transform:scaleX\(1.5\)/); }
+  }
+  const legacy = receipt.normalizeReservationReceiptSettings(null);
+  assert.match(receipt.renderConfiguredReservationReceipt(row, legacy, "customer"), /html,body\{[^}]*font-size:14px/);
+});
