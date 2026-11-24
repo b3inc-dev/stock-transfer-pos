@@ -152,3 +152,10 @@ test("block and code modes share the exact protected product list", () => {
   assert.match(section(codeHtml), /required-item-header.*アイテム.*数量/);
   assert.match(section(codeHtml), /class="required-title"/); assert.match(section(codeHtml), /class="required-code">SKU: SKU1/);
 });
+test("standard reservation blocks follow print order without a redundant divider", async () => {
+  const { defaultLayout } = await vite.ssrLoadModule("/app/services/receiptLayoutPresets.ts");
+  const layout = defaultLayout("reservation");
+  assert.deepEqual(layout.blocks.map(block => block.type), ["heading", "store_info", "reservation_items", "text", "reservation_info"]);
+  assert.equal(layout.blocks[0].settings.align, "center");
+  assert.equal(layout.blocks[3].settings.align, "center");
+});

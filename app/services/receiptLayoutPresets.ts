@@ -35,9 +35,9 @@ export function defaultLayout(kind: ReceiptKind): ReceiptLayout {
     case "reservation":
       return layout("reservation", [
         block("title", "heading", { text: "取置控え", size: "m", bold: false, align: "center" }),
-        block("store", "store_info"), block("meta", "reservation_info"),
-        block("items", "reservation_items"),
+        block("store", "store_info"), block("items", "reservation_items"),
         block("footer", "text", { text: "ご来店時にこの控えをご提示ください。", size: "s", align: "center" }),
+        block("meta", "reservation_info"),
       ]);
     case "sales":
       return layout("sales", [
