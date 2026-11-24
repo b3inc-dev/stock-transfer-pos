@@ -71,7 +71,9 @@ export async function listReservations(shop: string, locationId: string, admin: 
   if (dueDate && !validDate(dueDate)) throw new Error("受取期限の日付を確認してください");
   const filtered = rows.filter(row => (!dueDate || row.dueDate === dueDate) && (mode !== "due" || needsFollowUp(row)) && (!text || row.id.toLowerCase().includes(text) || row.guestName?.toLocaleLowerCase().includes(text) || (row.customerId && customerIds.has(row.customerId))))
     .sort((a, b) => Number(needsFollowUp(b)) - Number(needsFollowUp(a)) || (a.nextFollowDate || a.dueDate).localeCompare(b.nextFollowDate || b.dueDate));
-  const pageRows = filtered.slice(page * 25, (page + 1) * 25);
+  const requestedPage = Number.isSafeInteger(page) && page >= 0 ? page : 0;
+  const currentPage = Math.min(requestedPage, Math.max(0, Math.ceil(filtered.length / 25) - 1));
+  const pageRows = filtered.slice(currentPage * 25, (currentPage + 1) * 25);
   const full = await db.stockReservation.findMany({ where: { shop, locationId, id: { in: pageRows.map(row => row.id) } } });
   const ids = [...new Set(full.map(row => row.customerId).filter((id): id is string => Boolean(id)))];
   const customers = new Map<string, { displayName: string; phone?: string }>();
@@ -83,7 +85,7 @@ export async function listReservations(shop: string, locationId: string, admin: 
   const mapped = await Promise.all(pageRows.map(meta => publicReservation(full.find(row => row.id === meta.id)!, admin, false, customers)));
   let today: string | null = null;
   try { const timezone = JSON.parse(process.env.RESERVATION_LOCATION_TIMEZONES || "{}")[shop]?.[locationId]; if (timezone) today = localDate(Date.now(), timezone); } catch { /* Without a configured zone, don't guess the store's date. */ }
-  return { today, rows: mapped, hasNextPage: filtered.length > (page + 1) * 25, count: rows.filter(row => needsFollowUp(row)).length, total: filtered.length, allTotal: rows.length };
+  return { page: currentPage, today, availableDates: [...new Set(rows.map(row => row.dueDate))].sort(), rows: mapped, hasNextPage: filtered.length > (currentPage + 1) * 25, count: rows.filter(row => needsFollowUp(row)).length, total: filtered.length, allTotal: rows.length };
 }
 export async function reservationLocation(admin: ReservationAdmin, id: string) {
   const data = await reservationQuery(admin, `#graphql

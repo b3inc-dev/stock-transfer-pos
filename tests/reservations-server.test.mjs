@@ -137,3 +137,11 @@ test("POS due-date filter runs before pagination and today uses configured store
   assert.equal(result.today, localDate(Date.now(), "Pacific/Honolulu"));
   await assert.rejects(() => service.listReservations(shop, locationId, admin, "active", "", 0, "2026-02-31"), /日付/);
 });
+
+test("history clamps a stale second page after another device reduces results", async () => {
+  for (let i = 0; i < 26; i++) rows.set(`row-${i}`, { id: `row-${i}`, shop, locationId, status: "held", timezone: "Asia/Tokyo", guestName: "Guest", contactPhone: "09012345678", customerId: null, dueDate: "2026-12-01", lines: [], createdAt: new Date(), nextFollowDate: null });
+  assert.equal((await service.listReservations(shop, locationId, admin, "active", "", 1)).page, 1);
+  rows.delete("row-0");
+  const result = await service.listReservations(shop, locationId, admin, "active", "", 1);
+  assert.equal(result.page, 0); assert.equal(result.total, 25); assert.equal(result.rows.length, 25); assert.equal(result.hasNextPage, false);
+});
