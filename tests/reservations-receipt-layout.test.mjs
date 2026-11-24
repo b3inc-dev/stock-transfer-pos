@@ -159,3 +159,9 @@ test("standard reservation blocks follow print order without a redundant divider
   assert.equal(layout.blocks[0].settings.align, "center");
   assert.equal(layout.blocks[3].settings.align, "center");
 });
+test("standard store note does not ask staff to present a customer copy", () => {
+  const html = receipt.renderConfiguredReservationReceipt(row, receipt.normalizeReservationReceiptSettings(null), "store");
+  assert.doesNotMatch(html, /ご来店時にこの控えをご提示/);
+  assert.match(html, /商品・数量と受取期限をご確認/);
+  assert.match(html, /class="reservation-due-label">受取期限/);
+});

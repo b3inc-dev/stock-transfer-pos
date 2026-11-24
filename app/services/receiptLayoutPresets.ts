@@ -29,6 +29,8 @@ function layout(kind: ReceiptKind, blocks: LayoutBlock[], style: Partial<LayoutS
 const row = (id: string, field: string, label: string, extra: Record<string, BlockSettingValue> = {}) =>
   block(id, "settlement_row", { field, label, ...extra });
 
+export const RESERVATION_FOOTER_TEXT = "商品・数量と受取期限をご確認ください。";
+
 /** 標準のひな形（初めて開いたとき・保存が無いとき） */
 export function defaultLayout(kind: ReceiptKind): ReceiptLayout {
   switch (kind) {
@@ -36,7 +38,7 @@ export function defaultLayout(kind: ReceiptKind): ReceiptLayout {
       return layout("reservation", [
         block("title", "heading", { text: "取置控え", size: "m", bold: false, align: "center" }),
         block("store", "store_info"), block("items", "reservation_items"),
-        block("footer", "text", { text: "ご来店時にこの控えをご提示ください。", size: "s", align: "center" }),
+        block("footer", "text", { text: RESERVATION_FOOTER_TEXT, size: "s", align: "center" }),
         block("meta", "reservation_info"),
       ]);
     case "sales":
