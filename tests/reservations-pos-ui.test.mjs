@@ -52,6 +52,8 @@ test("POS customer association, confirmation registration and independent copy p
     rejectPrint = false; click("店舗控えを印刷"); await wait(100);
     assert.ok(prints[1].includes("copy=store")); assert.equal(calls.filter(call => call === "create").length, 1);
     assert.equal(draft.lines.length, 0);
+    click("連絡・印刷"); await wait(100); assert.equal(document.querySelector("s-page").getAttribute("heading"), "連絡・印刷");
+    click("お客様控えを印刷"); await wait(100); assert.ok(prints[2].includes("copy=customer")); assert.equal(calls.filter(call => call === "create").length, 1);
   } finally { ui.unmount(); delete globalThis.shopify; delete globalThis.fetch; }
   // Keep the built artifact in the OS temp directory for diagnosing a failing test.
   await writeFile(path.join(dir, "result.txt"), "customer association + print failure + store copy passed\n");
