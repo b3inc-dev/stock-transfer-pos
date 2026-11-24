@@ -113,3 +113,7 @@ POS専用UIルールの正本URLは今回のツールから閲覧できなかっ
 - 共通AdminBlock/BackAction/StateBadge/StatusBanner/GuardedLinkを利用し、主な内容と要約の2列、スマホでは要約を上にする。商品・履歴の表はHistory-tableとdata-labelを付ける。BackActionの網羅試験へ追加。
 
 検証: 関連82件成功、全体426成功/5失敗/1TODO。残る5失敗はmainにもある在庫Webhook履歴3件とCLIのパス判定2件。build/対象lint成功。全体lintはmainと同じ3167 errors/150 warnings、typecheckは同じ458 diagnosticsで追加0。別ストア・権限なし・匿名化済み・顧客/注文API失敗・履歴ページ送り・内部情報を返さないことを試験し、独立レビューでも指摘なし。今回も外部へソースを送る検証は行わず、ローカルの型検査/buildを使用した。ブラウザ/実機確認と本番反映は未実施。
+
+## 本番配備時の公開版制約（2026-11-25）
+
+Shopifyの配備検証で、optional_scopesのread_ordersだけではアプリ設定のorders/paid通知を登録できないことを確認した。公開版は必須権限を増やさず、この通知登録を外す。自社用は通知を維持する。公開版の購入完了は、任意権限・保護顧客データ利用の承認後に注文番号で照合する。自動完了通知は公開版では未対応。取置の有効化・実機受入は引き続き未完了。

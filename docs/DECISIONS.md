@@ -264,3 +264,5 @@ API バージョンバンプとセットで別 PR。
 公開版も顧客・注文の権限申請を前提に準備する。D18の必須scopeと既存売上/返品履歴Webhookの方針は維持し、取置専用にread_orders/read_customersをoptional_scopesとして準備、orders/paidだけを追加する。承認前に公開版で有効化・配備しない。公開用deploy検証は必須read_orders・既存orders/updated・refunds/createを引き続き禁止し、任意scopeを準備したorders/paidだけを認める。
 
 詳細は RESERVATIONS.md。新POS拡張のみ2026-07（Printing APIが必要）、既存7拡張/Admin APIは2026-01のまま。RESERVATIONS_ENABLED既定off。レシート仕様は暫定。会計カート消失時は注文未反映との区別が確定できるまで自動再作成/自動解除をしない。
+
+D20追記（2026-11-25、本番配備検証）: optional_scopesはアプリ設定のorders/paid登録に必要な必須scopeを満たさず、Shopifyに拒否された。公開版のorders/paid登録と検証の例外を削除し、任意権限の申請方針を維持する。公開版では注文番号照合を使用し、自動完了通知は未対応。自社用の通知登録は維持する。

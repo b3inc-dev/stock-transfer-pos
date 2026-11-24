@@ -20,7 +20,7 @@ const sorted = (a) => [...a].sort();
 describe("toml のスコープ", () => {
   it("公開用は read_orders を持たず、注文・返品の Webhook も受けない", () => {
     assert.ok(!parseScopes(publicToml).includes("read_orders"));
-    assert.deepEqual(parseWebhookTopics(publicToml).filter((t) => /^(orders|refunds)\//.test(t)), ["orders/paid"]);
+    assert.deepEqual(parseWebhookTopics(publicToml).filter((t) => /^(orders|refunds)\//.test(t)), []);
     assert.deepEqual(checkPublicScopes({ tomlText: publicToml }), { ok: true });
   });
   it("自社用（Ciara）は read_orders と注文・返品の Webhook を今まで通り持つ", () => {
@@ -56,8 +56,8 @@ describe("resolveAppScopes", () => {
 });
 
 describe("checkPublicScopes（deploy:public の見張り）", () => {
-  it("取置の任意スコープがなければ orders/paid も止める", () => {
-    const toml = publicToml.replace(/^optional_scopes.*$/m, "");
+  it("任意スコープがあっても orders/paid の登録を止める", () => {
+    const toml = publicToml + '\n[[webhooks.subscriptions]]\ntopics = ["orders/paid"]\nuri = "/webhooks/reservations/orders-paid"\n';
     assert.equal(checkPublicScopes({ tomlText: toml }).ok, false);
   });
   it("read_orders を足すと止める", () => {

@@ -51,10 +51,8 @@ api_version = "2026-01"
 direct_api_mode = "offline"
 embedded_app_direct_api_access = true
 
-  # Issue #59: 取置の決済照合。保護顧客データ承認・リリース承認後に配備する。
-  [[webhooks.subscriptions]]
-  topics = [ "orders/paid" ]
-  uri = "/webhooks/reservations/orders-paid"
+# 取置のorders/paid通知は必須read_ordersが必要なため公開版では登録しない。
+# 任意権限の承認後、注文番号による照合を使用する。
 
 [access_scopes]
 # read_users は制限付きスコープのため必須から除外。詳細: docs/ERROR_DEPLOY_READ_USERS_SCOPE.md
