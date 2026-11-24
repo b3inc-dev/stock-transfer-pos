@@ -277,6 +277,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const checkout = () => run(async () => {
     setAddingToCart(true);
     try {
+      await reservationApi({ command: "checkoutAccess" });
       await handoffReservationCart(detail, shopify, reservationApi, setDetail);
       shopify.toast.show("取置商品をカートへ追加しました。カートでお会計してください");
       await shopify.action.dismissModal();

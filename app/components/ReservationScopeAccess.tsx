@@ -1,21 +1,32 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { AdminBlock } from "./admin-ui";
+const required = ["read_orders", "read_customers"];
+const missingFrom = (granted: string[]) => required.filter(scope => !granted.includes(scope) && !granted.includes(scope.replace("read_", "write_")));
 export function ReservationScopeAccess({ onError }: { onError: (message: string) => void }) {
   const bridge = useAppBridge();
   const [missingScopes, setMissingScopes] = useState<string[]>([]);
+  const [status, setStatus] = useState<"checking" | "ready" | "failed">("checking");
   const [scopeBusy, setScopeBusy] = useState(false);
-  useEffect(() => { bridge.scopes.query().then(detail => setMissingScopes(["read_orders", "read_customers"].filter(scope => !detail.granted.includes(scope)))).catch(() => onError("取置に必要な権限を確認できません。画面を更新してください")); }, [bridge, onError]);
+  const checkScopes = useCallback(async () => {
+    setStatus("checking"); onError("");
+    try { const detail = await bridge.scopes.query(); setMissingScopes(missingFrom(detail.granted)); setStatus("ready"); }
+    catch { setStatus("failed"); onError("取置に必要な権限を確認できません。「再確認」を押してもう一度お試しください"); }
+  }, [bridge, onError]);
+  useEffect(() => { void checkScopes(); }, [checkScopes]);
   const requestScopes = async () => {
     setScopeBusy(true); onError("");
     try {
       const response = await bridge.scopes.request(missingScopes);
-      setMissingScopes(["read_orders", "read_customers"].filter(scope => !response.detail.granted.includes(scope)));
-      if (response.result !== "granted-all") onError("権限が許可されませんでした。取置を利用するには顧客・注文の読み取りが必要です");
+      const missing = missingFrom(response.detail.granted);
+      setMissingScopes(missing);
+      if (missing.length) onError("権限が許可されませんでした。ストア管理者が顧客・注文の読み取りを許可してください");
     } catch { onError("権限を更新できませんでした。アプリの承認状況を確認してください"); }
     finally { setScopeBusy(false); }
   };
-  return <>
-    {missingScopes.length ? <AdminBlock wide title="取置の利用権限" description="顧客と決済済み注文を照合するため、読み取り権限が必要です。" action={<button type="button" className="Admin-secondary" disabled={scopeBusy} onClick={requestScopes}>{scopeBusy ? "確認中…" : "権限を許可"}</button>}><p className="Admin-note">ストアの管理者が許可してください。</p></AdminBlock> : null}
-  </>;
+  return <AdminBlock wide title="取置の読み取り権限"
+    description={status === "checking" ? "権限を確認しています。" : status === "failed" ? "読み取り権限を確認できませんでした。" : missingScopes.length ? "初回は、ストア管理者が顧客と決済済み注文の読み取りを許可してください。" : "顧客・注文の読み取りは許可されています。"}
+    action={status === "failed" ? <button type="button" className="Admin-secondary" onClick={() => void checkScopes()}>再確認</button> : status === "ready" && missingScopes.length ? <button type="button" className="Admin-secondary" disabled={scopeBusy} onClick={requestScopes}>{scopeBusy ? "確認中…" : "権限を許可"}</button> : undefined}>
+    <p className="Admin-note">承認後はPOSの取置タイルから受付できます。</p>
+  </AdminBlock>;
 }

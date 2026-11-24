@@ -2,6 +2,7 @@
 import process from "node:process";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
+import { parse } from "graphql";
 import { createServer } from "vite";
 let vite, action, loader, dbReads;
 const shop = "fixture.myshopify.com", locationId = "gid://shopify/Location/1";
@@ -11,7 +12,7 @@ before(async () => {
     token: { dest: `https://${shop}`, sub: "123" },
     db: { stockReservationSettings: { async findUnique() { return globalThis.reservationApiFixture.receiptLayout ? { receiptLayout: globalThis.reservationApiFixture.receiptLayout } : null; } }, stockReservation: {
       async findFirst({ where }) { dbReads++; return where.id === row.id && where.shop === shop && where.locationId === locationId ? structuredClone(row) : null; },
-      async findMany() { dbReads++; return [structuredClone(row)]; },
+      async findMany({ where }) { dbReads++; return where.shop === shop && where.locationId === locationId ? [structuredClone(row)] : []; },
     } },
   };
   vite = await createServer({ configFile: false, appType: "custom", server: { middlewareMode: true, hmr: false }, plugins: [{ name: "reservation-auth", enforce: "pre", resolveId(id) {
@@ -25,8 +26,8 @@ before(async () => {
   } }] });
   ({ action, loader } = await vite.ssrLoadModule("/app/routes/api.reservations.tsx"));
 });
-after(async () => { delete globalThis.reservationApiFixture; delete process.env.RESERVATIONS_ENABLED; delete process.env.RESERVATION_POS_ACCESS; await vite?.close(); });
-beforeEach(() => { globalThis.reservationApiFixture.planBlocked = false; globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async () => { throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
+after(async () => { delete globalThis.reservationApiFixture; delete process.env.RESERVATIONS_ENABLED; delete process.env.RESERVATION_POS_ACCESS; delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; await vite?.close(); });
+beforeEach(() => { delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; globalThis.reservationApiFixture.planBlocked = false; globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async () => { throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
 const request = (body) => new Request("https://app.invalid/api/reservations", { method: "POST", body: JSON.stringify({ locationId, ...body }), headers: { "Content-Type": "application/json" } });
 const post = body => action({ request: request(body) });
 test("disabled feature performs no database access", async () => { delete process.env.RESERVATIONS_ENABLED; assert.equal((await post({ command: "detail", id: row.id })).status, 404); assert.equal(dbReads, 0); });
@@ -134,4 +135,97 @@ test("shop POS defaults retain plan gate and support receipt access for another 
   globalThis.reservationApiFixture.planBlocked = true;
   assert.equal((await post({ command: "count" })).status, 403);
   assert.equal(dbReads, 0);
+});
+
+function publicInstall(scopes = ["read_customers", "read_orders"]) {
+  process.env.APP_DISTRIBUTION = "public";
+  delete process.env.RESERVATION_POS_ACCESS;
+  globalThis.reservationApiFixture.graphql = async query => {
+    parse(query);
+    if (query.includes("ReservationPosSetup")) return Response.json({ data: { location: { id: locationId, name: "導入店", isActive: true }, shop: { ianaTimezone: "America/New_York" }, currentAppInstallation: { accessScopes: scopes.map(handle => ({ handle })) } } });
+    if (query.includes("ReservationSelectedCustomer")) return Response.json({ data: { customer: { displayName: "お客様", phone: "09012345678" } } });
+    throw new Error("unexpected public query");
+  };
+}
+test("public installation uses its active POS location and customer without any shop environment entries", async () => {
+  publicInstall();
+  const result = await (await post({ command: "sessionDisplay", customerId: "gid://shopify/Customer/1" })).json();
+  assert.equal(result.locationName, "導入店"); assert.equal(result.accessReady, true); assert.equal(result.customer.phone, "09012345678");
+  assert.equal((await post({ command: "count" })).status, 200);
+  const receipt = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=${encodeURIComponent(locationId)}`) });
+  assert.equal(receipt.status, 200); assert.ok(!(await receipt.text()).includes(row.contactPhone));
+});
+test("public automatic access rejects absent, foreign, mismatched and inactive locations before DB reads", async () => {
+  publicInstall();
+  for (const location of [null, { id: locationId, isActive: false }, { id: "gid://shopify/Location/2", isActive: true }]) {
+    globalThis.reservationApiFixture.graphql = async query => { parse(query); return Response.json({ data: { location } }); };
+    assert.equal((await post({ command: "count" })).status, 403);
+  }
+  assert.equal(dbReads, 0);
+});
+test("public automatic access never overrides malformed or explicitly denied access settings", async () => {
+  publicInstall();
+  for (const value of ["invalid", "null", "[]", JSON.stringify({ [shop]: null }), JSON.stringify({ [shop]: { 123: null } }), JSON.stringify({ [shop]: { "*": null } }), JSON.stringify({ [shop]: { 123: { locations: [], contact: false } } })]) {
+    process.env.RESERVATION_POS_ACCESS = value;
+    assert.equal((await post({ command: "count" })).status, 403);
+  }
+  process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } });
+  const result = await (await post({ command: "detail", id: row.id })).json(); assert.equal(result.row.phone, "•••• 5678");
+});
+test("public missing scopes stop reserve and checkout before DB access but allow count and resume", async () => {
+  publicInstall([]);
+  for (const command of ["create", "checkout", "checkoutAccess", "orders", "complete"]) {
+    const response = await post({ command, id: row.id }); assert.equal(response.status, 403);
+    const body = await response.json(); assert.match(body.error, /取置 → 設定/);
+    if (command === "checkout") assert.notEqual(body.checkoutRejected, true);
+  }
+  assert.equal(dbReads, 0);
+  const display = await (await post({ command: "sessionDisplay", customerId: "gid://shopify/Customer/1" })).json();
+  assert.equal(display.accessReady, false); assert.equal(display.customer, null); assert.match(display.notice, /取置 → 設定/);
+  assert.equal((await post({ command: "count" })).status, 200);
+  assert.equal((await post({ command: "resume", id: row.id })).status, 200);
+  const cancel = await post({ command: "cancel", id: row.id, version: 999 }); assert.equal(cancel.status, 409); assert.match((await cancel.json()).error, /ほかの端末/);
+});
+test("public onboarding retains plan rejection and unknown distribution never enables automatic access", async () => {
+  publicInstall(); globalThis.reservationApiFixture.planBlocked = true;
+  assert.equal((await post({ command: "count" })).status, 403); assert.equal(dbReads, 0);
+  globalThis.reservationApiFixture.planBlocked = false; delete process.env.APP_DISTRIBUTION;
+  assert.equal((await post({ command: "count" })).status, 403);
+});
+
+test("public checkout claim survives lost response and scope revocation, then resumes with the same key", async () => {
+  const { handoffReservationCart, CHECKOUT_PROPERTY, RESERVATION_PROPERTY } = await import("../extensions/common/reservations.js");
+  const scopes = ["read_customers", "read_orders"]; publicInstall(scopes);
+  const originalFind = globalThis.reservationApiFixture.db.stockReservation.findFirst;
+  const originalUpdate = globalThis.reservationApiFixture.db.stockReservation.updateMany;
+  let stored = structuredClone(row), writes = 0, loseResponse = true;
+  const cart = { properties: {}, lineItems: [], editable: true };
+  const pos = { session: { deviceId: 1 }, cart: { current: { value: cart }, async addCartProperties(props) { Object.assign(cart.properties, props); }, async removeCartProperties(keys) { keys.forEach(key => delete cart.properties[key]); }, async addLineItem(variantId, quantity) { cart.lineItems.push({ variantId, quantity }); return "line"; } } };
+  globalThis.reservationApiFixture.db.stockReservation.findFirst = async () => structuredClone(stored);
+  globalThis.reservationApiFixture.db.stockReservation.updateMany = async ({ where, data }) => { assert.equal(stored.version, where.version); writes++; stored = { ...stored, ...data, version: stored.version + 1 }; return { count: 1 }; };
+  const api = async input => {
+    const response = await post(input); const body = await response.json();
+    if (!body.ok) throw Object.assign(new Error(body.error), { checkoutRejected: body.checkoutRejected });
+    if (loseResponse) { loseResponse = false; throw new Error("response lost"); }
+    return body;
+  };
+  try {
+    const held = { ...row, checkoutKey: null };
+    await assert.rejects(handoffReservationCart(held, pos, api), /response lost/);
+    const key = cart.properties[CHECKOUT_PROPERTY]; assert.equal(key, stored.checkoutKey);
+    scopes.length = 0;
+    await assert.rejects(handoffReservationCart(held, pos, api), /取置 → 設定/);
+    assert.equal(cart.properties[CHECKOUT_PROPERTY], key); assert.equal(cart.properties[RESERVATION_PROPERTY], row.id); assert.equal(cart.lineItems.length, 0);
+    scopes.push("read_customers", "read_orders");
+    await handoffReservationCart(held, pos, api);
+    assert.equal(cart.properties[CHECKOUT_PROPERTY], key); assert.equal(writes, 1); assert.equal(cart.lineItems.length, 1); assert.equal(cart.lineItems[0].quantity, 2);
+  } finally { globalThis.reservationApiFixture.db.stockReservation.findFirst = originalFind; globalThis.reservationApiFixture.db.stockReservation.updateMany = originalUpdate; }
+});
+
+test("public newly added active location needs no access or timezone environment entry", async () => {
+  publicInstall();
+  const added = "gid://shopify/Location/99";
+  globalThis.reservationApiFixture.graphql = async (query, { variables }) => { parse(query); return Response.json({ data: { location: { id: variables.id, name: "追加店舗", isActive: true }, shop: { ianaTimezone: "Europe/Paris" }, currentAppInstallation: { accessScopes: [{ handle: "read_orders" }, { handle: "read_customers" }] } } }); };
+  const display = await (await post({ command: "sessionDisplay", locationId: added })).json(); assert.equal(display.accessReady, true); assert.equal(display.locationName, "追加店舗");
+  const count = await (await post({ command: "count", locationId: added })).json(); assert.equal(count.count, 0);
 });

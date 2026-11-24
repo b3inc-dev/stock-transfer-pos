@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type StockReservation } from "@prisma/client";
 import db from "../db.server";
+import { detectServerDistribution } from "./plan-distribution";
+import { getPublicClientId, getInhouseClientId } from "./app-toml.server";
 import { addDays, assertOrderMatches, localDate, maskPhone, needsFollowUp, normalizeReservationLines, TERMINAL_RESERVATIONS, validDate } from "../../extensions/common/reservations.js";
 
 export class ReservationCheckoutRejected extends Error { readonly checkoutRejected = true; }
@@ -13,6 +15,44 @@ export async function reservationPrivacyAvailable(shop: string) {
   try {
     return await db.stockReservationPrivacyRequest.count({ where: { shop } }) > 0 || await db.stockReservation.count({ where: { shop, anonymizedAt: null } }) > 0;
   } catch { return false; } // Direct privacy URL remains available even if the navigation count fails.
+}
+/** Only a positively identified public server enables automatic POS onboarding. */
+export function publicReservationDefaultsEnabled() {
+  return detectServerDistribution(process.env, null, getPublicClientId(), getInhouseClientId()).distribution === "public";
+}
+export function hasReservationPosAccessConfiguration(shop: string, subject: string) {
+  const raw = process.env.RESERVATION_POS_ACCESS;
+  if (!raw?.trim()) return false;
+  try {
+    const shops = JSON.parse(raw);
+    if (!shops || typeof shops !== "object" || Array.isArray(shops)) return true;
+    if (!Object.hasOwn(shops, shop)) return false;
+    const accounts = shops[shop];
+    if (!accounts || typeof accounts !== "object" || Array.isArray(accounts)) return true;
+    return Object.hasOwn(accounts, subject) || Object.hasOwn(accounts, "*");
+  } catch { return true; }
+}
+export async function reservationTimezone(shop: string, locationId: string, admin: ReservationAdmin, storeTimezone?: string) {
+  let configured;
+  try {
+    const shops = JSON.parse(process.env.RESERVATION_LOCATION_TIMEZONES || "{}");
+    if (!shops || typeof shops !== "object" || Array.isArray(shops)) throw new Error();
+    if (Object.hasOwn(shops, shop) && (!shops[shop] || typeof shops[shop] !== "object" || Array.isArray(shops[shop]))) throw new Error();
+    configured = shops[shop]?.[locationId];
+  }
+  catch { throw new Error("店舗のタイムゾーン設定を確認してください"); }
+  let timezone = configured;
+  if (configured === undefined && publicReservationDefaultsEnabled()) {
+    if (storeTimezone !== undefined) timezone = storeTimezone;
+    else {
+      const info = await reservationQuery(admin, `#graphql
+        query ReservationStoreTimezone { shop { ianaTimezone } }`);
+      timezone = info.shop?.ianaTimezone;
+    }
+  }
+  if (typeof timezone !== "string" || !timezone) throw new Error("店舗のタイムゾーンが未設定です。管理者に確認してください");
+  try { localDate(Date.now(), timezone); } catch { throw new Error("店舗のタイムゾーン設定を確認してください"); }
+  return timezone;
 }
 export function reservationAccountAccess(shop: string, subject: string, allowShopDefault = false): { locations: string[]; contact: boolean } | null {
   try {
@@ -168,7 +208,7 @@ export async function resumeReservationMove(row: StockReservation, admin: Reserv
   });
   return getReservation(row.shop, row.locationId, row.id);
 }
-export async function createReservation(args: { shop: string; locationId: string; actor: string; admin: ReservationAdmin; input: Record<string, unknown> }) {
+export async function createReservation(args: { shop: string; locationId: string; actor: string; admin: ReservationAdmin; input: Record<string, unknown>; storeTimezone?: string }) {
   const { shop, locationId, actor, admin, input } = args;
   const id = String(input.id || "");
   if (!/^R-[a-f0-9-]{36}$/.test(id)) throw new Error("登録番号が無効です。画面を開き直してください");
@@ -181,9 +221,7 @@ export async function createReservation(args: { shop: string; locationId: string
     if (existing.requestHash !== requestHash) throw new Error("登録内容が変わっています。元の取置を確認してください");
     return existing.operation ? resumeReservationMove(existing, admin) : existing;
   }
-  let timezone = "";
-  try { timezone = String(JSON.parse(process.env.RESERVATION_LOCATION_TIMEZONES || "{}")[shop]?.[locationId] || ""); } catch { /* fail closed below */ }
-  if (!timezone) throw new Error("店舗のタイムゾーンが未設定です。管理者に確認してください");
+  const timezone = await reservationTimezone(shop, locationId, admin, args.storeTimezone);
   const today = localDate(Date.now(), timezone); // Throws on invalid IANA zone; never assume server timezone.
   const location = await reservationLocation(admin, locationId);
   const lines = await loadLines(admin, locationId, requested);

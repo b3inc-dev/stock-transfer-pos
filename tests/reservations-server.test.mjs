@@ -7,6 +7,7 @@ import { parse } from "graphql";
 import { Prisma } from "@prisma/client";
 let vite, service, db;
 let rows, events, stock, responses, calls, failTransport, failDb;
+let shopTimezone = "America/New_York";
 const shop = "fixture.myshopify.com", locationId = "gid://shopify/Location/1", actor = "123";
 const variantId = "gid://shopify/ProductVariant/1";
 const input = () => ({ id: "R-12345678-1234-1234-1234-123456789abc", timezone: "Asia/Tokyo", name: "Guest", phone: "09012345678", lines: [{ variantId, quantity: 2 }] });
@@ -37,6 +38,7 @@ function makeDb() {
 const admin = {
   async graphql(query, { variables }) {
     parse(query);
+    if (query.includes("ReservationStoreTimezone")) return Response.json({ data: { shop: { ianaTimezone: shopTimezone } } });
     if (query.includes("ReservationLocation")) return Response.json({ data: { location: { id: locationId, name: "店", isActive: true } } });
     if (query.includes("ReservationVariants")) return Response.json({ data: { nodes: variables.ids.map(id => ({ id, displayName: "Tシャツ", inventoryItem: { id: `gid://shopify/InventoryItem/${id.split("/").pop()}`, tracked: true, inventoryLevel: { quantities: Object.entries(stock).map(([name, quantity]) => ({ name, quantity })) } } })) } });
     if (query.includes("ReservationMove")) {
@@ -60,8 +62,8 @@ before(async () => {
   vite = await createServer({ configFile: false, appType: "custom", server: { middlewareMode: true, hmr: false }, plugins: [{ name: "reservation-db", enforce: "pre", resolveId: id => id === "../db.server" ? "\0reservation-db" : null, load: id => id === "\0reservation-db" ? "export default globalThis.reservationTestDb" : null }] });
   service = await vite.ssrLoadModule("/app/utils/reservations.server.ts");
 });
-after(async () => { delete globalThis.reservationTestDb; delete process.env.RESERVATION_LOCATION_TIMEZONES; await vite?.close(); });
-beforeEach(() => { process.env.RESERVATION_LOCATION_TIMEZONES = JSON.stringify({ [shop]: { [locationId]: "Asia/Tokyo" } }); rows = new Map(); events = []; stock = { available: 5, reserved: 0 }; responses = new Map(); calls = []; failTransport = false; failDb = false; });
+after(async () => { delete globalThis.reservationTestDb; delete process.env.RESERVATION_LOCATION_TIMEZONES; delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; await vite?.close(); });
+beforeEach(() => { delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; process.env.RESERVATION_LOCATION_TIMEZONES = JSON.stringify({ [shop]: { [locationId]: "Asia/Tokyo" } }); rows = new Map(); events = []; stock = { available: 5, reserved: 0 }; responses = new Map(); calls = []; failTransport = false; failDb = false; });
 const create = (body = input()) => service.createReservation({ shop, locationId, actor, admin, input: body });
 
 test("timeout after Shopify success replays exact persisted input and key; no duplicate reserve", async () => {
@@ -159,4 +161,26 @@ test("history is oldest registration first regardless of due date and follow-up"
   for (const [id, createdAt, dueDate] of [["new", "2026-11-24", "2020-01-01"], ["old", "2026-11-20", "2030-01-01"]]) rows.set(id, { id, shop, locationId, status: "held", timezone: "Asia/Tokyo", guestName: "Guest", customerId: null, dueDate, createdAt: new Date(createdAt), lines: [], nextFollowDate: null });
   const result = await service.listReservations(shop, locationId, admin, "active", "", 0);
   assert.deepEqual(result.rows.map(row => row.id), ["old", "new"]);
+});
+
+test("public first reservation uses store timezone without per-store configuration and retries keep its original zone", async () => {
+  process.env.APP_DISTRIBUTION = "public"; delete process.env.RESERVATION_LOCATION_TIMEZONES;
+  shopTimezone = "America/New_York";
+  const result = await create(); assert.equal(result.timezone, shopTimezone);
+  const { localDate, addDays } = await import("../extensions/common/reservations.js");
+  assert.equal(result.dueDate, addDays(localDate(Date.now(), shopTimezone), 7));
+  shopTimezone = "Asia/Tokyo";
+  const replay = await create(); assert.equal(replay.timezone, "America/New_York"); assert.equal(replay.dueDate, result.dueDate); assert.equal(calls.length, 1);
+});
+test("public timezone keeps explicit location override and rejects invalid configured or Shopify zones", async () => {
+  process.env.APP_DISTRIBUTION = "public";
+  process.env.RESERVATION_LOCATION_TIMEZONES = JSON.stringify({ [shop]: { [locationId]: "Pacific/Honolulu" } });
+  assert.equal(await service.reservationTimezone(shop, locationId, admin), "Pacific/Honolulu");
+  for (const value of ["bad JSON", "null", "[]", JSON.stringify({ [shop]: null }), JSON.stringify({ [shop]: { [locationId]: "Invalid/Zone" } }), JSON.stringify({ [shop]: { [locationId]: null } })]) {
+    process.env.RESERVATION_LOCATION_TIMEZONES = value; await assert.rejects(() => service.reservationTimezone(shop, locationId, admin), /タイムゾーン/);
+  }
+  delete process.env.RESERVATION_LOCATION_TIMEZONES; shopTimezone = "Invalid/Zone";
+  await assert.rejects(() => service.reservationTimezone(shop, locationId, admin), /タイムゾーン/);
+  delete process.env.APP_DISTRIBUTION; shopTimezone = "Asia/Tokyo";
+  await assert.rejects(() => service.reservationTimezone(shop, locationId, admin), /未設定/);
 });
