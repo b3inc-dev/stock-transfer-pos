@@ -1,6 +1,7 @@
 import { renderReservationReceipt } from "./reservationReceipt.js";
 /** Pure rules shared by server and POS; no PII in error messages. */
 export const RESERVATION_LABELS = Object.freeze({ reserving: "確認中", held: "取置中", checkout: "会計中", cancelling: "確認中", completing: "確認中", sold: "販売完了", cancelled: "キャンセル", failed: "登録できませんでした" });
+/** @returns {"success" | "info" | "neutral" | "warning" | "critical"} */
 export function reservationStatusTone(status) {
   if (status === "failed") return "critical";
   if (status === "cancelled") return "neutral";
