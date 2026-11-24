@@ -1,3 +1,6 @@
+import { ReservationProductRow } from "./ProductRow.jsx";
+import { addReservationProduct, exactScanProduct, createReservationScanQueue } from "./productList.js";
+import { getListPageSlice } from "../../common/listDisplayPagination.js";
 /* global globalThis */
 import "../../common/remoteDomSiblingFix.js";
 import "@shopify/ui-extensions/preact";
@@ -14,7 +17,7 @@ export default async () => render(<ReservationModal />, document.body);
 // Preact component props are documented above and checked by the local SDK build.
 // eslint-disable-next-line react/prop-types
 export function ReservationModal({ fromProduct = false, initialProduct = null }) {
-  const [screen, setScreen] = useState("create");
+  const [screen, setScreenState] = useState("create");
   const [rows, setRows] = useState([]);
   const [mode, setMode] = useState("due");
   const [query, setQuery] = useState("");
@@ -26,6 +29,23 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const [products, setProducts] = useState([]);
   const [pendingProduct, setPendingProduct] = useState(null);
   const [search, setSearch] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [images, setImages] = useState(true);
+  const [cameraVisible, setCameraVisible] = useState(false);
+  const [productPage, setProductPage] = useState(1);
+  const [limits, setLimits] = useState({ searchLimit: 50, productLimit: 250 });
+  const [productPageInfo, setProductPageInfo] = useState({ hasNextPage: false, endCursor: null });
+  const searchRevision = useRef(0);
+  const screenRef = useRef("create");
+  const scanQueueRef = useRef(null);
+  const setScreen = useCallback(next => {
+    searchRevision.current += 1;
+    scanQueueRef.current?.stop();
+    if (screenRef.current === "products" && next !== "products") { shopify.scanner?.hideCameraScanner?.(); setCameraVisible(false); setScanBusy(false); }
+    screenRef.current = next;
+    setScreenState(next);
+  }, []);
   const [followDate, setFollowDate] = useState("");
   const [orderSearch, setOrderSearch] = useState("");
   const [orders, setOrders] = useState([]);
@@ -43,7 +63,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const [storeToday, setStoreToday] = useState("");
   const [slow, setSlow] = useState(false);
   const storeName = detail?.locationName || rows[0]?.locationName || "現在のPOS店舗";
-  useEffect(() => { if (!busy) { setSlow(false); return; } const timer = setTimeout(() => setSlow(true), 10000); return () => clearTimeout(timer); }, [busy]);
+  useEffect(() => { if (!busy && !searching && !scanBusy) { setSlow(false); return; } const timer = setTimeout(() => setSlow(true), 10000); return () => clearTimeout(timer); }, [busy, searching, scanBusy]);
   const lock = useRef(false);
   const draftReady = useRef(false);
   const draftLocation = useRef(locationId());
@@ -87,7 +107,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     };
     restore();
     return () => { alive = false; };
-  }, [storageKey, fromProduct, initialProduct]);
+  }, [storageKey, fromProduct, initialProduct, setScreen]);
   useEffect(() => { if (draftReady.current) writer.save(latestDraft.current).catch(e => setError(e.message)); }, [draft, submitted, writer]);
   const refresh = useCallback(async () => {
     const result = await reservationApi({ command: "list", mode, query, page, dueDate });
@@ -109,22 +129,75 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     latestDraft.current = next; setDraft(next);
   };
   const open = row => run(async () => { const result = await reservationApi({ command: "detail", id: row.id }); setDetail(result.row); setConfirm(false); setScreen("detail"); });
-  const searchProducts = useCallback(value => run(async () => { const data = await reservationApi({ command: "products", query: value }); setProducts(data.products); }), [run]);
   useEffect(() => {
     if (screen !== "products") return;
-    const signal = shopify.scanner?.scannerData?.current;
-    const unsubscribe = signal?.subscribe?.(value => {
-      const barcode = value?.data;
-      if (barcode) { setSearch(barcode); searchProducts(`barcode:${String(barcode).replace(/["\\]/g, "")}`); }
-    });
-    return () => unsubscribe?.();
-  }, [screen, searchProducts]);
-  const add = product => {
+    let alive = true;
+    reservationApi({ command: "productSettings" }).then(data => { if (alive) setLimits({ searchLimit: data.searchLimit, productLimit: data.productLimit }); }).catch(() => { if (alive) setError("表示件数の設定を取得できません。標準件数で表示します。"); });
+    return () => { alive = false; };
+  }, [screen]);
+  useEffect(() => {
+    if (screen !== "products" || submitted || !ready || !latestDraft.current.lines.length) return;
+    let alive = true;
+    reservationApi({ command: "products", ids: latestDraft.current.lines.map(line => line.variantId), images }).then(data => {
+      if (!alive || lock.current || screenRef.current !== "products") return;
+      const found = data.products;
+      const next = { ...latestDraft.current, lines: latestDraft.current.lines.map(line => { const product = found.find(product => product.id === line.variantId); return product ? { ...line, title: product.displayName, productTitle: product.productTitle, variantTitle: product.variantTitle, sku: product.sku, barcode: product.barcode, imageUrl: product.imageUrl, available: product.available, eligible: product.eligible } : line; }) };
+      latestDraft.current = next; setDraft(next);
+    }).catch(() => { if (alive) setError("商品の在庫・画像を取得できません。数量は保持しています。"); });
+    return () => { alive = false; };
+  }, [screen, images, submitted, ready]);
+  const searchProducts = useCallback(async (value, after = null) => {
+    const revision = ++searchRevision.current;
+    setSearching(true); setError("");
+    try {
+      const data = await reservationApi({ command: "products", query: value, after, first: limits.searchLimit, images });
+      if (revision !== searchRevision.current) return;
+      setProducts(previous => after ? [...new Map([...previous, ...data.products].map(product => [product.id, product])).values()] : data.products);
+      setProductPageInfo(data.pageInfo);
+      if (!after) setProductPage(1);
+    } catch (error) { if (revision === searchRevision.current) { setError(error.message); if (!after) setProducts([]); } }
+    finally { if (revision === searchRevision.current) setSearching(false); }
+  }, [images, limits.searchLimit]);
+  useEffect(() => {
+    searchRevision.current += 1;
+    if (screen !== "products" || !search.trim()) { setProducts([]); setProductPageInfo({ hasNextPage: false, endCursor: null }); setSearching(false); return; }
+    setSearching(true);
+    const timer = setTimeout(() => { void searchProducts(search); }, 300);
+    return () => { clearTimeout(timer); searchRevision.current += 1; };
+  }, [screen, search, searchProducts]);
+  const addProduct = useCallback(product => {
+    if (submitted || lock.current || !draftReady.current || screenRef.current !== "products") return false;
+    const next = addReservationProduct(latestDraft.current, product);
+    latestDraft.current = next; setDraft(next); return true;
+  }, [submitted]);
+  const add = (product, quantity = 1) => {
     if (submitted || lock.current || !ready) return;
-    if (draft.lines.some(line => line.variantId === product.id)) return;
-    patch({ lines: [...draft.lines, { variantId: product.id, title: product.displayName, quantity: 1 }] });
-    setProducts([]);
+    try { const next = addReservationProduct(latestDraft.current, product, quantity); latestDraft.current = next; setDraft(next); setError(""); }
+    catch (error) { setError(error.message); }
   };
+  const setQuantity = (id, quantity) => {
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 9999) { setError("数量は1〜9999の整数で入力してください"); return; }
+    patch({ lines: latestDraft.current.lines.map(line => line.variantId === id ? { ...line, quantity } : line) });
+  };
+  useEffect(() => {
+    if (screen !== "products" || submitted || !ready) return;
+    const scanner = createReservationScanQueue({
+      resolve: async code => { setScanBusy(true); const result = await reservationApi({ command: "products", query: code, scan: true, images, first: 50 }); return exactScanProduct(code, result.products, result.pageInfo); },
+      commit: product => { const added = addProduct(product); setScanBusy(false); if (added) shopify.toast.show("商品を追加しました（+1）"); },
+      onError: error => { setScanBusy(false); setError(error.message); },
+    });
+    scanQueueRef.current = scanner;
+    const unsubscribe = shopify.scanner?.scannerData?.current?.subscribe?.(value => scanner.enqueue(value?.data));
+    return () => { scanner.stop(); if (scanQueueRef.current === scanner) scanQueueRef.current = null; unsubscribe?.(); shopify.scanner?.hideCameraScanner?.(); setCameraVisible(false); setScanBusy(false); };
+  }, [screen, submitted, ready, images, addProduct]);
+  const toggleCamera = () => {
+    try { if (cameraVisible) shopify.scanner.hideCameraScanner(); else shopify.scanner.showCameraScanner(); setCameraVisible(!cameraVisible); }
+    catch { setError("カメラを開けません。POSのカメラ権限を確認してください"); }
+  };
+  const changeSearch = value => { searchRevision.current += 1; setProducts([]); setProductPageInfo({ hasNextPage: false, endCursor: null }); setSearch(value); setProductPage(1); };
+  const candidates = getListPageSlice(products, productPage, Math.min(50, limits.productLimit));
+  const selectedLines = getListPageSlice(draft.lines, productPage, Math.min(50, limits.productLimit));
+  const productView = search.trim() ? candidates : selectedLines;
   const save = () => run(async () => {
     if (!ready) throw new Error("前回の下書きを確認しています");
     const customer = shopify.cart.current.value.customer;
@@ -202,7 +275,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const titles = { create: "取置の受付", products: "取置する商品", review: "取置を登録", list: "取置履歴", detail: "取置の詳細", actions: "連絡・印刷", cancel: "取置を解除", "product-choice": "商品を追加" };
   let primary = null;
   if (screen === "create") primary = <s-button variant="primary" disabled={busy || !ready} onClick={next}>次へ</s-button>;
-  if (screen === "products") primary = <s-button variant="primary" disabled={busy || !ready || !draft.lines.length} onClick={() => { setError(""); setScreen("review"); }}>次へ</s-button>;
+  if (screen === "products") primary = <s-button variant="primary" disabled={busy || scanBusy || !ready || !draft.lines.length} onClick={() => { setError(""); setScreen("review"); }}>次へ</s-button>;
   if (screen === "review") primary = <s-button variant="primary" disabled={busy || !ready || !draft.lines.length} onClick={save}>{busy ? "登録中…" : submitted ? "登録結果を確認" : "確保して登録"}</s-button>;
   if (screen === "list") primary = <s-button variant="primary" disabled={busy || !ready} onClick={() => setScreen("create")}>取置を登録</s-button>;
   if (screen === "product-choice") primary = <s-button variant="primary" disabled={busy || !ready} onClick={confirmProduct}>この商品を追加</s-button>;
@@ -211,9 +284,10 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   if (screen === "detail" && ["reserving", "cancelling", "completing"].includes(detail?.status)) primary = <s-button variant="primary" disabled={busy} onClick={() => command("resume")}>反映を確認</s-button>;
 
   return <s-page heading={titles[screen] || "取置"}>
+    {screen === "products" ? <s-button slot="secondary-actions" disabled={busy || scanBusy || Boolean(submitted)} onClick={toggleCamera}>{cameraVisible ? "カメラを閉じる" : "カメラスキャン"}</s-button> : null}
     <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
       <s-box padding="base"><s-stack gap="small" direction="block">
-        {busy ? <s-banner tone="info" heading="読み込み中です。少しお待ちください。" /> : null}
+        {busy || searching || scanBusy ? <s-banner tone="info" heading="読み込み中です。少しお待ちください。" /> : null}
         {screen === "list" ? <>
           <s-text-field label="取置番号・名前で検索" value={queryInput} onInput={e => setQueryInput(e.currentTarget.value)} />
           <s-button disabled={busy} onClick={() => { setQuery(queryInput); setPage(0); }}>検索</s-button>
@@ -223,7 +297,13 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
           <s-stack direction="inline" gap="small">{[["due", "要対応"], ["active", "取置中"], ["ended", "終了"]].map(([value, label]) => <s-box key={value} inlineSize="33%"><s-button variant={mode === value ? "primary" : "secondary"} disabled={busy} onClick={() => { setMode(value); setPage(0); }}>{label}</s-button></s-box>)}</s-stack>
           <s-text>{storeName}・{updatedAt ? `${updatedAt} に更新` : "まだ更新していません"}</s-text>
           <s-stack direction="inline" justifyContent="space-between"><s-button disabled={busy || !page} onClick={() => setPage(page - 1)}>前へ</s-button><s-text>{total}件</s-text><s-button disabled={busy || !hasNext} onClick={() => setPage(page + 1)}>次へ</s-button></s-stack>
-        </> : <s-text>店舗: {storeName}</s-text>}
+        </> : <>
+          <s-stack direction="inline" justifyContent="space-between"><s-text>店舗: {storeName}</s-text>{screen === "products" ? <s-button disabled={busy || scanBusy} onClick={() => setImages(!images)}>{images ? "画像ON" : "画像OFF"}</s-button> : null}</s-stack>
+          {screen === "products" ? <>
+            <s-text-field label="商品名 / SKU / バーコード" value={search} onInput={event => changeSearch(event.currentTarget.value)}><s-button slot="accessory" disabled={!search} onClick={() => changeSearch("")}>×</s-button></s-text-field>
+            <s-text>{search.trim() ? `検索結果: ${products.length}件` : `追加済み: ${draft.lines.length}件`}</s-text>
+          </> : null}
+        </>}
       </s-stack></s-box><s-divider />
       <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0"><s-box padding="base"><s-stack gap="base" direction="block">
       {screen === "list" ? <>
@@ -248,10 +328,12 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         <s-text-field disabled={busy || !ready || Boolean(submitted)} label="取置用の電話番号" value={draft.phone} onInput={e => patch({ phone: e.currentTarget.value })} />
       </> : null}
       {screen === "products" ? <>
-        <s-text-field label="商品名・バーコードで検索" value={search} onInput={e => setSearch(e.currentTarget.value)} />
-        <s-button disabled={busy} onClick={() => searchProducts(search)}>商品を探す</s-button>
-        {products.map(product => <s-button key={product.id} disabled={busy || !ready || Boolean(submitted)} onClick={() => add(product)}>{product.displayName}</s-button>)}
-        {draft.lines.map((line, index) => <s-stack key={line.variantId} gap="small" direction="block"><s-text>{line.title}</s-text><s-number-field disabled={busy || !ready || Boolean(submitted)} label="数量" min={1} max={9999} value={String(line.quantity)} onInput={e => patch({ lines: draft.lines.map((item, i) => i === index ? { ...item, quantity: Number(e.currentTarget.value) } : item) })} /><s-button variant="secondary" disabled={busy || !ready || Boolean(submitted)} onClick={() => patch({ lines: draft.lines.filter((_, i) => i !== index) })}>商品を外す</s-button></s-stack>)}
+        {search.trim() && !searching && !products.length ? <s-text>一致する商品はありません。</s-text> : null}
+        {!search.trim() && !draft.lines.length ? <s-text>商品名・SKU・バーコードで検索するか、スキャンして追加してください。</s-text> : null}
+        {productView.displayed.map(product => <ReservationProductRow key={product.id || product.variantId} product={product} images={images} candidate={Boolean(search.trim())} disabled={busy || scanBusy || !ready || Boolean(submitted)} quantity={search.trim() ? draft.lines.find(line => line.variantId === product.id)?.quantity || 0 : product.quantity}
+          onAdd={quantity => add(product, quantity)} onSet={quantity => setQuantity(product.variantId, quantity)} onRemove={() => patch({ lines: latestDraft.current.lines.filter(line => line.variantId !== product.variantId) })} />)}
+        {productView.showPagination ? <s-stack direction="inline" gap="base"><s-button disabled={busy || productView.currentPage <= 1} onClick={() => setProductPage(productView.currentPage - 1)}>前へ</s-button><s-text>{productView.rangeStart}〜{productView.rangeEnd} / {productView.total}件</s-text><s-button disabled={busy || productView.currentPage >= productView.totalPages} onClick={() => setProductPage(productView.currentPage + 1)}>次へ</s-button></s-stack> : null}
+        {search.trim() && productPageInfo.hasNextPage ? <s-button disabled={searching} onClick={() => searchProducts(search, productPageInfo.endCursor)}>さらに読み込む</s-button> : null}
       </> : null}
       {screen === "create" ? <>
         <s-switch disabled={busy || !ready || Boolean(submitted)} label="対面で受付" checked={draft.faceToFace} onChange={e => patch({ faceToFace: e.currentTarget.checked, print: false })} />
@@ -299,7 +381,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       {canAddToCart ? <s-text>追加後はPOSのカートでお会計してください。</s-text> : null}
       <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
         <s-button variant="secondary" onClick={goBack} disabled={busy}>{screen === "cancel" || screen === "review" ? "やめる" : screen === "detail" && detail?.endedAt ? "閉じる" : "戻る"}</s-button>
-        {screen === "create" ? <s-button disabled={busy} onClick={() => { setScreen("list"); setDetail(null); setError(""); }}>履歴一覧</s-button> : screen === "detail" ? <s-button disabled={busy} onClick={() => setScreen("actions")}>連絡・印刷</s-button> : screen === "list" && (error || slow) ? <s-button disabled={busy} onClick={() => run(refresh)}>再読み込み</s-button> : <s-box />}
+        {screen === "create" ? <s-button disabled={busy} onClick={() => { setScreen("list"); setDetail(null); setError(""); }}>履歴一覧</s-button> : screen === "detail" ? <s-button disabled={busy} onClick={() => setScreen("actions")}>連絡・印刷</s-button> : screen === "products" && (error || slow) && search.trim() ? <s-button disabled={busy || searching} onClick={() => searchProducts(search)}>再読み込み</s-button> : screen === "list" && (error || slow) ? <s-button disabled={busy} onClick={() => run(refresh)}>再読み込み</s-button> : <s-box />}
         {primary || <s-box />}
       </s-stack>
     </s-stack></s-box>

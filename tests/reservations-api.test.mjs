@@ -19,13 +19,13 @@ before(async () => {
     if (id === "../utils/plan-gate.server") return "\0api-plan";
   }, load(id) {
     if (id === "\0api-db") return "export default globalThis.reservationApiFixture.db";
-    if (id === "\0api-shopify") return `export const authenticate = { pos: async () => ({sessionToken:globalThis.reservationApiFixture.token}) }; export const unauthenticated = { admin: async () => ({admin: {graphql: async () => {throw new Error('unexpected Shopify call')}}}) };`;
+    if (id === "\0api-shopify") return `export const authenticate = { pos: async () => ({sessionToken:globalThis.reservationApiFixture.token}) }; export const unauthenticated = { admin: async () => ({admin: {graphql: async (query, options) => globalThis.reservationApiFixture.graphql(query, options)}}) };`;
     if (id === "\0api-plan") return "export const planBlockedPosResponse = async () => null";
   } }] });
   ({ action, loader } = await vite.ssrLoadModule("/app/routes/api.reservations.tsx"));
 });
 after(async () => { delete globalThis.reservationApiFixture; delete process.env.RESERVATIONS_ENABLED; delete process.env.RESERVATION_POS_ACCESS; await vite?.close(); });
-beforeEach(() => { dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
+beforeEach(() => { globalThis.reservationApiFixture.graphql = async () => { throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
 const request = (body) => new Request("https://app.invalid/api/reservations", { method: "POST", body: JSON.stringify({ locationId, ...body }), headers: { "Content-Type": "application/json" } });
 const post = body => action({ request: request(body) });
 test("disabled feature performs no database access", async () => { delete process.env.RESERVATIONS_ENABLED; assert.equal((await post({ command: "detail", id: row.id })).status, 404); assert.equal(dbReads, 0); });
@@ -49,4 +49,23 @@ test("tile count is database-only; receipt excludes PII and enforces store grant
   const response = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=${encodeURIComponent(locationId)}`) });
   const html = await response.text(); assert.equal(response.status, 200); assert.ok(!html.includes(row.guestName)); assert.ok(!html.includes(row.contactPhone));
   const denied = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=gid://shopify/Location/2`) }); assert.equal(denied.status, 403);
+});
+
+test("product search returns SKU, JAN, image, current-store stock and cursor with bounded page size", async () => {
+  const calls = [];
+  globalThis.reservationApiFixture.graphql = async (query, { variables }) => {
+    calls.push({ query, variables });
+    return Response.json({ data: { productVariants: { nodes: [{ id: "gid://shopify/ProductVariant/1", displayName: "Tシャツ / 青", title: "青", sku: "SKU-1", barcode: "1234567890123", image: { url: "https://image.invalid/1" }, product: { title: "Tシャツ" }, inventoryItem: { tracked: true, inventoryLevel: { quantities: [{ quantity: 4 }] } } }], pageInfo: { hasNextPage: true, endCursor: "next" } } } });
+  };
+  const result = await (await post({ command: "products", query: "SKU-1", first: 99999, after: "previous" })).json();
+  assert.equal(calls[0].variables.first, 50); assert.equal(calls[0].variables.location, locationId); assert.equal(calls[0].variables.query, "sku:SKU-1 OR SKU-1"); assert.equal(calls[0].variables.after, "previous");
+  assert.equal(result.products[0].available, 4); assert.equal(result.products[0].eligible, true); assert.equal(result.products[0].sku, "SKU-1"); assert.equal(result.products[0].imageUrl, "https://image.invalid/1"); assert.equal(result.pageInfo.endCursor, "next");
+});
+test("scanner queries use exact codes; restoring metadata uses validated variant IDs", async () => {
+  const calls = [];
+  globalThis.reservationApiFixture.graphql = async (query, { variables }) => { calls.push({ query, variables }); return Response.json({ data: variables.ids ? { nodes: [] } : { productVariants: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } }); };
+  await post({ command: "products", query: "12345678", scan: true });
+  assert.equal(calls[0].variables.query, 'barcode:"12345678" OR sku:"12345678"');
+  await post({ command: "products", ids: ["gid://shopify/ProductVariant/1", "invalid", "gid://shopify/ProductVariant/1"] });
+  assert.deepEqual(calls[1].variables.ids, ["gid://shopify/ProductVariant/1"]); assert.equal(calls[1].variables.location, locationId);
 });

@@ -1,3 +1,4 @@
+import { buildVariantSearchQuery } from "../../extensions/common/variantSearch.js";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate, unauthenticated } from "../shopify.server";
 import { planBlockedPosResponse } from "../utils/plan-gate.server";
@@ -52,12 +53,29 @@ export async function action({ request }: ActionFunctionArgs) {
     if (command === "list") {
       return json({ ok: true, ...await listReservations(shop, locationId, withGraphQLRetry(admin), String(body.mode || "due"), String(body.query || "").slice(0, 100), Math.max(0, Math.floor(Number(body.page) || 0)), String(body.dueDate || "")) });
     }
+    if (command === "productSettings") {
+      const data = await reservationQuery(withGraphQLRetry(admin), `#graphql query ReservationProductSettings { currentAppInstallation { metafield(namespace: "stock_transfer_pos", key: "settings_v1") { value } } }`);
+      let settings: { searchList?: { initialLimit?: number }; productList?: { initialLimit?: number } } = {};
+      try { settings = JSON.parse(data.currentAppInstallation?.metafield?.value || "{}"); } catch { /* use existing defaults */ }
+      return json({ ok: true, searchLimit: Math.max(10, Math.min(50, Number(settings?.searchList?.initialLimit) || 50)), productLimit: Math.max(1, Math.min(250, Number(settings?.productList?.initialLimit) || 250)) });
+    }
     if (command === "products") {
-      const query = String(body.query || "").trim().slice(0, 100);
-      if (!query) return json({ ok: true, products: [] });
-      const data = await reservationQuery(withGraphQLRetry(admin), `#graphql
-        query ReservationSearch($query: String!) { productVariants(first: 25, query: $query) { nodes { id displayName barcode } } }`, { query });
-      return json({ ok: true, products: data.productVariants.nodes });
+      const raw = String(body.query || "").trim().slice(0, 100);
+      const ids = Array.isArray(body.ids) ? [...new Set<string>(body.ids.map((id: unknown) => String(id)))].filter(id => /^gid:\/\/shopify\/ProductVariant\/\d+$/.test(id)).slice(0, 250) : [];
+      if (!raw && !ids.length) return json({ ok: true, products: [], pageInfo: { hasNextPage: false, endCursor: null } });
+      const first = Math.max(10, Math.min(50, Math.floor(Number(body.first) || 50)));
+      const after = typeof body.after === "string" ? body.after.slice(0, 1000) : null;
+      const query = body.scan ? `barcode:"${raw.replace(/["\\]/g, "")}" OR sku:"${raw.replace(/["\\]/g, "")}"` : buildVariantSearchQuery(raw);
+      const fields = `id displayName title sku barcode image @include(if: $images) { url } product { title featuredImage @include(if: $images) { url } } inventoryItem { tracked inventoryLevel(locationId: $location) { quantities(names: ["available"]) { quantity } } }`;
+      const data = ids.length
+        ? await reservationQuery(withGraphQLRetry(admin), `#graphql query ReservationProductDetails($ids: [ID!]!, $location: ID!, $images: Boolean!) { nodes(ids: $ids) { ... on ProductVariant { ${fields} } } }`, { ids, location: locationId, images: body.images !== false })
+        : await reservationQuery(withGraphQLRetry(admin), `#graphql query ReservationSearch($query: String!, $first: Int!, $after: String, $location: ID!, $images: Boolean!) { productVariants(first: $first, after: $after, query: $query) { nodes { ${fields} } pageInfo { hasNextPage endCursor } } }`, { query, first, after, location: locationId, images: body.images !== false });
+      const connection = ids.length ? { nodes: data.nodes.filter(Boolean), pageInfo: { hasNextPage: false, endCursor: null } } : data.productVariants;
+      return json({ ok: true, products: connection.nodes.map((node: { id: string; displayName: string; title: string; sku: string; barcode: string; image?: { url: string }; product: { title: string; featuredImage?: { url: string } }; inventoryItem?: { tracked: boolean; inventoryLevel?: { quantities: { quantity: number }[] } } }) => ({
+        id: node.id, displayName: node.displayName, productTitle: node.product.title, variantTitle: node.title, sku: node.sku, barcode: node.barcode,
+        imageUrl: node.image?.url || node.product.featuredImage?.url || "", available: node.inventoryItem?.inventoryLevel?.quantities[0]?.quantity ?? null,
+        eligible: Boolean(node.inventoryItem?.tracked && node.inventoryItem?.inventoryLevel),
+      })), pageInfo: connection.pageInfo });
     }
     if (command === "orders") {
       // Staff search by human order name; the completion path re-reads and fully validates the selected order.
