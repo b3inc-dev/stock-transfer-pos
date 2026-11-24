@@ -2,10 +2,10 @@ api_version = "2026-01"
 
 [[extensions]]
 type = "ui_extension"
-name = "発注 / 在庫調整"
+name = "発注 / 登録・履歴"
 uid = "3442a3e2-c0cf-5888-eef4-8ebb325334304cbf805b"
 handle = "stock-transfer-order"
-description = "発注 / 在庫調整"
+description = "発注 / 登録・履歴"
 
 # module: file that contains your extension’s source code
 # target: location where your extension appears in POS

@@ -3,9 +3,9 @@ api_version = "2026-01"
 [[extensions]]
 uid = "5d4fd9c8-9ffe-27f5-b3a1-c7f81186bbf83c90721a"
 type = "ui_extension"
-name = "出庫 / 在庫処理"
+name = "出庫 / 処理・履歴"
 handle = "stock-transfer-tile"
-description = "出庫 / 在庫処理"
+description = "出庫 / 処理・履歴"
 
 [[extensions.targeting]]
 target = "pos.home.tile.render"

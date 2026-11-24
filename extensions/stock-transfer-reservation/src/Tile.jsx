@@ -15,5 +15,5 @@ function Tile() {
     globalThis.document?.addEventListener?.("visibilitychange", refresh);
     return () => { alive = false; clearInterval(timer); globalThis.removeEventListener?.("focus", refresh); globalThis.document?.removeEventListener?.("visibilitychange", refresh); };
   }, []);
-  return <s-tile heading="取置" subheading={count === null ? "開いて確認" : `要対応 ${count}件`} onClick={() => shopify.action.presentModal()} />;
+  return <s-tile heading="取置" subheading={count > 0 ? `要対応 ${count}件` : "登録・履歴"} onClick={() => shopify.action.presentModal()} />;
 }
