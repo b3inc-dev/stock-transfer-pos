@@ -2,7 +2,7 @@ import { japanesePhoneDisplay } from "../../extensions/common/customerDisplay.js
 import { reservationDisplayNumber, reservationIntakeLabel } from "../../extensions/common/reservations.js";
 /** POS Receipt live 6df3d07 を基準にした取置用の設定と、印刷データの許可リスト。 */
 import { normalizeReservationReceipt } from "../../extensions/common/reservationReceipt.js";
-import { defaultLayout } from "./receiptLayoutPresets";
+import { defaultLayout, RESERVATION_FOOTER_TEXT } from "./receiptLayoutPresets";
 import { canonicalLayout, type ReceiptLayout } from "./receiptLayoutSchema";
 import { sampleTemplateData, type ReceiptTemplateData } from "./receiptLayoutData";
 import { validateLayoutInput } from "./receiptLayoutValidate";
@@ -34,7 +34,7 @@ export function normalizeReservationReceiptSettings(input: unknown, strict = fal
     layout.style.lineHeight = { compact: 1.15, normal: 1.35, relaxed: 1.6 }[legacy.bodySpacing] || 1.35;
     for (const block of layout.blocks) {
       if (block.type === "heading") block.settings.text = legacy.receiptTitle;
-      if (block.type === "text") block.settings.text = legacy.footerNote;
+      if (block.type === "text") block.settings.text = legacy.footerNote === "ご来店時にこの控えをご提示ください。" ? RESERVATION_FOOTER_TEXT : legacy.footerNote;
       if (block.type === "reservation_info") Object.assign(block.settings, { show_date: legacy.showIssueDate, show_staff: legacy.showStaff });
       if (block.type === "reservation_items") Object.assign(block.settings, { show_sku: legacy.showSku, show_barcode: legacy.showBarcode });
       if (block.type === "store_info") Object.assign(block.settings, { show_name: legacy.showLocationName, show_address: true, show_phone: true });
