@@ -1,3 +1,4 @@
+import { buildCustomerSearchQuery, normalizeCustomerSearch } from "../../extensions/common/customerSearch.js";
 import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
 import { normalizeReservationReceiptSettings, renderConfiguredReservationReceipt } from "../services/reservationReceiptLayout";
 import db from "../db.server";
@@ -98,11 +99,14 @@ export async function action({ request }: ActionFunctionArgs) {
     }
     if (command === "customers") {
       if (missingScopes.includes("read_customers")) return json({ ok: false, error: "ストア管理者が管理画面の「取置 → 設定」で顧客の読み取りを許可してください" }, 403);
-      const query = String(body.query || "").trim().slice(0, 100);
-      if (query.length < 2) return json({ ok: true, customers: [], hasNextPage: false });
+      const text = normalizeCustomerSearch(body.query);
+      if (!text) return json({ ok: true, customers: [], pageInfo: { hasNextPage: false, endCursor: null } });
+      const query = buildCustomerSearchQuery(text);
+      const after = typeof body.after === "string" ? body.after.slice(0, 1000) : null;
       const data = await reservationQuery(withGraphQLRetry(admin), `#graphql
-        query ReservationCustomerPicker($query: String!) { customers(first: 20, query: $query) { nodes { id firstName lastName displayName phone } pageInfo { hasNextPage } } }`, { query });
-      return json({ ok: true, customers: data.customers.nodes.map((customer: { id: string; firstName: string; lastName: string; displayName: string; phone: string | null }) => ({ id: customer.id, name: japaneseCustomerName(customer), phone: reveal ? customer.phone || "" : maskPhone(customer.phone || "") })), hasNextPage: data.customers.pageInfo.hasNextPage });
+        query ReservationCustomerPicker($query: String!, $after: String) { customers(first: 20, query: $query, after: $after) { nodes { id firstName lastName displayName phone } pageInfo { hasNextPage endCursor } } }`, { query, after });
+      if (data.customers.pageInfo.hasNextPage && (!data.customers.pageInfo.endCursor || data.customers.pageInfo.endCursor === after)) throw new Error("次のお客様一覧を取得できません。再読み込みしてください");
+      return json({ ok: true, customers: data.customers.nodes.map((customer: { id: string; firstName: string; lastName: string; displayName: string; phone: string | null }) => ({ id: customer.id, name: japaneseCustomerName(customer), phone: reveal ? customer.phone || "" : maskPhone(customer.phone || "") })), pageInfo: data.customers.pageInfo });
     }
     if (command === "receiptOptions") {
       const saved = await db.stockReservationSettings.findUnique({ where: { shop }, select: { receiptLayout: true } });

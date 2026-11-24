@@ -1143,13 +1143,15 @@ export function SaveBar({
     }
   }, [status, tone, shopify]);
 
-  const save = () => {
+  const save = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
     const element = form();
     if (!element) return;
     if (!element.reportValidity()) return;
     element.requestSubmit();
   };
-  const discard = () => {
+  const discard = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
     form()?.reset();
     onDiscard?.();
     setDirty(false);
@@ -1159,8 +1161,8 @@ export function SaveBar({
     <>
       <span ref={marker} hidden data-save-bar={id} />
       <AppSaveBar id={id} open={dirty && active === id}>
-        <button variant="primary" onClick={save}>保存</button>
-        <button onClick={discard}>破棄</button>
+        <button type="button" variant="primary" onClick={save}>保存</button>
+        <button type="button" onClick={discard}>破棄</button>
       </AppSaveBar>
     </>
   );

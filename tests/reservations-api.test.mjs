@@ -235,7 +235,7 @@ test("customer picker uses Japanese name order and limits to authenticated shop 
   globalThis.reservationApiFixture.graphql = async (query, { variables }) => { received = { query, variables }; return Response.json({ data: { customers: { nodes: [{ id: "gid://shopify/Customer/1", firstName: "太郎", lastName: "山田", displayName: "太郎 山田", phone: "+819012345678" }], pageInfo: { hasNextPage: false } } } }); };
   const response = await post({ command: "customers", query: "山田" });
   const result = await response.json(); assert.equal(response.status, 200); assert.equal(result.customers[0].name, "山田 太郎"); assert.equal(result.customers[0].phone, "•••• 5678");
-  assert.match(received.query, /customers\(first: 20/); assert.equal(received.variables.query, "山田");
+  assert.match(received.query, /customers\(first: 20/); assert.match(received.variables.query, /last_name:"山田"/);
   delete process.env.RESERVATION_POS_ACCESS;
   assert.equal((await post({ command: "customers", query: "山田" })).status, 403);
 });

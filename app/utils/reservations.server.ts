@@ -1,10 +1,10 @@
+import { reservationDisplayNumber , addDays, assertOrderMatches, localDate, maskPhone, needsFollowUp, normalizeReservationLines, TERMINAL_RESERVATIONS, validDate } from "../../extensions/common/reservations.js";
 import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
 import { createHash, randomUUID } from "node:crypto";
 import { Prisma, type StockReservation } from "@prisma/client";
 import db from "../db.server";
 import { detectServerDistribution } from "./plan-distribution";
 import { getPublicClientId, getInhouseClientId } from "./app-toml.server";
-import { addDays, assertOrderMatches, localDate, maskPhone, needsFollowUp, normalizeReservationLines, TERMINAL_RESERVATIONS, validDate } from "../../extensions/common/reservations.js";
 
 export class ReservationCheckoutRejected extends Error { readonly checkoutRejected = true; }
 export type ReservationAdmin = { graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<Response> };
@@ -89,7 +89,7 @@ export async function publicReservation(row: StockReservation, admin: Reservatio
     phone = phone || data.customer?.phone || "";
   }
   // Explicit whitelist: never expose the persisted mutation input or checkout key in list results.
-  return { id: row.id, locationId: row.locationId, locationName: row.locationName, timezone: row.timezone,
+  return { id: row.id, number: row.number, intakeMethod: row.intakeMethod, displayNumber: reservationDisplayNumber(row), locationId: row.locationId, locationName: row.locationName, timezone: row.timezone,
     status: row.status, version: row.version, customerId: row.customerId, name,
     phone: reveal ? phone : maskPhone(phone), contactVisible: reveal, lines: row.lines,
     dueDate: row.dueDate, nextFollowDate: row.nextFollowDate, needsFollowUp: needsFollowUp(row),
@@ -103,18 +103,18 @@ export async function reservationDueCount(shop: string, locationId: string) {
 export async function listReservations(shop: string, locationId: string, admin: ReservationAdmin, mode: string, query: string, page: number, dueDate = "") {
   const rows = await db.stockReservation.findMany({ where: { shop, locationId,
     status: mode === "ended" ? { in: TERMINAL_RESERVATIONS } : { notIn: TERMINAL_RESERVATIONS } },
-    select: { id: true, createdAt: true, customerId: true, guestName: true, status: true, dueDate: true, nextFollowDate: true, timezone: true },
+    select: { id: true, number: true, createdAt: true, customerId: true, guestName: true, status: true, dueDate: true, nextFollowDate: true, timezone: true },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
   const text = query.trim().toLocaleLowerCase();
   let customerIds = new Set<string>();
-  if (text && !text.startsWith("r-")) {
+  if (text && !/^(?:#?r\d+|r-|\d+$)/i.test(text)) {
     const data = await reservationQuery(admin, `#graphql
       query ReservationCustomerSearch($query: String!) { customers(first: 100, query: $query) { nodes { id } pageInfo { hasNextPage } } }`, { query: text });
     if (data.customers.pageInfo.hasNextPage) throw new Error("お名前をもう少し詳しく入力してください");
     customerIds = new Set(data.customers.nodes.map((customer: { id: string }) => customer.id));
   }
   if (dueDate && !validDate(dueDate)) throw new Error("受取期限の日付を確認してください");
-  const filtered = rows.filter(row => (!dueDate || row.dueDate === dueDate) && (mode !== "due" || needsFollowUp(row)) && (!text || row.id.toLowerCase().includes(text) || row.guestName?.toLocaleLowerCase().includes(text) || (row.customerId && customerIds.has(row.customerId))))
+  const filtered = rows.filter(row => (!dueDate || row.dueDate === dueDate) && (mode !== "due" || needsFollowUp(row)) && (!text || row.id.toLowerCase().includes(text) || reservationDisplayNumber(row).toLowerCase().includes(text) || (row.number !== null && String(row.number) === text.replace(/^#?r/i, "").replace(/^0+(?=\d)/, "")) || row.guestName?.toLocaleLowerCase().includes(text) || (row.customerId && customerIds.has(row.customerId))))
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
   const requestedPage = Number.isSafeInteger(page) && page >= 0 ? page : 0;
   const currentPage = Math.min(requestedPage, Math.max(0, Math.ceil(filtered.length / 25) - 1));
@@ -215,11 +215,12 @@ export async function createReservation(args: { shop: string; locationId: string
   if (!/^R-[a-f0-9-]{36}$/.test(id)) throw new Error("登録番号が無効です。画面を開き直してください");
   const requested = normalizeReservationLines(input.lines);
   const requestHash = createHash("sha256").update(JSON.stringify({ lines: requested, customerId: input.customerId || null, name: String(input.name || "").trim(), phone: String(input.phone || "").trim(), timezone: input.timezone })).digest("hex");
+  const intakeMethod = typeof input.faceToFace === "boolean" ? input.faceToFace ? "in_person" : "inquiry" : null;
   const existing = await db.stockReservation.findUnique({ where: { id } });
   if (existing) {
     if (existing.shop !== shop || existing.locationId !== locationId) throw new Error("登録番号が重複しています");
     // Never replace PII or quantities on a replay, especially after a response was lost.
-    if (existing.requestHash !== requestHash) throw new Error("登録内容が変わっています。元の取置を確認してください");
+    if (existing.requestHash !== requestHash || (existing.intakeMethod && existing.intakeMethod !== intakeMethod)) throw new Error("登録内容が変わっています。元の取置を確認してください");
     return existing.operation ? resumeReservationMove(existing, admin) : existing;
   }
   const timezone = await reservationTimezone(shop, locationId, admin, args.storeTimezone);
@@ -242,7 +243,7 @@ export async function createReservation(args: { shop: string; locationId: string
     if (!guestName || guestName.length > 100 || !contactPhone) throw new Error("ゲストのお名前と連絡用電話番号を入力してください");
   }
   const settings = await db.stockReservationSettings.findUnique({ where: { shop } });
-  const data = { id, requestHash, shop, locationId, locationName: location.name, timezone, status: "reserving", customerId, guestName, contactPhone,
+  const data = { id, requestHash, intakeMethod, shop, locationId, locationName: location.name, timezone, status: "reserving", customerId, guestName, contactPhone,
     lines: lines.map(line => ({ variantId: line.variantId, inventoryItemId: line.inventoryItemId, title: line.title, sku: line.sku, barcode: line.barcode, quantity: line.quantity })), dueDate: addDays(today, settings?.days ?? 7), createdBy: actor };
   // Materialize exact input before inserting, so there's never a row eligible for two different reserve operations.
   const provisional = { ...data, version: 1 } as unknown as StockReservation;

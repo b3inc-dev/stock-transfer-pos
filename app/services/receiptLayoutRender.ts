@@ -255,7 +255,8 @@ function readableTemplate(t: string): string {
 export function blocksToCode(layout: ReceiptLayout): string {
   const parts: string[] = [];
   for (const block of layout.blocks) {
-    if (layout.kind === "reservation" && ["reservation_info", "reservation_items"].includes(block.type)) continue;
+    if (layout.kind === "reservation" && block.type === "reservation_info") continue;
+    if (layout.kind === "reservation" && block.type === "reservation_items") { parts.push("<!-- reservation-items -->"); continue; }
     if (block.hidden) continue;
     const def = getBlockDef(block.type);
     if (!def) continue;

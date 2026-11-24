@@ -10,6 +10,7 @@ export function reservationStatusTone(status) {
 }
 export const TERMINAL_RESERVATIONS = ["sold", "cancelled", "failed"];
 export const RESERVATION_PROPERTY = "取置番号";
+export const RESERVATION_ID_PROPERTY = "_pos_stock_reservation_id";
 export const CHECKOUT_PROPERTY = "_pos_stock_reservation_checkout";
 export function localDate(now, timezone) {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(now));
@@ -46,7 +47,7 @@ export function normalizeReservationLines(input) {
 }
 export function assertOrderMatches(row, order) {
   const attr = key => order?.customAttributes?.find(a => a.key === key)?.value;
-  if (!order || order.cancelledAt || order.displayFinancialStatus !== "PAID" || order.displayFulfillmentStatus !== "FULFILLED" || order.sourceName !== "pos" || order.retailLocation?.id !== row.locationId || attr(RESERVATION_PROPERTY) !== row.id || attr(CHECKOUT_PROPERTY) !== row.checkoutKey) throw new Error("決済済みの同じ店舗の取置注文を確認できません");
+  if (!order || order.cancelledAt || order.displayFinancialStatus !== "PAID" || order.displayFulfillmentStatus !== "FULFILLED" || order.sourceName !== "pos" || order.retailLocation?.id !== row.locationId || !reservationCartMatches(row, { [RESERVATION_PROPERTY]: attr(RESERVATION_PROPERTY), [RESERVATION_ID_PROPERTY]: attr(RESERVATION_ID_PROPERTY) }) || attr(CHECKOUT_PROPERTY) !== row.checkoutKey) throw new Error("決済済みの同じ店舗の取置注文を確認できません");
   if (row.customerId && order.customer?.id !== row.customerId) throw new Error("注文の顧客が取置と一致しません");
   if (order.lineItems?.pageInfo?.hasNextPage || order.refunds?.length) throw new Error("返品または明細のある注文を管理者が確認してください");
   const fulfilled = new Map();
@@ -70,7 +71,7 @@ export function assertOrderMatches(row, order) {
 export function cartCanReceive(row, cart) {
   if (!cart || cart.editable === false) throw new Error("カートを編集できません");
   const props = cart.properties || {};
-  const same = props[RESERVATION_PROPERTY] === row.id && props[CHECKOUT_PROPERTY] === row.checkoutKey;
+  const same = reservationCartMatches(row, props) && props[CHECKOUT_PROPERTY] === row.checkoutKey;
   if (!same && ((cart.lineItems || []).length || Object.keys(props).length || (cart.customer && String(cart.customer.id) !== String(row.customerId || "").split("/").pop()))) throw new Error("ほかのお客様のカートがあります。空のカートから開いてください");
   if (cart.customer && String(cart.customer.id) !== String(row.customerId || "").split("/").pop()) throw new Error("カートの顧客が取置と一致しません");
   const counts = new Map();
@@ -88,19 +89,19 @@ export function receiptHtml(row, layout) { return renderReservationReceipt(row, 
 export async function handoffReservationCart(detail, pos, api, update = () => {}) {
   let row = detail;
   const cart = pos.cart.current.value;
-  const checkoutKey = row.checkoutKey || (cart.properties?.[RESERVATION_PROPERTY] === row.id ? cart.properties[CHECKOUT_PROPERTY] : null) || crypto.randomUUID();
+  const checkoutKey = row.checkoutKey || (reservationCartMatches(row, cart.properties) ? cart.properties[CHECKOUT_PROPERTY] : null) || crypto.randomUUID();
   cartCanReceive({ ...row, checkoutKey }, cart);
   const deviceId = String(pos.session.deviceId);
-  if (row.status === "checkout" && (cart.properties?.[CHECKOUT_PROPERTY] !== row.checkoutKey || cart.properties?.[RESERVATION_PROPERTY] !== row.id)) throw new Error("会計用カートが見つかりません。二重会計を防ぐため、注文を照合してください");
+  if (row.status === "checkout" && (cart.properties?.[CHECKOUT_PROPERTY] !== row.checkoutKey || !reservationCartMatches(row, cart.properties))) throw new Error("会計用カートが見つかりません。二重会計を防ぐため、注文を照合してください");
   if (row.status === "held") {
-    await pos.cart.addCartProperties({ [RESERVATION_PROPERTY]: row.id, [CHECKOUT_PROPERTY]: checkoutKey });
+    await pos.cart.addCartProperties({ [RESERVATION_PROPERTY]: reservationDisplayNumber(row), ...(row.number ? { [RESERVATION_ID_PROPERTY]: row.id } : {}), [CHECKOUT_PROPERTY]: checkoutKey });
     try {
       const result = await api({ command: "checkout", id: row.id, version: row.version, deviceId, checkoutKey });
       row = result.row; update(row);
     } catch (error) {
       const current = pos.cart.current.value;
-      if (error.checkoutRejected === true && !current.lineItems?.length && current.properties?.[RESERVATION_PROPERTY] === row.id && current.properties?.[CHECKOUT_PROPERTY] === checkoutKey) {
-        await pos.cart.removeCartProperties([RESERVATION_PROPERTY, CHECKOUT_PROPERTY]);
+      if (error.checkoutRejected === true && !current.lineItems?.length && reservationCartMatches(row, current.properties) && current.properties?.[CHECKOUT_PROPERTY] === checkoutKey) {
+        await pos.cart.removeCartProperties([RESERVATION_PROPERTY, CHECKOUT_PROPERTY, ...(current.properties?.[RESERVATION_ID_PROPERTY] ? [RESERVATION_ID_PROPERTY] : [])]);
       }
       throw error;
     }
@@ -108,7 +109,7 @@ export async function handoffReservationCart(detail, pos, api, update = () => {}
   if (row.status !== "checkout" || row.checkoutDevice !== deviceId) throw new Error("別の端末で会計中です。元の端末から再開してください");
   const assertSameCart = () => {
     const current = pos.cart.current.value;
-    if (current.properties?.[RESERVATION_PROPERTY] !== row.id || current.properties?.[CHECKOUT_PROPERTY] !== row.checkoutKey) throw new Error("会計中にカートが切り替わりました。元の取置カートから再開してください");
+    if (!reservationCartMatches(row, current.properties) || current.properties?.[CHECKOUT_PROPERTY] !== row.checkoutKey) throw new Error("会計中にカートが切り替わりました。元の取置カートから再開してください");
     cartCanReceive(row, current);
     return current;
   };
@@ -123,4 +124,20 @@ export async function handoffReservationCart(detail, pos, api, update = () => {}
   }
   if (cartCanReceive(row, assertSameCart()).length) throw new Error("全商品を引き継げませんでした。同じ取置から再開してください");
   return row;
+}
+
+/** UUID remains the replay key; the shop-local database number is for staff-facing labels. */
+export function reservationDisplayNumber(row) {
+  return Number.isSafeInteger(row?.number) && row.number > 0 ? `#R${String(row.number).padStart(4, "0")}` : String(row?.id || "—");
+}
+
+/** Accept previously marked carts while requiring both keys for the new display label. */
+export function reservationCartMatches(row, props = {}) {
+  if (!props) return false;
+  if (props[RESERVATION_PROPERTY] === row.id) return !props[RESERVATION_ID_PROPERTY] || props[RESERVATION_ID_PROPERTY] === row.id;
+  return Boolean(row.number && props[RESERVATION_ID_PROPERTY] === row.id && props[RESERVATION_PROPERTY] === reservationDisplayNumber(row));
+}
+
+export function reservationIntakeLabel(row) {
+  return row?.intakeMethod === "in_person" ? "店頭で受付" : row?.intakeMethod === "inquiry" ? "お問い合わせでの受付" : "受付方法未記録";
 }

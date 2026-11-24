@@ -182,6 +182,8 @@ model InventoryCountDocumentChunk {
 
 // Issue #59: 店舗の取置。操作入力を送信前に保存し、結果不明でも同じキーで再送する。
 model StockReservation {
+  intakeMethod   String?
+  number         Int?
   id             String   @id
   requestHash    String?
   shop           String
@@ -210,6 +212,7 @@ model StockReservation {
   updatedAt      DateTime @updatedAt
   events         StockReservationEvent[]
 
+  @@unique([shop, number])
   @@index([shop, locationId, status, dueDate])
   @@index([shop, customerId])
 }
@@ -226,6 +229,7 @@ model StockReservationEvent {
 }
 
 model StockReservationSettings {
+  nextReservationNumber Int @default(1)
   shop       String @id
   days       Int @default(7)
   receiptLayout Json?
