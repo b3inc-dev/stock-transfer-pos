@@ -1,5 +1,5 @@
 import type { Prisma } from "@prisma/client";
-import { maskPhone, RESERVATION_LABELS } from "../../extensions/common/reservations.js";
+import { maskPhone, RESERVATION_LABELS, reservationStatusTone } from "../../extensions/common/reservations.js";
 import { reservationAccountAccess, reservationQuery, type ReservationAdmin } from "./reservations.server";
 
 export const reservationDetailSelect = {
@@ -13,12 +13,7 @@ type DetailRecord = Prisma.StockReservationGetPayload<{ select: typeof reservati
   events: { id: string; kind: string; actor: string; followDate: string | null; createdAt: Date }[];
 };
 const EVENT_LABELS: Record<string, string> = { held: "取置登録", sold: "販売完了", cancelled: "キャンセル", unreachable: "不通", planned: "来店予定" };
-export function reservationStatusTone(status: string): "success" | "info" | "neutral" | "warning" | "critical" {
-  if (status === "held" || status === "sold") return "success";
-  if (status === "cancelled") return "neutral";
-  if (status === "failed") return "critical";
-  return status === "checkout" ? "info" : "warning";
-}
+export { reservationStatusTone };
 function dateTime(value: Date | null) {
   if (!value) return "—";
   const parts = new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(value));

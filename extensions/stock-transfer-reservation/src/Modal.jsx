@@ -9,7 +9,7 @@ import { render } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { locationId, reservationApi, printReservation } from "./api.js";
 import { appendProductToDraft, createReservationDraftWriter, loadProductReservationDraft, restoreReservationInputDraft } from "./productEntry.js";
-import { handoffReservationCart, RESERVATION_LABELS } from "../../common/reservations.js";
+import { handoffReservationCart, RESERVATION_LABELS, reservationStatusTone } from "../../common/reservations.js";
 
 const DRAFT_KEY = "pos_stock_reservation_draft_v1";
 const newId = () => `R-${crypto.randomUUID()}`;
@@ -31,6 +31,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const [pendingProduct, setPendingProduct] = useState(null);
   const [search, setSearch] = useState("");
   const [searching, setSearching] = useState(false);
+  const [searchLoaded, setSearchLoaded] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [images, setImages] = useState(true);
   const [cameraVisible, setCameraVisible] = useState(false);
@@ -69,6 +70,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const customerIdRef = useRef(customerId);
   const sessionRevision = useRef(0);
   const [sessionNotice, setSessionNotice] = useState("");
+  const [sessionLoading, setSessionLoading] = useState(true);
   const storeName = detail?.locationName || storeLabel || rows[0]?.locationName || "店舗名を読み込み中…";
   useEffect(() => {
     const current = shopify.cart.current;
@@ -81,11 +83,13 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     const refreshSession = async () => {
       if (customerIdRef.current !== customerId) return;
       const request = ++sessionRevision.current;
+      setSessionLoading(true);
       try {
         const result = await reservationApi({ command: "sessionDisplay", locationId: draftLocation.current, customerId: customerId ? `gid://shopify/Customer/${customerId}` : null });
         if (!alive || request !== sessionRevision.current || customerIdRef.current !== customerId) return;
         setStoreLabel(result.locationName); setSelectedCustomer(result.customer); setSessionNotice(result.notice || "");
       } catch (error) { if (alive && request === sessionRevision.current && customerIdRef.current === customerId) { setSessionNotice(error.message); setStoreLabel(previous => previous || "店舗名を取得できません"); } }
+      finally { if (alive && request === sessionRevision.current && customerIdRef.current === customerId) setSessionLoading(false); }
     };
     void refreshSession(); globalThis.addEventListener?.("focus", refreshSession);
     return () => { alive = false; globalThis.removeEventListener?.("focus", refreshSession); };
@@ -186,9 +190,11 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const searchProducts = useCallback(async (value, after = null) => {
     const revision = ++searchRevision.current;
     setSearching(true); setError("");
+    if (!after) { setSearchLoaded(false); setProducts([]); setProductPageInfo({ hasNextPage: false, endCursor: null }); }
     try {
       const data = await reservationApi({ command: "products", query: value, after, first: limits.searchLimit, images });
       if (revision !== searchRevision.current) return;
+      setSearchLoaded(true);
       setProducts(previous => after ? [...new Map([...previous, ...data.products].map(product => [product.id, product])).values()] : data.products);
       setProductPageInfo(data.pageInfo);
       if (!after) setProductPage(1);
@@ -197,6 +203,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   }, [images, limits.searchLimit]);
   useEffect(() => {
     searchRevision.current += 1;
+    setSearchLoaded(false);
     if (screen !== "products" || !search.trim()) { setProducts([]); setProductPageInfo({ hasNextPage: false, endCursor: null }); setSearching(false); return; }
     setSearching(true);
     const timer = setTimeout(() => { void searchProducts(search); }, 300);
@@ -343,7 +350,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         {(listLoaded ? rows : []).map(row => <s-box key={row.id}><s-clickable onClick={() => open(row)} disabled={busy}><s-box padding="base"><s-stack gap="small" direction="block">
           <s-stack direction="inline" justifyContent="space-between"><s-text type="strong">{row.id} ›</s-text><s-text>登録 {new Date(row.createdAt).toLocaleDateString("ja-JP", { timeZone: row.timezone || "Asia/Tokyo" })}</s-text></s-stack>
           <s-text>受取期限: {row.dueDate}</s-text><s-text>{row.name}・{row.phone}</s-text><s-text>店舗: {row.locationName}</s-text>
-          <s-stack direction="inline" justifyContent="space-between"><s-badge tone={row.needsFollowUp ? "warning" : "info"}>{row.needsFollowUp ? "要対応" : RESERVATION_LABELS[row.status]}</s-badge><s-text>{row.lines.length}件・合計{row.lines.reduce((sum, line) => sum + line.quantity, 0)}点</s-text></s-stack>
+          <s-stack direction="inline" justifyContent="space-between"><s-badge tone={row.needsFollowUp ? "warning" : reservationStatusTone(row.status)}>{row.needsFollowUp ? "要対応" : RESERVATION_LABELS[row.status]}</s-badge><s-text>{row.lines.length}件・合計{row.lines.reduce((sum, line) => sum + line.quantity, 0)}点</s-text></s-stack>
         </s-stack></s-box></s-clickable><s-divider /></s-box>)}
       </> : null}
       {screen === "product-choice" ? <>
@@ -358,7 +365,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         {customerId ? <>
           <s-text type="strong">{selectedCustomer?.name || "POSでお客様を選択済みです"}</s-text>
           {selectedCustomer?.phone ? <s-text>{selectedCustomer.phone}</s-text> : null}
-          {!selectedCustomer ? <s-text type="small">お客様の情報を確認しています。取得できない場合は利用権限を確認してください。</s-text> : null}
+          {!selectedCustomer ? <s-text type="small">{sessionLoading ? "お客様の情報を確認しています。" : "お客様の情報を取得できませんでした。表示された理由を確認してください。"}</s-text> : null}
           {selectedCustomer?.hasPhone === false ? <s-text-field disabled={busy || !ready || Boolean(submitted)} label="連絡用の電話番号（未登録）" value={draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone || "" : ""} onInput={e => patch({ memberPhone: e.currentTarget.value, memberPhoneCustomerId: String(customerId) })} /> : null}
           <s-text type="small">お客様の変更はPOSのカートで行えます。</s-text>
         </> : <>
@@ -368,7 +375,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         </>}
       </> : null}
       {screen === "products" ? <>
-        {search.trim() && !searching && !products.length ? <s-text>一致する商品はありません。</s-text> : null}
+        {search.trim() && searchLoaded && !searching && !products.length ? <s-text>一致する商品はありません。</s-text> : null}
         {!search.trim() && !draft.lines.length ? <s-text>商品名・SKU・バーコードで検索するか、スキャンして追加してください。</s-text> : null}
         {productView.displayed.map(product => <ReservationProductRow key={product.id || product.variantId} product={product} images={images} candidate={Boolean(search.trim())} disabled={busy || scanBusy || !ready || Boolean(submitted)} quantity={search.trim() ? draft.lines.find(line => line.variantId === product.id)?.quantity || 0 : product.quantity}
           onAdd={quantity => add(product, quantity)} onSet={quantity => setQuantity(product.variantId, quantity)} onRemove={() => patch({ lines: latestDraft.current.lines.filter(line => line.variantId !== product.variantId) })} />)}
@@ -391,7 +398,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       </> : null}
       {screen === "cancel" && detail ? <><s-text>表示した商品の取置を解除し、販売可能在庫に戻します。</s-text>{detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}</> : null}
       {(screen === "detail" || screen === "actions") && detail ? <>
-        <s-text type="strong">{detail.id}</s-text><s-badge tone={detail.needsFollowUp ? "warning" : "info"}>{RESERVATION_LABELS[detail.status]}</s-badge>
+        <s-text type="strong">{detail.id}</s-text><s-badge tone={detail.needsFollowUp ? "warning" : reservationStatusTone(detail.status)}>{RESERVATION_LABELS[detail.status]}</s-badge>
         <s-text>{detail.name}</s-text><s-text>{detail.phone}</s-text>{!detail.contactVisible ? <s-text>連絡先の確認には権限が必要です。</s-text> : null}
         <s-text>{detail.locationName}・受取期限 {detail.dueDate}</s-text>
         {detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}

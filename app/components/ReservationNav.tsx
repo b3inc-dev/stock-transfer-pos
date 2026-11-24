@@ -27,7 +27,7 @@ export function ReservationNav({ selected }: { selected: "settings" | "receipt" 
 .Admin-body a.Reservation-row:not(.Admin-primary):not(.Admin-secondary) {color:inherit;text-decoration:none;overflow-wrap:anywhere;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 16px;padding:20px 12px;border-bottom:1px solid #e1e3e5;}
 .Reservation-row p {margin:0;}
 .Reservation-row-end {text-align:right;}
-@media(max-width:700px){.Reservation-history{grid-template-columns:minmax(0,1fr);}.Reservation-tabs{padding-inline:0;}}
+@media(max-width:767px){.Reservation-history{grid-template-columns:minmax(0,1fr);}.Reservation-tabs{padding-inline:0;}}
 `}</style><nav className="Reservation-tabs" aria-label="取置のメニュー">{items.map(item =>
     <GuardedLink key={item.key} to={item.path + suffix} className={selected === item.key ? "is-active" : undefined} aria-current={selected === item.key ? "page" : undefined}>{item.label}</GuardedLink>
   )}</nav></>;

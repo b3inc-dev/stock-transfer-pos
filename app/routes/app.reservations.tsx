@@ -6,7 +6,7 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { adminPlanRedirect } from "../utils/plan-gate.server";
 import { reservationsEnabled } from "../utils/reservations.server";
-import { RESERVATION_LABELS } from "../../extensions/common/reservations.js";
+import { RESERVATION_LABELS, reservationStatusTone } from "../../extensions/common/reservations.js";
 import { GuardedLink, SecondaryLink, StateBadge, StatusBanner, SuccessToast } from "../components/admin-ui";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -83,7 +83,7 @@ export default function Reservations() {
             <strong>{row.id}</strong><span className="Reservation-row-end Admin-note">{new Intl.DateTimeFormat("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(row.createdAt))}</span>
             <p className="Admin-note">店舗: {row.locationName}</p><span />
             <p className="Admin-note">受取期限: {row.dueDate}</p><span />
-            <span><StateBadge label={RESERVATION_LABELS[row.status as keyof typeof RESERVATION_LABELS] || "確認中"} tone={row.status === "held" || row.status === "sold" ? "success" : row.status === "cancelled" ? "neutral" : "warning"} /></span><span className="Reservation-row-end Admin-note">{lines.length}件・合計{quantity}点</span>
+            <span><StateBadge label={RESERVATION_LABELS[row.status as keyof typeof RESERVATION_LABELS] || "確認中"} tone={reservationStatusTone(row.status)} /></span><span className="Reservation-row-end Admin-note">{lines.length}件・合計{quantity}点</span>
           </GuardedLink>;
         })}
         <div className="Admin-pager">{page > 0 ? <SecondaryLink to={pageLink(page - 1)}>前へ</SecondaryLink> : null}{(page + 1) * 25 < total ? <SecondaryLink to={pageLink(page + 1)}>次へ</SecondaryLink> : null}</div>
