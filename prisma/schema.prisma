@@ -228,6 +228,8 @@ model StockReservationEvent {
 model StockReservationSettings {
   shop       String @id
   days       Int @default(7)
+  receiptLayout Json?
+  receiptVersion Int @default(0)
   updatedAt  DateTime @updatedAt
 }
 

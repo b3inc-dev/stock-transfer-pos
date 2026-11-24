@@ -8,7 +8,7 @@ const row = { id: "R-12345678-1234-1234-1234-123456789abc", shop, locationId, lo
 before(async () => {
   globalThis.reservationApiFixture = {
     token: { dest: `https://${shop}`, sub: "123" },
-    db: { stockReservation: {
+    db: { stockReservationSettings: { async findUnique() { return globalThis.reservationApiFixture.receiptLayout ? { receiptLayout: globalThis.reservationApiFixture.receiptLayout } : null; } }, stockReservation: {
       async findFirst({ where }) { dbReads++; return where.id === row.id && where.shop === shop && where.locationId === locationId ? structuredClone(row) : null; },
       async findMany() { dbReads++; return [structuredClone(row)]; },
     } },
@@ -25,7 +25,7 @@ before(async () => {
   ({ action, loader } = await vite.ssrLoadModule("/app/routes/api.reservations.tsx"));
 });
 after(async () => { delete globalThis.reservationApiFixture; delete process.env.RESERVATIONS_ENABLED; delete process.env.RESERVATION_POS_ACCESS; await vite?.close(); });
-beforeEach(() => { globalThis.reservationApiFixture.graphql = async () => { throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
+beforeEach(() => { globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async () => { throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
 const request = (body) => new Request("https://app.invalid/api/reservations", { method: "POST", body: JSON.stringify({ locationId, ...body }), headers: { "Content-Type": "application/json" } });
 const post = body => action({ request: request(body) });
 test("disabled feature performs no database access", async () => { delete process.env.RESERVATIONS_ENABLED; assert.equal((await post({ command: "detail", id: row.id })).status, 404); assert.equal(dbReads, 0); });
@@ -68,4 +68,13 @@ test("scanner queries use exact codes; restoring metadata uses validated variant
   assert.equal(calls[0].variables.query, 'barcode:"12345678" OR sku:"12345678"');
   await post({ command: "products", ids: ["gid://shopify/ProductVariant/1", "invalid", "gid://shopify/ProductVariant/1"] });
   assert.deepEqual(calls[1].variables.ids, ["gid://shopify/ProductVariant/1"]); assert.equal(calls[1].variables.location, locationId);
+});
+
+test("printed receipt uses the saved layout and shared renderer used by admin preview", async () => {
+  const layout = { receiptTitle: "店舗の取置伝票", customerCopy: true, storeCopy: false, paperWidth: 58 };
+  globalThis.reservationApiFixture.receiptLayout = layout;
+  const response = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=${encodeURIComponent(locationId)}`) });
+  const { renderReservationReceipt } = await import("../extensions/common/reservationReceipt.js");
+  assert.equal(await response.text(), renderReservationReceipt(row, layout));
+  assert.match(response.headers.get("Content-Security-Policy"), /img-src https:/);
 });
