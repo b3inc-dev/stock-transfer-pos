@@ -1,3 +1,4 @@
+import { receiptTypography } from "./receiptTypography";
 import { protectReservationDocument } from "./reservationReceiptDocument";
 /**
  * レシートのレイアウト → 印字 HTML（プレビューと印字で同じ関数を使う）
@@ -18,15 +19,8 @@ import { getBlockDef, type SettingDef } from "./receiptLayoutBlocks";
 import {
   LAYOUT_LIMITS,
   resolvePaperPrintStyle,
-  type FontFamily,
   type ReceiptLayout,
 } from "./receiptLayoutSchema";
-
-const FONT_STACKS: Record<FontFamily, string> = {
-  sans: `"Hiragino Sans", "Noto Sans JP", "Yu Gothic", system-ui, sans-serif`,
-  serif: `"Hiragino Mincho ProN", "Noto Serif JP", "Yu Mincho", serif`,
-  mono: `ui-monospace, "SFMono-Regular", "Noto Sans Mono", monospace`,
-};
 
 export function paperWidthPx(mm: 58 | 80): number {
   // CSS px は 96dpi。プリンターの 203dpi のドット数とは別。
@@ -175,14 +169,13 @@ export function isSafeImageUrl(url: string): boolean {
 
 /** 画面の大きさ・文字の大きさなど、全部のレシートに共通の CSS */
 export function baseCss(layout: Pick<ReceiptLayout, "paperWidthMm" | "style" | "paperStyles">): string {
-  const st = layout.style;
   const p = resolvePaperPrintStyle(layout);
-  const bodyFont = layout.paperStyles?.[layout.paperWidthMm] ? `${p.fontSizePt}pt` : `${st.fontSizePx}px`;
+  const typography = receiptTypography(layout);
   return [
     `*{box-sizing:border-box}`,
     `@page{size:auto;margin:0}`,
     `html,body{margin:0;padding:0;background:#fff}`,
-    `body{padding:${p.marginYMm}mm ${p.marginXMm}mm;width:100%;max-width:100%;overflow-wrap:anywhere;color:#000;font-family:${FONT_STACKS[st.fontFamily]};font-size:${bodyFont};line-height:${p.lineHeight};font-weight:${st.fontWeight}}`,
+    `body{padding:${p.marginYMm}mm ${p.marginXMm}mm;width:100%;max-width:100%;overflow-wrap:anywhere;color:#000;font-family:${typography.fontFamily};font-size:${typography.fontSize};line-height:${p.lineHeight};font-weight:${typography.fontWeight}}`,
     `p{margin:0}`,
     `.blk{margin:6px 0}`,
     `.a-left{text-align:left}.a-center{text-align:center}.a-right{text-align:right}`,
@@ -192,7 +185,7 @@ export function baseCss(layout: Pick<ReceiptLayout, "paperWidthMm" | "style" | "
     `.row{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin:2px 0}`,
     `.row>span:first-child{min-width:0;flex:1;overflow-wrap:anywhere}`,
     `.row>span:last-child{min-width:0;max-width:65%;text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}`,
-    `.print-value,.row .print-value{font-size:${p.amountFontSizePt}pt}`,
+    `.print-value,.row .print-value{font-size:${typography.quantitySize}}`,
     // The standard total/receipt amount block uses l (1.3): normalize it to
     // the recommended 14pt total. Other sizes retain their relative ratios.
     // Do not force bold here: totals inherit total_bold from their row;
