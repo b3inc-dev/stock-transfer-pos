@@ -33,3 +33,8 @@ export function createReservationDraftWriter(storage, storageKey) {
     },
   };
 }
+
+/** Keep guest input separate from the exact wire payload used for an uncertain member submission. */
+export function restoreReservationInputDraft(saved) {
+  return { ...saved, phone: saved.submitted === true ? saved.guestDraftPhone ?? (saved.customerId ? "" : saved.phone) : saved.phone };
+}

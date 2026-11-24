@@ -85,3 +85,13 @@ test("failed save leaves Back pending for correction and a subsequent save can r
   assert.equal(dismissed, false); fail = false;
   await writer.save({ name: "latest" }); assert.equal(stored.name, "latest");
 });
+
+test("member submission restore preserves guest contact separately from its exact retry payload", async () => {
+  const { restoreReservationInputDraft } = await import("../extensions/stock-transfer-reservation/src/productEntry.js");
+  const wire = { submitted: true, customerId: "gid://shopify/Customer/2", name: "Guest Alice", phone: "08022222222", guestDraftPhone: "09011111111", memberPhone: "08022222222", memberPhoneCustomerId: "2", lines: [] };
+  const restored = restoreReservationInputDraft(wire);
+  assert.equal(restored.phone, "09011111111"); assert.equal(restored.name, "Guest Alice"); assert.equal(wire.phone, "08022222222");
+  assert.equal(restoreReservationInputDraft({ ...wire, guestDraftPhone: undefined }).phone, "");
+  const editedAfterRejection = { ...restored, submitted: false, phone: "09033333333" };
+  assert.equal(restoreReservationInputDraft(editedAfterRejection).phone, "09033333333");
+});

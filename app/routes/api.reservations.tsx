@@ -5,11 +5,11 @@ import { authenticate, unauthenticated } from "../shopify.server";
 import { planBlockedPosResponse } from "../utils/plan-gate.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { ReservationCheckoutRejected, createReservation, getReservation, listReservations, reservationAccountAccess, reservationDueCount, publicReservation, reservationCommand, reservationQuery, reservationsEnabled } from "../utils/reservations.server";
-import { receiptHtml } from "../../extensions/common/reservations.js";
+import { localDate, maskPhone, receiptHtml } from "../../extensions/common/reservations.js";
 
 const headers = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Cache-Control": "private, no-store" };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers });
-async function context(request: Request) {
+async function context(request: Request, metadataOnly = false) {
   if (!reservationsEnabled()) throw new Response("Not found", { status: 404, headers });
   const { sessionToken } = await authenticate.pos(request);
   const shop = new URL(sessionToken.dest).hostname;
@@ -19,8 +19,8 @@ async function context(request: Request) {
   const blocked = await planBlockedPosResponse({ shop, feature: "reservation", getAdmin: () => withGraphQLRetry(admin), headers });
   if (blocked) throw blocked;
   const access = reservationAccountAccess(shop, actor);
-  if (!access) throw new Response(JSON.stringify({ ok: false, error: "このPOSアカウントには取置の利用権限がありません。管理者に確認してください" }), { status: 403, headers: { ...headers, "Content-Type": "application/json" } });
-  return { shop, actor, admin, access, reveal: access.contact };
+  if (!access && !metadataOnly) throw new Response(JSON.stringify({ ok: false, error: "このPOSアカウントには取置の利用権限がありません。管理者に確認してください" }), { status: 403, headers: { ...headers, "Content-Type": "application/json" } });
+  return { shop, actor, admin, access: access || { locations: [], contact: false }, reveal: access?.contact === true };
 }
 export async function loader({ request }: LoaderFunctionArgs) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
@@ -43,10 +43,30 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
   try {
-    const { shop, actor: authenticatedActor, admin, access, reveal } = await context(request);
     const body = await request.json();
+    const metadataOnly = body.command === "sessionDisplay";
+    const { shop, actor: authenticatedActor, admin, access, reveal } = await context(request, metadataOnly);
     const locationId = String(body.locationId || "");
     if (!/^gid:\/\/shopify\/Location\/\d+$/.test(locationId)) return json({ error: "POS店舗を取得できません" }, 400);
+    if (metadataOnly) {
+      const info = await reservationQuery(withGraphQLRetry(admin), `#graphql query ReservationSessionDisplay($id: ID!) { location(id: $id) { id name isActive } shop { ianaTimezone } }`, { id: locationId });
+      if (!info.location?.isActive) return json({ ok: false, error: "有効な店舗を選択してください" }, 400);
+      const permitted = access.locations.includes(locationId);
+      let timezone = "";
+      try { timezone = JSON.parse(process.env.RESERVATION_LOCATION_TIMEZONES || "{}")[shop]?.[locationId] || ""; } catch { /* no configured store zone */ }
+      let today: string | null = null;
+      try { today = localDate(Date.now(), timezone || info.shop.ianaTimezone); } catch { /* don't invent a date */ }
+      let customer: { name: string; phone: string; hasPhone: boolean } | null = null;
+      let notice = permitted ? "" : "管理者による、このPOS利用者と店舗の取置利用設定が必要です。";
+      const customerId = String(body.customerId || "");
+      if (permitted && /^gid:\/\/shopify\/Customer\/\d+$/.test(customerId)) {
+        try {
+          const data = await reservationQuery(withGraphQLRetry(admin), `#graphql query ReservationSelectedCustomer($id: ID!) { customer(id: $id) { displayName phone } }`, { id: customerId });
+          if (data.customer) customer = { name: data.customer.displayName, phone: data.customer.phone ? (reveal ? data.customer.phone : maskPhone(data.customer.phone)) : "", hasPhone: Boolean(data.customer.phone) };
+        } catch { notice = "選択済み顧客の情報を取得できません。顧客データの利用権限を確認してください。"; }
+      }
+      return json({ ok: true, locationName: info.location.name, today, customer, accessReady: permitted, notice });
+    }
     if (!access.locations.includes(locationId)) return json({ ok: false, error: "この店舗の取置を利用する権限がありません" }, 403);
     const pinned = /^\d+$/.test(String(body.staffMemberId || "")) ? String(body.staffMemberId) : "未取得";
     const actor = `${authenticatedActor} / POS担当 ${pinned}`;

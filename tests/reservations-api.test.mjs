@@ -78,3 +78,19 @@ test("printed receipt uses the saved layout and shared renderer used by admin pr
   assert.equal(await response.text(), renderReservationReceipt(row, layout));
   assert.match(response.headers.get("Content-Security-Policy"), /img-src https:/);
 });
+
+test("session display can show store name without granting access to customer data or reservations", async () => {
+  delete process.env.RESERVATION_POS_ACCESS; const calls = [];
+  globalThis.reservationApiFixture.graphql = async (query, { variables }) => { calls.push({ query, variables }); assert.ok(query.includes("ReservationSessionDisplay")); return Response.json({ data: { location: { id: locationId, name: "店舗の実名", isActive: true }, shop: { ianaTimezone: "Asia/Tokyo" } } }); };
+  const result = await (await post({ command: "sessionDisplay", customerId: "gid://shopify/Customer/1", contact: true })).json();
+  assert.equal(result.locationName, "店舗の実名"); assert.equal(result.customer, null); assert.equal(result.accessReady, false); assert.match(result.notice, /利用設定/); assert.equal(calls.length, 1);
+  assert.equal((await post({ command: "products", query: "test" })).status, 403);
+});
+test("selected customer display respects signed contact grants and distinguishes missing phone", async () => {
+  let phone = "09012345678";
+  globalThis.reservationApiFixture.graphql = async query => Response.json({ data: query.includes("ReservationSessionDisplay") ? { location: { id: locationId, name: "店舗A", isActive: true }, shop: { ianaTimezone: "Asia/Tokyo" } } : { customer: { displayName: "選択されたお客様", phone } } });
+  const masked = await (await post({ command: "sessionDisplay", customerId: "gid://shopify/Customer/1", contact: true })).json();
+  assert.equal(masked.customer.name, "選択されたお客様"); assert.equal(masked.customer.phone, "•••• 5678");
+  phone = null; const noPhone = await (await post({ command: "sessionDisplay", customerId: "gid://shopify/Customer/1" })).json();
+  assert.equal(noPhone.customer.hasPhone, false); assert.equal(noPhone.customer.phone, "");
+});
