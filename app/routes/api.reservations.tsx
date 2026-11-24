@@ -1,3 +1,5 @@
+import { japaneseCustomerName } from "../../extensions/common/customerDisplay.js";
+import { normalizeReservationReceiptSettings, renderConfiguredReservationReceipt } from "../services/reservationReceiptLayout";
 import db from "../db.server";
 import { buildVariantSearchQuery } from "../../extensions/common/variantSearch.js";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
@@ -5,7 +7,7 @@ import { authenticate, unauthenticated } from "../shopify.server";
 import { planBlockedPosResponse } from "../utils/plan-gate.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { ReservationCheckoutRejected, createReservation, getReservation, listReservations, hasReservationPosAccessConfiguration, publicReservationDefaultsEnabled, reservationAccountAccess, reservationDueCount, publicReservation, reservationCommand, reservationQuery, reservationsEnabled } from "../utils/reservations.server";
-import { localDate, maskPhone, receiptHtml } from "../../extensions/common/reservations.js";
+import { localDate, maskPhone } from "../../extensions/common/reservations.js";
 
 const headers = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Cache-Control": "private, no-store" };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers });
@@ -45,7 +47,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const row = await getReservation(shop, locationId, id);
     if (!["held", "checkout", "sold", "cancelled"].includes(row.status)) return json({ error: "登録を確認してから印刷してください" }, 409);
     const settings = await db.stockReservationSettings.findUnique({ where: { shop }, select: { receiptLayout: true } });
-    return new Response(receiptHtml({ ...row, lines: row.lines }, settings?.receiptLayout), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src https:", "X-Content-Type-Options": "nosniff" } });
+    const requestedCopy = url.searchParams.get("copy");
+    if (requestedCopy && !["customer", "store"].includes(requestedCopy)) return json({ ok: false, error: "控えの種類を選んでください" }, 400);
+    const options = normalizeReservationReceiptSettings(settings?.receiptLayout);
+    const copy = requestedCopy === "store" ? "store" : requestedCopy === "customer" ? "customer" : options.customerCopy ? "customer" : "store";
+    return new Response(renderConfiguredReservationReceipt(row, settings?.receiptLayout, copy), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:", "X-Content-Type-Options": "nosniff" } });
   } catch (error) {
     if (error instanceof Response) return error;
     return json({ ok: false, error: "取置控えを取得できません。店舗と登録内容を確認してください" }, 400);
@@ -73,8 +79,8 @@ export async function action({ request }: ActionFunctionArgs) {
       const customerId = String(body.customerId || "");
       if (permitted && !missingScopes.includes("read_customers") && /^gid:\/\/shopify\/Customer\/\d+$/.test(customerId)) {
         try {
-          const data = await reservationQuery(withGraphQLRetry(admin), `#graphql query ReservationSelectedCustomer($id: ID!) { customer(id: $id) { displayName phone } }`, { id: customerId });
-          if (data.customer) customer = { name: data.customer.displayName, phone: data.customer.phone ? (reveal ? data.customer.phone : maskPhone(data.customer.phone)) : "", hasPhone: Boolean(data.customer.phone) };
+          const data = await reservationQuery(withGraphQLRetry(admin), `#graphql query ReservationSelectedCustomer($id: ID!) { customer(id: $id) { firstName lastName displayName phone } }`, { id: customerId });
+          if (data.customer) customer = { name: japaneseCustomerName(data.customer), phone: data.customer.phone ? (reveal ? data.customer.phone : maskPhone(data.customer.phone)) : "", hasPhone: Boolean(data.customer.phone) };
         } catch { notice = "選択済み顧客の情報を取得できません。顧客データの利用権限を確認してください。"; }
       }
       return json({ ok: true, locationName: info.location.name, today, customer, accessReady: permitted && !missingScopes.length, notice });
@@ -89,6 +95,19 @@ export async function action({ request }: ActionFunctionArgs) {
     if (command === "count") return json({ ok: true, count: await reservationDueCount(shop, locationId) });
     if (command === "list") {
       return json({ ok: true, ...await listReservations(shop, locationId, withGraphQLRetry(admin), String(body.mode || "due"), String(body.query || "").slice(0, 100), Math.max(0, Math.floor(Number(body.page) || 0)), String(body.dueDate || "")) });
+    }
+    if (command === "customers") {
+      if (missingScopes.includes("read_customers")) return json({ ok: false, error: "ストア管理者が管理画面の「取置 → 設定」で顧客の読み取りを許可してください" }, 403);
+      const query = String(body.query || "").trim().slice(0, 100);
+      if (query.length < 2) return json({ ok: true, customers: [], hasNextPage: false });
+      const data = await reservationQuery(withGraphQLRetry(admin), `#graphql
+        query ReservationCustomerPicker($query: String!) { customers(first: 20, query: $query) { nodes { id firstName lastName displayName phone } pageInfo { hasNextPage } } }`, { query });
+      return json({ ok: true, customers: data.customers.nodes.map((customer: { id: string; firstName: string; lastName: string; displayName: string; phone: string | null }) => ({ id: customer.id, name: japaneseCustomerName(customer), phone: reveal ? customer.phone || "" : maskPhone(customer.phone || "") })), hasNextPage: data.customers.pageInfo.hasNextPage });
+    }
+    if (command === "receiptOptions") {
+      const saved = await db.stockReservationSettings.findUnique({ where: { shop }, select: { receiptLayout: true } });
+      const options = normalizeReservationReceiptSettings(saved?.receiptLayout);
+      return json({ ok: true, customerCopy: options.customerCopy, storeCopy: options.storeCopy });
     }
     if (command === "productSettings") {
       const data = await reservationQuery(withGraphQLRetry(admin), `#graphql query ReservationProductSettings { currentAppInstallation { metafield(namespace: "stock_transfer_pos", key: "settings_v1") { value } } }`);

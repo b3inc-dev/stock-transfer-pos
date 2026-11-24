@@ -76,8 +76,8 @@ test("printed receipt uses the saved layout and shared renderer used by admin pr
   const layout = { receiptTitle: "店舗の取置伝票", customerCopy: true, storeCopy: false, paperWidth: 58 };
   globalThis.reservationApiFixture.receiptLayout = layout;
   const response = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=${encodeURIComponent(locationId)}`) });
-  const { renderReservationReceipt } = await import("../extensions/common/reservationReceipt.js");
-  assert.equal(await response.text(), renderReservationReceipt(row, layout));
+  const { renderConfiguredReservationReceipt } = await vite.ssrLoadModule("/app/services/reservationReceiptLayout.ts");
+  assert.equal(await response.text(), renderConfiguredReservationReceipt(row, layout, "customer"));
   assert.match(response.headers.get("Content-Security-Policy"), /img-src https:/);
 });
 
@@ -228,4 +228,22 @@ test("public newly added active location needs no access or timezone environment
   globalThis.reservationApiFixture.graphql = async (query, { variables }) => { parse(query); return Response.json({ data: { location: { id: variables.id, name: "追加店舗", isActive: true }, shop: { ianaTimezone: "Europe/Paris" }, currentAppInstallation: { accessScopes: [{ handle: "read_orders" }, { handle: "read_customers" }] } } }); };
   const display = await (await post({ command: "sessionDisplay", locationId: added })).json(); assert.equal(display.accessReady, true); assert.equal(display.locationName, "追加店舗");
   const count = await (await post({ command: "count", locationId: added })).json(); assert.equal(count.count, 0);
+});
+
+test("customer picker uses Japanese name order and limits to authenticated shop with masked contacts", async () => {
+  let received;
+  globalThis.reservationApiFixture.graphql = async (query, { variables }) => { received = { query, variables }; return Response.json({ data: { customers: { nodes: [{ id: "gid://shopify/Customer/1", firstName: "太郎", lastName: "山田", displayName: "太郎 山田", phone: "+819012345678" }], pageInfo: { hasNextPage: false } } } }); };
+  const response = await post({ command: "customers", query: "山田" });
+  const result = await response.json(); assert.equal(response.status, 200); assert.equal(result.customers[0].name, "山田 太郎"); assert.equal(result.customers[0].phone, "•••• 5678");
+  assert.match(received.query, /customers\(first: 20/); assert.equal(received.variables.query, "山田");
+  delete process.env.RESERVATION_POS_ACCESS;
+  assert.equal((await post({ command: "customers", query: "山田" })).status, 403);
+});
+test("receipt options and copy endpoint honor merchant switches", async () => {
+  globalThis.reservationApiFixture.receiptLayout = { customerCopy: false, storeCopy: true };
+  const result = await (await post({ command: "receiptOptions" })).json(); assert.equal(result.customerCopy, false); assert.equal(result.storeCopy, true);
+  const base = `https://app.invalid/api/reservations?receipt=${row.id}&locationId=${encodeURIComponent(locationId)}`;
+  assert.equal((await loader({ request: new Request(`${base}&copy=customer`) })).status, 400);
+  const store = await loader({ request: new Request(`${base}&copy=store`) }); assert.equal(store.status, 200); assert.match(await store.text(), /店舗保管用/);
+  assert.equal((await loader({ request: new Request(`${base}&copy=invalid`) })).status, 400);
 });

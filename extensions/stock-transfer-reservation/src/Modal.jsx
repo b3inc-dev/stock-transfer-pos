@@ -1,3 +1,5 @@
+import { japanesePhoneDisplay } from "../../common/customerDisplay.js";
+import { ReservationCustomerPicker, CUSTOMER_PICKER_ID } from "./CustomerPicker.jsx";
 import { ReservationPageControls } from "./HistoryControls.jsx";
 import { ReservationProductRow } from "./ProductRow.jsx";
 import { addReservationProduct, exactScanProduct, createReservationScanQueue } from "./productList.js";
@@ -9,7 +11,7 @@ import { render } from "preact";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { locationId, reservationApi, printReservation } from "./api.js";
 import { appendProductToDraft, createReservationDraftWriter, loadProductReservationDraft, restoreReservationInputDraft } from "./productEntry.js";
-import { handoffReservationCart, RESERVATION_LABELS, reservationStatusTone } from "../../common/reservations.js";
+import { handoffReservationCart, RESERVATION_LABELS, reservationStatusTone, RESERVATION_PROPERTY, CHECKOUT_PROPERTY } from "../../common/reservations.js";
 
 const DRAFT_KEY = "pos_stock_reservation_draft_v1";
 const newId = () => `R-${crypto.randomUUID()}`;
@@ -18,6 +20,9 @@ export default async () => render(<ReservationModal />, document.body);
 // Preact component props are documented above and checked by the local SDK build.
 // eslint-disable-next-line react/prop-types
 export function ReservationModal({ fromProduct = false, initialProduct = null }) {
+  const customerPickerRef = useRef(null);
+  const confirmRegistrationRef = useRef(null);
+  const [receiptOptions, setReceiptOptions] = useState(null);
   const [screen, setScreenState] = useState("create");
   const [rows, setRows] = useState([]);
   const [mode, setMode] = useState("due");
@@ -36,6 +41,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   const [images, setImages] = useState(true);
   const [cameraVisible, setCameraVisible] = useState(false);
   const [productPage, setProductPage] = useState(1);
+  const [candidateLimit, setCandidateLimit] = useState(20);
   const [limits, setLimits] = useState({ searchLimit: 50, productLimit: 250 });
   const [productPageInfo, setProductPageInfo] = useState({ hasNextPage: false, endCursor: null });
   const searchRevision = useRef(0);
@@ -169,6 +175,28 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     const next = { ...latestDraft.current, ...value };
     latestDraft.current = next; setDraft(next);
   };
+  const customerChange = customer => {
+    let changed = false;
+    return run(async () => {
+      if (!ready || submitted || screenRef.current !== "create") throw new Error("受付画面でお客様を確認してください");
+      if (locationId() !== draftLocation.current) throw new Error("POS店舗が変わっています。元の店舗で開いてください");
+      const cart = shopify.cart.current.value;
+      if (cart.editable === false || cart.properties?.[RESERVATION_PROPERTY] || cart.properties?.[CHECKOUT_PROPERTY]) throw new Error("取置の会計中です。カートのお会計を先に完了してください");
+      if (customer) {
+        const id = Number(customer.id.split("/").pop());
+        if (!Number.isSafeInteger(id) || id <= 0) throw new Error("お客様を選び直してください");
+        await shopify.cart.setCustomer({ id });
+      } else await shopify.cart.removeCustomer();
+      changed = true; customerPickerRef.current?.hideOverlay?.();
+    }).then(() => changed);
+  };
+  useEffect(() => {
+    if (screen !== "create" && screen !== "detail" && screen !== "actions") return;
+    let alive = true;
+    setReceiptOptions(null);
+    reservationApi({ command: "receiptOptions" }).then(result => { if (alive) setReceiptOptions(result); }).catch(error => { if (alive) setError(error.message); });
+    return () => { alive = false; };
+  }, [screen]);
   const open = row => run(async () => { const result = await reservationApi({ command: "detail", id: row.id }); setDetail(result.row); setConfirm(false); setScreen("detail"); });
   useEffect(() => {
     if (screen !== "products") return;
@@ -238,10 +266,10 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     try { if (cameraVisible) shopify.scanner.hideCameraScanner(); else shopify.scanner.showCameraScanner(); setCameraVisible(!cameraVisible); }
     catch { setError("カメラを開けません。POSのカメラ権限を確認してください"); }
   };
-  const changeSearch = value => { searchRevision.current += 1; setProducts([]); setProductPageInfo({ hasNextPage: false, endCursor: null }); setSearch(value); setProductPage(1); };
-  const candidates = getListPageSlice(products, productPage, Math.min(50, limits.productLimit));
+  const changeSearch = value => { searchRevision.current += 1; setProducts([]); setProductPageInfo({ hasNextPage: false, endCursor: null }); setSearch(value); setCandidateLimit(20); };
+  const displayedCandidates = products.slice(0, candidateLimit);
   const selectedLines = getListPageSlice(draft.lines, productPage, Math.min(50, limits.productLimit));
-  const productView = search.trim() ? candidates : selectedLines;
+
   const save = () => run(async () => {
     if (!ready) throw new Error("前回の下書きを確認しています");
     const customer = shopify.cart.current.value.customer;
@@ -253,16 +281,18 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     try { await writer.save(payload); }
     catch (e) { latestDraft.current = previousSubmitted || draft; setSubmitted(previousSubmitted); throw e; }
     const data = await reservationApi({ command: "create", ...payload });
-    setDetail(data.row); setScreen("detail");
+    setDetail(data.row);
     if (data.row.status === "held") {
       const empty = { id: newId(), lines: [], name: "", phone: "", faceToFace: true, print: false, memberPhone: "", memberPhoneCustomerId: "" };
       latestDraft.current = empty; setSubmitted(null); setDraft(empty);
-      await writer.save(empty);
+      try { await writer.save(empty); } catch { setError("取置は登録済みです。下書きの消去を確認できませんでした。同じ番号で結果を確認してください"); }
       shopify.toast.show("取置を登録しました。商品を取置棚へ移してください");
-      if (draft.faceToFace && draft.print) {
-        try { await printReservation(data.row); } catch { setError("取置は登録済みです。印刷できませんでした。詳細から再印刷してください"); }
-      }
+      try {
+        const options = await reservationApi({ command: "receiptOptions" });
+        if (options.customerCopy) await printReservation(data.row, "customer");
+      } catch { setError("取置は登録済みです。お客様控えを印刷できませんでした。詳細の「連絡・印刷」から再印刷してください"); }
     }
+    setScreen("detail");
   });
   const command = (name, extra = {}) => run(async () => {
     const result = await reservationApi({ command: name, id: detail.id, version: detail.version, ...extra });
@@ -302,22 +332,21 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
   });
   const goBack = () => {
     if (screen === "products") { setScreen("create"); setError(""); return; }
-    if (screen === "review") { setScreen("products"); setError(""); return; }
     if (screen === "cancel" || screen === "actions") { setScreen("detail"); setConfirm(false); setError(""); return; }
     if (screen === "list") { setScreen("create"); setError(""); return; }
     if (screen === "create" || (screen === "detail" && detail?.endedAt)) { run(async () => { if (ready) await writer.save(latestDraft.current); await shopify.action.dismissModal(); }); return; }
     back();
   };
   const next = () => {
-    if (submitted) { setError(""); setScreen("review"); return; }
+    if (submitted) { void save(); return; }
     if (!shopify.cart.current.value.customer?.id && (!draft.name.trim() || !draft.phone.trim())) { setError("お名前と電話番号を入力してください"); return; }
     setError(""); setScreen("products");
   };
-  const titles = { create: "取置の受付", products: "取置する商品", review: "取置を登録", list: "取置履歴", detail: "取置の詳細", actions: "連絡・印刷", cancel: "取置を解除", "product-choice": "商品を追加" };
+  const titles = { create: "取置の受付", products: "取置する商品", list: "取置履歴", detail: "取置の詳細", actions: "連絡・印刷", cancel: "取置を解除", "product-choice": "商品を追加" };
   let primary = null;
-  if (screen === "create") primary = <s-button variant="primary" disabled={busy || !ready} onClick={next}>次へ</s-button>;
-  if (screen === "products") primary = <s-button variant="primary" disabled={busy || scanBusy || !ready || !draft.lines.length} onClick={() => { setError(""); setScreen("review"); }}>次へ</s-button>;
-  if (screen === "review") primary = <s-button variant="primary" disabled={busy || !ready || !draft.lines.length} onClick={save}>{busy ? "登録中…" : submitted ? "登録結果を確認" : "確保して登録"}</s-button>;
+  if (screen === "create") primary = <s-button variant="primary" disabled={busy || !ready} loading={busy} onClick={next}>{busy ? "処理中…" : submitted ? "登録結果を確認" : "次へ"}</s-button>;
+  if (screen === "products") primary = <s-button variant="primary" disabled={busy || scanBusy || !ready || !draft.lines.length} command="--show" commandFor="reservation-register-confirm" onClick={() => setError("")}>確定</s-button>;
+
   if (screen === "list") primary = <s-button variant="primary" disabled={busy || !ready} onClick={() => setScreen("create")}>取置を登録</s-button>;
   if (screen === "product-choice") primary = <s-button variant="primary" disabled={busy || !ready} onClick={confirmProduct}>この商品を追加</s-button>;
   if (canAddToCart) primary = <s-button variant="primary" disabled={busy} loading={addingToCart} onClick={checkout}>{addingToCart ? "追加中…" : "カートへ追加"}</s-button>;
@@ -339,18 +368,18 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
         </> : <>
           <s-stack direction="inline" justifyContent="space-between"><s-text>店舗: {storeName}</s-text>{screen === "products" ? <s-button disabled={busy || scanBusy} onClick={() => setImages(!images)}>{images ? "画像ON" : "画像OFF"}</s-button> : null}</s-stack>
           {screen === "products" ? <>
-            <s-text-field label="商品名 / SKU / バーコード" value={search} onInput={event => changeSearch(event.currentTarget.value)}><s-button slot="accessory" disabled={!search} onClick={() => changeSearch("")}>×</s-button></s-text-field>
+            <s-box inlineSize="100%" paddingBlockStart="small-200"><s-search-field placeholder="商品名 / SKU / バーコード" value={search} onInput={event => changeSearch(event.currentTarget.value)} onChange={event => changeSearch(event.currentTarget.value)} /></s-box>
             <s-text>{search.trim() ? `検索結果: ${products.length}件` : `追加済み: ${draft.lines.length}件`}</s-text>
           </> : null}
         </>}
       </s-stack></s-box><s-divider />
-      <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0"><s-box padding="base"><s-stack gap="base" direction="block">
+      <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0"><s-box padding="base"><s-stack gap={screen === "products" ? "none" : "base"} direction="block">
       {screen === "list" ? <>
         {listLoaded ? <ReservationPageControls page={page} total={total} disabled={busy} onChange={setPage} /> : <s-text>一覧を取得できていません。</s-text>}
         {listLoaded && !rows.length && !busy ? <><s-text>条件に合う取置はありません。対象の全体は{allTotal}件です。</s-text><s-button onClick={() => { setMode("active"); setQuery(""); setQueryInput(""); setPage(0); }}>すべて表示する</s-button></> : null}
         {(listLoaded ? rows : []).map(row => <s-box key={row.id}><s-clickable onClick={() => open(row)} disabled={busy}><s-box padding="base"><s-stack gap="small" direction="block">
           <s-stack direction="inline" justifyContent="space-between"><s-text type="strong">{row.id} ›</s-text><s-text>登録 {new Date(row.createdAt).toLocaleDateString("ja-JP", { timeZone: row.timezone || "Asia/Tokyo" })}</s-text></s-stack>
-          <s-text>受取期限: {row.dueDate}</s-text><s-text>{row.name}・{row.phone}</s-text><s-text>店舗: {row.locationName}</s-text>
+          <s-text>受取期限: {row.dueDate}</s-text><s-text>{row.name}・{japanesePhoneDisplay(row.phone)}</s-text><s-text>店舗: {row.locationName}</s-text>
           <s-stack direction="inline" justifyContent="space-between"><s-badge tone={row.needsFollowUp ? "warning" : reservationStatusTone(row.status)}>{row.needsFollowUp ? "要対応" : RESERVATION_LABELS[row.status]}</s-badge><s-text>{row.lines.length}件・合計{row.lines.reduce((sum, line) => sum + line.quantity, 0)}点</s-text></s-stack>
         </s-stack></s-box></s-clickable><s-divider /></s-box>)}
       </> : null}
@@ -364,13 +393,13 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       </> : null}
       {screen === "create" ? <>
         {customerId ? <>
-          <s-text type="strong">{selectedCustomer?.name || "POSでお客様を選択済みです"}</s-text>
-          {selectedCustomer?.phone ? <s-text>{selectedCustomer.phone}</s-text> : null}
+          <s-text type="small" color="subdued">お客様</s-text><s-text type="strong">{selectedCustomer?.name || "POSでお客様を選択済みです"}</s-text>
+          {selectedCustomer?.phone ? <s-text>{japanesePhoneDisplay(selectedCustomer.phone)}</s-text> : null}
           {!selectedCustomer ? <s-text type="small">{sessionLoading ? "お客様の情報を確認しています。" : "お客様の情報を取得できませんでした。表示された理由を確認してください。"}</s-text> : null}
           {selectedCustomer?.hasPhone === false ? <s-text-field disabled={busy || !ready || Boolean(submitted)} label="連絡用の電話番号（未登録）" value={draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone || "" : ""} onInput={e => patch({ memberPhone: e.currentTarget.value, memberPhoneCustomerId: String(customerId) })} /> : null}
-          <s-text type="small">お客様の変更はPOSのカートで行えます。</s-text>
+          <s-stack direction="inline" justifyContent="space-between"><s-button disabled={busy || !ready || Boolean(submitted)} command="--show" commandFor={CUSTOMER_PICKER_ID}>お客様を変更</s-button><s-button tone="critical" disabled={busy || !ready || Boolean(submitted)} onClick={() => customerChange(null)}>カートから解除</s-button></s-stack><s-text type="small" color="subdued">お客様の登録情報は削除されません。</s-text>
         </> : <>
-          <s-text>お客様をPOSで選択するか、ゲストのお名前と電話番号を入力してください。</s-text>
+          <s-text type="strong">お客様</s-text><s-button disabled={busy || !ready || Boolean(submitted)} command="--show" commandFor={CUSTOMER_PICKER_ID}>お客様を選択</s-button><s-text type="small" color="subdued">既存のお客様を選ぶか、ゲストのお名前と電話番号を入力してください。</s-text>
           <s-text-field disabled={busy || !ready || Boolean(submitted)} label="ゲストのお名前" value={draft.name} onInput={e => patch({ name: e.currentTarget.value })} />
           <s-text-field disabled={busy || !ready || Boolean(submitted)} label="取置用の電話番号" value={draft.phone} onInput={e => patch({ phone: e.currentTarget.value })} />
         </>}
@@ -378,29 +407,28 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       {screen === "products" ? <>
         {search.trim() && searchLoaded && !searching && !products.length ? <s-text>一致する商品はありません。</s-text> : null}
         {!search.trim() && !draft.lines.length ? <s-text>商品名・SKU・バーコードで検索するか、スキャンして追加してください。</s-text> : null}
-        {productView.displayed.map(product => <ReservationProductRow key={product.id || product.variantId} product={product} images={images} candidate={Boolean(search.trim())} disabled={busy || scanBusy || !ready || Boolean(submitted)} quantity={search.trim() ? draft.lines.find(line => line.variantId === product.id)?.quantity || 0 : product.quantity}
-          onAdd={quantity => add(product, quantity)} onSet={quantity => setQuantity(product.variantId, quantity)} onRemove={() => patch({ lines: latestDraft.current.lines.filter(line => line.variantId !== product.variantId) })} />)}
-        {productView.showPagination ? <s-stack direction="inline" gap="base"><s-button disabled={busy || productView.currentPage <= 1} onClick={() => setProductPage(productView.currentPage - 1)}>前へ</s-button><s-text>{productView.rangeStart}〜{productView.rangeEnd} / {productView.total}件</s-text><s-button disabled={busy || productView.currentPage >= productView.totalPages} onClick={() => setProductPage(productView.currentPage + 1)}>次へ</s-button></s-stack> : null}
-        {search.trim() && productPageInfo.hasNextPage ? <s-button disabled={searching} onClick={() => searchProducts(search, productPageInfo.endCursor)}>さらに読み込む</s-button> : null}
+        {search.trim() ? <><s-stack gap="small-400">{displayedCandidates.map(product => <ReservationProductRow key={product.id} product={product} images={images} candidate disabled={busy || scanBusy || !ready || Boolean(submitted)} quantity={draft.lines.find(line => line.variantId === product.id)?.quantity || 0} onAdd={quantity => add(product, quantity)} />)}</s-stack>
+          {products.length > candidateLimit ? <s-box padding="small"><s-button disabled={busy} onClick={() => setCandidateLimit(previous => previous + 20)}>さらに表示（残り {products.length - candidateLimit}件）</s-button></s-box> : null}
+          {productPageInfo.hasNextPage ? <s-box padding="small"><s-button disabled={searching} onClick={() => searchProducts(search, productPageInfo.endCursor)}>{searching ? "読込中..." : "さらに読み込む"}</s-button></s-box> : null}
+          {products.length ? <s-divider /> : null}
+        </> : null}
+        {draft.lines.length ? <s-stack gap="none"><s-text type="strong">取置リスト</s-text>
+          <s-box blockSize="8px" />
+          {selectedLines.showPagination ? <><s-stack direction="inline" gap="base" justifyContent="space-between"><s-button disabled={busy || selectedLines.currentPage <= 1} onClick={() => setProductPage(selectedLines.currentPage - 1)}>前へ</s-button><s-text>{selectedLines.rangeStart}〜{selectedLines.rangeEnd} / {selectedLines.total}件</s-text><s-button disabled={busy || selectedLines.currentPage >= selectedLines.totalPages} onClick={() => setProductPage(selectedLines.currentPage + 1)}>次へ</s-button></s-stack><s-box blockSize="8px" /></> : null}
+          {selectedLines.displayed.map(product => <ReservationProductRow key={product.variantId} product={product} images={images} disabled={busy || scanBusy || !ready || Boolean(submitted)} quantity={product.quantity} onSet={quantity => setQuantity(product.variantId, quantity)} onRemove={() => patch({ lines: latestDraft.current.lines.filter(line => line.variantId !== product.variantId) })} />)}
+        </s-stack> : <s-text color="subdued">まだ追加されていません</s-text>}
       </> : null}
       {screen === "create" ? <>
-        <s-switch disabled={busy || !ready || Boolean(submitted)} label="対面で受付" checked={draft.faceToFace} onChange={e => patch({ faceToFace: e.currentTarget.checked, print: false })} />
-        {draft.faceToFace ? <s-switch disabled={busy || !ready || Boolean(submitted)} label="取置レシートを発行" checked={draft.print} onChange={e => patch({ print: e.currentTarget.checked })} /> : null}
+        <s-divider /><s-text type="small" color="subdued">受付方法</s-text><s-switch disabled={busy || !ready || Boolean(submitted)} label="対面で受付" checked={draft.faceToFace} onChange={e => patch({ faceToFace: e.currentTarget.checked, print: false })} />
+        <s-text type="small" color="subdued">お客様控えは登録後、店舗控えは詳細画面から印刷します。発行の有無は管理画面の設定に従います。</s-text>
         <s-text>保存すると販売可能在庫から取置分を確保します。</s-text>
 
         {submitted ? <s-text>送信済みの内容を保持しています。再度登録を押すと同じ番号で結果を確認します。</s-text> : null}
       </> : null}
-      {screen === "review" ? <>
-        <s-text type="strong">取置を登録しますか？</s-text><s-text>表示した商品を確保して取置を登録します。</s-text>
-        <s-text>{submitted ? "前回送信したお客様の内容で確認します" : customerId ? selectedCustomer?.name || "POSで選択したお客様" : draft.name}</s-text><s-text>{customerId ? selectedCustomer?.phone || (draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone : "") : draft.phone}</s-text>
-        {draft.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}
-        <s-text>{draft.faceToFace && draft.print ? "取置レシートを発行します" : "取置レシートは発行しません"}</s-text>
-        {submitted ? <s-text>送信した内容を保持しています。同じ取置番号で結果を確認します。</s-text> : null}
-      </> : null}
       {screen === "cancel" && detail ? <><s-text>表示した商品の取置を解除し、販売可能在庫に戻します。</s-text>{detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}</> : null}
       {(screen === "detail" || screen === "actions") && detail ? <>
         <s-text type="strong">{detail.id}</s-text><s-badge tone={detail.needsFollowUp ? "warning" : reservationStatusTone(detail.status)}>{RESERVATION_LABELS[detail.status]}</s-badge>
-        <s-text>{detail.name}</s-text><s-text>{detail.phone}</s-text>{!detail.contactVisible ? <s-text>連絡先の確認には権限が必要です。</s-text> : null}
+        <s-text>{detail.name}</s-text><s-text>{japanesePhoneDisplay(detail.phone)}</s-text>{!detail.contactVisible ? <s-text>連絡先の確認には権限が必要です。</s-text> : null}
         <s-text>{detail.locationName}・受取期限 {detail.dueDate}</s-text>
         {detail.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}
         {detail.nextFollowDate ? <s-text>次回確認 {detail.nextFollowDate}</s-text> : null}
@@ -417,7 +445,11 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
           <s-button disabled={busy} onClick={() => run(async () => { const result = await reservationApi({ command: "orders", query: orderSearch }); setOrders(result.orders); })}>注文を探す</s-button>
           {orders.map(order => <s-button key={order.id} disabled={busy} onClick={() => command("complete", { orderId: order.id })}>{order.name}を照合</s-button>)}
         </> : null}
-        {screen === "actions" && ["held", "checkout", "sold", "cancelled"].includes(detail.status) ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail); shopify.toast.show("印刷を送信しました"); })}>{busy ? "処理中…" : "取置レシートを印刷"}</s-button> : null}
+        {screen === "detail" && receiptOptions?.storeCopy && ["held", "checkout", "sold", "cancelled"].includes(detail?.status) ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "store"); shopify.toast.show("店舗控えの印刷を送信しました"); })}>店舗控えを印刷</s-button> : null}
+        {screen === "actions" && ["held", "checkout", "sold", "cancelled"].includes(detail.status) ? <>
+          {receiptOptions?.customerCopy ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "customer"); shopify.toast.show("お客様控えの印刷を送信しました"); })}>お客様控えを印刷</s-button> : null}
+          {receiptOptions?.storeCopy ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "store"); shopify.toast.show("店舗控えの印刷を送信しました"); })}>店舗控えを印刷</s-button> : null}
+        </> : null}
         {detail.status === "failed" ? <s-button disabled={busy} onClick={() => { setSubmitted(null); setDraft(previous => ({ ...previous, submitted: false, id: newId() })); setScreen("create"); setDetail(null); }}>内容を直して登録</s-button> : null}
         {detail.endedAt ? <s-text>終了 {new Date(detail.endedAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}・担当 {detail.endedBy}</s-text> : null}
       </> : null}
@@ -428,11 +460,24 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
       {notice ? <s-text tone="critical">{notice}</s-text> : null}
       {canAddToCart ? <s-text>追加後はPOSのカートでお会計してください。</s-text> : null}
       <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
-        <s-button variant="secondary" onClick={goBack} disabled={busy}>{screen === "cancel" || screen === "review" ? "やめる" : screen === "detail" && detail?.endedAt ? "閉じる" : "戻る"}</s-button>
-        {screen === "create" ? <s-button disabled={busy} onClick={() => { setScreen("list"); setDetail(null); setError(""); }}>履歴一覧</s-button> : screen === "detail" ? <s-button disabled={busy} onClick={() => setScreen("actions")}>連絡・印刷</s-button> : screen === "products" && (error || slow) && search.trim() ? <s-button disabled={busy || searching} onClick={() => searchProducts(search)}>再読み込み</s-button> : screen === "list" && (error || slow) ? <s-button disabled={busy} onClick={() => run(refresh)}>再読み込み</s-button> : <s-box />}
+        <s-button variant="secondary" onClick={goBack} disabled={busy}>{screen === "cancel" ? "やめる" : screen === "detail" && detail?.endedAt ? "閉じる" : "戻る"}</s-button>
+        {screen === "create" ? <s-button disabled={busy} onClick={() => { setScreen("list"); setDetail(null); setError(""); }}>履歴一覧</s-button> : screen === "detail" && receiptOptions?.storeCopy && ["held", "checkout", "sold", "cancelled"].includes(detail?.status) ? <s-button disabled={busy} onClick={() => run(async () => { await printReservation(detail, "store"); shopify.toast.show("店舗控えの印刷を送信しました"); })}>店舗控えを印刷</s-button> : screen === "products" ? null : screen === "list" && (error || slow) ? <s-button disabled={busy} onClick={() => run(refresh)}>再読み込み</s-button> : <s-box />}
+        {screen === "products" ? <s-text>明細 {draft.lines.length} / 合計 {draft.lines.reduce((sum, line) => sum + line.quantity, 0)}</s-text> : null}
         {primary || <s-box />}
       </s-stack>
     </s-stack></s-box>
     </s-stack>
+    <ReservationCustomerPicker locationId={draftLocation.current} busy={busy || !ready || Boolean(submitted)} modalRef={customerPickerRef} onSelect={customerChange} />
+    <s-modal id="reservation-register-confirm" heading="取置を確定しますか？" ref={confirmRegistrationRef}>
+      <s-box padding="base"><s-stack gap="base">
+        <s-text type="small" color="subdued">表示した商品の在庫を確保して、取置を登録します。</s-text>
+        <s-text type="strong">{customerId ? selectedCustomer?.name || "POSで選択したお客様" : draft.name}</s-text>
+        <s-text>{japanesePhoneDisplay(customerId ? selectedCustomer?.phone || (draft.memberPhoneCustomerId === String(customerId) ? draft.memberPhone : "") : draft.phone)}</s-text>
+        <s-text>明細 {draft.lines.length} / 合計 {draft.lines.reduce((sum, line) => sum + line.quantity, 0)}</s-text>
+        {draft.lines.map(line => <s-text key={line.variantId}>{line.title} × {line.quantity}</s-text>)}
+        <s-divider /><s-button command="--hide" commandFor="reservation-register-confirm" disabled={busy}>戻る</s-button>
+        <s-button variant="primary" disabled={busy || scanBusy || !ready || !draft.lines.length} onClick={() => { confirmRegistrationRef.current?.hideOverlay?.(); void save(); }}>{busy ? "登録中…" : "確定する"}</s-button>
+      </s-stack></s-box>
+    </s-modal>
   </s-page>;
 }
