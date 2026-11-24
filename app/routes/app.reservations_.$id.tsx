@@ -7,7 +7,7 @@ import db from "../db.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { adminPlanRedirect } from "../utils/plan-gate.server";
 import { reservationsEnabled } from "../utils/reservations.server";
-import { reservationAdminDetail, reservationDetailSelect, reservationEventSelect, reservationListState } from "../utils/reservation-admin-detail.server";
+import { reservationAdminDetail, reservationDetailSelect, reservationEventSelect, reservationListState, reservationFilterQuery } from "../utils/reservation-admin-detail.server";
 import { AdminBlock, BackAction, SecondaryLink, StateBadge, StatusBanner } from "../components/admin-ui";
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
@@ -21,8 +21,9 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     events: { select: reservationEventSelect, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 26, skip: state.historyPage * 25 } } });
   if (!row) throw new Response("Not found", { status: 404, headers: { "Cache-Control": "private, no-store" } });
   const detail = reservationAdminDetail({ row, shop: session.shop, subject: sessionToken?.sub || "", admin: withGraphQLRetry(admin) });
-  const backTo = `/app/reservations?ended=${state.ended ? 1 : 0}&page=${state.page}`;
-  const historyBase = `/app/reservations/${encodeURIComponent(id)}?ended=${state.ended ? 1 : 0}&page=${state.page}&historyPage=`;
+  const filters = reservationFilterQuery(new URL(request.url));
+  const backTo = `/app/reservations?ended=${state.ended ? 1 : 0}&page=${state.page}${filters}`;
+  const historyBase = `/app/reservations/${encodeURIComponent(id)}?ended=${state.ended ? 1 : 0}&page=${state.page}${filters}&historyPage=`;
   return data({ detail, backTo, historyBase, historyPage: state.historyPage }, { headers: { "Cache-Control": "private, no-store" } });
 }
 export default function ReservationDetail() {

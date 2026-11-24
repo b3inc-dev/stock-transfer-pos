@@ -126,3 +126,14 @@ test("checkout claim is idempotent with the premarked cart key and preserves ope
   assert.equal((await service.reservationCommand(checkout, admin, actor, { command: "checkout", version: checkout.version, checkoutKey, deviceId: "1" })).checkoutKey, checkoutKey);
   await assert.rejects(service.reservationCommand(checkout, admin, actor, { command: "checkout", version: checkout.version, checkoutKey: "aaaaaaab-1234-1234-1234-123456789abc", deviceId: "2" }), error => error.checkoutRejected === true);
 });
+
+test("POS due-date filter runs before pagination and today uses configured store timezone", async () => {
+  const today = "2026-12-01";
+  for (let i = 0; i < 30; i++) rows.set(`row-${i}`, { id: `row-${i}`, shop, locationId, status: "held", timezone: "Pacific/Honolulu", guestName: "Guest", contactPhone: "09012345678", customerId: null, dueDate: i < 26 ? today : "2026-12-02", lines: [], createdAt: new Date(), nextFollowDate: null });
+  process.env.RESERVATION_LOCATION_TIMEZONES = JSON.stringify({ [shop]: { [locationId]: "Pacific/Honolulu" } });
+  const result = await service.listReservations(shop, locationId, admin, "active", "", 1, today);
+  assert.equal(result.total, 26); assert.equal(result.rows.length, 1); assert.equal(result.hasNextPage, false); assert.equal(result.allTotal, 30);
+  const { localDate } = await import("../extensions/common/reservations.js");
+  assert.equal(result.today, localDate(Date.now(), "Pacific/Honolulu"));
+  await assert.rejects(() => service.listReservations(shop, locationId, admin, "active", "", 0, "2026-02-31"), /日付/);
+});

@@ -197,7 +197,7 @@ export default function App() {
           </div>
         </div>
       )}
-      <Outlet context={{ shopPlan, storeHandle }} />
+      <Outlet context={{ shopPlan, storeHandle, reservationsEnabled: showReservations }} />
     </AppProvider>
   );
 }
