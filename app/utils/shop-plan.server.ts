@@ -28,7 +28,8 @@ export type PlanFeature =
   | "loss"
   | "order"
   | "stocktake"
-  | "adjustment";
+  | "adjustment"
+  | "reservation";
 
 export type PlanAccess = "allowed" | "plan_required" | "plan_check_failed";
 

@@ -4,7 +4,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, cpSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, cpSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -20,7 +20,7 @@ const sorted = (a) => [...a].sort();
 describe("toml のスコープ", () => {
   it("公開用は read_orders を持たず、注文・返品の Webhook も受けない", () => {
     assert.ok(!parseScopes(publicToml).includes("read_orders"));
-    assert.deepEqual(parseWebhookTopics(publicToml).filter((t) => /^(orders|refunds)\//.test(t)), []);
+    assert.deepEqual(parseWebhookTopics(publicToml).filter((t) => /^(orders|refunds)\//.test(t)), ["orders/paid"]);
     assert.deepEqual(checkPublicScopes({ tomlText: publicToml }), { ok: true });
   });
   it("自社用（Ciara）は read_orders と注文・返品の Webhook を今まで通り持つ", () => {
@@ -56,6 +56,10 @@ describe("resolveAppScopes", () => {
 });
 
 describe("checkPublicScopes（deploy:public の見張り）", () => {
+  it("取置の任意スコープがなければ orders/paid も止める", () => {
+    const toml = publicToml.replace(/^optional_scopes.*$/m, "");
+    assert.equal(checkPublicScopes({ tomlText: toml }).ok, false);
+  });
   it("read_orders を足すと止める", () => {
     const toml = publicToml.replace(/^(\s*scopes\s*=\s*")([^"]*)"/m, '$1$2,read_orders"');
     const r = checkPublicScopes({ tomlText: toml });
@@ -95,7 +99,7 @@ describe("コマンドとして動かす", () => {
     writeFileSync(path.join(dir, "shopify.app.public.toml"), pubToml);
     return dir;
   }
-  const run = (dir, toml) => spawnSync(process.execPath, [path.join(dir, "scripts", "verify-app-mode.js"), toml], { encoding: "utf8" });
+  const run = (dir, toml) => spawnSync(process.execPath, [realpathSync(path.join(dir, "scripts", "verify-app-mode.js")), toml], { encoding: "utf8" });
 
   it("公開用の toml に read_orders があると exit 1（deploy:public が止まる）", () => {
     const bad = publicToml.replace(/^(\s*scopes\s*=\s*")([^"]*)"/m, '$1$2,read_orders"');

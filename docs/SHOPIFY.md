@@ -10,7 +10,7 @@ API version・エンティティ関係・エラー分類。設定の正: `shopif
 | バージョン | **2026-01**（webhooks `api_version`, サーバー GraphQL URL） |
 | POS | `shopify:admin/api/graphql.json`（埋め込み Direct API） |
 | REST | Webhook ペイロード形状・OAuth トークン更新程度。業務 mutation は GraphQL |
-| スコープ（抜粋） | `read/write_inventory`, `read/write_inventory_transfers`, `write_inventory_shipments*`, `read_locations`, `read_products`。`read_orders` は**自社用（`shopify.app.toml`）だけ**。公開用（`shopify.app.public.toml`）には無い（DECISIONS D18） |
+| スコープ（抜粋） | `read/write_inventory`, `read/write_inventory_transfers`, `write_inventory_shipments*`, `read_locations`, `read_products`。`read_orders` は**自社用（`shopify.app.toml`）だけ**。公開用の必須scopeには無い（D18）。#59は`read_orders`/`read_customers`を任意scopeで準備し、顧客データ承認後に管理者が許可（D20） |
 
 ## 2. エンティティ関係
 
@@ -70,6 +70,7 @@ erDiagram
 | `inventoryItemUpdate` | 追跡フラグ等 |
 | `inventorySetQuantities` | 絶対値セット（棚卸・調整・apply-change） |
 | `inventoryAdjustQuantities` | 相対調整（ロス等） |
+| `inventoryMoveQuantities` | 取置のavailable↔reserved。2026-01 + @idempotent + 両状態のCAS（#59） |
 
 **入力配列上限**: lineItems 等 **250**（アプリ定数 `SHOPIFY_ADMIN_LINE_ITEMS_ARRAY_MAX`）。
 
@@ -131,3 +132,7 @@ Shopify Transfer/Shipment create に対し、本アプリは **クライアン�
 - [`INBOUND_ACTIVATION_FAILURE_CAUSES.md`](./INBOUND_ACTIVATION_FAILURE_CAUSES.md)
 - [`API_POS_STOCKTAKE_VS_LOG_INVENTORY.md`](./API_POS_STOCKTAKE_VS_LOG_INVENTORY.md)
 - [`CRON_JOB_SETUP_GUIDE.md`](./CRON_JOB_SETUP_GUIDE.md)
+
+## 10. 取置の追加（Issue #59）
+
+新しい取置拡張だけPOS API 2026-07を使い、Printing APIで控えを印刷する。既存7拡張/Admin APIは2026-01。`orders/paid`→`/webhooks/reservations/orders-paid`は取置の決済・全数履行照合用（既存の売上/返品履歴を有効にするものではない）。本番配備前に顧客・注文のscopeと保護顧客データ承認、開発ストア/POS Liteの受入が必要。詳細は[RESERVATIONS.md](RESERVATIONS.md)。

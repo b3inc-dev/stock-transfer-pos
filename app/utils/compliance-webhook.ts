@@ -29,6 +29,9 @@ export type ComplianceDb = {
   inventoryCountDocument: { deleteMany: DeleteMany };
   orderPendingLocation: { deleteMany: DeleteMany };
   refundPendingLocation: { deleteMany: DeleteMany };
+  stockReservation?: { deleteMany: DeleteMany; updateMany: (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => Promise<{ count: number }> };
+  stockReservationSettings?: { deleteMany: DeleteMany };
+  stockReservationPrivacyRequest?: { deleteMany: DeleteMany; upsert: (args: { where: { id: string }; create: { id: string; shop: string; customerId: string }; update: Record<string, never> }) => Promise<unknown> };
 };
 
 export type ComplianceResult = {
@@ -42,6 +45,8 @@ export type ComplianceResult = {
 type CustomersRedactPayload = {
   shop_domain?: string;
   orders_to_redact?: Array<number | string>;
+  customer?: { id?: number | string };
+  data_request?: { id?: number | string };
 };
 
 type ShopRedactPayload = { shop_domain?: string };
@@ -64,7 +69,12 @@ export async function handleComplianceWebhook(args: {
 
   switch (normalized) {
     case COMPLIANCE_TOPICS.CUSTOMERS_DATA_REQUEST: {
-      // 顧客のメール・電話・氏名などは保存していない。店に渡すデータはない。
+      // 取置の補完連絡先は管理画面の終了取置から削除可能。開示は取置のエクスポート手順（RESERVATIONS.md）で対応する。
+      const body = (args.payload ?? {}) as CustomersRedactPayload;
+      if (shop && body.customer?.id && body.data_request?.id && db.stockReservationPrivacyRequest) {
+        const id = `${shop}:${body.data_request.id}`;
+        await db.stockReservationPrivacyRequest.upsert({ where: { id }, create: { id, shop, customerId: `gid://shopify/Customer/${body.customer.id}` }, update: {} });
+      }
       log(`[compliance] customers/data_request for ${shop}`);
       return { status: 200, handled: normalized, deleted };
     }
@@ -78,6 +88,15 @@ export async function handleComplianceWebhook(args: {
         const where = { shop: shopDomain, orderId: { in: orderIds } };
         deleted.orderPendingLocation = (await db.orderPendingLocation.deleteMany({ where })).count;
         deleted.refundPendingLocation = (await db.refundPendingLocation.deleteMany({ where })).count;
+      }
+      if (shopDomain && body.customer?.id && db.stockReservation) {
+        deleted.stockReservationContacts = (await db.stockReservation.updateMany({
+          where: { shop: shopDomain, customerId: `gid://shopify/Customer/${body.customer.id}` },
+          data: { customerId: null, guestName: null, contactPhone: null, requestHash: null, anonymizedAt: new Date(), version: { increment: 1 } },
+        })).count;
+      }
+      if (shopDomain && body.customer?.id && db.stockReservationPrivacyRequest) {
+        deleted.stockReservationPrivacyRequest = (await db.stockReservationPrivacyRequest.deleteMany({ where: { shop: shopDomain, customerId: `gid://shopify/Customer/${body.customer.id}` } })).count;
       }
       log(`[compliance] customers/redact for ${shopDomain}`, deleted);
       return { status: 200, handled: normalized, deleted };
@@ -109,6 +128,9 @@ export async function handleComplianceWebhook(args: {
       deleted.inventoryChangeLog = (await db.inventoryChangeLog.deleteMany({ where })).count;
       deleted.orderPendingLocation = (await db.orderPendingLocation.deleteMany({ where })).count;
       deleted.refundPendingLocation = (await db.refundPendingLocation.deleteMany({ where })).count;
+      if (db.stockReservation) deleted.stockReservation = (await db.stockReservation.deleteMany({ where })).count;
+      if (db.stockReservationPrivacyRequest) deleted.stockReservationPrivacyRequest = (await db.stockReservationPrivacyRequest.deleteMany({ where })).count;
+      if (db.stockReservationSettings) deleted.stockReservationSettings = (await db.stockReservationSettings.deleteMany({ where })).count;
       deleted.session = (await db.session.deleteMany({ where })).count;
       log(`[compliance] shop/redact for ${shopDomain}`, deleted);
       return { status: 200, handled: normalized, deleted };

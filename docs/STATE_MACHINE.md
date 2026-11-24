@@ -304,3 +304,7 @@ activate → settle → [チャンクごと] 今の数を読む（50 件ずつ�
 - 前の動き（終わるまで待つ）に戻すのは、Render の環境変数を **ちょうど `WEBHOOK_RESPONSE_BUDGET_MS=0`** にすること（`off` も 0 と同じに扱う）。ほかの数でない値（`false`・`none` など）や負の数は 0 ではなく**既定の 4000** になるので、戻すときは必ず `0` と書く。環境変数を変えるとサーバーが入れ直され、そのときから効く。
 - ログ `[webhook-budget]` には、店（`shop=` … `X-Shopify-Shop-Domain`）と Webhook の ID（`webhookId=` … `X-Shopify-Webhook-Id`）が入る。「先に 200 を返す」行があって、同じ `webhookId` の「続きの処理が終わった」「続きの処理が失敗した」行が無いものが、配備の再起動などで止まった分。配備の時刻と合わせて探し、要るなら手で直す。本文（注文の中身）はログに出さない。
 - 外した店でトークンの更新に失敗したとき、ライブラリ 1.1 系は `authenticate.webhook` で 500 を投げる。受け口は `authenticateWebhook`（`webhook-auth-safe.ts`）を通し、HMAC を確かめてセッション無しで受ける。`orders/updated`・`refunds/create` はそのとき 200 で終わる（記録しない）。
+
+## 12. 取置（Issue #59）
+
+取置はTransfer/apply-changeと別の `StockReservation` を正とする。`reserving → held → checkout → completing → sold`、`held → cancelling → cancelled`。各在庫操作はDBに完全な入力・@idempotentキーを永続化してから送る。結果不明では同じ入力・キーで再送、23時間で自動再送を止める。販売・解除・フォローはDB version CASで排他。会計前にreservedを戻さず、同店舗の決済済み・全数履行済みPOS注文を照合してからreserved→availableを1回行う。詳細・未完了の受入項目は [RESERVATIONS.md](RESERVATIONS.md)。

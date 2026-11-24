@@ -40,6 +40,7 @@ Prisma の `InventoryChangeEvent` は **在庫数量の set/adjust（apply-chang
 | 調整 | `extensions/stock-transfer-adjustment/` | 簡易棚卸/調整 |
 | 棚卸 | `extensions/stock-transfer-stocktake/` | 棚卸 metafield + set quantities |
 | 発注/仕入 | `extensions/stock-transfer-order/` / `purchase/` | 発注・仕入 |
+| 取置 | `extensions/stock-transfer-reservation/` | #59。2026-07。登録・期限・確保・会計照合・印刷（既定無効、実機受入待ち） |
 | 共通 | `extensions/common/` | appEventId・log・apply-change・activate retry |
 | Admin | `app/routes/*` | 設定・履歴・API・Webhook |
 | スナップショット | `scripts/call-inventory-snapshot-daily.js` + cron API | 日次在庫スナップ（移管処理ではない） |
