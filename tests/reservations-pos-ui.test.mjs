@@ -52,8 +52,8 @@ test("POS customer association, confirmation registration and independent copy p
     document.querySelector("s-clickable").dispatchEvent(new window.Event("click")); await wait(50);
     assert.equal(cart.customer, null); click("このお客様を選択"); await wait(150);
     assert.equal(cart.customer.id, 1); assert.ok(document.body.textContent.includes("080-1234-5678"));
-    cart.properties["取置番号"] = "existing"; click("カートから解除"); await wait(100); assert.equal(cart.customer.id, 1);
-    delete cart.properties["取置番号"]; click("カートから解除"); await wait(150); assert.equal(cart.customer, null);
+    cart.properties["取置番号"] = "existing"; click("解除"); await wait(100); assert.equal(cart.customer.id, 1);
+    delete cart.properties["取置番号"]; click("解除"); await wait(150); assert.equal(cart.customer, null);
     click("次へ"); await wait(150); assert.equal(document.querySelector('s-page').getAttribute("heading"), "取置する商品");
     assert.ok([...document.querySelectorAll("s-button")].some(node => node.textContent === "戻る" && !node.closest("s-modal")));
     assert.equal(calls.filter(call => call === "create").length, 0);
