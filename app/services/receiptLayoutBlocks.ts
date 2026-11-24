@@ -80,7 +80,7 @@ export const BLOCK_DEFS: BlockDef[] = [
     { key: "show_date", label: "受付日", type: "checkbox", default: true },
     { key: "show_staff", label: "担当番号", type: "checkbox", default: true },
   ], template: `<div class="blk"><div class="b">{{ reservation.copy_label }}</div><div class="b">取置番号 {{ reservation.number }}</div><div class="b">受取期限 {{ reservation.due_date }}</div>{% if s_show_date %}<div>受付 {{ reservation.created_at_label }}</div>{% endif %}{% if s_show_staff %}<div>担当 {{ staff.name }}</div>{% endif %}</div>` },
-  { type: "reservation_items", label: "取置商品・数量", description: "下部の固定欄に取置商品の明細を印字します。並び順は変わりません。", kinds: ["reservation"], settings: [
+  { type: "reservation_items", label: "取置商品・数量", description: "商品名・数量を印字します。SKU・JANの表示を選べます。", kinds: ["reservation"], settings: [
     { key: "show_sku", label: "SKU", type: "checkbox", default: false },
     { key: "show_barcode", label: "JAN", type: "checkbox", default: false },
   ], template: `<div class="blk">{% for item in reservation.items %}<div class="row"><span>{{ item.title }}{% if s_show_sku and item.sku != blank %}<br>SKU: {{ item.sku }}{% endif %}{% if s_show_barcode and item.barcode != blank %}<br>JAN: {{ item.barcode }}{% endif %}</span><span>{{ item.quantity }}点</span></div>{% endfor %}</div>` },
