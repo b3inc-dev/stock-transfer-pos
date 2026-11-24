@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const SUB_PAGES = {
+  "app/routes/app.reservations_.settings.tsx": "取置期限の設定",
   "app/routes/app.history.$id.tsx": "入出庫の履歴詳細",
 };
 

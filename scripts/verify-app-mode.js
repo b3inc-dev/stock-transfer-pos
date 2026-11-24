@@ -100,7 +100,11 @@ export function checkPublicScopes({ tomlText, tomlName = "toml" }) {
   const scopes = parseScopes(tomlText);
   if (!scopes) return { ok: false, error: `${tomlName} に access_scopes の scopes がありません` };
   const badScopes = scopes.filter((s) => PUBLIC_FORBIDDEN_SCOPES.includes(s));
-  const badTopics = parseWebhookTopics(tomlText).filter((t) => PROTECTED_TOPIC.test(t));
+  // D20 / Issue #59: only the reservation paid hook is prepared with optional scopes.
+  // Existing orders/updated and refunds/create remain prohibited for public distribution.
+  const optional = String(tomlText).match(/^\s*optional_scopes\s*=\s*\[([^\]]*)\]/m)?.[1] || "";
+  const reservationPrepared = optional.includes('"read_orders"') && optional.includes('"read_customers"');
+  const badTopics = parseWebhookTopics(tomlText).filter((t) => PROTECTED_TOPIC.test(t) && !(t === "orders/paid" && reservationPrepared));
   if (badScopes.length || badTopics.length) {
     return {
       ok: false,

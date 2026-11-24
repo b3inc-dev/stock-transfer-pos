@@ -57,6 +57,8 @@ flowchart TB
 | 在庫変動履歴行 | Prisma `InventoryChangeLog` | `idempotencyKey` unique |
 | apply-change 操作 | Prisma `InventoryChangeEvent` | `appEventId` unique |
 | OAuth Session | Prisma `Session` | |
+| 取置・操作チェックポイント・対応履歴 | Prisma `StockReservation` / `StockReservationEvent` | #59。Transferとは別系統。RESERVATIONS.md参照 |
+| 標準取置日数・開示依頼 | Prisma `StockReservationSettings` / `StockReservationPrivacyRequest` | 全店共通日数、shop/customer単位の開示対応 |
 
 ## 3. 出庫アーキテクチャ（核心）
 

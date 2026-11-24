@@ -1,0 +1,15 @@
+api_version = "2026-07"
+
+[[extensions]]
+type = "ui_extension"
+name = "取置"
+handle = "stock-transfer-reservation"
+description = "店舗の取置・期限・会計を管理"
+
+[[extensions.targeting]]
+module = "./src/Tile.jsx"
+target = "pos.home.tile.render"
+
+[[extensions.targeting]]
+module = "./src/Modal.jsx"
+target = "pos.home.modal.render"

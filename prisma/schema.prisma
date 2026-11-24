@@ -179,3 +179,64 @@ model InventoryCountDocumentChunk {
   @@unique([documentId, chunkIndex])
   @@index([documentId])
 }
+
+// Issue #59: 店舗の取置。操作入力を送信前に保存し、結果不明でも同じキーで再送する。
+model StockReservation {
+  id             String   @id
+  requestHash    String?
+  shop           String
+  locationId     String
+  locationName   String
+  timezone       String
+  status         String
+  version        Int      @default(1)
+  customerId     String?
+  guestName      String?
+  contactPhone   String?
+  lines          Json
+  dueDate        String
+  nextFollowDate String?
+  checkoutKey    String?  @unique
+  checkoutBy     String?
+  checkoutDevice String?
+  orderId        String?
+  operation      Json?
+  lastError      String?
+  createdBy      String
+  endedBy        String?
+  endedAt        DateTime?
+  anonymizedAt   DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  events         StockReservationEvent[]
+
+  @@index([shop, locationId, status, dueDate])
+  @@index([shop, customerId])
+}
+
+model StockReservationEvent {
+  id            String @id
+  reservationId String
+  reservation   StockReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  kind          String
+  actor         String
+  followDate    String?
+  createdAt     DateTime @default(now())
+  @@index([reservationId, createdAt])
+}
+
+model StockReservationSettings {
+  shop       String @id
+  days       Int @default(7)
+  updatedAt  DateTime @updatedAt
+}
+
+// 顧客データ開示依頼。Webhookで耐久受付し、管理者がダウンロードする。
+model StockReservationPrivacyRequest {
+  id          String @id
+  shop        String
+  customerId  String
+  exportedAt  DateTime?
+  createdAt   DateTime @default(now())
+  @@index([shop, exportedAt])
+}

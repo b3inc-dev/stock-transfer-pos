@@ -6,6 +6,7 @@ import { AppProvider } from "@shopify/shopify-app-react-router/react";
 
 import "@shopify/polaris/build/esm/styles.css";
 
+import { reservationPrivacyAvailable, reservationsEnabled } from "../utils/reservations.server";
 import { authenticate } from "../shopify.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { isInventoryCountReadOnlySubmission } from "../utils/inventory-count-revalidation";
@@ -35,7 +36,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (shopPlan.locationPlanMismatch) {
       const url = new URL(request.url);
       const path = url.pathname;
-      if (path !== "/app" && path !== "/app/plan" && !path.startsWith("/app/plan?")) {
+      if (path !== "/app/reservation-privacy" && path !== "/app/reservations/privacy" && path !== "/app" && path !== "/app/plan" && !path.startsWith("/app/plan?")) {
         return redirect("/app/plan?mismatch=1");
       }
     }
@@ -50,7 +51,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     // eslint-disable-next-line no-undef
     return data(
-      { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle },
+      { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle, reservationsEnabled: reservationsEnabled(), showReservationPrivacy: await reservationPrivacyAvailable(session.shop) },
       { headers: { "Cache-Control": "private, no-store" } }
     );
   } catch (e) {
@@ -72,7 +73,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000; // 5分（有料プランでも LB/プロキシのアイドル切断を防ぐ）
 
 export default function App() {
-  const { apiKey, shopPlan, storeHandle } = useLoaderData<typeof loader>();
+  const { apiKey, shopPlan, storeHandle, reservationsEnabled: showReservations, showReservationPrivacy } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isLoading = navigation.state === "loading";
   const { features, distribution } = shopPlan;
@@ -142,12 +143,14 @@ export default function App() {
         {features.order && <s-link href="/app/order">発注</s-link>}
         {features.loss && <s-link href="/app/loss">ロス</s-link>}
         {features.stocktake && <s-link href="/app/inventory-count">棚卸</s-link>}
+        {showReservationPrivacy && <s-link href="/app/reservation-privacy">顧客データ</s-link>}
+        {showReservations && features.reservation && <s-link href="/app/reservations">取置</s-link>}
         {features.adjustment && <s-link href="/app/adjustment">調整</s-link>}
         {distribution === "public" && <s-link href="/app/plan">料金プラン</s-link>}
       {/* @ts-expect-error s-app-nav 閉じタグ */}
       </s-app-nav>
       {/* 上部メニュー（s-app-nav が表示されない環境用・常に表示） */}
-      <AppNavBar shopPlan={shopPlan} />
+      <AppNavBar shopPlan={shopPlan} showReservations={showReservations} showReservationPrivacy={showReservationPrivacy} />
       {shopPlan.locationPlanMismatch && (
         <div
           style={{

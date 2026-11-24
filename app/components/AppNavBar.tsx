@@ -10,9 +10,11 @@ import type { ShopPlan } from "../utils/shop-plan.server";
 
 type AppNavBarProps = {
   shopPlan: ShopPlan;
+  showReservations?: boolean;
+  showReservationPrivacy?: boolean;
 };
 
-export function AppNavBar({ shopPlan }: AppNavBarProps) {
+export function AppNavBar({ shopPlan, showReservations, showReservationPrivacy }: AppNavBarProps) {
   const location = useLocation();
   const search = location.search || "";
   const { features, distribution } = shopPlan;
@@ -42,6 +44,8 @@ export function AppNavBar({ shopPlan }: AppNavBarProps) {
   if (features.adjustment) {
     items.push({ path: "/app/adjustment", label: "調整" });
   }
+  if (showReservationPrivacy) items.push({ path: "/app/reservation-privacy", label: "顧客データ" });
+  if (showReservations && features.reservation) items.push({ path: "/app/reservations", label: "取置" });
   if (distribution === "public") {
     items.push({ path: "/app/plan", label: "料金プラン" });
   }
