@@ -16,14 +16,15 @@ export function ReservationCustomerScreen({ locationId, storeName, busy, selecti
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   const revision = useRef(0);
+  const selectionRef = useRef(null);
   const change = value => {
-    if (value === query) return;
+    if (selectionRef.current || value === query) return;
     revision.current++; setQuery(value); setRows([]); setLoaded(false); setSelected(null); setError(""); setPage(0); setCursors([null]);
   };
   useEffect(() => {
     const request = ++revision.current;
     let alive = true;
-    setSelected(null); setLoaded(false); setRows([]); setError("");
+    selectionRef.current = null; setSelected(null); setLoaded(false); setRows([]); setError("");
     if (!query.trim()) { setLoading(false); return; }
     setLoading(true);
     const timer = setTimeout(async () => {
@@ -36,18 +37,22 @@ export function ReservationCustomerScreen({ locationId, storeName, busy, selecti
     }, 300);
     return () => { clearTimeout(timer); alive = false; };
   }, [query, locationId, cursors, page, refresh]);
-  const invalidate = () => { revision.current++; setSelected(null); setLoaded(false); setRows([]); setLoading(Boolean(query.trim())); setError(""); };
+  const invalidate = () => { revision.current++; selectionRef.current = null; setSelected(null); setLoaded(false); setRows([]); setLoading(Boolean(query.trim())); setError(""); };
   const previousPage = () => { if (busy || loading || !loaded || page === 0) return; invalidate(); setPage(previous => previous - 1); };
   const next = () => {
     if (busy || loading || !loaded || !pageInfo.hasNextPage || !pageInfo.endCursor) return;
     invalidate(); setCursors(previous => [...previous.slice(0, page + 1), pageInfo.endCursor]); setPage(previous => previous + 1);
   };
   const retry = () => { invalidate(); setRefresh(previous => previous + 1); };
+  const pick = customer => { if (busy || loading || !loaded) return; selectionRef.current = customer; setSelected(customer); };
+  const searchAgain = () => { selectionRef.current = null; setSelected(null); };
   const locked = busy || loading;
   return <s-stack gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
     <s-box padding="base"><s-stack gap="base">
       <s-text>ロケーション: {storeName}</s-text>
-      <s-search-field placeholder="氏名・電話番号で検索" value={query} disabled={busy} onInput={event => change(event.currentTarget.value)} onChange={event => change(event.currentTarget.value)} />
+      {selected ? <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
+        <s-text>検索: {query}</s-text><s-button disabled={busy} onClick={searchAgain}>検索し直す</s-button>
+      </s-stack> : <s-search-field placeholder="氏名・電話番号で検索" value={query} disabled={busy} onInput={event => change(event.currentTarget.value)} onChange={event => change(event.currentTarget.value)} />}
       <s-text type="small" color="subdued">{loading ? "検索中…" : !query.trim() ? "氏名または電話番号を入力してください。" : loaded ? `${page + 1}ページ目・${rows.length}件` : "検索結果を取得できていません。"}</s-text>
       {loaded ? <s-stack direction="inline" justifyContent="space-between" alignItems="center">
         <s-button disabled={locked || page === 0} onClick={previousPage}>前へ</s-button>
@@ -58,7 +63,7 @@ export function ReservationCustomerScreen({ locationId, storeName, busy, selecti
     <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0"><s-box padding="base"><s-stack gap="none">
       {loaded && !rows.length ? <s-text color="subdued">一致するお客様はいません。氏名の一部や電話番号でもお試しください。</s-text> : null}
       {rows.map(customer => <s-box key={customer.id}>
-        <s-clickable disabled={locked} onClick={() => setSelected(customer)}><s-box padding="base"><s-stack gap="small-400">
+        <s-clickable disabled={locked} onClick={() => pick(customer)}><s-box padding="base"><s-stack gap="small-400">
           <s-stack direction="inline" justifyContent="space-between" alignItems="center"><s-text type="strong">{customer.name}</s-text>{selected?.id === customer.id ? <s-badge tone="info">選択中</s-badge> : <s-text>›</s-text>}</s-stack>
           <s-text color="subdued">{japanesePhoneDisplay(customer.phone) || "電話番号未登録"}</s-text>
         </s-stack></s-box></s-clickable><s-divider />

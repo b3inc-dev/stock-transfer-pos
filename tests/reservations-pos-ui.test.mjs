@@ -41,6 +41,13 @@ test("POS customer association, confirmation registration and independent copy p
     click("お客様を選択"); await wait(100);
     const search = document.querySelector('s-search-field[placeholder="氏名・電話番号で検索"]'); search.value = "姓 名"; search.dispatchEvent(new window.Event("input")); await wait(450);
     const customer = document.querySelector("s-clickable"); assert.ok(customer); customer.dispatchEvent(new window.Event("click")); await wait(150);
+    assert.equal(document.querySelector('s-search-field[placeholder="氏名・電話番号で検索"]'), null, "selected customer removes the native input so its keyboard can close");
+    // A native blur/change arriving after selection must not reopen the search field.
+    search.value = "姓 名前"; search.dispatchEvent(new window.Event("change")); await wait(50);
+    assert.equal(document.querySelector('s-search-field[placeholder="氏名・電話番号で検索"]'), null);
+    click("検索し直す"); await wait(50);
+    assert.ok(document.querySelector('s-search-field[placeholder="氏名・電話番号で検索"]'));
+    document.querySelector("s-clickable").dispatchEvent(new window.Event("click")); await wait(50);
     assert.equal(cart.customer, null); click("このお客様を選択"); await wait(150);
     assert.equal(cart.customer.id, 1); assert.ok(document.body.textContent.includes("080-1234-5678"));
     cart.properties["取置番号"] = "existing"; click("カートから解除"); await wait(100); assert.equal(cart.customer.id, 1);
