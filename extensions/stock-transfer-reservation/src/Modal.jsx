@@ -294,7 +294,7 @@ export function ReservationModal({ fromProduct = false, initialProduct = null })
     </s-stack></s-box></s-scroll-box>
     <s-divider />
     <s-box padding="base"><s-stack gap="base" direction="block">
-      <s-stack direction="inline" justifyContent="space-between"><s-text>店舗: {storeName}</s-text>{screen === "list" ? <s-text>{total}件</s-text> : <s-text>{draft.lines.length}件</s-text>}</s-stack>
+      <s-stack direction="inline" justifyContent="space-between"><s-text>店舗: {storeName}</s-text>{screen === "list" ? <s-text>{total}件</s-text> : <s-text>{detail && ["detail", "actions", "cancel"].includes(screen) ? detail.lines.length : draft.lines.length}件</s-text>}</s-stack>
       {notice ? <s-banner tone="critical" heading="操作を確認してください">{notice}</s-banner> : null}
       {canAddToCart ? <s-text>追加後はPOSのカートでお会計してください。</s-text> : null}
       <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base">
