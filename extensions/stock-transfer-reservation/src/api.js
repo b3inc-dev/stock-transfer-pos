@@ -1,4 +1,5 @@
 import { getAppUrl } from "../../common/appUrl.js";
+import { printReceipt } from "../../common/receiptPrinting.js";
 export function locationId() {
   const value = shopify.session.currentSession.locationId;
   if (!value) throw new Error("POS店舗を取得できません");
@@ -28,7 +29,5 @@ export async function reservationApi(input = {}) {
   } finally { clearTimeout(timer); }
 }
 export async function printReservation(row, copy = "customer") {
-  const printers = await shopify.printing.getPrinters();
-  const printer = printers.find(item => item.connected);
-  await shopify.printing.print(`${getAppUrl()}/api/reservations?receipt=${encodeURIComponent(row.id)}&locationId=${encodeURIComponent(locationId())}&copy=${encodeURIComponent(copy)}`, printer ? { printer } : undefined);
+  return printReceipt(`/api/reservations?receipt=${encodeURIComponent(row.id)}&locationId=${encodeURIComponent(locationId())}&copy=${encodeURIComponent(copy)}`);
 }
