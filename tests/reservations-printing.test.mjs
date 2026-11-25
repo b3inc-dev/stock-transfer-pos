@@ -15,9 +15,9 @@ function setup(t, printing) {
   globalThis.shopify = { session: { currentSession: { locationId: 1 } }, printing };
 }
 const deferred = () => {
-  let resolve;
-  const promise = new Promise(yes => { resolve = yes; });
-  return { promise, resolve };
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 };
 
 test("unavailable printing gives an actionable error", async t => {
@@ -102,6 +102,35 @@ test("native print timeout is uncertain and never automatically resends on late 
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(sends, 1);
 });
+
+for (const outcome of ["resolve", "reject"]) {
+  test("timed-out native print blocks a second send until late " + outcome, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const sent = deferred(), started = deferred();
+    let sends = 0;
+    setup(t, {
+      getPrinters: async () => [{ connected: true }],
+      print() {
+        if (++sends !== 1) return Promise.resolve();
+        started.resolve();
+        return sent.promise;
+      },
+    });
+    const pending = assert.rejects(printReceipt(src), { code: "PRINT_TIMEOUT_UNKNOWN" });
+    await started.promise;
+    t.mock.timers.tick(RECEIPT_PRINT_TIMEOUT_MS);
+    await pending;
+    await assert.rejects(printReceipt(src), { code: "PRINT_IN_FLIGHT" });
+    assert.equal(sends, 1);
+
+    if (outcome === "resolve") sent.resolve();
+    else sent.reject(new Error("Printer disconnected"));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sends, 1, "late completion never automatically resends");
+    await printReceipt(src);
+    assert.equal(sends, 2, "a later explicit reprint is allowed");
+  });
+}
 
 test("printer discovery rejection never sends and releases its lock", async t => {
   let attempts = 0;

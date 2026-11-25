@@ -29,6 +29,7 @@ export async function printReceipt(src) {
   if (inFlight.has(src)) throw printError("PRINT_IN_FLIGHT", "同じ控えを印刷中です。終わるまでお待ちください。");
   inFlight.add(src);
   let phase = "discovery";
+  let nativePrint;
   try {
     const result = await withTimeout(printing.getPrinters(), phase);
     const printers = Array.isArray(result) ? result : result?.printers;
@@ -37,7 +38,8 @@ export async function printReceipt(src) {
       throw printError("NO_CONNECTED_PRINTER", "つながっているレシートプリンタがありません。用紙・電源・つながりを確かめてください。");
     }
     phase = "printing";
-    await withTimeout(printing.print(src, { printer: connected[0] }), phase);
+    nativePrint = Promise.resolve(printing.print(src, { printer: connected[0] }));
+    await withTimeout(nativePrint, phase);
     return {
       message: `${connected.length > 1 ? "複数のプリンタがつながっているため、最初の1台に送りました。" : "プリンタに送りました。"}紙が出たか確かめてください。`,
     };
@@ -49,7 +51,9 @@ export async function printReceipt(src) {
     if (/disconnect|offline|not connected|切断|未接続/i.test(raw)) throw printError("PRINT_FAILED", "プリンタがつながっていません。紙が出たか確認し、電源とつながりを確かめてください。");
     throw printError("PRINT_FAILED", "印刷を確認できませんでした。紙が出たか確認し、出ていない場合だけ再印刷してください。");
   } finally {
-    // A timeout cannot cancel a native job. A later explicit retry is the user's choice after checking paper.
-    inFlight.delete(src);
+    // A UI timeout does not cancel the native job. Release only once it settles.
+    const unlock = () => inFlight.delete(src);
+    if (nativePrint) void nativePrint.then(unlock, unlock);
+    else unlock();
   }
 }
