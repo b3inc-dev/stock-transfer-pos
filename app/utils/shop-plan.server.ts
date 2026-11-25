@@ -29,7 +29,8 @@ export type PlanFeature =
   | "order"
   | "stocktake"
   | "adjustment"
-  | "reservation";
+  | "reservation"
+  | "outboundRequest";
 
 export type PlanAccess = "allowed" | "plan_required" | "plan_check_failed";
 

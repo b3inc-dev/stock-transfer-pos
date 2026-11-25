@@ -308,3 +308,14 @@ activate → settle → [チャンクごと] 今の数を読む（50 件ずつ�
 ## 12. 取置（Issue #59）
 
 取置はTransfer/apply-changeと別の `StockReservation` を正とする。`reserving → held → checkout → completing → sold`、`held → cancelling → cancelled`。各在庫操作はDBに完全な入力・@idempotentキーを永続化してから送る。結果不明では同じ入力・キーで再送、23時間で自動再送を止める。販売・解除・フォローはDB version CASで排他。会計前にreservedを戻さず、同店舗の決済済み・全数履行済みPOS注文を照合してからreserved→availableを1回行う。詳細・未完了の受入項目は [RESERVATIONS.md](RESERVATIONS.md)。
+
+
+## 出庫依頼（2026-11-25）
+
+管理側の依頼は `draft → requested → working → processing → completed`。ShopifyのTransfer／Shipment状態とは別に管理する。受領操作は既存の入庫のみ。
+
+検品確定は、最新の依頼版・制御設定・数量を検証→差異SKUモーダル確認→固定したoperationをDB保存→既存出庫と共有するTransfer／Shipment mutation→在庫履歴を保存する。端末をまたぐversion比較で同じ依頼の同時実行を拒否する。
+
+作業中の商品追加は依頼版を進め、古い確認を無効にする。出庫処理中／出庫完了／結果不明では明細を変えない。応答不明を理由に作り直さず、マーカーとIDを照合する。全チャンクの発送と履歴保存を確認してから出庫完了にする。通常出庫の端末内CPの挙動は変更しない。
+
+詳細・復旧・有効化・検証は [OUTBOUND_REQUESTS.md](OUTBOUND_REQUESTS.md)。

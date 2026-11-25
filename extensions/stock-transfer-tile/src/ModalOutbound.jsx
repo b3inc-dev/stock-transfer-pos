@@ -1,3 +1,4 @@
+import { OUTBOUND_READY_MUTATION, OUTBOUND_SHIPMENT_MUTATION, OUTBOUND_MARK_MUTATION, OUTBOUND_TRACKING_MUTATION } from "../../common/outboundTransferMutations.js";
 // ModalOutbound.jsx（出庫のみ）
 // POS DOM ポリフィルの兄弟リンク不具合を render より前に補修（common/remoteDomSiblingFix.js）
 import "../../common/remoteDomSiblingFix.js";
@@ -9623,13 +9624,7 @@ async function fetchInventoryTransferDetailForHistory({ id, signal }) {
 /* Transfer/Shipment */
 
 async function inventoryTransferCreateAsReadyToShip({ originLocationId, destinationLocationId, lineItems, lineItemsMeta, note }) {
-  const mutation = `#graphql
-    mutation CreateTransferReady($input: InventoryTransferCreateAsReadyToShipInput!) {
-      inventoryTransferCreateAsReadyToShip(input: $input) {
-        inventoryTransfer { id status }
-        userErrors { field message }
-      }
-    }`;
+  const mutation = OUTBOUND_READY_MUTATION;
 
   const input = { originLocationId, destinationLocationId, lineItems };
   const noteTrim = note != null && String(note).trim();
@@ -9976,13 +9971,7 @@ async function createInventoryShipmentInTransitChunked({ movementId, lineItems, 
 }
 
 async function inventoryShipmentMarkInTransit(shipmentId) {
-  const mutation = `#graphql
-    mutation MarkShipmentInTransit($id: ID!) {
-      inventoryShipmentMarkInTransit(id: $id) {
-        inventoryShipment { id status }
-        userErrors { field message }
-      }
-    }`;
+  const mutation = OUTBOUND_MARK_MUTATION;
   const data = await adminGraphql(mutation, { id: shipmentId });
   assertNoUserErrors(data?.inventoryShipmentMarkInTransit, "inventoryShipmentMarkInTransit");
   return data?.inventoryShipmentMarkInTransit?.inventoryShipment ?? null;
@@ -9990,13 +9979,7 @@ async function inventoryShipmentMarkInTransit(shipmentId) {
 
 /** 既存 Transfer に DRAFT シップメントを追加（movementId = Transfer ID） */
 async function createInventoryShipmentDraft({ movementId, lineItems, lineItemsMeta }) {
-  const mutation = `#graphql
-    mutation ShipmentCreateDraft($input: InventoryShipmentCreateInput!) {
-      inventoryShipmentCreate(input: $input) {
-        inventoryShipment { id status }
-        userErrors { field message }
-      }
-    }`;
+  const mutation = OUTBOUND_SHIPMENT_MUTATION;
   const data = await adminGraphql(mutation, {
     input: { movementId, lineItems },
   });
@@ -10019,13 +10002,7 @@ async function inventoryShipmentSetTrackingSafe(shipmentId, trackingInput) {
   const sid = String(shipmentId || "").trim();
   if (!sid || Object.keys(clean).length === 0) return null;
   const data = await adminGraphql(
-    `#graphql
-      mutation InvShpSetTrk($id: ID!, $tracking: InventoryShipmentTrackingInput!) {
-        inventoryShipmentSetTracking(id: $id, tracking: $tracking) {
-          inventoryShipment { id status }
-          userErrors { field message }
-        }
-      }`,
+    OUTBOUND_TRACKING_MUTATION,
     { id: sid, tracking: clean }
   );
   assertNoUserErrors(data?.inventoryShipmentSetTracking, "inventoryShipmentSetTracking");

@@ -247,3 +247,49 @@ model StockReservationPrivacyRequest {
   createdAt   DateTime @default(now())
   @@index([shop, exportedAt])
 }
+
+// Application-owned requests; Shopify Transfer/Shipment remain the source of shipment state.
+model OutboundRequest {
+  id String @id
+  shop String
+  number String
+  originId String
+  originName String
+  destinationId String
+  destinationName String
+  dueDate String?
+  note String @default("")
+  lines Json
+  actualLines Json
+  status String @default("draft")
+  version Int @default(1)
+  owner String?
+  claimKey String?
+  operationId String? @unique
+  execution Json?
+  error String?
+  createdBy String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  completedAt DateTime?
+  events OutboundRequestEvent[]
+  @@unique([shop, number])
+  @@index([shop, originId, status, createdAt])
+}
+
+model OutboundRequestEvent {
+  id String @id @default(cuid())
+  requestId String
+  request OutboundRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  actor String
+  action String
+  createdAt DateTime @default(now())
+  @@index([requestId, createdAt])
+}
+
+model OutboundRequestSettings {
+  shop String @id
+  policy Json
+  version Int @default(1)
+  updatedAt DateTime @updatedAt
+}
