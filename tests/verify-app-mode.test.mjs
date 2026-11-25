@@ -90,6 +90,7 @@ describe("package.json の deploy スクリプト", () => {
       const verifyAt = s.indexOf(`verify-app-mode.js ${toml}`);
       const deployAt = s.indexOf(`shopify app deploy --config ${toml}`);
       assert.ok(setAt >= 0 && verifyAt > setAt && deployAt > verifyAt, s);
+      assert.ok(s.endsWith(`shopify app deploy --config ${toml} --allow-updates`), s);
       // && でつないでいる（見張りが止めたら deploy まで行かない）
       assert.ok(!/;|\|\|/.test(s), s);
     });

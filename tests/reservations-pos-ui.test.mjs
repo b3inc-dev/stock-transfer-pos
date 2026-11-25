@@ -61,8 +61,9 @@ test("POS customer association, confirmation registration and independent copy p
     assert.equal(calls.filter(call => call === "create").length, 1);
     assert.ok(prints[0].includes("copy=customer")); assert.equal(document.querySelector("s-page").getAttribute("heading"), "取置の詳細");
     assert.ok(document.body.textContent.includes("取置は登録済み"));
-    rejectPrint = false; click("店舗控えを印刷"); await wait(100);
+    rejectPrint = false; click("店舗控えを印刷"); click("店舗控えを印刷"); await wait(100);
     assert.ok(prints[1].includes("copy=store")); assert.equal(calls.filter(call => call === "create").length, 1);
+    assert.equal(prints.length, 2, "double click sends only one store copy and never registers again");
     assert.equal(draft.lines.length, 0);
     click("連絡・印刷"); await wait(100); assert.equal(document.querySelector("s-page").getAttribute("heading"), "連絡・印刷");
     click("お客様控えを印刷"); await wait(100); assert.ok(prints[2].includes("copy=customer")); assert.equal(calls.filter(call => call === "create").length, 1);
