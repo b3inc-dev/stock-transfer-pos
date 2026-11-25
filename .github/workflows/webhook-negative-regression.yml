@@ -1,0 +1,27 @@
+name: Webhook negative regression
+on:
+  pull_request:
+    paths:
+      - 'app/utils/webhook-auth-safe.ts'
+      - 'app/utils/webhookAuth.js'
+      - 'tests/webhook-negative-regression.test.mjs'
+      - '.github/workflows/webhook-negative-regression.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify checked-out revision
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --test tests/webhook-negative-regression.test.mjs
