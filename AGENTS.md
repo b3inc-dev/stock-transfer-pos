@@ -53,6 +53,7 @@ Shopify POS / 在庫移管アプリの長期開発・保守向けエージェン
 | 領域 | 主なパス |
 |------|----------|
 | 出庫（移管作成） | `extensions/stock-transfer-tile/src/ModalOutbound.jsx` |
+| 出庫依頼 | `extensions/stock-transfer-request/` / `app/routes/app.outbound-requests*`（仕様: `docs/OUTBOUND_REQUESTS.md`） |
 | 入庫受領 | `extensions/stock-transfer-inbound/` |
 | 共通（履歴・apply-change・appEventId） | `extensions/common/` |
 | apply-change API | `app/routes/api.inventory.apply-change.tsx` |

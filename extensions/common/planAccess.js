@@ -10,7 +10,7 @@
  * - 契約の状態を読めなかった: 止める（plan_check_failed）。「契約が要る」とは言わず、もう一度試してもらう
  */
 
-/** @typedef {"settings"|"history"|"transfer"|"inventoryInfo"|"purchase"|"loss"|"order"|"stocktake"|"adjustment"|"reservation"} PlanFeature */
+/** @typedef {"settings"|"history"|"transfer"|"inventoryInfo"|"purchase"|"loss"|"order"|"stocktake"|"adjustment"|"reservation"|"outboundRequest"} PlanFeature */
 /** @typedef {"allowed"|"plan_required"|"plan_check_failed"} PlanAccess */
 
 /** Lite でも使える機能 */
@@ -25,6 +25,7 @@ export const PRO_ONLY_FEATURES = Object.freeze([
   "stocktake",
   "adjustment",
   "reservation",
+  "outboundRequest",
 ]);
 
 export const ALL_FEATURES = Object.freeze([...LITE_FEATURES, ...PRO_ONLY_FEATURES]);
@@ -41,6 +42,7 @@ export const FEATURE_LABELS = Object.freeze({
   stocktake: "棚卸",
   adjustment: "調整",
   reservation: "取置",
+  outboundRequest: "出庫依頼",
 });
 
 function normalizePlan(plan) {
@@ -112,6 +114,7 @@ export function applyChangeFailsOpenOnPlanCheckError(activity) {
 
 /** 管理画面の URL がどの機能か。null は誰でも開ける（ホーム・料金プラン・接続維持）。 */
 const ADMIN_PATH_FEATURES = [
+  ["/app/outbound-requests", "outboundRequest"],
   ["/app/reservations", "reservation"],
   ["/app/settings", "settings"],
   ["/app/history", "history"],

@@ -1,3 +1,4 @@
+import { outboundRequestsEnabled } from "../utils/outbound-requests.server";
 import { useEffect, useRef } from "react";
 import type { HeadersFunction, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { Outlet, redirect, useLoaderData, useNavigation, useRouteError, data } from "react-router";
@@ -51,7 +52,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     // eslint-disable-next-line no-undef
     return data(
-      { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle, reservationsEnabled: reservationsEnabled(), showReservationPrivacy: await reservationPrivacyAvailable(session.shop) },
+      { apiKey: process.env.SHOPIFY_API_KEY || "", shopPlan, storeHandle, reservationsEnabled: reservationsEnabled(), outboundRequestsEnabled: outboundRequestsEnabled(), showReservationPrivacy: await reservationPrivacyAvailable(session.shop) },
       { headers: { "Cache-Control": "private, no-store" } }
     );
   } catch (e) {
@@ -73,7 +74,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000; // 5分（有料プランでも LB/プロキシのアイドル切断を防ぐ）
 
 export default function App() {
-  const { apiKey, shopPlan, storeHandle, reservationsEnabled: showReservations, showReservationPrivacy } = useLoaderData<typeof loader>();
+  const { apiKey, shopPlan, storeHandle, reservationsEnabled: showReservations, showReservationPrivacy, outboundRequestsEnabled: showOutboundRequests } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
   const isLoading = navigation.state === "loading";
   const { features, distribution } = shopPlan;
@@ -139,6 +140,7 @@ export default function App() {
         {features.settings && <s-link href="/app/settings">設定</s-link>}
         {features.inventoryInfo && <s-link href="/app/inventory-info">在庫情報</s-link>}
         {features.history && <s-link href="/app/history">入出庫</s-link>}
+        {showOutboundRequests && features.outboundRequest && <s-link href="/app/outbound-requests">出庫依頼</s-link>}
         {features.purchase && <s-link href="/app/purchase">仕入</s-link>}
         {features.order && <s-link href="/app/order">発注</s-link>}
         {features.loss && <s-link href="/app/loss">ロス</s-link>}
@@ -149,7 +151,7 @@ export default function App() {
       {/* @ts-expect-error s-app-nav 閉じタグ */}
       </s-app-nav>
       {/* 上部メニュー（s-app-nav が表示されない環境用・常に表示） */}
-      <AppNavBar shopPlan={shopPlan} showReservations={showReservations} showReservationPrivacy={showReservationPrivacy} />
+      <AppNavBar shopPlan={shopPlan} showReservations={showReservations} showOutboundRequests={showOutboundRequests} showReservationPrivacy={showReservationPrivacy} />
       {shopPlan.locationPlanMismatch && (
         <div
           style={{

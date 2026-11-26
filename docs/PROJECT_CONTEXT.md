@@ -35,6 +35,7 @@ Prisma の `InventoryChangeEvent` は **在庫数量の set/adjust（apply-chang
 | 領域 | パス | 役割 |
 |------|------|------|
 | 出庫 | `extensions/stock-transfer-tile/` | Transfer/Shipment 作成・編集・履歴 |
+| 出庫依頼 | `extensions/stock-transfer-request/` / `app/routes/app.outbound-requests*` | 管理側の依頼→店舗の検品・印刷・出庫。受領は既存入庫。詳細 `OUTBOUND_REQUESTS.md` |
 | 入庫 | `extensions/stock-transfer-inbound/` | 宛先ロケの Transfer 一覧・受領 |
 | ロス | `extensions/stock-transfer-loss/` | ロス計上（adjust/set + 履歴） |
 | 調整 | `extensions/stock-transfer-adjustment/` | 簡易棚卸/調整 |

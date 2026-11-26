@@ -23,6 +23,8 @@ type DeleteMany = (args: { where: Record<string, unknown> }) => Promise<{ count:
 
 /** この処理で使う Prisma のテーブルだけを持つ型（テストでは偽物を渡す） */
 export type ComplianceDb = {
+  outboundRequest?: { deleteMany: DeleteMany };
+  outboundRequestSettings?: { deleteMany: DeleteMany };
   session: { deleteMany: DeleteMany };
   inventoryChangeLog: { deleteMany: DeleteMany };
   inventoryChangeEvent: { deleteMany: DeleteMany };
@@ -131,6 +133,8 @@ export async function handleComplianceWebhook(args: {
       if (db.stockReservation) deleted.stockReservation = (await db.stockReservation.deleteMany({ where })).count;
       if (db.stockReservationPrivacyRequest) deleted.stockReservationPrivacyRequest = (await db.stockReservationPrivacyRequest.deleteMany({ where })).count;
       if (db.stockReservationSettings) deleted.stockReservationSettings = (await db.stockReservationSettings.deleteMany({ where })).count;
+      if (db.outboundRequest) deleted.outboundRequest = (await db.outboundRequest.deleteMany({ where })).count;
+      if (db.outboundRequestSettings) deleted.outboundRequestSettings = (await db.outboundRequestSettings.deleteMany({ where })).count;
       deleted.session = (await db.session.deleteMany({ where })).count;
       log(`[compliance] shop/redact for ${shopDomain}`, deleted);
       return { status: 200, handled: normalized, deleted };

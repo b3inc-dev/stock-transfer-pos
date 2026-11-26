@@ -11,10 +11,11 @@ import type { ShopPlan } from "../utils/shop-plan.server";
 type AppNavBarProps = {
   shopPlan: ShopPlan;
   showReservations?: boolean;
+  showOutboundRequests?: boolean;
   showReservationPrivacy?: boolean;
 };
 
-export function AppNavBar({ shopPlan, showReservations, showReservationPrivacy }: AppNavBarProps) {
+export function AppNavBar({ shopPlan, showReservations, showReservationPrivacy, showOutboundRequests }: AppNavBarProps) {
   const location = useLocation();
   const search = location.search || "";
   const { features, distribution } = shopPlan;
@@ -29,6 +30,7 @@ export function AppNavBar({ shopPlan, showReservations, showReservationPrivacy }
   if (features.history) {
     items.push({ path: "/app/history", label: "入出庫" });
   }
+  if (showOutboundRequests && features.outboundRequest) items.push({ path: "/app/outbound-requests", label: "出庫依頼" });
   if (features.purchase) {
     items.push({ path: "/app/purchase", label: "仕入" });
   }
