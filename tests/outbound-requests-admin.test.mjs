@@ -11,11 +11,13 @@ before(async () => {
   vite = await createServer({ configFile: false, appType: "custom", server: { middlewareMode: true, hmr: false }, plugins: [{
     name: "outbound-admin-fixture", enforce: "pre",
     resolveId(source) {
+      if (source === "../utils/outbound-request-products.server") return "\0request-product-add";
       if (source === "../db.server") return "\0request-admin-db";
       if (source === "../utils/outbound-request-admin.server") return "\0request-admin-auth";
       if (source === "../utils/outbound-requests.server") return "\0request-admin-service";
     },
     load(source) {
+      if (source === "\0request-product-add") return "export const requestProductAdd=async(admin,command,form)=>{globalThis.outboundAdminFixture.calls.push({catalog:command});return {products:[],pageInfo:{hasNextPage:false,endCursor:null}}}";
       if (source === "\0request-admin-db") return "export default {outboundRequest:{count:args=>globalThis.outboundAdminFixture.db.outboundRequest.count(args),findMany:args=>globalThis.outboundAdminFixture.db.outboundRequest.findMany(args)},outboundRequestEvent:{findMany:args=>globalThis.outboundAdminFixture.db.outboundRequestEvent.findMany(args)}}";
       if (source === "\0request-admin-auth") return 'export const outboundAdmin = async () => {const f=globalThis.outboundAdminFixture;if(f.denied)throw new Response("Not found",{status:404});return {session:{shop:"fixture.myshopify.com"},admin:{},actor:"管理担当"}}';
       if (source === "\0request-admin-service") return [
@@ -107,4 +109,16 @@ test("all admin entry points retain feature/auth gates", async () => {
   await assert.rejects(() => editor.action({ request: post("/new", { id }) }), error => error.status === 404);
   await assert.rejects(() => detail.action({ request: post("/" + id, {}) , params: { id } }), error => error.status === 404);
   assert.equal(fixture.calls.length, 0);
+});
+
+test("catalog reads preserve unsaved creation fields and never save or publish", async () => {
+  for (const command of ["search", "collections", "collectionProducts", "csv"]) {
+    const formData = new FormData(); formData.set("command", command);
+    assert.equal(editor.shouldRevalidate({ formData, defaultShouldRevalidate: true }), false);
+    const result = await editor.action({ request: post("/new", { command, requestKey: "read-" + command, query: "SKU" }) });
+    assert.equal(result.data.requestKey, "read-" + command);
+  }
+  assert.equal(fixture.calls.filter(call => call.catalog).length, 4);
+  assert.equal(fixture.calls.filter(call => call.save || call.change).length, 0);
+  assert.equal(editor.shouldRevalidate({ formData: new FormData(), defaultShouldRevalidate: true }), true);
 });
