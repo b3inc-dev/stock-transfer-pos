@@ -83,7 +83,22 @@ function historyFixture(previousQuantity, failedRead, failuresRemaining = Infini
     async create({ data }) { const row = { id: `synthetic-${rows.length + 1}`, ...data }; rows.push(row); return row; },
     async update({ where, data }) { const row = rows.find(item => matches(item, where)); assert.ok(row, "update targets a saved observation"); Object.assign(row, data); return row; },
   };
-  return { rows, restoreRead() { failedRead = null; } };
+  const observations=[];
+  globalThis.inventoryZeroObservationFixture.db.inventoryWebhookObservation = {
+    async upsert({where,create}) {
+      assert.equal(where.shop_idempotencyKey.shop,create.shop);
+      const found=observations.find(row=>row.shop===create.shop&&row.idempotencyKey===create.idempotencyKey);
+      if(found)return found;
+      const row={...create};observations.push(row);return row;
+    },
+    async findFirst({where}) {
+      return observations.filter(row=>matches(row,where)).sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp)||a.idempotencyKey.localeCompare(b.idempotencyKey))[0]??null;
+    },
+    async deleteMany({where}) {
+      let count=0;for(let i=observations.length-1;i>=0;i--)if(matches(observations[i],where)){observations.splice(i,1);count++;}return {count};
+    },
+  };
+  return { rows, observations, restoreRead() { failedRead = null; } };
 }
 
 const submit = () => action({ request: new Request("https://fixture.invalid/webhook", { method: "POST" }) });
@@ -111,12 +126,61 @@ test('chronological 10 to 8 to 10 keeps both nonzero observations',async()=>{
 test('nonzero reverse-order control retains both observations',async()=>{
   assert.deepEqual(await sequence([[7,later[1]],earlier]),[{quantity:8,delta:-2},{quantity:7,delta:-1}]);
 });
-// Known unmet chronological invariance, documented in #53 comment6945558864.
-// TODO is intentional: the assertions retain the desired result, not the observed loss.
-test('zero-looking later observation survives reverse arrival', {todo:'POS-WEBHOOK-ZERO-001: zero-delta observation is discarded before a predecessor arrives'},async()=>{
+test('zero-looking later observation survives reverse arrival',async()=>{
   assert.deepEqual(await sequence([later,earlier]),expected);
 });
 test('replay of the missing later observation repairs history exactly once',async()=>{
   assert.deepEqual(await sequence([later,earlier,later,later]),expected);
+});
+
+const deliver = async ([available,updated_at]) => {
+ globalThis.inventoryZeroObservationFixture.event={...event,payload:{...event.payload,available,updated_at}};
+ try{return await submit();}finally{globalThis.inventoryZeroObservationFixture.event=event;}
+};
+test('a genuine zero stays out of visible history and retains one idempotent observation',async()=>{
+ const f=historyFixture(10,null);
+ assert.equal((await deliver(later)).status,200);assert.equal((await deliver(later)).status,200);
+ assert.equal(f.rows.length,0);assert.equal(f.observations.length,1);
+ assert.deepEqual(Object.keys(f.observations[0]).sort(),['adjustmentGroupId','available','idempotencyKey','inventoryItemId','locationId','shop','timestamp'].sort());
+});
+test('retention unavailable or failed is not acknowledged as success',async()=>{
+ for(const missing of [true,false]) {
+  const f=historyFixture(10,null);
+  if(missing)globalThis.inventoryZeroObservationFixture.db.inventoryWebhookObservation=undefined;
+  else globalThis.inventoryZeroObservationFixture.db.inventoryWebhookObservation.upsert=async()=>{throw new Error('synthetic unavailable store');};
+  assert.equal((await deliver(later)).status,503);assert.equal(f.rows.length,0);assert.equal(f.observations.length,0);
+ }
+});
+test('foreign shop/item/location observations cannot be replayed by this anchor',async()=>{
+ const f=historyFixture(10,null);
+ for(const changed of [{shop:'foreign.invalid'},{inventoryItemId:'99'},{locationId:'99'}])f.observations.push({shop:event.shop,inventoryItemId:'11',locationId:'22',timestamp:new Date(later[1]),available:10,idempotencyKey:JSON.stringify(changed),...changed});
+ assert.equal((await deliver(earlier)).status,200);
+ assert.deepEqual(f.rows.map(r=>r.quantityAfter),[8]);assert.equal(f.observations.length,3);
+});
+test('a retained replay failure stays recoverable by retrying the committed anchor',async()=>{
+ const f=historyFixture(10,null);await deliver(later);
+ const obs=globalThis.inventoryZeroObservationFixture.db.inventoryWebhookObservation,find=obs.findFirst;
+ obs.findFirst=async()=>{throw new Error('synthetic replay read unavailable');};
+ assert.equal((await deliver(earlier)).status,200);assert.equal(f.rows.length,1);assert.equal(f.observations.length,1);
+ obs.findFirst=find;
+ assert.equal((await deliver(earlier)).status,200);
+ assert.deepEqual([...f.rows].sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp)).map(r=>({quantity:r.quantityAfter,delta:r.delta})),expected);
+ assert.equal(f.observations.length,0);
+});
+test('retained negative movement uses the existing pending-sale classifier',async()=>{
+ const f=historyFixture(10,null);let pending=[{orderId:'synthetic-sale',quantity:2,locationId:'22'}];
+ globalThis.inventoryZeroObservationFixture.db.orderPendingLocation={findMany:async()=>pending,findFirst:async()=>null,deleteMany:async()=>{pending=[];return {count:1};}};
+ await deliver(later);assert.equal((await deliver([12,earlier[1]])).status,200);
+ assert.deepEqual(f.rows.map(r=>[r.activity,r.quantityAfter,r.delta]),[['admin_webhook',12,2],['order_sales',10,-2]]);
+ assert.equal(f.observations.length,0);assert.equal(pending.length,0);
+});
+test('retained positive movement uses pending-refund while preserving the existing sale row',async()=>{
+ const f=historyFixture(10,null);await deliver(later);
+ const sold={id:'synthetic-sale-log',shop:event.shop,inventoryItemId:'11',locationId:'22',timestamp:new Date(earlier[1]),quantityAfter:8,delta:-2,activity:'order_sales',sourceType:'order_sales',sourceId:'order_synthetic',idempotencyKey:`${event.shop}:11:22:${new Date(earlier[1]).toISOString()}`,sku:'',variantId:null,locationName:'22'};
+ f.rows.push(sold);const prior={...sold};let pending=[{refundId:'synthetic-refund',orderId:'synthetic',quantity:2,locationId:'22'}];
+ globalThis.inventoryZeroObservationFixture.db.refundPendingLocation={findMany:async()=>pending,findFirst:async()=>null,deleteMany:async()=>{pending=[];return {count:1};}};
+ assert.equal((await deliver(earlier)).status,200);assert.deepEqual(f.rows[0],prior);
+ assert.deepEqual(f.rows.map(r=>[r.activity,r.quantityAfter,r.delta]),[['order_sales',8,-2],['refund',10,2]]);
+ assert.equal(f.observations.length,0);assert.equal(pending.length,0);
 });
 

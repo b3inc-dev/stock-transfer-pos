@@ -63,6 +63,23 @@ model InventoryChangeLog {
   @@index([shop, timestamp])
 }
 
+// Internal zero-looking inventory notifications. Not a visible history activity.
+// Only inventory identifiers, observed quantity/time and deduplication data are kept.
+model InventoryWebhookObservation {
+  id                String   @id @default(cuid())
+  shop              String
+  idempotencyKey    String
+  inventoryItemId   String
+  locationId        String
+  timestamp         DateTime
+  available         Int
+  adjustmentGroupId String?
+  createdAt         DateTime @default(now())
+
+  @@unique([shop, idempotencyKey])
+  @@index([shop, inventoryItemId, locationId, timestamp])
+}
+
 // 在庫変更イベント（Phase1 イベント先行）：1回の操作単位のヘッダ。先にDB保存→Shopify実行→履歴確定
 model InventoryChangeEvent {
   id             String   @id @default(cuid())

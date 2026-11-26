@@ -27,12 +27,18 @@ const PENDING_ORDER_MAX_RETRIES = 1; // 最大約 0.8s（旧 2.5s×3 は棚卸�
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response> {
+async function handleWebhook(
+  args: ActionFunctionArgs,
+  retainedContext?: Awaited<ReturnType<typeof authenticateWebhook>>,
+  replayingRetainedObservation = false,
+): Promise<Response> {
+  const { request } = args;
   // デバッグ: webhookが到達したかどうかを確認
   console.log(`[inventory_levels/update] Webhook endpoint called: method=${request.method}, url=${request.url}`);
   
   try {
-    const { payload, shop, topic, session } = await authenticateWebhook(request);
+    const authenticated = retainedContext ?? await authenticateWebhook(request);
+    const { payload, shop, topic, session } = authenticated;
 
     console.log(`[inventory_levels/update] Webhook received: shop=${shop}, topic=${topic}`);
 
@@ -95,6 +101,39 @@ async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response>
       inventoryItemIds: [inventoryItemIdRaw, `gid://shopify/InventoryItem/${inventoryItemIdRaw}`],
       locationIds: [locationIdRaw, `gid://shopify/Location/${locationIdRaw}`],
     };
+    // Keep zero-looking observations separate from visible business history. A late
+    // predecessor can make one nonzero. Re-evaluate it through this same handler so
+    // sales/refund matching is preserved; never manufacture an admin classification.
+    // One retained observation per invocation bounds work and prevents replay loops.
+    const replayNextRetainedObservation = async (observedAt: Date) => {
+      if (replayingRetainedObservation || !db.inventoryWebhookObservation) return;
+      const next = await db.inventoryWebhookObservation.findFirst({
+        where: {
+          shop,
+          inventoryItemId: { in: historyScope.inventoryItemIds },
+          locationId: { in: historyScope.locationIds },
+          timestamp: { gt: observedAt },
+        },
+        orderBy: [{ timestamp: "asc" }, { idempotencyKey: "asc" }],
+      });
+      if (!next) return;
+      const response = await handleWebhook(args, {
+        ...authenticated,
+        payload: {
+          inventory_item_id: next.inventoryItemId,
+          location_id: next.locationId,
+          available: next.available,
+          updated_at: next.timestamp.toISOString(),
+          inventory_adjustment_group_id: next.adjustmentGroupId ?? undefined,
+        },
+      }, true);
+      if (response.status >= 400) throw new Error("Retained inventory observation could not be re-evaluated");
+    };
+    const forgetRetainedObservation = async (key: string) => {
+      if (db.inventoryWebhookObservation) {
+        await db.inventoryWebhookObservation.deleteMany({ where: { shop, idempotencyKey: key } });
+      }
+    };
     const repairSuccessorAfter = async (observedAt: Date, excludeId?: string | null) => {
       try {
         const repaired = await repairSuccessorDelta(db, historyScope, observedAt, available, excludeId);
@@ -103,6 +142,7 @@ async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response>
             `[inventory_levels/update] Late notification: recomputed next admin_webhook delta from this quantity: id=${repaired.id}, delta=${repaired.delta}, quantityAfter(before)=${available}`
           );
         }
+        await replayNextRetainedObservation(observedAt);
       } catch (e: unknown) {
         console.warn(
           "[inventory_levels/update] Failed to recompute next row delta after late notification:",
@@ -341,6 +381,8 @@ async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response>
             console.warn("[inventory_levels/update] Could not repair metadata on duplicate event", error);
           }
           console.log(`Skipping duplicate webhook: ${idempotencyKey}`);
+          await forgetRetainedObservation(idempotencyKey);
+          await replayNextRetainedObservation(updatedAt);
           return new Response("OK", { status: 200 });
         }
       } else {
@@ -353,9 +395,23 @@ async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response>
       return new Response("Inventory history unavailable", { status: 503 });
     }
 
-    // 変動がない（delta が 0）場合はログを保存しない（「0」の行が履歴に並ばないようにする）
+    // Preserve a zero-looking observation without adding a visible zero history row.
+    // A failed retention write is not acknowledged as complete: Shopify may retry.
     if (delta === 0) {
-      console.log(`[inventory_levels/update] Skipping log: no change (delta=0), item=${inventoryItemIdRaw}, location=${locationIdRaw}, quantityAfter=${available}`);
+      if (!db.inventoryWebhookObservation) return new Response("Inventory observation unavailable", { status: 503 });
+      try {
+        await db.inventoryWebhookObservation.upsert({
+          where: { shop_idempotencyKey: { shop, idempotencyKey } },
+          create: {
+            shop, idempotencyKey, inventoryItemId: inventoryItemIdRaw,
+            locationId: locationIdRaw, timestamp: updatedAt, available, adjustmentGroupId,
+          },
+          // The first authenticated observation owns the key, just like history.
+          update: {},
+        });
+      } catch {
+        return new Response("Inventory observation unavailable", { status: 503 });
+      }
       return new Response("OK", { status: 200 });
     }
 
@@ -987,6 +1043,7 @@ async function handleWebhook({ request }: ActionFunctionArgs): Promise<Response>
             note: noteForCreate,
           },
         });
+        await forgetRetainedObservation(idempotencyKey);
         
         if (pendingOrder && typeof db.orderPendingLocation !== "undefined") {
           await db.orderPendingLocation.deleteMany({

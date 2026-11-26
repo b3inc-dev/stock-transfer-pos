@@ -1,0 +1,36 @@
+{
+  "id": "POS-WEBHOOK-ZERO-001",
+  "owner": "Codex scheduled pos_outbound_next",
+  "sourceMain": "94fb3ea579904f65b9df9306aa7da31f84d16d06",
+  "parentPR152": "40d1d0020fdfab711b54d390c07934bffcfea125",
+  "scope": "internal history zero-observation retention; isolated candidate only",
+  "design": {
+    "chosen": "separate internal table; visible history/export/count queries unchanged",
+    "rejected": "visible zero history rows or direct admin promotion bypassing sale/refund classification",
+    "columns": "shop, inventoryItemId, locationId, timestamp, available, adjustmentGroupId, idempotencyKey, generated id/createdAt; no raw payload/customer/order/token/SKU/store name",
+    "reevaluate": "after late history write or committed-anchor retry, re-evaluate the next retained same-scope observation through existing handler/pending classification, at most one replay depth",
+    "cleanup": "delete when ordinary history exists/created; shop/redact follows existing public/inhouse/reinstall safeguards",
+    "retention": "unpromoted true-zero observations follow existing shop history deletion boundary; no new TTL or cleanup scheduler introduced. Long-term volume and retention review remain required before production"
+  },
+  "validation": {
+    "before": "parent runtime same strict known case:0pass1fail",
+    "after": "candidate10pass0fail0skip0TODO; chronology/reverse/replay/zero hiding/503fail/scope/recovery/pending sale+refund",
+    "migration": "isolated PGlite0.3.14 PostgreSQL17.5 WASM:1pass; newDDL/unique/shop/time/rollback; not actualPrisma TCP/PG16 concurrency",
+    "prisma": "6.16.3 validate success; client generation pending",
+    "fullBuildTypecheck": "not completed; existing baseline458 type errors not reclassified as new"
+  },
+  "noOperations": [
+    "no app main/staging merge",
+    "no shared DB migration/data write",
+    "no actual Shopify stock/Flow/notification",
+    "no CLI deployment",
+    "no UI changes",
+    "no paid resource/config/cron creation"
+  ],
+  "remaining": [
+    "independent review",
+    "actual Prisma/Postgres multi-client race, sustained volume/retention",
+    "live migration/release approval",
+    "actual store/device/printing acceptance unrelated to this backend fix"
+  ]
+}
