@@ -16,3 +16,13 @@ test('route keeps only the framework action export and daily imports the server 
  assert.ok(daily.includes('from "../utils/inventory-webhook-handler.server"'));
  assert.ok(!daily.includes('from "./webhooks.inventory_levels.update"'));
 });
+
+import {mapRelocatedDiagnostics} from '../scripts/observe-candidate-quality.mjs';
+test('diagnostic relocation aliases only the hash-proven file, preserving messages and multiplicity',()=>{
+ const source=read('app/utils/inventory-webhook-handler.server.ts');
+ const d={file:'app/utils/inventory-webhook-handler.server.ts',line:176,column:20,code:'TS2339',message:'same debt'};
+ const other={...d,file:'app/utils/other.server.ts'};
+ const mapped=mapRelocatedDiagnostics([d,d,other],source);
+ assert.deepEqual(mapped,[{...d,file:'app/routes/webhooks.inventory_levels.update.tsx'},{...d,file:'app/routes/webhooks.inventory_levels.update.tsx'},other]);
+ assert.throws(()=>mapRelocatedDiagnostics([d],source+'\n'),/relocation alias requires/);
+});
