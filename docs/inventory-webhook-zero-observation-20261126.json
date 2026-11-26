@@ -1,0 +1,35 @@
+{
+  "dateJst": "2026-11-26 14:36 JST",
+  "owner": "Codex scheduled pos_outbound_next",
+  "scope": "new synthetic current-runtime zero-observation arrival/replay regression; test-only; no runtime fix",
+  "base": "2cc5a2c73dd487d32fc1b221c4a628f4ae8aaae4",
+  "inheritedFinding": "https://github.com/b3inc-dev/stock-transfer-pos/issues/53#issuecomment-6945558864",
+  "findingId": "POS-WEBHOOK-ZERO-001",
+  "expected": "baseline10, earlier8, later10 yields chronological rows8/-2 and10/+2 regardless arrival",
+  "results": {
+    "ordered": "pass2rows",
+    "nonzeroReverseControl": "pass2rows",
+    "zeroLookingReverse": "expected2rows; actual1row8/-2 despite all200",
+    "replay": "replaying later after predecessor arrives recovers10/+2 once; replay twice no duplicate",
+    "committedTest": "3pass0fail0skip1TODO; TODO assertion actually fails",
+    "strictSameTest": "3pass1fail0skip0TODO",
+    "sensitivity": "scratch-only zero-discard-disabled:4pass0fail; source restored; cause localization, not proposed production fix"
+  },
+  "command": "node --test --test-reporter=tap tests/inventory-webhook-zero-observation.test.mjs",
+  "boundary": {
+    "actualHandler": true,
+    "vite": "6.3.6",
+    "database": "in-memory Prisma-shaped synthetic fixture; no SQLite/Postgres",
+    "shopifyAuthentication": "mocked authenticate.webhook; not HMAC/SDK evidence",
+    "shopifyNetwork": false,
+    "productionWrite": false,
+    "ui": false
+  },
+  "remaining": [
+    "Explicit observation retention design preserving display suppression/idempotency/order/refund rules",
+    "Actual Postgres concurrent arrival/retention and sales/refund replay regression",
+    "No broad webhook retry added; no runtime change",
+    "Independent review; no app merge/deploy"
+  ],
+  "runtimeSourceValidation": "11 app runtime blobs match main recursive tree2bd1eddfc2d84b3e84c196896892047a3109533a; restored after mutation"
+}
