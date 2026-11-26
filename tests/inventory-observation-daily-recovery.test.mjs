@@ -30,7 +30,8 @@ before(async () => {
     }],
   });
   globalThis.inventoryDailyRecoveryFixture = { db: {}, event, webhookCalls:0 };
-  ({ action, replayStoredInventoryObservation:replayStored } = await vite.ssrLoadModule("/app/routes/webhooks.inventory_levels.update.tsx"));
+  ({ action } = await vite.ssrLoadModule("/app/routes/webhooks.inventory_levels.update.tsx"));
+  ({ replayStoredInventoryObservation:replayStored } = await vite.ssrLoadModule("/app/utils/inventory-webhook-handler.server.ts"));
   ({action:daily}=await vite.ssrLoadModule("/app/routes/api.inventory-snapshot-daily.tsx"));
   ({drainInventoryObservations:drain}=await vite.ssrLoadModule("/app/utils/inventory-observation-drain.server.ts"));
 });

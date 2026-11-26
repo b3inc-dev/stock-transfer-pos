@@ -13,7 +13,7 @@ import {
 } from "../utils/inventory-snapshot";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
 import { drainInventoryObservations } from "../utils/inventory-observation-drain.server";
-import { replayStoredInventoryObservation } from "./webhooks.inventory_levels.update";
+import { replayStoredInventoryObservation } from "../utils/inventory-webhook-handler.server";
 
 export type { DailyInventorySnapshot, InventorySnapshotsData } from "../utils/inventory-snapshot";
 

@@ -64,7 +64,7 @@ test("a sale preserves a previous adjustment ending at the sale's starting quant
     "../utils/webhook-auth-safe.server": { authenticateWebhook: (r) => modules["../shopify.server"].authenticate.webhook(r) },
     "../utils/webhook-response-budget": { respondWithinBudget: (work) => work() },
   };
-  const source = readFileSync(new URL("../app/routes/webhooks.inventory_levels.update.tsx", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../app/utils/inventory-webhook-handler.server.ts", import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
@@ -80,7 +80,7 @@ test("a sale preserves a previous adjustment ending at the sale's starting quant
 
   const request = new Request("https://example.test/webhook", { method: "POST" });
   for (let delivery = 0; delivery < 2; delivery++) {
-    assert.equal((await exports.action({ request })).status, 200);
+    assert.equal((await exports.inventoryWebhookAction({ request })).status, 200);
   }
   assert.deepEqual(history[0], prior);
   assert.deepEqual(history.map((row) => [row.activity, row.delta, row.quantityAfter]), [
