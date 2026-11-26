@@ -36,10 +36,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.14.0'
-      - name: Install isolated test tools only
-        run: |
-          npm install --prefix "$RUNNER_TEMP/pos-pg-deps" --no-save prisma@6.16.3 @prisma/client@6.16.3 vite@6.3.6
-          ln -s "$RUNNER_TEMP/pos-pg-deps/node_modules" node_modules
+      - name: Install repository lockfile dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Guard disposable connection then generate actual Prisma client
         run: |
           node --input-type=module -e "import {assertIsolatedRecoveryDatabase} from './tests/fixtures/isolated-pg-guard.mjs'; assertIsolatedRecoveryDatabase();"

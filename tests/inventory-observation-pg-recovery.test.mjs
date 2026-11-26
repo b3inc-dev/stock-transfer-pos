@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fork } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 
 import { assertIsolatedRecoveryDatabase } from './fixtures/isolated-pg-guard.mjs';
 
@@ -24,7 +25,11 @@ function worker(mode){
 // Worker imports only the guard; do not register parent tests inside a child.
 if(!['seed','refresh-failure','healthy','concurrent','delete-failure'].includes(process.argv[2])){
  test('PG16 Prisma recovery persists across process restart, concurrent drains and committed cleanup failure',{skip:!enabled,timeout:180000},async()=>{
-  const {PrismaClient}=await import('@prisma/client');const db=new PrismaClient({log:[]});
+  const {PrismaClient,Prisma}=await import('@prisma/client');
+  const lock=JSON.parse(await readFile(new URL('../package-lock.json',import.meta.url),'utf8'));
+  assert.equal(Prisma.prismaVersion.client,lock.packages['node_modules/@prisma/client'].version,'generated client must match parent repository lock');
+  console.log('PG_RECOVERY_CLIENT_VERSION='+Prisma.prismaVersion.client);
+  const db=new PrismaClient({log:[]});
   const shop='pg-recovery.invalid';
   const clear=async()=>{await db.inventoryWebhookObservation.deleteMany({});await db.inventoryChangeLog.deleteMany({});await db.session.deleteMany({});};
   const states=async()=>({observations:await db.inventoryWebhookObservation.count(),history:await db.inventoryChangeLog.findMany({where:{shop,timestamp:{gte:new Date('2026-01-04T00:00:00Z')}},orderBy:{timestamp:'asc'}})});
