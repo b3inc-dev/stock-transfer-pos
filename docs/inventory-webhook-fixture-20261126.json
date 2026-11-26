@@ -1,0 +1,54 @@
+{
+  "observedAt": "2026-11-26T04:35:29Z",
+  "baseMain": "2cc5a2c73dd487d32fc1b221c4a628f4ae8aaae4",
+  "finding": "Existing inventory-webhook-history-read fixture discards every timestamp query, so current findPreviousQuantity's timestamp.lt and successor.gt cannot observe baseline/history.",
+  "before": {
+    "command": "node --test --test-reporter=tap tests/inventory-webhook-history-read.test.mjs",
+    "tests": 7,
+    "passed": 3,
+    "failed": 3,
+    "todo": 1,
+    "todoActuallyFailed": true,
+    "skipped": 0,
+    "wrongObservedDelta": null,
+    "expectedDelta": -2
+  },
+  "change": "test-only: actual field predicates/scope/time order/update fixture, synthetic scoped baseline, future successor repair, scoped foreign observations negative case; chronological expectation unchanged and now active instead of TODO.",
+  "after": {
+    "command": "node --test --test-reporter=tap tests/inventory-webhook-history-read.test.mjs tests/inventory-webhook-metadata-recovery.test.mjs tests/webhook-shop-timezone.test.mjs",
+    "tests": 15,
+    "passed": 15,
+    "failed": 0,
+    "todo": 0,
+    "skipped": 0,
+    "historyTests": 8
+  },
+  "sensitivity": {
+    "detected": 3,
+    "total": 3,
+    "cases": [
+      "predecessor-time-scope-removed",
+      "successor-repair-disabled",
+      "tenant-history-scope-removed"
+    ],
+    "eachFailed": 1,
+    "eachPassed": 7,
+    "restoredRelatedPassed": 15
+  },
+  "runtime": "Node24.22.3 / Vite6.3.6 isolated dependencies (--ignore-scripts)",
+  "runtimeSourceBlobs": {
+    "app/routes/webhooks.inventory_levels.update.tsx": "3eb78bae9b6f326ff8cff30b2141cbfc4bf44d38",
+    "app/utils/inventory-history-order.ts": "7c9900486bf05804bab8e2343e7ac498ce6e564c"
+  },
+  "runtimeUnchanged": true,
+  "productionData": false,
+  "shopifyAuthentication": "mocked",
+  "db": "memory fixture only, no network DB",
+  "limitations": [
+    "No full repo regression/typecheck/build in this sparse test checkout",
+    "Not proof of actual inventory totals, webhook HTTP500 causes, SDK/HMAC or DB concurrency",
+    "Issue53 missing zero-delta observation case remains unverified and separate",
+    "Does not close all inventory ordering/reconciliation requirements",
+    "No runtime, UI, live config, deploy or public enabling changes"
+  ]
+}
