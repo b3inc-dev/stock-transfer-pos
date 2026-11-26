@@ -1,0 +1,66 @@
+{
+  "observedAt": "2026-11-26T01:36:54Z",
+  "candidate": "47b975c048ea806ee27ccac7e4217c94b8dc8203",
+  "sourceBlobs": {
+    "extensions/stock-transfer-request/src/api.js": "aacf556161f3617b0979e8848ed9b9b22dfa669a",
+    "extensions/common/appUrl.js": "be303fe70f862227ceb126e41604a555c9df54e6"
+  },
+  "runtime": "Node v24.22.3",
+  "command": "node --test tests/outbound-request-api-boundary.test.mjs",
+  "result": {
+    "tests": 19,
+    "passed": 19,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0
+  },
+  "mutationSensitivity": [
+    {
+      "mutation": "removed-origin-fence",
+      "detected": true,
+      "passed": 18,
+      "failed": 1,
+      "skipped": 0
+    },
+    {
+      "mutation": "caller-can-spoof-location",
+      "detected": true,
+      "passed": 18,
+      "failed": 1,
+      "skipped": 0
+    },
+    {
+      "mutation": "timeout-does-not-abort",
+      "detected": true,
+      "passed": 18,
+      "failed": 1,
+      "skipped": 0
+    },
+    {
+      "mutation": "timeout-not-cleared",
+      "detected": true,
+      "passed": 3,
+      "failed": 16,
+      "skipped": 0
+    }
+  ],
+  "boundaries": {
+    "network": "mocked global fetch; no actual network",
+    "database": "not connected",
+    "shopify": "synthetic session only",
+    "ui": "not modified",
+    "production": "not modified",
+    "fullRegression": false,
+    "ci": "not run",
+    "independentReview": "pending",
+    "storeE2E": "not run",
+    "physicalPOS": "not run"
+  },
+  "remaining": [
+    "POS-OUTREQ-ENV-001 isolated staging build/API/Shop/app install/source version verification",
+    "UI-POS-OUTREQ-001..003 existing individual approval gates remain",
+    "approved synthetic SKU/two-location source shipment to destination receipt",
+    "real iPhone/iPad and printer acceptance",
+    "owner receipt/integration authorization before main/Render/Shopify release"
+  ]
+}
