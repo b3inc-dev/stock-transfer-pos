@@ -45,7 +45,7 @@ test('actual production build npm start routes HTTP authentication and DB recove
   }
   assert.ok(denied,'actual npm start must serve the compiled route');assert.equal(denied.status,401);assert.equal((await denied.json()).ok,false);
   assert.equal(await db.inventoryWebhookObservation.count(),1);assert.equal(await db.inventoryChangeLog.count(),2,'compiled auth gate must not write on401');
-  const get=await fetch(url);assert.equal(get.status,405,'actual router must reject GET without a loader');
+  const get=await fetch(url);assert.equal(get.status,400,'compiled no-loader resource route rejects GET with its existing400 contract');assert.equal(await db.inventoryWebhookObservation.count(),1);assert.equal(await db.inventoryChangeLog.count(),2,'GET rejection must not change history');
   const call=()=>run(process.execPath,[fileURLToPath(new URL('../scripts/call-inventory-snapshot-daily.js',import.meta.url))],{INVENTORY_SNAPSHOT_API_URL:url,INVENTORY_SNAPSHOT_API_KEY:key});
   const first=await call();assert.equal(first.status,0,'compiled server must recover the stored observation');assert.ok(!(first.stdout+first.stderr).includes('CANARY'));const summary=JSON.parse(first.stdout);assert.equal(summary.processed,1);assert.equal(summary.total,1);assert.equal(summary.observationRecovery.completed,1);
   assert.equal(await db.inventoryWebhookObservation.count(),0);
@@ -54,7 +54,7 @@ test('actual production build npm start routes HTTP authentication and DB recove
   const repeat=await call();assert.equal(repeat.status,0);assert.equal(JSON.parse(repeat.stdout).observationRecovery.attempted,0);assert.equal((await history()).length,2);
   const events=(await readFile(audit,'utf8')).trim().split('\n').map(s=>JSON.parse(s));assert.ok(events.filter(x=>x.kind==='synthetic_graphql').length>=3);assert.equal(events.filter(x=>x.kind==='denied_fetch').length,0,'only the known synthetic GraphQL boundary should be requested');assert.equal(events.filter(x=>x.kind==='denied_interval').length,0,'background periodic jobs must stay inactive');
   assert.ok(!output.includes('synthetic-token-CANARY'),'server must not print access tokens');
-  console.log('PRODUCTION_START_CHAIN npm_start=pass compiled_route401=pass get405=pass child_cli_pg_plus2=pass repeat_idempotent=pass denied_fetch=0');
+  console.log('PRODUCTION_START_CHAIN npm_start=pass compiled_route401=pass get400_no_write=pass child_cli_pg_plus2=pass repeat_idempotent=pass denied_fetch=0');
  }finally{
   if(server?.pid){try{process.kill(-server.pid,'SIGTERM');}catch{}await wait(100);}
   await clear();await db.$disconnect();await rm(temp,{recursive:true,force:true});
