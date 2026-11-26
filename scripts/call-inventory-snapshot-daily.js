@@ -35,18 +35,21 @@ async function callApi() {
       data = { raw: text };
     }
 
-    if (!response.ok) {
-      console.error(`Error: HTTP ${response.status}`);
-      console.error(JSON.stringify(data, null, 2));
-      process.exit(1);
-    }
-
-    console.log('Success:');
-    console.log(JSON.stringify(data, null, 2));
-    process.exit(0);
-  } catch (error) {
+    const count = value => Number.isSafeInteger(value) && value >= 0;
+    const errors = Array.isArray(data.errors) ? data.errors.length : data.errors == null ? 0 : Number.isSafeInteger(data.errors) && data.errors >= 0 ? data.errors : -1;
+    const recovery = data.observationRecovery;
+    const validRecovery = recovery && ['scanned','attempted','completed','retained','failed','deferred'].every(key => count(recovery[key])) &&
+      recovery.attempted === recovery.completed + recovery.retained + recovery.failed && recovery.scanned === recovery.attempted + recovery.deferred;
+    const success = response.ok && data.ok === true && count(data.processed) && count(data.total) && data.processed === data.total && errors === 0 &&
+      validRecovery && recovery.failed === 0 && recovery.deferred === 0;
+    // Never print raw response/error strings, shop names, keys or customer data.
+    const summary = { ok: Boolean(success), status: response.status, processed: count(data.processed) ? data.processed : null, total: count(data.total) ? data.total : null, errors: errors < 0 ? null : errors,
+      observationRecovery: validRecovery ? Object.fromEntries(['scanned','attempted','completed','retained','failed','deferred','batchLimitReached'].map(key => [key, recovery[key]])) : null };
+    console.log(JSON.stringify(summary));
+    process.exit(success ? 0 : 1);
+  } catch {
     console.error('Error calling API:');
-    console.error(error.message);
+    console.error('Snapshot request failed; inspect the authenticated service logs.');
     process.exit(1);
   }
 }
