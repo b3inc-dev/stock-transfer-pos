@@ -1,0 +1,25 @@
+name: Snapshot cron real HTTP acceptance
+on:
+  pull_request:
+    branches: [main, codex/inventory-replay-server-boundary-20261126]
+    paths:
+      - '.github/workflows/snapshot-cron-http-acceptance.yml'
+      - 'tests/inventory-snapshot-cron-http.test.mjs'
+      - 'scripts/call-inventory-snapshot-daily.js'
+permissions:
+  contents: read
+jobs:
+  synthetic-http-child:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+      - name: Identify real subprocess transports
+        run: node --version && curl --version
+      - name: Exercise real loopback HTTP and OS exit without SDK or DB
+        run: node --test --test-reporter=tap tests/inventory-snapshot-cron-http.test.mjs
