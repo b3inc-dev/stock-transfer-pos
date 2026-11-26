@@ -45,6 +45,7 @@ beforeEach(() => {
 });
 const admin = { async graphql(query, { variables = {} } = {}) {
   const ok = data => Response.json({ data });
+  if (query.includes("RequestCatalog")) { fixture.catalogVariables = variables; return ok({ productVariants: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } }); }
   if (query.includes("RequestPosLocation")) return ok({ location: { id: variables.id, isActive: true, name: "A" } });
   if (query.includes("OutboundRequestLocations")) return ok({ locations: { nodes: [{ id: fixture.row.originId, name: "A", isActive: true }, { id: fixture.row.destinationId, name: "B", isActive: true }], pageInfo: { hasNextPage: false } } });
   if (query.includes("OutboundRequestVariants")) return ok({ nodes: variables.ids.map(gid => { const n = gid.split("/").pop(); return { id: gid, displayName: `商品${n}`, sku: `SKU${n}`, barcode: n, inventoryItem: { id: `gid://shopify/InventoryItem/${n}` } }; }) });
@@ -250,4 +251,12 @@ test("plan denial stops new shipment writes but never drops a confirmed shipment
   assert.equal(response.status, 200);
   assert.equal((await response.json()).row.status, "completed");
   assert.equal(fixture.logs.size, 1);
+});
+
+test("POS product pagination forwards the common search query and validates cursors", async () => {
+  const request = input => new Request("https://test/api/outbound-requests", { method: "POST", body: JSON.stringify({ locationId: fixture.row.originId, command: "products", ...input }) });
+  const result = await route.action({ request: request({ query: "シート", after: "next-50" }) });
+  assert.equal(result.status, 200); const body = await result.json(); assert.deepEqual(body.pageInfo, { hasNextPage: false, endCursor: null });
+  assert.equal(fixture.catalogVariables.after, "next-50"); assert.equal(fixture.catalogVariables.first, 50); assert.ok(fixture.catalogVariables.query.includes("シート"));
+  const malformed = await route.action({ request: request({ query: "商品", after: "x".repeat(2048) }) }); assert.equal(malformed.status, 400);
 });

@@ -32,6 +32,16 @@ const ORDER: TemplateVariable[] = [
 ];
 
 export const TEMPLATE_VARIABLES: Record<ReceiptKind, TemplateVariable[]> = {
+  outbound_request: [...COMMON,
+    { name: "outbound_request.number", label: "依頼番号" },
+    { name: "outbound_request.origin_name", label: "出庫元" },
+    { name: "outbound_request.destination_name", label: "移動先" },
+    { name: "outbound_request.due_date", label: "希望出庫日" },
+    { name: "outbound_request.status_label", label: "状態" },
+    { name: "outbound_request.version", label: "依頼の版" },
+    { name: "outbound_request.note", label: "備考" },
+    { name: "outbound_request.items", label: "商品（title・variant_title・sku・barcode・requested・actual・reason）" },
+  ],
   reservation: [...COMMON,
     { name: "reservation.number", label: "取置番号" }, { name: "reservation.due_date", label: "受取期限" },
     { name: "reservation.created_at_label", label: "受付日" }, { name: "reservation.copy_label", label: "控えの用途" },

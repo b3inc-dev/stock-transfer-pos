@@ -9,11 +9,12 @@
  * 保存先は AppSetting（key = receipt_layout_v1_<kind>）。DB の形は変えない。
  */
 
-export const RECEIPT_KINDS = ["settlement", "sales", "gift", "receipt", "reservation"] as const;
+export const RECEIPT_KINDS = ["settlement", "sales", "gift", "receipt", "reservation", "outbound_request"] as const;
 export type ReceiptKind = (typeof RECEIPT_KINDS)[number];
 
 export const RECEIPT_KIND_LABELS: Record<ReceiptKind, string> = {
   reservation: "取置控え",
+  outbound_request: "出庫依頼書",
   settlement: "精算・点検レシート",
   sales: "販売レシート",
   gift: "ギフトレシート",

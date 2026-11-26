@@ -34,6 +34,11 @@ export const RESERVATION_FOOTER_TEXT = "商品・数量と受取期限をご確�
 /** 標準のひな形（初めて開いたとき・保存が無いとき） */
 export function defaultLayout(kind: ReceiptKind): ReceiptLayout {
   switch (kind) {
+    case "outbound_request": return layout("outbound_request", [
+      block("title", "heading", { text: "出庫依頼書", size: "l", bold: true, align: "center" }),
+      block("meta", "outbound_request_info"), block("items", "outbound_request_items"),
+      block("note", "text", { text: "{{ outbound_request.note }}", size: "s", align: "left" }),
+    ], { fontSizePx: 14 });
     case "reservation":
       return layout("reservation", [
         block("title", "heading", { text: "取置控え", size: "m", bold: false, align: "center" }),
@@ -256,7 +261,7 @@ export function ciaraSettlementLayout(): ReceiptLayout {
 export type LayoutPreset = { id: string; label: string; kinds: ReceiptKind[]; build: (kind: ReceiptKind) => ReceiptLayout };
 
 export const LAYOUT_PRESETS: LayoutPreset[] = [
-  { id: "standard", label: "標準", kinds: ["settlement", "sales", "gift", "receipt", "reservation"], build: defaultLayout },
+  { id: "standard", label: "標準", kinds: ["settlement", "sales", "gift", "receipt", "reservation", "outbound_request"], build: defaultLayout },
   { id: "ciara-sales", label: "Ciara 風", kinds: ["sales"], build: () => ciaraSalesLayout() },
   { id: "ciara-receipt", label: "Ciara 風", kinds: ["receipt"], build: () => ciaraReceiptLayout() },
   { id: "ciara-settlement", label: "Ciara 風", kinds: ["settlement"], build: () => ciaraSettlementLayout() },

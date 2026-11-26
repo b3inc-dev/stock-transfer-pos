@@ -18,16 +18,17 @@ test("POS scans and extra products require a SKU difference modal before shippin
   Object.assign(globalThis, { window, document: window.document, HTMLElement: window.HTMLElement, Element: window.Element, Node: window.Node });
   const line = (n, quantity) => ({ variantId: `gid://shopify/ProductVariant/${n}`, inventoryItemId: `gid://shopify/InventoryItem/${n}`, title: `商品${n}`, sku: `SKU${n}`, barcode: String(n), quantity, reason: "" });
   let row = { id: "request-fixture", number: "OR-1", version: 1, originId: "gid://shopify/Location/1", originName: "A", destinationName: "B", status: "requested", claimed: false, lines: [line(1, 2), line(2, 2)], actualLines: [], note: "店舗間移動" };
+  let cameraOpens = 0, cameraCloses = 0;
   const policy = { allowUnder: true, underReason: "required", allowOver: true, overReason: "required", allowExtra: true, extraReason: "required" }, calls = [], storage = new Map(), prints = [];
   let scan;
-  globalThis.shopify = { session: { currentSession: { locationId: 1 }, getSessionToken: async () => "fixture" }, storage: { async get(key) { return storage.get(key); }, async set(key, value) { storage.set(key, structuredClone(value)); } }, scanner: { scannerData: { current: { subscribe(fn) { scan = fn; return () => { scan = null; }; } } }, hideCameraScanner() {}, showCameraScanner() {} }, toast: { show() {} }, printing: { getPrinters: async () => [{ connected: true }], async print(src) { prints.push(src); } } };
+  globalThis.shopify = { session: { currentSession: { locationId: 1 }, getSessionToken: async () => "fixture" }, storage: { async get(key) { return storage.get(key); }, async set(key, value) { storage.set(key, structuredClone(value)); } }, scanner: { scannerData: { current: { subscribe(fn) { scan = fn; return () => { scan = null; }; } } }, hideCameraScanner() { cameraCloses++; }, showCameraScanner() { cameraOpens++; } }, toast: { show() {} }, printing: { getPrinters: async () => [{ connected: true }], async print(src) { prints.push(src); } } };
   globalThis.fetch = async (_url, options) => {
     const body = JSON.parse(options.body); calls.push(body);
     const response = extra => Response.json({ ok: true, settings: { version: 1, policy }, shipping: { required: false, allowCustomCarrier: true, carriers: [] }, ...extra });
     if (body.command === "list") return response({ rows: [row], count: 1 });
     if (body.command === "detail") return response({ row });
     if (body.command === "claim") { row = { ...row, status: "working", claimed: true, version: row.version + 1 }; return response({ row }); }
-    if (body.command === "products") return body.query === "失敗" ? Response.json({ ok: false, error: "検索できませんでした" }, { status: 500 }) : response({ products: [line(3, 0)] });
+    if (body.command === "products") return body.query === "失敗" ? Response.json({ ok: false, error: "検索できませんでした" }, { status: 500 }) : response({ products: body.after ? [line(3, 0), line(4, 0)] : [line(3, 0)], pageInfo: { hasNextPage: !body.after, endCursor: body.after ? "cursor-2" : "cursor-1" } });
     if (body.command === "preview") {
       const checked = validateOutboundActual(row.lines, body.actual, policy);
       return response({ preview: { ...checked, differences: checked.differences.map(line => ({ ...line, title: body.actual.find(item => item.inventoryItemId === line.inventoryItemId)?.title, sku: body.actual.find(item => item.inventoryItemId === line.inventoryItemId)?.sku })), token: "preview-confirmation" } });
@@ -48,8 +49,20 @@ test("POS scans and extra products require a SKU difference modal before shippin
   };
   try {
     ui.mount(); await wait(); await wait();
+    const statusButtons = [...document.querySelectorAll("s-button")].filter(button => ["出庫待ち", "履歴"].includes(button.textContent));
+    assert.deepEqual(statusButtons.map(button => button.parentElement.getAttribute("inlineSize")), ["50%", "50%"]);
+    assert.equal(statusButtons[0].parentElement.parentElement.getAttribute("inlineSize"), "100%");
     const item = document.querySelector("s-clickable"); assert.ok(item); item.dispatchEvent(new window.Event("click")); await wait();
     click("作業を開始"); await wait(); await wait();
+    const inspectionFooter = document.querySelector("s-page > s-stack > s-scroll-box").nextElementSibling.nextElementSibling;
+    assert.deepEqual([...inspectionFooter.querySelectorAll("s-button")].map(button => button.textContent), ["戻る", "検品を保存", "出庫完了"]);
+    const buttonsRow = inspectionFooter.querySelector("s-button").parentElement;
+    assert.equal(buttonsRow.getAttribute("justifyContent"), "space-between");
+    assert.ok([...buttonsRow.children].every(button => button.tagName === "S-BUTTON"), "footer buttons retain the inbound/outbound direct placement, not equal-width wrappers");
+    const contentScroll = document.querySelector("s-page > s-stack > s-scroll-box");
+    assert.equal(contentScroll.getAttribute("blockSize"), "auto"); assert.equal(contentScroll.getAttribute("maxBlockSize"), "100%");
+    assert.equal(inspectionFooter.closest("s-scroll-box"), null, "the footer never scrolls with the products");
+    click("カメラスキャン"); await wait(); assert.equal(cameraOpens, 1); click("カメラを閉じる"); await wait(); assert.ok(cameraCloses > 0);
     assert.equal(typeof scan, "function"); scan({ data: "1" }); scan({ data: "1" }); scan({ data: "1" }); await wait();
     const staleScanner = scan;
     const inspectionScroll = document.querySelector("s-page > s-stack > s-scroll-box");
@@ -61,6 +74,10 @@ test("POS scans and extra products require a SKU difference modal before shippin
     const searchField = document.querySelector("s-search-field");
     assert.equal(searchField.closest("s-scroll-box"), null, "search stays in the fixed header");
     searchField.value = "商品3"; searchField.dispatchEvent(new window.Event("input")); await wait(); await wait(); await wait(); await wait();
+    click("さらに読み込む"); click("さらに読み込む"); await wait();
+    assert.equal(calls.filter(call => call.command === "products" && call.after === "cursor-1").length, 1, "double taps only fetch one next page");
+    assert.equal(document.querySelectorAll("#outbound-add-button-3").length, 1, "page overlap never duplicates products");
+    assert.ok(document.querySelector("#outbound-add-button-4"));
     const addProduct = [...document.querySelectorAll("s-button")].find(button => button.id === "outbound-add-button-3");
     assert.ok(addProduct); addProduct.dispatchEvent(new window.Event("click")); await wait();
     searchField.value = "失敗"; searchField.dispatchEvent(new window.Event("input"));
