@@ -4,6 +4,7 @@ api_version = "2026-07"
 type = "ui_extension"
 name = "出庫依頼"
 handle = "stock-transfer-request"
+uid = "6c4c6bba-9dac-0aef-0a19-f80a25be1317bc2ca86a"
 description = "管理画面からの依頼を確認・印刷・検品して出庫"
 
 [[extensions.targeting]]
