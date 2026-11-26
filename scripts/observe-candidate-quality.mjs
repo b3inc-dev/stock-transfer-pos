@@ -46,7 +46,7 @@ async function observe(baseline){
  const run=(cwd,program,args,label)=>{
   const result=spawnSync(program,args,{cwd,env:{...process.env,FORCE_COLOR:'0'},encoding:'utf8',maxBuffer:64*1024*1024});
   assert.ok(!result.error&&result.status!==null,'quality command must actually finish');
-  const text=(result.stdout??'')+(result.stderr??'');logs.push([label,text]);return {status:result.status,text};
+  const text=(result.stdout??'')+(result.stderr??'');logs.push([label,text,result.stderr??'']);return {status:result.status,text};
  };
  const snapshots=[];
  for(const [label,cwd] of [['main',base],['candidate',root]]){
@@ -68,7 +68,7 @@ async function observe(baseline){
  process.stdout.write('POS_QUALITY_OBSERVATION '+JSON.stringify(summary)+'\n');
  process.stdout.write('POS_QUALITY_ADDED_TYPES '+JSON.stringify(addedTypes.slice(0,30))+'\n');
  process.stdout.write('POS_QUALITY_ADDED_LINT '+JSON.stringify(addedLint.slice(0,30))+'\n');
- if(main.buildExit!==0||candidate.buildExit!==0){process.stdout.write('POS_QUALITY_BUILD_FAILURE '+logs.filter(([n])=>n.endsWith('-build')).map(([n,t])=>n+'\n'+t.split('\n').slice(-25).join('\n')).join('\n'));process.exitCode=1;}
+ if(main.buildExit!==0||candidate.buildExit!==0){process.stdout.write('POS_QUALITY_BUILD_FAILURE '+logs.filter(([n])=>(n==='main-build'&&main.buildExit!==0)||(n==='candidate-build'&&candidate.buildExit!==0)).map(([n,t,stderr])=>n+'\n'+stderr.split('\n').slice(0,160).join('\n')+'\n'+t.split('\n').slice(-3).join('\n')).join('\n'));process.exitCode=1;}
  else if(addedTypes.length){process.stdout.write('POS_QUALITY_BLOCKED=new_type_diagnostics\n');process.exitCode=1;}
  else process.stdout.write('POS_QUALITY_SCOPE=build_and_type_delta_observed full_quality_green='+summary.fullQualityGreen+'\n');
 }
