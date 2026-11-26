@@ -12,7 +12,7 @@ before(async () => {
     token: { dest: `https://${shop}`, sub: "123" },
     db: { stockReservationSettings: { async findUnique() { return globalThis.reservationApiFixture.receiptLayout ? { receiptLayout: globalThis.reservationApiFixture.receiptLayout } : null; } }, stockReservation: {
       async findFirst({ where }) { dbReads++; return where.id === row.id && where.shop === shop && where.locationId === locationId ? structuredClone(row) : null; },
-      async findMany({ where }) { dbReads++; return where.shop === shop && where.locationId === locationId ? [structuredClone(row)] : []; },
+      async findMany({ where }) { dbReads++; return where.shop === shop && where.locationId === locationId ? structuredClone(globalThis.reservationApiFixture.rows || [row]) : []; },
       async count({ where }) {
         dbReads++;
         assert.deepEqual(where, { shop, locationId, status: { notIn: ["sold", "cancelled", "failed"] } });
@@ -33,7 +33,7 @@ before(async () => {
   ({ action, loader } = await vite.ssrLoadModule("/app/routes/api.reservations.tsx"));
 });
 after(async () => { delete globalThis.reservationApiFixture; delete process.env.RESERVATIONS_ENABLED; delete process.env.RESERVATION_POS_ACCESS; delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; await vite?.close(); });
-beforeEach(() => { delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; globalThis.reservationApiFixture.planBlocked = false; globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async query => { if(query.includes("ReservationReceiptLocation")) return Response.json({data:{location:{id:locationId,address:null}}}); throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
+beforeEach(() => { delete process.env.APP_DISTRIBUTION; delete process.env.SHOPIFY_API_KEY; delete globalThis.reservationApiFixture.rows; globalThis.reservationApiFixture.planBlocked = false; globalThis.reservationApiFixture.receiptLayout = null; globalThis.reservationApiFixture.graphql = async query => { if(query.includes("ReservationReceiptLocation")) return Response.json({data:{location:{id:locationId,address:null}}}); throw new Error("unexpected Shopify call"); }; dbReads = 0; process.env.RESERVATIONS_ENABLED = "1"; process.env.RESERVATION_POS_ACCESS = JSON.stringify({ [shop]: { 123: { locations: [locationId], contact: false } } }); globalThis.reservationApiFixture.token = { dest: `https://${shop}`, sub: "123" }; });
 const request = (body) => new Request("https://app.invalid/api/reservations", { method: "POST", body: JSON.stringify({ locationId, ...body }), headers: { "Content-Type": "application/json" } });
 const post = body => action({ request: request(body) });
 test("disabled feature performs no database access", async () => { delete process.env.RESERVATIONS_ENABLED; assert.equal((await post({ command: "detail", id: row.id })).status, 404); assert.equal(dbReads, 0); });
@@ -205,7 +205,7 @@ test("public missing scopes stop reserve and checkout before DB access but allow
 test("public onboarding retains plan rejection and unknown distribution never enables automatic access", async () => {
   publicInstall(); globalThis.reservationApiFixture.planBlocked = true;
   assert.equal((await post({ command: "count" })).status, 403); assert.equal(dbReads, 0);
-  globalThis.reservationApiFixture.planBlocked = false; delete process.env.APP_DISTRIBUTION;
+  delete globalThis.reservationApiFixture.rows; globalThis.reservationApiFixture.planBlocked = false; delete process.env.APP_DISTRIBUTION;
   assert.equal((await post({ command: "count" })).status, 403);
 });
 
@@ -278,4 +278,24 @@ test("customer phone endpoint requires contact access, write scope and exact aut
 });
 test("requesting customer phone registration cannot bypass contact permission during create", async () => {
   assert.equal((await post({ command: "create", ...row, saveCustomerPhone: true })).status, 403); assert.equal(dbReads, 0);
+});
+
+test("overdue tile count uses each reservation timezone and ignores follow-up postponement and terminal rows", async () => {
+  const { localDate } = await import("../extensions/common/reservations.js");
+  const addDays = (day, days) => new Date(Date.parse(day) + days * 86400000).toISOString().slice(0, 10);
+  globalThis.reservationApiFixture.rows = ["Asia/Tokyo", "Pacific/Honolulu"].flatMap(timezone => {
+    const today = localDate(Date.now(), timezone);
+    return [
+      { ...row, timezone, dueDate: addDays(today, -1), nextFollowDate: addDays(today, 5) },
+      { ...row, timezone, dueDate: today },
+      { ...row, timezone, dueDate: addDays(today, 1), nextFollowDate: addDays(today, -1) },
+      ...["sold", "cancelled", "failed"].map(status => ({ ...row, timezone, status, dueDate: addDays(today, -1) })),
+    ];
+  });
+  const response = await post({ command: "overdueCount" });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, count: 2 });
+  assert.equal((await post({ command: "overdueCount", locationId: "gid://shopify/Location/2" })).status, 403);
+  globalThis.reservationApiFixture.planBlocked = true;
+  assert.equal((await post({ command: "overdueCount" })).status, 403);
 });

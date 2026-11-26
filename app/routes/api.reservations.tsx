@@ -9,7 +9,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate, unauthenticated } from "../shopify.server";
 import { planBlockedPosResponse } from "../utils/plan-gate.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
-import { ReservationCheckoutRejected, createReservation, getReservation, listReservations, hasReservationPosAccessConfiguration, publicReservationDefaultsEnabled, reservationAccountAccess, reservationDueCount, reservationPendingCount, publicReservation, reservationCommand, reservationQuery, reservationsEnabled } from "../utils/reservations.server";
+import { ReservationCheckoutRejected, createReservation, getReservation, listReservations, hasReservationPosAccessConfiguration, publicReservationDefaultsEnabled, reservationAccountAccess, reservationDueCount, reservationPendingCount, reservationOverdueCount, publicReservation, reservationCommand, reservationQuery, reservationsEnabled } from "../utils/reservations.server";
 import { localDate, maskPhone } from "../../extensions/common/reservations.js";
 
 const headers = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Cache-Control": "private, no-store" };
@@ -106,6 +106,7 @@ export async function action({ request }: ActionFunctionArgs) {
     if (["create", "checkout", "checkoutAccess"].includes(command) && missingScopes.length) return json({ ok: false, error: "ストア管理者が管理画面の「取置 → 設定」で顧客・注文の読み取りを許可してください。承認後にもう一度お試しください" }, 403);
     if (["orders", "complete"].includes(command) && missingScopes.includes("read_orders")) return json({ ok: false, error: "ストア管理者が管理画面の「取置 → 設定」で注文の読み取りを許可してください" }, 403);
     if (command === "checkoutAccess") return json({ ok: true });
+    if (command === "overdueCount") return json({ ok: true, count: await reservationOverdueCount(shop, locationId) });
     if (command === "pendingCount") return json({ ok: true, count: await reservationPendingCount(shop, locationId) });
     if (command === "count") return json({ ok: true, count: await reservationDueCount(shop, locationId) });
     if (command === "list") {

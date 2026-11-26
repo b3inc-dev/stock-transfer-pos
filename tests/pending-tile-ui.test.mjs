@@ -32,16 +32,16 @@ for (const [name, heading, fallback] of [["inbound", "入庫", "処理・履歴"
     const subheading = () => document.querySelector("s-tile")?.getAttribute("subheading");
     try {
       await ui.mount(); await wait(); await wait();
-      assert.equal(subheading(), "未対応 3件");
+      assert.equal(subheading(), `${name === "reservation" ? "期限超過" : "未対応"} 3件`);
       assert.equal(document.querySelector("s-tile").getAttribute("heading"), heading);
-      if (name === "reservation") assert.equal(globalThis.tileFixture.command, "pendingCount");
+      if (name === "reservation") assert.equal(globalThis.tileFixture.command, "overdueCount");
       globalThis.tileFixture.count = 0; window.dispatchEvent(new window.Event("focus")); await wait(); assert.equal(subheading(), fallback);
-      globalThis.tileFixture.count = 7; window.dispatchEvent(new window.Event("focus")); await wait(); assert.equal(subheading(), "未対応 7件");
+      globalThis.tileFixture.count = 7; window.dispatchEvent(new window.Event("focus")); await wait(); assert.equal(subheading(), `${name === "reservation" ? "期限超過" : "未対応"} 7件`);
       globalThis.tileFixture.error = true; window.dispatchEvent(new window.Event("focus")); await wait(); assert.equal(subheading(), fallback);
       document.querySelector("s-tile").dispatchEvent(new window.Event("click")); assert.equal(opened, 1);
       globalThis.shopify.session.currentSession.locationId = 2;
       globalThis.tileFixture.error = false; globalThis.tileFixture.count = 1;
-      window.dispatchEvent(new window.Event("focus")); await wait(); assert.equal(subheading(), "未対応 1件");
+      window.dispatchEvent(new window.Event("focus")); await wait(); assert.equal(subheading(), `${name === "reservation" ? "期限超過" : "未対応"} 1件`);
     } finally { ui.unmount(); Object.assign(globalThis, previous); }
   });
 }

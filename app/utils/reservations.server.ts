@@ -100,6 +100,11 @@ export async function publicReservation(row: StockReservation, admin: Reservatio
 export async function reservationPendingCount(shop: string, locationId: string) {
   return db.stockReservation.count({ where: { shop, locationId, status: { notIn: TERMINAL_RESERVATIONS } } });
 }
+export async function reservationOverdueCount(shop: string, locationId: string) {
+  const rows = await db.stockReservation.findMany({ where: { shop, locationId, status: { notIn: TERMINAL_RESERVATIONS } }, select: { status: true, dueDate: true, timezone: true } });
+  const now = Date.now();
+  return rows.filter(row => !TERMINAL_RESERVATIONS.includes(row.status) && validDate(row.dueDate) && row.dueDate < localDate(now, row.timezone)).length;
+}
 export async function reservationDueCount(shop: string, locationId: string) {
   const rows = await db.stockReservation.findMany({ where: { shop, locationId, status: { notIn: TERMINAL_RESERVATIONS } }, select: { status: true, dueDate: true, nextFollowDate: true, timezone: true } });
   return rows.filter(row => needsFollowUp(row)).length;
