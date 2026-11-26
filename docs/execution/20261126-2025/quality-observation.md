@@ -1,0 +1,10 @@
+# Full app quality observation before integration — 2026-11-26
+
+Owner Codex POS. Base PR1576f98154a539b727598c4cc5e7217cd85d7cb4dca, exact live-source comparison main94fb3ea579904f65b9df9306aa7da31f84d16d06. New CI/scripts/tests/docs only until an explicitly identified non-UI candidate diagnostic is corrected; no app merge/deploy/DB/Store operation.
+
+The workflow archives exact main to a separate temporary snapshot, installs one identical repository lock without lifecycle scripts and asserts lock bytes plus dependency realpath match. Prisma is regenerated sequentially for each snapshot before full package typecheck, lint JSON and build. There is no DB service: exact synthetic credentials point at localhost port1/no_connection, with synthetic Shopify build keys and quality.invalid URL. Fixture guard rejects any other environment before commands and never prints canary credentials. Build/type/lint commands are observed rather than missing commands treated as success.
+
+The report retains nonzero type/lint statuses and counts. Added diagnostic comparison is a normalized file/code/fullmessage multiset, preserving multiplicities while ignoring shifted line positions; this is not whole-program semantic equivalence. New type diagnostics or failed builds block the observation job. Added lint is explicitly reported as unresolved debt; CI observation completion is **not an app quality-green or release approval**. Existing candidate lint/type debt remains a real integration gate and must not be erased or scored as fixed. Command failures without parseable output are unobserved and block, never counted as zero. Logs are isolated fixture command output, not Render/store/customer logs.
+
+ExactHEAD CI/result and independent review are required. No migration, live credentials, real Store/SDK/device/physical print/cron command/cadence or actualRender drift acceptance is added; previous migration/PG/tenant evidence is not re-scored. Main/staging/other-owner/UI/production settings remain unchanged. Candidate full build is a new boundary only if actually successful; baseline diagnostic identity does not make legacy debt disappear.
+
