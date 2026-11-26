@@ -139,7 +139,9 @@ type Common = {
 };
 
 export type ReservationPrintData = { number: string; due_date: string; created_at_label: string; copy_label: string; intake_label?: string; items: { title: string; variant_title?: string; sku: string; barcode: string; quantity: number }[] };
+export type OutboundRequestPrintData = { number: string; version: number; origin_name: string; destination_name: string; due_date: string; status_label: string; note: string; items: { title: string; variant_title: string; sku: string; barcode: string; requested: number; actual: number | null; reason: string }[] };
 export type ReceiptTemplateData =
+  | (Common & { kind: "outbound_request"; outbound_request: OutboundRequestPrintData })
   | (Common & { kind: "reservation"; reservation: ReservationPrintData })
   | (Common & { kind: "sales"; order: OrderData })
   | (Common & { kind: "gift"; order: OrderData })
@@ -218,6 +220,7 @@ const SAMPLE_ORDER: OrderData = {
 /** プレビューの見本のデータ（実際の注文ではない） */
 export function sampleTemplateData(kind: ReceiptKind): ReceiptTemplateData {
   switch (kind) {
+    case "outbound_request": return { ...SAMPLE_COMMON, kind, document: { title: "出庫依頼書" }, outbound_request: { number: "OR-0001", version: 1, origin_name: "サンプルストア 渋谷店", destination_name: "サンプルストア 横浜店", due_date: "2026-12-03", status_label: "作業中", note: "商品と数量を確認して出庫してください。", items: [{ title: "シェルインナーシート", variant_title: "ブルー / iPhone15", sku: "SAMPLE-001", barcode: "1234567890123", requested: 2, actual: 1, reason: "在庫不足" }] } };
     case "reservation": return { ...SAMPLE_COMMON, kind, document: { title: "取置控え" }, reservation: { number: "#R0001", due_date: "2026-12-02", created_at_label: "2026/11/25", copy_label: "お客様控え", items: [{ title: "サンプル商品", variant_title: "ブルー / M", sku: "SAMPLE-001", barcode: "1234567890123", quantity: 2 }] } };
     case "sales":
       return { ...SAMPLE_COMMON, kind, document: { title: `販売レシート ${SAMPLE_ORDER.name}` }, order: SAMPLE_ORDER };

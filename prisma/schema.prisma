@@ -289,6 +289,8 @@ model OutboundRequestEvent {
 
 model OutboundRequestSettings {
   shop String @id
+  receiptLayout Json?
+  receiptVersion Int @default(0)
   policy Json
   version Int @default(1)
   updatedAt DateTime @updatedAt

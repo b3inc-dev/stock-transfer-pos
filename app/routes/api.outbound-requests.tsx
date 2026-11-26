@@ -6,6 +6,9 @@ import { withGraphQLRetry } from "../utils/graphql-with-retry";
 import { renderConfiguredOutboundRequestReceipt } from "../services/outboundRequestReceipt";
 import { advanceRequest, beginRequest, canonicalLines, changeRequest, getRequest, getRequestPolicy, outboundRequestsEnabled, outboundPublicMessage, previewRequest, reconcileRequest, requestError, requestProducts, requestQuery, shippingSettings, type RequestLine, type RequestRow } from "../utils/outbound-requests.server";
 
+import { catalogPage } from "../utils/outbound-request-products.server";
+import { buildVariantSearchQuery } from "../../extensions/common/variantSearch.js";
+
 const headers = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Cache-Control": "private, no-store" };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers });
 async function context(request: Request, locationId: string, recovery?: { command: string; id: string }) {
@@ -41,7 +44,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const { shop } = await context(request, locationId);
     const row = await getRequest(shop, url.searchParams.get("receipt") || "", locationId);
     if (["draft", "cancelled"].includes(row.status)) throw requestError("印刷できる依頼を選択してください", 409);
-    return new Response(renderConfiguredOutboundRequestReceipt(row, (await getRequestPolicy(shop)).policy), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'", "X-Content-Type-Options": "nosniff" } });
+    return new Response(renderConfiguredOutboundRequestReceipt(row, (await getRequestPolicy(shop)).policy, (await db.outboundRequestSettings.findUnique({ where: { shop } }))?.receiptLayout), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:", "X-Content-Type-Options": "nosniff" } });
   } catch (error) { return failure(error); }
 }
 export async function action({ request }: ActionFunctionArgs) {
@@ -58,7 +61,12 @@ export async function action({ request }: ActionFunctionArgs) {
       const page = Math.max(0, Math.floor(Number(body.page) || 0));
       return json({ ok: true, location, count: await db.outboundRequest.count({ where }), rows: command === "count" ? [] : await db.outboundRequest.findMany({ where, select: { id: true, number: true, status: true, originId: true, originName: true, destinationName: true, dueDate: true, version: true }, orderBy: { createdAt: "desc" }, take: 25, skip: page * 25 }), page, settings: await getRequestPolicy(shop), shipping });
     }
-    if (command === "products") return json({ ok: true, products: await requestProducts(admin, String(body.query || ""), body.scan === true) });
+    if (command === "products") {
+      const query = String(body.query || "").trim().slice(0, 100), after = String(body.after || "");
+      if (after.length >= 2048) throw requestError("ページを選び直してください");
+      if (body.scan === true) return json({ ok: true, products: await requestProducts(admin, query, true) });
+      return json({ ok: true, ...(query ? await catalogPage(admin, buildVariantSearchQuery(query), after) : { products: [], pageInfo: { hasNextPage: false, endCursor: null } }) });
+    }
     const row = await getRequest(shop, String(body.id || ""), locationId);
     if (command === "detail") return json({ ok: true, row: posRow(row), settings: await getRequestPolicy(shop), shipping });
     if (Number(body.version) !== row.version) throw requestError("依頼が更新されました。読み直して検品内容を確認してください", 409);

@@ -147,6 +147,7 @@ export default function App() {
         {features.stocktake && <s-link href="/app/inventory-count">棚卸</s-link>}
         {((showReservations && features.reservation) || showReservationPrivacy) && <s-link href={showReservations && features.reservation ? "/app/reservations" : "/app/reservations/customer-data"}>取置</s-link>}
         {features.adjustment && <s-link href="/app/adjustment">調整</s-link>}
+        {((showReservations && features.reservation) || (showOutboundRequests && features.outboundRequest)) && <s-link href="/app/receipts">レシート編集</s-link>}
         {distribution === "public" && <s-link href="/app/plan">料金プラン</s-link>}
       {/* @ts-expect-error s-app-nav 閉じタグ */}
       </s-app-nav>

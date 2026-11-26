@@ -377,9 +377,9 @@ export function ReceiptLayoutEditor({
                             {summary ? <Text as="span" tone="subdued">{` ${summary}`}</Text> : null}
                           </button>
                           <span style={{ display: "inline-flex", gap: 2 }}>
-                            <MoveIconButton label="上へ" direction="up" onClick={() => move(i, -1)} disabled={i === 0 || (kind === "reservation" && ["reservation_info", "reservation_items"].includes(block.type))} />
-                            <MoveIconButton label="下へ" direction="down" onClick={() => move(i, 1)} disabled={i === layout.blocks.length - 1 || (kind === "reservation" && ["reservation_info", "reservation_items"].includes(block.type))} />
-                            {kind === "reservation" && ["reservation_info", "reservation_items"].includes(block.type) ? null : <><VisibilityIconButton
+                            <MoveIconButton label="上へ" direction="up" onClick={() => move(i, -1)} disabled={i === 0 || (["reservation", "outbound_request"].includes(kind) && ["reservation_info", "reservation_items", "outbound_request_info", "outbound_request_items"].includes(block.type))} />
+                            <MoveIconButton label="下へ" direction="down" onClick={() => move(i, 1)} disabled={i === layout.blocks.length - 1 || (["reservation", "outbound_request"].includes(kind) && ["reservation_info", "reservation_items", "outbound_request_info", "outbound_request_items"].includes(block.type))} />
+                            {["reservation", "outbound_request"].includes(kind) && ["reservation_info", "reservation_items", "outbound_request_info", "outbound_request_items"].includes(block.type) ? null : <><VisibilityIconButton
                               hidden={block.hidden === true}
                               onClick={() => setBlocks(layout.blocks.map((b) => (b.id === block.id ? { ...b, hidden: !b.hidden } : b)))}
                             />

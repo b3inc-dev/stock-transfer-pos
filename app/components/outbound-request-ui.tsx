@@ -35,8 +35,6 @@ const requestCss = [
   ".Outreq-form-fieldset {border:0;margin:0;padding:0;min-width:0;}",
   ".Outreq-receipt {padding:12px 0;border-bottom:1px solid #e1e3e5;}",
   ".Outreq-split {display:grid;grid-template-columns:minmax(260px,2fr) minmax(0,3fr);gap:24px;align-items:start;}",
-  ".Outreq-split .Admin-form a.Admin-primary {background:#005bd3;color:#fff;box-shadow:inset 0 -1px 0 #004299;}",
-  ".Outreq-split .Admin-form a.Admin-primary:hover {background:#004299;}",
   ".Outreq-split section,.Outreq-split aside,.Outreq-split main {min-width:0;}",
   ".Outreq-heading {margin:0 0 4px;font-size:14px;font-weight:600;}",
   ".Outreq-intro {margin:0 0 16px;}",

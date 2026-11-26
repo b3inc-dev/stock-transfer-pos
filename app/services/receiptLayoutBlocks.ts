@@ -33,7 +33,7 @@ export type BlockDef = {
   summaryKey?: string;
 };
 
-const ALL: readonly ReceiptKind[] = ["settlement", "sales", "gift", "receipt", "reservation"];
+const ALL: readonly ReceiptKind[] = ["settlement", "sales", "gift", "receipt", "reservation", "outbound_request"];
 
 const ALIGN: SettingOption[] = [
   { value: "left", label: "左" },
@@ -76,6 +76,8 @@ export const SETTLEMENT_FIELDS: { value: string; label: string; format: "money" 
 ];
 
 export const BLOCK_DEFS: BlockDef[] = [
+  { type: "outbound_request_info", label: "依頼番号・出庫元・移動先", description: "依頼番号・出庫元・移動先・希望日・状態を必須欄に印字します。", kinds: ["outbound_request"], settings: [{ key: "show_version", label: "依頼の版を出す", type: "checkbox", default: true }], template: `<div>{{ outbound_request.number }}</div>` },
+  { type: "outbound_request_items", label: "依頼商品・数量・差異理由", description: "依頼数と保存済みの検品・出庫数を分けて印字します。", kinds: ["outbound_request"], settings: [{ key: "show_sku", label: "SKUを出す", type: "checkbox", default: true }, { key: "show_barcode", label: "JANを出す", type: "checkbox", default: true }], template: `<!-- outbound-request-items -->` },
   { type: "reservation_info", label: "取置番号・受取期限", description: "下部の固定欄に取置番号と受取期限を印字します。並び順は変わりません。", kinds: ["reservation"], settings: [
     { key: "show_date", label: "受付日", type: "checkbox", default: true },
     { key: "show_staff", label: "担当番号", type: "checkbox", default: true },

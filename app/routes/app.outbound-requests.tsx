@@ -4,7 +4,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import db from "../db.server";
 import { outboundAdmin } from "../utils/outbound-request-admin.server";
 import { requestLocations, type RequestRow } from "../utils/outbound-requests.server";
-import { AdminBlock, EmptyState, GuardedLink, PickList, PrimaryLink, SecondaryLink, StateBadge } from "../components/admin-ui";
+import { AdminBlock, EmptyState, GuardedLink, PickList, SecondaryLink, StateBadge } from "../components/admin-ui";
 import { OutboundRequestNav } from "../components/outbound-request-ui";
 import { OUTBOUND_REQUEST_LABELS, outboundRequestTone } from "../../extensions/common/outboundRequests.js";
 import { REQUEST_LIST_PATH, REQUEST_PAGE_SIZE, requestFilters, requestListUrl, requestChildUrl, requestDate, type RequestFilters } from "../utils/outbound-request-view";
@@ -62,7 +62,7 @@ export default function OutboundRequests() {
     <div className="Outreq-split">
       <aside><h2 className="Outreq-heading">出庫依頼</h2><p className="Admin-note Outreq-intro">条件で絞り込みを行い、依頼を表示します。</p><ListFilters key={listUrl} filters={filters} locations={locations} busy={busy} /></aside>
       <main aria-busy={busy}>
-        <AdminBlock wide title="依頼一覧" action={<PrimaryLink to={createUrl} icon="plus">依頼を追加</PrimaryLink>}>
+        <AdminBlock wide title="依頼一覧" action={<SecondaryLink to={createUrl} icon="plus">依頼を追加</SecondaryLink>}>
           <p className="Admin-note">表示: {rows.length}件 / {count}件</p>
           {rows.length ? rows.map(row => <GuardedLink key={row.id} to={requestChildUrl(REQUEST_LIST_PATH + "/" + row.id, listUrl)} className="Outreq-row" aria-label={row.number + "の詳細"}>
             <div className="Outreq-row-top"><strong>{row.number}</strong><span className="Admin-note Outreq-row-date">希望日: {requestDate(row.dueDate)}</span></div>

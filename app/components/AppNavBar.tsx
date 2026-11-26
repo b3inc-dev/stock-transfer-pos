@@ -47,6 +47,7 @@ export function AppNavBar({ shopPlan, showReservations, showReservationPrivacy, 
     items.push({ path: "/app/adjustment", label: "調整" });
   }
   if ((showReservations && features.reservation) || showReservationPrivacy) items.push({ path: showReservations && features.reservation ? "/app/reservations" : "/app/reservations/customer-data", label: "取置", match: ["/app/reservations", "/app/reservation-privacy"] });
+  if ((showReservations && features.reservation) || (showOutboundRequests && features.outboundRequest)) items.push({ path: "/app/receipts", label: "レシート編集" });
   if (distribution === "public") {
     items.push({ path: "/app/plan", label: "料金プラン" });
   }

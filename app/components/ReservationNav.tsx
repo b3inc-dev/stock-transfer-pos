@@ -5,7 +5,6 @@ export function ReservationNav({ selected }: { selected: "settings" | "receipt" 
   const { search } = useLocation();
   const items = [
     { key: "settings", label: "設定", path: "/app/reservations/settings" },
-    { key: "receipt", label: "レシート編集", path: "/app/reservations/receipt" },
     { key: "customers", label: "顧客データ", path: "/app/reservations/customer-data" },
     { key: "history", label: "履歴", path: "/app/reservations" },
   ];
