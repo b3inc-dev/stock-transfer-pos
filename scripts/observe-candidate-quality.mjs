@@ -35,6 +35,11 @@ function addedDiagnostics(before,after){
  for(const d of before)counts.set(key(d),(counts.get(key(d))??0)+1);
  return after.filter(d=>{const k=key(d),n=counts.get(k)??0;if(n){counts.set(k,n-1);return false;}return true;});
 }
+export function mapRelocatedDiagnostics(diagnostics,source){
+ const restored=source.replace('// app/utils/inventory-webhook-handler.server.ts','// app/routes/webhooks.inventory_levels.update.tsx').replace('export const inventoryWebhookAction =','export const action =');
+ assert.equal(createHash('sha256').update(restored).digest('hex'),'7d0247aedadbd429428286c7cd2a7f395b778d806cc3ad9cd94a8d2dd7b9ac25','relocation alias requires the exact parent handler body');
+ return diagnostics.map(d=>d.file==='app/utils/inventory-webhook-handler.server.ts'?{...d,file:'app/routes/webhooks.inventory_levels.update.tsx'}:d);
+}
 async function observe(baseline){
  const root=process.cwd();assertQualityFixture();
  const temporary=await realpath(process.env.RUNNER_TEMP),base=await realpath(baseline);
@@ -61,9 +66,11 @@ async function observe(baseline){
   snapshots.push({label,typeExit:type.status,lintExit:lint.status,buildExit:build.status,types,lints});
  }
  for(const [name,text] of logs)await writeFile(path.join(temporary,'pos-'+name+'.log'),text);
- const [main,candidate]=snapshots,addedTypes=addedDiagnostics(main.types,candidate.types),addedLint=addedDiagnostics(main.lints,candidate.lints);
- const summary={main:{typeExit:main.typeExit,typeErrors:main.types.length,lintExit:main.lintExit,lintErrors:main.lints.length,buildExit:main.buildExit},candidate:{typeExit:candidate.typeExit,typeErrors:candidate.types.length,lintExit:candidate.lintExit,lintErrors:candidate.lints.length,buildExit:candidate.buildExit},addedTypeErrors:addedTypes.length,addedLintErrors:addedLint.length,fullQualityGreen:candidate.typeExit===0&&candidate.lintExit===0&&candidate.buildExit===0,lockSha256:createHash('sha256').update(candidateLock).digest('hex')};
- const report={...summary,addedTypes,addedLint,comparison:'normalized file+code+fullmessage multiset, positions retained but not used to tolerate shifted lines; not semantic whole-program equivalence',limitations:['Existing debt remains an integration gate','Lint observations are not waived by this report','No real database/Shopify/Store/device/deployment acceptance']};
+ const [main,candidate]=snapshots,relocatedSource=await readFile(path.join(root,'app/utils/inventory-webhook-handler.server.ts'),'utf8');
+ const rawAddedTypes=addedDiagnostics(main.types,candidate.types),rawAddedLint=addedDiagnostics(main.lints,candidate.lints);
+ const addedTypes=addedDiagnostics(main.types,mapRelocatedDiagnostics(candidate.types,relocatedSource)),addedLint=addedDiagnostics(main.lints,mapRelocatedDiagnostics(candidate.lints,relocatedSource));
+ const summary={main:{typeExit:main.typeExit,typeErrors:main.types.length,lintExit:main.lintExit,lintErrors:main.lints.length,buildExit:main.buildExit},candidate:{typeExit:candidate.typeExit,typeErrors:candidate.types.length,lintExit:candidate.lintExit,lintErrors:candidate.lints.length,buildExit:candidate.buildExit},rawAddedTypeErrors:rawAddedTypes.length,rawAddedLintErrors:rawAddedLint.length,relocationAlias:"exact-parent-hash-guarded server→old-route filename only",addedTypeErrors:addedTypes.length,addedLintErrors:addedLint.length,fullQualityGreen:candidate.typeExit===0&&candidate.lintExit===0&&candidate.buildExit===0,lockSha256:createHash('sha256').update(candidateLock).digest('hex')};
+ const report={...summary,addedTypes,addedLint,rawAddedTypes,rawAddedLint,comparison:'normalized file+code+fullmessage multiset, positions retained but not used to tolerate shifted lines; not semantic whole-program equivalence',limitations:['Existing debt remains an integration gate','Lint observations are not waived by this report','No real database/Shopify/Store/device/deployment acceptance']};
  await writeFile(path.join(temporary,'pos-quality-report.json'),JSON.stringify(report,null,2));
  process.stdout.write('POS_QUALITY_OBSERVATION '+JSON.stringify(summary)+'\n');
  process.stdout.write('POS_QUALITY_ADDED_TYPES '+JSON.stringify(addedTypes.slice(0,30))+'\n');

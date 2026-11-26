@@ -178,7 +178,7 @@ describe("inventory history deltas follow the notification time, not the arrival
   });
 
   it("the webhook route looks up the previous row only before the notification time and repairs after saving", () => {
-    const route = readFileSync(new URL("../app/routes/webhooks.inventory_levels.update.tsx", import.meta.url), "utf8");
+    const route = readFileSync(new URL("../app/utils/inventory-webhook-handler.server.ts", import.meta.url), "utf8");
     assert.ok(route.includes("findPreviousQuantity("));
     // 時刻の条件の無い「いちばん新しい行」の検索が残っていないこと
     assert.equal(route.includes("const prevLog = await db.inventoryChangeLog.findFirst"), false);
