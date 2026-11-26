@@ -1,0 +1,49 @@
+[
+  {
+    "source": "public",
+    "sourceLogId": "829aacf1-58a6-459c-8c61-c8bb482dd8f3",
+    "timestamp": "2026-11-26T14:59:51.926852904Z",
+    "sourceWire": {
+      "ok": true,
+      "processed": 5,
+      "total": 6,
+      "errors": [
+        "SYNTHETIC-REDACTED-ERROR"
+      ]
+    },
+    "transport": "offline synthetic replay only; no liveHTTP call",
+    "candidateExit": 1,
+    "anonymousSummary": {
+      "ok": false,
+      "status": 200,
+      "processed": 5,
+      "total": 6,
+      "errors": 1,
+      "observationRecovery": null
+    },
+    "stderrEmpty": true,
+    "secretCanaryAbsent": true
+  },
+  {
+    "source": "ciara",
+    "sourceLogId": "7ee3a301-d706-4d52-8b20-cb2da03cfcea",
+    "timestamp": "2026-11-26T15:00:41.508567599Z",
+    "sourceWire": {
+      "ok": true,
+      "processed": 1,
+      "total": 1
+    },
+    "transport": "offline synthetic replay only; no liveHTTP call",
+    "candidateExit": 1,
+    "anonymousSummary": {
+      "ok": false,
+      "status": 200,
+      "processed": 1,
+      "total": 1,
+      "errors": 0,
+      "observationRecovery": null
+    },
+    "stderrEmpty": true,
+    "secretCanaryAbsent": true
+  }
+]
