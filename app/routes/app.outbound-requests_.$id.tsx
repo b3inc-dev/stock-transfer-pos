@@ -6,6 +6,15 @@ import { outboundAdmin } from "../utils/outbound-request-admin.server";
 import { changeRequest, getRequest, requestError, requestTransferSummary } from "../utils/outbound-requests.server";
 import { AdminBlock, BackAction, ConfirmAction, SecondaryLink, StateBadge, StatusBanner } from "../components/admin-ui";
 import { OUTBOUND_REQUEST_LABELS, outboundRequestTone } from "../../extensions/common/outboundRequests.js";
+
+const receiptStatusLabels: Record<string, string> = {
+  TRANSFERRED: "受領処理済み",
+  IN_PROGRESS: "処理中",
+  READY_TO_SHIP: "配送準備完了",
+  DRAFT: "下書き",
+  CANCELED: "取消済み",
+};
+
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const { session, admin } = await outboundAdmin(request);
   const row = await getRequest(session.shop, params.id || "");
@@ -38,7 +47,22 @@ export default function RequestDetail() {
       {["draft", "requested"].includes(row.status) ? <ConfirmAction label="依頼を取消" heading="依頼を取り消しますか？" message="店舗から出庫を開始できなくなります。在庫は変更しません。" disabled={busy} fields={{ command: "cancel", version: String(row.version) }} trigger="secondary" /> : null}
     </AdminBlock>
     <AdminBlock wide title="出庫の記録" description="受領は既存の入庫で行います。">{row.execution?.chunks.map((chunk, index) => <p key={index}>分割 {index + 1}：Transfer {chunk.transferId || "未作成"} ／ Shipment {chunk.shipmentId || "未作成"}</p>)}</AdminBlock>
-    <AdminBlock wide title="受領状況" description="Shopifyの最新状況を参照します。ここでは受領操作を行いません。"><Suspense fallback={<p role="status">読み込んでいます。</p>}><Await resolve={receipts} errorElement={<p role="status">受領状況を確認できません。既存の入出庫履歴で確認してください。</p>}>{items => items.length ? items.map(item => <p key={item.id}><SecondaryLink small to={`/app/history/${encodeURIComponent(item.id)}`}>入出庫履歴</SecondaryLink> {item.receivedQuantity === null ? "確認できません" : `受領 ${item.receivedQuantity} / 出庫 ${item.totalQuantity}`}・{{ TRANSFERRED: "入庫済み", IN_PROGRESS: "処理中", READY_TO_SHIP: "配送準備完了", DRAFT: "下書き", CANCELED: "取消済み" }[item.status] || "要確認"}</p>) : <p>発送の記録はまだありません。</p>}</Await></Suspense></AdminBlock>
+    <AdminBlock wide title="受領状況" description="Shopifyの最新状況を参照します。ここでは受領操作を行いません。">
+      <Suspense fallback={<p role="status">読み込んでいます。</p>}>
+        <Await resolve={receipts} errorElement={<p role="status">受領状況を確認できません。既存の入出庫履歴で確認してください。</p>}>
+          {items => items.length ? items.map(({ id, status, quantities }) => (
+            <p key={id}>
+              <SecondaryLink small to={`/app/history/${encodeURIComponent(id)}`}>入出庫履歴</SecondaryLink>
+              {" "}{receiptStatusLabels[status] ?? "要確認"}・
+              {quantities ? <>
+                配送明細 {quantities.total}点 ／ 受入 {quantities.accepted}点 ／ 拒否 {quantities.rejected}点 ／ 未処理 {quantities.pending}点
+                {quantities.canceled > 0 ? ` ／ 取消 ${quantities.canceled}点` : ""}
+              </> : "受領数量を確認できません"}
+            </p>
+          )) : <p>発送の記録はまだありません。</p>}
+        </Await>
+      </Suspense>
+    </AdminBlock>
     <AdminBlock wide title="対応履歴">{events.map(event => <p key={event.id}>{new Date(event.createdAt).toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}・{event.action}・{event.actor}</p>)}</AdminBlock>
   </div></s-page>;
 }

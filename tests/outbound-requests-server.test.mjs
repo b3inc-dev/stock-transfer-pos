@@ -124,6 +124,45 @@ test("completed requests are visible to the existing inbound destination list wi
   assert.equal((await fetchPendingTransfersForDestination(fixture.row.destinationId)).length, 0);
   assert.equal(fixture.counters.inventoryShipmentMarkInTransit, 1);
 });
+test("receipt summary separates accepted, rejected, canceled and pending quantities per shipment", async () => {
+  const transferIds = [1, 2, 3].map(id => `gid://shopify/InventoryTransfer/${id}`);
+  const shipmentIds = [1, 2].map(id => `gid://shopify/InventoryShipment/${id}`);
+  const row = { execution: { chunks: [
+    { transferId: transferIds[0], shipmentId: shipmentIds[0] },
+    { transferId: transferIds[1], shipmentId: shipmentIds[1] },
+    { transferId: transferIds[2] },
+    {},
+  ] } };
+  const transfer = (id, status) => ({ __typename: "InventoryTransfer", id, status });
+  const shipment = (id, total, accepted, rejected, processed) => ({ __typename: "InventoryShipment", id,
+    lineItemTotalQuantity: total, totalAcceptedQuantity: accepted,
+    totalRejectedQuantity: rejected, totalReceivedQuantity: processed,
+  });
+  const shopify = { async graphql(query, { variables }) {
+    assert.match(query, /query OutboundRequestReceiving/);
+    assert.deepEqual(variables.ids, [transferIds[0], shipmentIds[0], transferIds[1], shipmentIds[1], transferIds[2]]);
+    const nodes = [shipment(shipmentIds[1], 6, 2, 1, 4), transfer(transferIds[2], "READY_TO_SHIP"),
+      transfer(transferIds[0], "TRANSFERRED"), shipment(shipmentIds[0], 2, 1, 1, 2), transfer(transferIds[1], "IN_PROGRESS")];
+    return Response.json({ data: { nodes } });
+  } };
+  assert.deepEqual(await service.requestTransferSummary(row, shopify), [
+    { id: transferIds[0], status: "TRANSFERRED", quantities: { total: 2, accepted: 1, rejected: 1, canceled: 0, pending: 0 } },
+    { id: transferIds[1], status: "IN_PROGRESS", quantities: { total: 6, accepted: 2, rejected: 1, canceled: 1, pending: 2 } },
+    { id: transferIds[2], status: "READY_TO_SHIP", quantities: null },
+  ]);
+});
+test("receipt summary reports unknown quantities for missing or inconsistent Shopify records", async () => {
+  const transferId = "gid://shopify/InventoryTransfer/1", shipmentId = "gid://shopify/InventoryShipment/1";
+  const row = { execution: { chunks: [{ transferId, shipmentId }] } };
+  const shopify = nodes => ({ graphql: async () => Response.json({ data: { nodes } }) });
+  const transfer = { __typename: "InventoryTransfer", id: transferId, status: "IN_PROGRESS" };
+  const shipment = { __typename: "InventoryShipment", id: shipmentId, lineItemTotalQuantity: 2,
+    totalAcceptedQuantity: 2, totalRejectedQuantity: 1, totalReceivedQuantity: 2 };
+  assert.deepEqual(await service.requestTransferSummary(row, shopify([transfer, null])), [{ id: transferId, status: "IN_PROGRESS", quantities: null }]);
+  assert.deepEqual(await service.requestTransferSummary(row, shopify([transfer, shipment])), [{ id: transferId, status: "IN_PROGRESS", quantities: null }]);
+  assert.deepEqual(await service.requestTransferSummary(row, shopify([null, shipment])), [{ id: transferId, status: "UNKNOWN", quantities: null }]);
+  assert.deepEqual(await service.requestTransferSummary({ execution: null }, { graphql: async () => assert.fail("no transfer to fetch") }), []);
+});
 for (const lost of ["inventoryTransferCreateAsReadyToShip", "inventoryShipmentCreate", "inventoryShipmentMarkInTransit"]) test(`lost ${lost} response reconciles without creating/sending again`, async () => {
   fixture.failure = lost;
   let row = await finish(await begin());

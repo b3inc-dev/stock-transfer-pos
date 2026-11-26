@@ -148,10 +148,55 @@ export async function beginRequest(row: RequestRow, actor: string, admin: Reques
 }
 
 export async function requestTransferSummary(row: RequestRow, admin: RequestAdmin) {
-  const ids = (row.execution?.chunks || []).flatMap(chunk => chunk.transferId ? [chunk.transferId] : []);
+  const chunks = (row.execution?.chunks ?? []).flatMap(({ transferId, shipmentId }) =>
+    transferId ? [{ transferId, shipmentId }] : [],
+  );
+  const ids = [...new Set(chunks.flatMap(({ transferId, shipmentId }) =>
+    shipmentId ? [transferId, shipmentId] : [transferId],
+  ))];
   if (!ids.length) return [];
-  const result = await requestQuery<{ nodes: ({ id: string; status: string; totalQuantity: number; receivedQuantity: number } | null)[] }>(withGraphQLRetry(admin), "query OutboundRequestReceiving($ids:[ID!]!){nodes(ids:$ids){... on InventoryTransfer{id status totalQuantity receivedQuantity}}}", { ids });
-  return ids.map((id, index) => result.nodes[index] || { id, status: "UNKNOWN", totalQuantity: null, receivedQuantity: null });
+  type ReceiptNode = { __typename: "InventoryTransfer"; id: string; status: string } | {
+    __typename: "InventoryShipment";
+    id: string;
+    lineItemTotalQuantity: number;
+    totalAcceptedQuantity: number;
+    totalRejectedQuantity: number;
+    totalReceivedQuantity: number;
+  };
+  const { nodes } = await requestQuery<{ nodes: (ReceiptNode | null)[] }>(withGraphQLRetry(admin), `#graphql
+    query OutboundRequestReceiving($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        __typename
+        id
+        ... on InventoryTransfer { status }
+        ... on InventoryShipment {
+          lineItemTotalQuantity
+          totalAcceptedQuantity
+          totalRejectedQuantity
+          totalReceivedQuantity
+        }
+      }
+    }
+  `, { ids });
+  const byId = new Map(nodes.flatMap(node => node ? [[node.id, node] as const] : []));
+  return chunks.map(({ transferId, shipmentId }) => {
+    const transfer = byId.get(transferId);
+    const shipment = shipmentId ? byId.get(shipmentId) : undefined;
+    const status = transfer?.__typename === "InventoryTransfer" ? transfer.status : "UNKNOWN";
+    if (transfer?.__typename !== "InventoryTransfer" || shipment?.__typename !== "InventoryShipment") {
+      return { id: transferId, status, quantities: null };
+    }
+    const { lineItemTotalQuantity: total, totalAcceptedQuantity: accepted,
+      totalRejectedQuantity: rejected, totalReceivedQuantity: processed } = shipment;
+    // Shopify's processed quantity includes accepted, rejected and canceled units.
+    if (![total, accepted, rejected, processed].every(value => Number.isInteger(value) && value >= 0)
+      || accepted + rejected > processed || processed > total) {
+      return { id: transferId, status, quantities: null };
+    }
+    return { id: transferId, status, quantities: {
+      total, accepted, rejected, canceled: processed - accepted - rejected, pending: total - processed,
+    } };
+  });
 }
 
 async function mutate(admin: RequestAdmin, query: string, variables: Record<string, unknown>, field: string, entity: string) {
