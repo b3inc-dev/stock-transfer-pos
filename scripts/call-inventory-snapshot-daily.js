@@ -38,7 +38,7 @@ async function callApi() {
     const count = value => Number.isSafeInteger(value) && value >= 0;
     const errors = Array.isArray(data.errors) ? data.errors.length : data.errors == null ? 0 : Number.isSafeInteger(data.errors) && data.errors >= 0 ? data.errors : -1;
     const recovery = data.observationRecovery;
-    const validRecovery = recovery && ['scanned','attempted','completed','retained','failed','deferred'].every(key => count(recovery[key])) &&
+    const validRecovery = recovery && typeof recovery.batchLimitReached === 'boolean' && ['scanned','attempted','completed','retained','failed','deferred'].every(key => count(recovery[key])) &&
       recovery.attempted === recovery.completed + recovery.retained + recovery.failed && recovery.scanned === recovery.attempted + recovery.deferred;
     const success = response.ok && data.ok === true && count(data.processed) && count(data.total) && data.processed === data.total && errors === 0 &&
       validRecovery && recovery.failed === 0 && recovery.deferred === 0;

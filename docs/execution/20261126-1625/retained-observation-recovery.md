@@ -14,10 +14,13 @@ The existing CLI now checks HTTP/body/counters and exits nonzero on partial snap
 node --test --test-reporter=tap tests/inventory-observation-daily-recovery.test.mjs tests/inventory-snapshot-cron-result.test.mjs
 node --test --test-reporter=tap tests/inventory-history-order.test.mjs tests/inventory-webhook-zero-observation.test.mjs tests/pending-sale-history.test.mjs tests/compliance-webhook.test.mjs
 ```
-New selected tests: 11 pass, no fail/skip. Replacing only the daily route with parent main makes the no-new-webhook recovery assertion fail; candidate passes. Auth-before-data, tenant session denial, failure preservation, next-trigger recovery, duplicate suppression, true-zero hidden preservation, admission budget and strict/anonymous CLI counts are covered.
+New selected tests: 13 pass, no fail/skip. Replacing only the daily route with parent main makes the no-new-webhook recovery assertion fail; candidate passes. Auth-before-data, tenant session denial, failure preservation, next-trigger recovery, duplicate suppression, true-zero hidden preservation, admission budget and strict/anonymous CLI counts are covered.
 
 Supplementary isolated PGlite 0.3.14/PostgreSQL17.5 WASM test applies parent153's existing migration and persists the retained row, then demonstrates failed refresh preserving it and next daily invocation promoting/deleting it: 1 pass. Actual history/session/Shopify ports are synthetic; timestamp-without-time-zone is explicitly parsed as UTC for Prisma-compatible fixture semantics. This is not Prisma TCP/PG16 or full database integration. No dependency/schema/package change is included.
 
 ## Remaining acceptance
 Independent exact-HEAD review, real Prisma/PG16 concurrency and transaction behavior, full app type/build, permitted store/device acceptance, retention volume/load, deployed cron command and cadence/latency, and operational next-trigger evidence remain unverified. Parent153 must be accepted before this stacked branch. No merge, migration, actual daily invocation, deployment, config/DB write, inventory/notification or public enablement was performed. Scores remain custom92/public62 until a separately recorded accepted checkpoint.
 
+
+## Independent review correction
+Reviewer reproduced a malformed batchLimitReached string/object being copied into CLI output with exit0. The flag must now be a boolean before recovery is considered valid or any recovery field is printed. Two canary regression cases fail before this correction and pass afterward; malformed responses exit1 without printing canary values. Final selected six suites: 66 pass. No runtime drain/trigger or production configuration changed in this correction.
