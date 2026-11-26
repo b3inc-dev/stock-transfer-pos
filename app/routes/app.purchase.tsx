@@ -12,6 +12,8 @@ import { logInventoryChangesFromAdjustment } from "../utils/inventory-change-log
 import db from "../db.server";
 import { adminPlanRedirect } from "../utils/plan-gate.server";
 
+import { ProductAddMethodTabs, ProductCandidateList, ProductCandidateRow, downloadProductCsvTemplate } from "../components/product-add-parts";
+
 const PURCHASE_NS = "stock_transfer_pos";
 const PURCHASE_KEY = "purchase_entries_v1";
 
@@ -1109,17 +1111,7 @@ export default function PurchasePage() {
     return newPurchaseCarrierCustom.trim();
   }, [carriers, newPurchaseCarrierCustom, newPurchaseCarrierId]);
 
-  const handlePurchaseCsvTemplateDownload = () => {
-    // ✅ Excel で「数量」が文字化けしないように UTF-8 BOM を付与
-    const csv = "\uFEFFSKU,数量\r\n";
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "purchase_template.csv";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  const handlePurchaseCsvTemplateDownload = () => downloadProductCsvTemplate("purchase_template.csv");
 
   const filteredEntries = useMemo(() => {
     let filtered = entries;
@@ -1839,11 +1831,7 @@ export default function PurchasePage() {
 
                         <s-divider />
                         <s-text type="strong">商品</s-text>
-                        <div style={{ display: "flex", gap: "4px", alignItems: "center", flexWrap: "wrap" }}>
-                          <button type="button" onClick={() => setNewPurchaseProductMethod("search")} style={{ padding: "8px 16px", border: "none", borderRadius: 8, background: newPurchaseProductMethod === "search" ? "#e5e7eb" : "transparent", color: "#202223", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>商品検索</button>
-                          <button type="button" onClick={() => setNewPurchaseProductMethod("collection")} style={{ padding: "8px 16px", border: "none", borderRadius: 8, background: newPurchaseProductMethod === "collection" ? "#e5e7eb" : "transparent", color: "#202223", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>コレクション検索</button>
-                          <button type="button" onClick={() => setNewPurchaseProductMethod("csv")} style={{ padding: "8px 16px", border: "none", borderRadius: 8, background: newPurchaseProductMethod === "csv" ? "#e5e7eb" : "transparent", color: "#202223", fontSize: 14, fontWeight: 500, cursor: "pointer" }}>CSVアップロード</button>
-                        </div>
+                        <ProductAddMethodTabs value={newPurchaseProductMethod} onChange={setNewPurchaseProductMethod} disabled={fetcher.state === "submitting"} />
                         <s-divider />
 
                         {newPurchaseProductMethod === "collection" && (
@@ -2345,68 +2333,12 @@ export default function PurchasePage() {
                                       : `表示: ${newPurchaseCsvPreviewItems.length}件`}
                                   </s-text>
                                 </div>
-                                <div style={{ maxHeight: "280px", overflowY: "auto", border: "1px solid #e1e3e5", borderRadius: "8px", padding: "10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                                <ProductCandidateList>
                                   {newPurchaseCsvPreviewItems.map((it) => {
                                     const invId = String(it.inventoryItemId ?? "");
-                                    const isSelected = invId ? newPurchaseCsvSelectedIds.has(invId) : false;
-                                    return (
-                                      <div
-                                        key={`${invId}-${it.variantId ?? ""}-${it.sku ?? ""}-${it.title ?? ""}`}
-                                        role="button"
-                                        tabIndex={0}
-                                        onClick={() => {
-                                          if (!invId) return;
-                                          setNewPurchaseCsvSelectedIds((prev) => {
-                                            const next = new Set(prev);
-                                            if (next.has(invId)) next.delete(invId);
-                                            else next.add(invId);
-                                            return next;
-                                          });
-                                        }}
-                                        onKeyDown={(e) => {
-                                          if (!invId) return;
-                                          if (e.key === "Enter" || e.key === " ") {
-                                            e.preventDefault();
-                                            setNewPurchaseCsvSelectedIds((prev) => {
-                                              const next = new Set(prev);
-                                              if (next.has(invId)) next.delete(invId);
-                                              else next.add(invId);
-                                              return next;
-                                            });
-                                          }
-                                        }}
-                                        style={{
-                                          padding: "10px 12px",
-                                          borderRadius: "6px",
-                                          cursor: invId ? "pointer" : "not-allowed",
-                                          backgroundColor: isSelected ? "#eff6ff" : "transparent",
-                                          border: isSelected ? "1px solid #2563eb" : "1px solid transparent",
-                                          borderBottom: isSelected ? undefined : "1px solid #e5e7eb",
-                                          display: "flex",
-                                          alignItems: "center",
-                                          gap: "8px",
-                                          opacity: invId ? 1 : 0.6,
-                                        }}
-                                      >
-                                        <input
-                                          type="checkbox"
-                                          checked={isSelected}
-                                          readOnly
-                                          style={{ width: "16px", height: "16px", flexShrink: 0 }}
-                                        />
-                                        <div style={{ flex: "1 1 auto", minWidth: 0 }}>
-                                          <span style={{ fontWeight: isSelected ? 600 : 500, overflow: "hidden", textOverflow: "ellipsis", display: "block" }}>
-                                            {it.title || "(商品名なし)"}
-                                          </span>
-                                          {it.sku ? (
-                                            <span style={{ fontSize: "12px", color: "#6d7175", display: "block" }}>SKU：{it.sku}</span>
-                                          ) : null}
-                                        </div>
-                                        <span style={{ fontSize: 13, color: "#202223" }}>× {it.quantity}</span>
-                                      </div>
-                                    );
+                                    return <ProductCandidateRow key={`${invId}-${it.variantId ?? ""}-${it.sku ?? ""}-${it.title ?? ""}`} title={it.title || ""} sku={it.sku} quantity={it.quantity} selected={Boolean(invId && newPurchaseCsvSelectedIds.has(invId))} disabled={!invId} onToggle={() => setNewPurchaseCsvSelectedIds(previous => { const next = new Set(previous); if (next.has(invId)) next.delete(invId); else next.add(invId); return next; })} />;
                                   })}
-                                </div>
+                                </ProductCandidateList>
                               </>
                             )}
                           </s-stack>

@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { useEffect, useRef, useState } from "react";
-import { Form, data, redirect, useActionData, useFetcher, useLoaderData, useNavigation } from "react-router";
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { Form, data, redirect, useActionData, useLoaderData, useNavigation } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunctionArgs } from "react-router";
 import { outboundAdmin } from "../utils/outbound-request-admin.server";
-import { getRequest, requestLocations, requestProducts, saveRequest, type RequestLine } from "../utils/outbound-requests.server";
+import { getRequest, requestLocations, saveRequest, type RequestLine } from "../utils/outbound-requests.server";
 import { AdminBlock, BackAction, DeleteIconButton, EditTable, EditRow, EditCell, SaveBar, StatusBanner, markFormDirty } from "../components/admin-ui";
+import { OutboundProductPicker } from "../components/OutboundProductPicker";
+import { PRODUCT_ADD_COMMANDS } from "../utils/product-add-csv";
+import { requestProductAdd } from "../utils/outbound-request-products.server";
 import { OutboundRequestNav } from "../components/outbound-request-ui";
 import { REQUEST_LIST_PATH, requestChildUrl, requestReturnTo } from "../utils/outbound-request-view";
+
+export function shouldRevalidate({ formData, defaultShouldRevalidate }: ShouldRevalidateFunctionArgs) {
+  return PRODUCT_ADD_COMMANDS.includes(String(formData?.get("command") || "")) ? false : defaultShouldRevalidate;
+}
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await outboundAdmin(request), url = new URL(request.url), id = url.searchParams.get("id");
@@ -17,9 +24,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin, actor } = await outboundAdmin(request), form = await request.formData();
   try {
-    if (form.get("command") === "search") {
-      const query = String(form.get("query") || "").trim();
-      return data({ ok: true, error: "", query, products: query ? await requestProducts(admin, query) : [] });
+    if (PRODUCT_ADD_COMMANDS.includes(String(form.get("command")))) {
+      return data({ ok: true, error: "", requestKey: String(form.get("requestKey") || ""), ...await requestProductAdd(admin, String(form.get("command")), form) });
     }
     const version = Number(form.get("version")), id = String(form.get("id"));
     const existing = version ? await getRequest(session.shop, id) : null;
@@ -28,7 +34,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const returnTo = requestReturnTo(new URL(request.url).searchParams.get("returnTo"));
     return redirect(requestChildUrl(REQUEST_LIST_PATH + "/" + row.id, returnTo, { saved: "1" }));
   } catch (error) {
-    return data({ ok: false, error: error instanceof Error ? error.message : "登録できませんでした", query: String(form.get("query") || ""), products: [] as RequestLine[] }, { status: 400 });
+    return data({ ok: false, error: error instanceof Error ? error.message : "登録できませんでした", requestKey: String(form.get("requestKey") || ""), products: [] as RequestLine[] }, { status: 400 });
   }
 }
 export default function RequestEditor() {
@@ -37,20 +43,24 @@ export default function RequestEditor() {
 }
 function RequestEditorForm({ loaded }: { loaded: ReturnType<typeof useLoaderData<typeof loader>> }) {
   const { id, row, locations, returnTo } = loaded;
-  const [lines, setLines] = useState<RequestLine[]>(row?.lines || []), [query, setQuery] = useState("");
-  const result = useActionData<typeof action>(), search = useFetcher<typeof action>(), busy = useNavigation().state !== "idle";
+  const [lines, setLines] = useState<RequestLine[]>(row?.lines || []), [pickerError, setPickerError] = useState(""), [pickerReset, setPickerReset] = useState(0);
+  const result = useActionData<typeof action>(), busy = useNavigation().state !== "idle";
   const working = row?.status === "working", initialLines = useRef(lines), formRef = useRef<HTMLFormElement>(null);
   useEffect(() => { if (lines !== initialLines.current) markFormDirty(formRef.current); }, [lines]);
-  const searchBusy = search.state !== "idle";
-  const searchProducts = () => {
-    const form = new FormData(); form.set("command", "search"); form.set("query", query);
-    void search.submit(form, { method: "post" });
+  const linesRef = useRef(lines); linesRef.current = lines;
+  const addProducts = (products: RequestLine[]) => {
+    const next = [...linesRef.current];
+    for (const product of products) {
+      if (next.some(line => line.variantId === product.variantId || line.inventoryItemId === product.inventoryItemId)) continue;
+      if (!Number.isSafeInteger(product.quantity) || product.quantity < 1 || product.quantity > 999999) throw new Error("数量は1〜999999の整数で入力してください");
+      next.push(product);
+    }
+    if (next.length > 3000) throw new Error("依頼は3000明細以内に分けてください");
+    linesRef.current = next; setLines(next);
   };
-  const candidates = search.data?.query === query.trim() ? search.data.products : undefined;
-  const searchError = search.data?.query === query.trim() ? search.data.error : "";
   return <s-page heading={row ? "出庫依頼を編集" : "出庫依頼を追加"}><BackAction to={row ? requestChildUrl(REQUEST_LIST_PATH + "/" + id, returnTo) : returnTo} label={row ? "依頼の詳細へ戻る" : "出庫依頼へ戻る"} /><div className="Admin-body">
     <OutboundRequestNav selected="create" returnTo={returnTo} />
-    {result?.error || searchError ? <StatusBanner tone="critical" heading="入力を確認してください">{result?.error || searchError}</StatusBanner> : null}
+    {result?.error || pickerError ? <StatusBanner tone="critical" heading="入力を確認してください">{result?.error || pickerError}</StatusBanner> : null}
     <Form id="outbound-request-editor" method="post" ref={formRef}>
       <input type="hidden" name="id" value={id} /><input type="hidden" name="version" value={row?.version || 0} /><input type="hidden" name="lines" value={JSON.stringify(lines)} />
       <fieldset className="Outreq-form-fieldset" disabled={busy}>
@@ -65,16 +75,8 @@ function RequestEditorForm({ loaded }: { loaded: ReturnType<typeof useLoaderData
               <label>希望出庫日<input type="date" className="Admin-input" name="dueDate" defaultValue={row?.dueDate || ""} /></label>
               <label>備考<textarea className="Admin-input" name="note" defaultValue={row?.note || ""} maxLength={2000} rows={3} /></label>
             </div></AdminBlock>
-            <AdminBlock wide title="商品を追加" description="商品名・SKU・JANで検索し、明細へ追加します。">
-              <div data-not-form-value className="Outreq-fields">
-                <label>商品検索<input className="Admin-input" type="search" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); if (!busy && !searchBusy) searchProducts(); } }} /></label>
-                <div><button type="button" className="Admin-secondary" onClick={searchProducts} disabled={busy || searchBusy || !query.trim()}>{searchBusy ? "検索中…" : "検索"}</button></div>
-                {!searchBusy && candidates?.length === 0 ? <p className="Admin-note">条件に合う商品はありません。</p> : null}
-                <div className="Outreq-candidates" aria-busy={searchBusy}>{!searchBusy ? candidates?.map(product => {
-                  const added = lines.some(line => line.variantId === product.variantId);
-                  return <div className="Outreq-candidate" key={product.variantId}><div><p>{product.title}</p><p className="Admin-note">SKU: {product.sku || "—"}<br />JAN: {product.barcode || "—"}</p></div><button type="button" className="Admin-secondary" disabled={busy || added} onClick={() => setLines(previous => previous.some(line => line.variantId === product.variantId) ? previous : [...previous, { ...product, quantity: 1 }])}>{added ? "追加済み" : "追加"}</button></div>;
-                }) : null}</div>
-              </div>
+            <AdminBlock wide title="商品を追加" description="商品検索・コレクション検索・CSVから、選択した商品を明細へ追加します。">
+              <OutboundProductPicker key={pickerReset} lines={lines} onAdd={addProducts} disabled={busy} onError={setPickerError} />
             </AdminBlock>
           </aside>
           <main>
@@ -91,7 +93,7 @@ function RequestEditorForm({ loaded }: { loaded: ReturnType<typeof useLoaderData
           </main>
         </div>
       </fieldset>
-      <SaveBar failed={Boolean(result?.error) && !busy} onDiscard={() => { setLines(row?.lines || []); setQuery(""); }} />
+      <SaveBar failed={Boolean(result?.error) && !busy} onDiscard={() => { setLines(row?.lines || []); setPickerError(""); setPickerReset(previous => previous + 1); }} />
     </Form>
   </div></s-page>;
 }

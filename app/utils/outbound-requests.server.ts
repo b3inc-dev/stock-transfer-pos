@@ -25,13 +25,13 @@ export async function requestQuery<T>(admin: RequestAdmin, query: string, variab
   check(response.ok && !result.errors?.length && result.data, "Shopifyへの接続を確認できません。もう一度お試しください", 502);
   return result.data as T;
 }
-const variantsFields = "id displayName title product { title } image { url } sku barcode inventoryItem { id }";
+export const variantsFields = "id displayName title product { title } image { url } sku barcode inventoryItem { id }";
 export async function requestProducts(admin: RequestAdmin, query: string, scan = false) {
   const result = await requestQuery<{ productVariants: { nodes: Variant[]; pageInfo: { hasNextPage: boolean } } }>(withGraphQLRetry(admin), `query OutboundRequestProducts($query:String!){productVariants(first:50,query:$query){nodes{${variantsFields}}pageInfo{hasNextPage}}}`, { query: buildVariantSearchQuery(String(query).slice(0, 100)) });
   if (scan) check(!result.productVariants.pageInfo.hasNextPage, "候補が多いため商品を特定できません。検索して選択してください");
   return result.productVariants.nodes.map(productLine);
 }
-function productLine(v: Variant) { return { variantId: v.id, inventoryItemId: v.inventoryItem.id, title: v.displayName, productTitle: v.product?.title || v.displayName, variantTitle: v.title === "Default Title" ? "" : v.title || "", imageUrl: v.image?.url || "", sku: v.sku || "", barcode: v.barcode || "", quantity: 0 }; }
+export function productLine(v: Variant) { return { variantId: v.id, inventoryItemId: v.inventoryItem.id, title: v.displayName, productTitle: v.product?.title || v.displayName, variantTitle: v.title === "Default Title" ? "" : v.title || "", imageUrl: v.image?.url || "", sku: v.sku || "", barcode: v.barcode || "", quantity: 0 }; }
 export async function canonicalLines(admin: RequestAdmin, lines: RequestLine[]) {
   check(Array.isArray(lines) && lines.length > 0 && lines.length <= 3000, "商品は1〜3000件で登録してください");
   const unique = new Set<string>(), output: RequestLine[] = [];
