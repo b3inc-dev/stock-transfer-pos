@@ -1,0 +1,62 @@
+name: Daily HTTP Prisma PostgreSQL16 acceptance
+on:
+  pull_request:
+    branches: [main, codex/snapshot-cron-http-acceptance-2125]
+    paths:
+      - '.github/workflows/daily-http-pg-acceptance.yml'
+      - 'tests/daily-http-pg-acceptance.test.mjs'
+      - 'tests/fixtures/daily-http-pg-worker.mjs'
+      - 'scripts/call-inventory-snapshot-daily.js'
+      - 'app/**'
+      - 'prisma/**'
+permissions:
+  contents: read
+jobs:
+  isolated-http-prisma:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-local
+          POSTGRES_DB: commercor_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d commercor_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:test-only-local@127.0.0.1:5432/commercor_test
+      RUN_POS_PG_RECOVERY: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+      - name: Guard isolated connection before dependency or database work
+        run: node tests/fixtures/daily-http-pg-worker.mjs guard-only
+      - name: Install exact repository lock without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Generate locked Prisma and prepare disposable schema
+        run: |
+          node_modules/.bin/prisma generate
+          node_modules/.bin/prisma db push --skip-generate
+      - name: Observe actual HTTP auth gate and Prisma retained recovery
+        run: node --test --test-concurrency=1 --test-reporter=tap tests/daily-http-pg-acceptance.test.mjs
+      - name: Parent main daily route must fail the authenticated recovery checkpoint
+        run: |
+          cp app/routes/api.inventory-snapshot-daily.tsx "$RUNNER_TEMP/http-candidate-daily.tsx"
+          git fetch --depth=1 origin 94fb3ea579904f65b9df9306aa7da31f84d16d06
+          git show 94fb3ea579904f65b9df9306aa7da31f84d16d06:app/routes/api.inventory-snapshot-daily.tsx > app/routes/api.inventory-snapshot-daily.tsx
+          set +e
+          node --test --test-reporter=tap tests/daily-http-pg-acceptance.test.mjs > "$RUNNER_TEMP/http-parent-control.tap" 2>&1
+          parent_status=$?
+          set -e
+          cp "$RUNNER_TEMP/http-candidate-daily.tsx" app/routes/api.inventory-snapshot-daily.tsx
+          cmp app/routes/api.inventory-snapshot-daily.tsx "$RUNNER_TEMP/http-candidate-daily.tsx"
+          test "$parent_status" -ne 0
+          grep -Fq 'authenticated HTTP CLI must complete DB recovery' "$RUNNER_TEMP/http-parent-control.tap"
+          echo 'HTTP_PG_PARENT_CONTROL=authenticated_recovery_assert_failed; candidate_restored=verified'
