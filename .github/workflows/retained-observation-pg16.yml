@@ -1,12 +1,14 @@
 name: Retained observation PostgreSQL16 acceptance
 on:
   pull_request:
-    branches: [main, codex/retained-observation-daily-recovery-20261126]
+    branches: [main, codex/retained-observation-daily-recovery-20261126, codex/retained-recovery-pg16-acceptance-20261126]
     paths:
       - '.github/workflows/retained-observation-pg16.yml'
       - 'tests/inventory-observation-pg-recovery.test.mjs'
       - 'tests/fixtures/retained-observation-pg-worker.mjs'
       - 'tests/fixtures/isolated-pg-guard.mjs'
+      - 'tests/fixtures/retained-observation-tenant-worker.mjs'
+      - 'tests/inventory-observation-tenant.pg-acceptance.mjs'
       - 'app/**'
       - 'prisma/**'
 permissions:
@@ -44,7 +46,7 @@ jobs:
           node_modules/.bin/prisma generate
           node_modules/.bin/prisma db push --skip-generate
       - name: Exercise fresh and concurrent processes over real TCP
-        run: node --test --test-reporter=tap tests/inventory-observation-pg-recovery.test.mjs
+        run: node --test --test-concurrency=1 --test-reporter=tap tests/inventory-observation-pg-recovery.test.mjs tests/inventory-observation-tenant.pg-acceptance.mjs
       - name: Parent route sensitivity on the same disposable database
         run: |
           cp app/routes/api.inventory-snapshot-daily.tsx "$RUNNER_TEMP/candidate-daily.tsx"
@@ -58,3 +60,23 @@ jobs:
           cmp app/routes/api.inventory-snapshot-daily.tsx "$RUNNER_TEMP/candidate-daily.tsx"
           test "$parent_status" -ne 0
           echo 'PARENT_DAILY_ROUTE_STRICT_CONTROL=expected_failure; candidate_restored=verified'
+      - name: Tenant-session selection sensitivity with exact assertion
+        run: |
+          cp app/routes/api.inventory-snapshot-daily.tsx "$RUNNER_TEMP/candidate-tenant-daily.tsx"
+          python3 - <<'PYTEST'
+          from pathlib import Path
+          path = Path('app/routes/api.inventory-snapshot-daily.tsx')
+          source = path.read_text()
+          needle = 'where: { shop: observation.shop, isOnline: false }'
+          assert source.count(needle) == 1
+          path.write_text(source.replace(needle, 'where: { isOnline: false }', 1))
+          PYTEST
+          set +e
+          node --test --test-reporter=tap tests/inventory-observation-tenant.pg-acceptance.mjs > "$RUNNER_TEMP/tenant-control.tap" 2>&1
+          tenant_status=$?
+          set -e
+          cp "$RUNNER_TEMP/candidate-tenant-daily.tsx" app/routes/api.inventory-snapshot-daily.tsx
+          cmp app/routes/api.inventory-snapshot-daily.tsx "$RUNNER_TEMP/candidate-tenant-daily.tsx"
+          test "$tenant_status" -ne 0
+          grep -Fq 'restored tenant must recover with matching offline session' "$RUNNER_TEMP/tenant-control.tap"
+          echo 'TENANT_SELECTOR_CONTROL=matching_session_assertion_failed; candidate_restored=verified'
