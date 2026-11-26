@@ -27,9 +27,11 @@ const PENDING_ORDER_MAX_RETRIES = 1; // 最大約 0.8s（旧 2.5s×3 は棚卸�
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+type InventoryWebhookContext = Pick<Awaited<ReturnType<typeof authenticateWebhook>>, "payload" | "shop" | "topic" | "session">;
+
 async function handleWebhook(
   args: ActionFunctionArgs,
-  retainedContext?: Awaited<ReturnType<typeof authenticateWebhook>>,
+  retainedContext?: InventoryWebhookContext,
   replayingRetainedObservation = false,
 ): Promise<Response> {
   const { request } = args;
@@ -1096,5 +1098,17 @@ async function handleWebhook(
 }
 
 // 4 秒を過ぎたら先に 200 を返し、処理は続ける（webhook-response-budget.ts）
+/** Only the authenticated existing daily endpoint may supply this trusted DB row/session. */
+export async function replayStoredInventoryObservation(
+  observation: { shop: string; inventoryItemId: string; locationId: string; available: number; timestamp: Date; adjustmentGroupId: string | null },
+  session: NonNullable<InventoryWebhookContext["session"]>,
+): Promise<Response> {
+  if (!session || session.shop !== observation.shop) return new Response("Unauthorized", { status: 403 });
+  return handleWebhook({ request: new Request("https://internal.invalid/retained-inventory-replay", { method: "POST" }) } as ActionFunctionArgs, {
+    shop: observation.shop, topic: "INVENTORY_LEVELS_UPDATE", session,
+    payload: { inventory_item_id: observation.inventoryItemId, location_id: observation.locationId, available: observation.available, updated_at: observation.timestamp.toISOString(), inventory_adjustment_group_id: observation.adjustmentGroupId ?? undefined },
+  }, true);
+}
+
 export const action = (args: ActionFunctionArgs) =>
   respondWithinBudget(() => handleWebhook(args), { label: "inventory_levels/update", request: args.request });

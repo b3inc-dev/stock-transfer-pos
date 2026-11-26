@@ -12,6 +12,8 @@ import {
   saveSnapshotsForDate,
 } from "../utils/inventory-snapshot";
 import { refreshOfflineSessionIfNeeded } from "../utils/refresh-offline-session";
+import { drainInventoryObservations } from "../utils/inventory-observation-drain.server";
+import { replayStoredInventoryObservation } from "./webhooks.inventory_levels.update";
 
 export type { DailyInventorySnapshot, InventorySnapshotsData } from "../utils/inventory-snapshot";
 
@@ -122,6 +124,20 @@ export async function action({ request }: ActionFunctionArgs) {
       });
     }
 
+    // Reuse the already authenticated daily trigger. No new cron or schema/TTL.
+    const observationRecovery = await drainInventoryObservations({
+      db,
+      replay: async observation => {
+        const record = await db.session.findFirst({ where: { shop: observation.shop, isOnline: false } });
+        if (!record) throw new Error("Offline session unavailable");
+        await refreshOfflineSessionIfNeeded(record.id, record.shop, record.expires, record.refreshToken);
+        const session = await sessionStorage.loadSession(record.id);
+        if (!session || session.shop !== observation.shop) throw new Error("Offline session unavailable");
+        return replayStoredInventoryObservation(observation, session);
+      },
+    });
+    const recoveryOk = observationRecovery.failed === 0 && observationRecovery.deferred === 0;
+
     // 全ショップのセッションを取得（オフラインアクセストークン）
     const sessions = await db.session.findMany({
       where: {
@@ -131,7 +147,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (sessions.length === 0) {
       return new Response(
-        JSON.stringify({ ok: true, message: "No shops to process", processed: 0 }),
+        JSON.stringify({ ok: recoveryOk, message: "No shops to process", processed: 0, total: 0, observationRecovery }),
         {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -154,11 +170,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return new Response(
       JSON.stringify({
-        ok: true,
+        ok: errors.length === 0 && recoveryOk,
         message: `Processed ${processedCount} shops`,
         processed: processedCount,
         total: sessions.length,
         errors: errors.length > 0 ? errors : undefined,
+        observationRecovery,
       }),
       {
         status: 200,
