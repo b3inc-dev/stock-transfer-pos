@@ -1,0 +1,109 @@
+{
+  "snapshotJst": "2026-11-27T00:29:00+09:00",
+  "scope": "Read-only actual scheduled-run audit, not runtime or cron modification",
+  "workspaceId": "tea-d4mg3sali9vc73epu1j0",
+  "liveSource": "94fb3ea579904f65b9df9306aa7da31f84d16d06",
+  "candidate": "bdecd0527011c02a11f8f2e8cbadf4bae95e4849",
+  "liveDailySource": {
+    "path": "app/routes/api.inventory-snapshot-daily.tsx",
+    "blob": "b1537ae32c250bfe27d1caf48178594be03cf8a7",
+    "hasRecoveryOutput": false,
+    "partialResponseOkAlwaysTrue": true
+  },
+  "candidateCallerSource": {
+    "path": "scripts/call-inventory-snapshot-daily.js",
+    "blob": "a99a5b5ac022262f842ae3ff13a5af58ea13bad3",
+    "requiresRecoveryCounters": true,
+    "offlineCopyBlobMatched": true
+  },
+  "runs": [
+    {
+      "resourceId": "crn-d64g1mpr0fns73dfias0",
+      "name": "inventory-snapshot-daily",
+      "owner": "tea-d4mg3sali9vc73epu1j0",
+      "repo": "https://github.com/b3inc-dev/stock-transfer-pos",
+      "branch": "main",
+      "liveSha": "94fb3ea579904f65b9df9306aa7da31f84d16d06",
+      "runId": "crn-d64g1mpr0fns73dfias0-29928419",
+      "startEvent": {
+        "id": "evt-dc44iegjo6nc73d4ra10",
+        "time": "2026-11-26T14:59:03Z"
+      },
+      "endEvent": {
+        "id": "evt-dc44iqojo6nc73d4rhqg",
+        "time": "2026-11-26T14:59:55.065758Z",
+        "status": "successful"
+      },
+      "counterLog": {
+        "id": "829aacf1-58a6-459c-8c61-c8bb482dd8f3",
+        "time": "2026-11-26T14:59:51.926852904Z",
+        "ok": true,
+        "processed": 5,
+        "total": 6,
+        "errors": 1,
+        "hasObservationRecovery": false
+      },
+      "counterComplete": false,
+      "authenticationErrorClass": "authentication/access-token rejection",
+      "correlationToSingleLiveAppError": true,
+      "evidence": "https://dashboard.render.com/cron/crn-d64g1mpr0fns73dfias0"
+    },
+    {
+      "resourceId": "crn-d663jnjnv86c73e33pdg",
+      "name": "inventory-snapshot-daily-ciara",
+      "owner": "tea-d4mg3sali9vc73epu1j0",
+      "repo": "https://github.com/b3inc-dev/stock-transfer-pos",
+      "branch": "main",
+      "liveSha": "94fb3ea579904f65b9df9306aa7da31f84d16d06",
+      "runId": "crn-d663jnjnv86c73e33pdg-29928419",
+      "startEvent": {
+        "id": "evt-dc44iegjo6nc73d4ra0g",
+        "time": "2026-11-26T14:59:03Z"
+      },
+      "endEvent": {
+        "id": "evt-dc44jg8jo6nc73d4t0g0",
+        "time": "2026-11-26T15:01:21.264873Z",
+        "status": "successful"
+      },
+      "counterLog": {
+        "id": "7ee3a301-d706-4d52-8b20-cb2da03cfcea",
+        "time": "2026-11-26T15:00:41.508567599Z",
+        "ok": true,
+        "processed": 1,
+        "total": 1,
+        "errors": 0,
+        "hasObservationRecovery": false
+      },
+      "counterComplete": true,
+      "correlationToSingleLiveAppError": false,
+      "evidence": "https://dashboard.render.com/cron/crn-d663jnjnv86c73e33pdg"
+    }
+  ],
+  "conclusions": {
+    "public": "Cron successful status and oktrue coexist with5/6/errors1. ExistingPOS-RENDER-001 persists; not a new issue and not cleared.",
+    "ciara": "This run counters1/1/errors0 only; no Store/inventory correctness claim.",
+    "wireCompatibility": "Both live outputs omit observationRecovery; unchanged candidate strict caller rejects both with exit1 in anonymous offline replay.",
+    "activationGate": "Do not activate the strict caller alone against old live94fb. Existing approved backend/schema/migration/actual-wire gates must be satisfied first; no settings changed.",
+    "recoveryDeploymentOrder": [
+      "Existing migration/schema/history approval and verification",
+      "Separate approved backend candidate integration/deployment by actual owner",
+      "Observe actual matching wire recovery counters/tenant and data acceptance",
+      "Only then separately approved cron caller/command activation and operational run acceptance"
+    ]
+  },
+  "operationalAcceptance": "blocked/unconfirmed",
+  "nextOwnerReceipt": "unconfirmed",
+  "limits": [
+    "Actual API source/result shape observed from read-only logs; no extra API POST was issued",
+    "Offline replay contains only counts and synthetic error placeholder, no tenant/customer/order/IP/key/rawerror",
+    "No real DB/schema/Store/token/session/config/deploy/cron changes",
+    "No new score claimed; old unit/HTTP/compiled CI evidence not rerun for credit",
+    "Auth rejection correlation to one public snapshot error is observed; identity and auth restoration not reproduced or changed",
+    "Runtimefeatureflag live values unverified"
+  ],
+  "newIssueNotifications": [],
+  "oldIssueState": {
+    "POS_RENDER_001": "same existing partial state; new dated occurrence recorded, no duplicate user alert",
+    "POS_RENDER_002": "old two timeout IDs remain unresolved; new events checked separately by full monitoring"
+  }
+}
