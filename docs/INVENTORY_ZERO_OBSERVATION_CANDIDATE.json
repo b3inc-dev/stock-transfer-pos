@@ -1,0 +1,37 @@
+{
+  "id": "POS-WEBHOOK-ZERO-001",
+  "owner": "Codex scheduled pos_outbound_next",
+  "sourceMain": "94fb3ea579904f65b9df9306aa7da31f84d16d06",
+  "parentPR152": "40d1d0020fdfab711b54d390c07934bffcfea125",
+  "scope": "internal history zero-observation retention; isolated candidate only",
+  "design": {
+    "chosen": "separate internal table; visible history/export/count queries unchanged",
+    "rejected": "visible zero history rows or direct admin promotion bypassing sale/refund classification",
+    "columns": "shop, inventoryItemId, locationId, timestamp, available, adjustmentGroupId, idempotencyKey, generated id/createdAt; no raw payload/customer/order/token/SKU/store name; nullable lastAttemptedAt tracks bounded replay fairness only",
+    "reevaluate": "after late history write or committed-anchor retry, re-evaluate one same-scope retained observation; lastAttemptedAt null-first/oldest-first rotates true-zero rows without deleting evidence, recursion remains1",
+    "cleanup": "delete when ordinary history exists/created; shop/redact follows existing public/inhouse/reinstall safeguards",
+    "retention": "unpromoted true-zero observations follow existing shop history deletion boundary; no new TTL or cleanup scheduler introduced. Long-term volume and retention review remain required before production",
+    "retentionUpsertRace": "after retention upsert re-read the preceding quantity; if a predecessor committed before retention was visible and now makes delta nonzero, re-enter the same handler once"
+  },
+  "validation": {
+    "before": "parent runtime same strict known case:0pass1fail",
+    "after": "candidate12 zero-observation tests pass; related53pass0fail0skip including2 barrier/starvation findings",
+    "migration": "isolated PGlite0.3.14 PostgreSQL17.5 WASM:1pass; newDDL/unique/shop/time/rollback; not actualPrisma TCP/PG16 concurrency",
+    "prisma": "6.16.3 validate/generate success; actual TCP PG16 unverified",
+    "fullBuildTypecheck": "not completed; existing baseline458 type errors not reclassified as new"
+  },
+  "noOperations": [
+    "no app main/staging merge",
+    "no shared DB migration/data write",
+    "no actual Shopify stock/Flow/notification",
+    "no CLI deployment",
+    "no UI changes",
+    "no paid resource/config/cron creation"
+  ],
+  "remaining": [
+    "independent review",
+    "actual Prisma/Postgres multi-client race, sustained volume/retention",
+    "live migration/release approval",
+    "actual store/device/printing acceptance unrelated to this backend fix"
+  ]
+}

@@ -16,6 +16,7 @@ function handleComplianceWebhook(args) {
 }
 
 const TABLES = [
+  "inventoryWebhookObservation",
   "session",
   "inventoryChangeLog",
   "inventoryChangeEvent",
