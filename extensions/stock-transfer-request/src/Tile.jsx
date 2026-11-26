@@ -12,5 +12,5 @@ function Tile() {
     const timer = setInterval(refresh, 60000);
     return () => { alive = false; clearInterval(timer); };
   }, []);
-  return <s-tile heading="出庫依頼" subheading={count > 0 ? `要対応 ${count}件` : "確認・印刷・出庫"} onClick={() => shopify.action.presentModal()} />;
+  return <s-tile heading="出庫依頼" subheading={count > 0 ? `要対応 ${count}件` : "処理・履歴"} onClick={() => shopify.action.presentModal()} />;
 }

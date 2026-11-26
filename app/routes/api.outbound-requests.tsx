@@ -3,7 +3,7 @@ import db from "../db.server";
 import { authenticate, unauthenticated } from "../shopify.server";
 import { planBlockedPosResponse } from "../utils/plan-gate.server";
 import { withGraphQLRetry } from "../utils/graphql-with-retry";
-import { renderOutboundRequestReceipt } from "../../extensions/common/outboundRequests.js";
+import { renderConfiguredOutboundRequestReceipt } from "../services/outboundRequestReceipt";
 import { advanceRequest, beginRequest, canonicalLines, changeRequest, getRequest, getRequestPolicy, outboundRequestsEnabled, outboundPublicMessage, previewRequest, reconcileRequest, requestError, requestProducts, requestQuery, shippingSettings, type RequestLine, type RequestRow } from "../utils/outbound-requests.server";
 
 const headers = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, GET, OPTIONS", "Access-Control-Allow-Headers": "Authorization, Content-Type", "Cache-Control": "private, no-store" };
@@ -41,7 +41,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const { shop } = await context(request, locationId);
     const row = await getRequest(shop, url.searchParams.get("receipt") || "", locationId);
     if (["draft", "cancelled"].includes(row.status)) throw requestError("印刷できる依頼を選択してください", 409);
-    return new Response(renderOutboundRequestReceipt(row, (await getRequestPolicy(shop)).policy.paperWidth), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'", "X-Content-Type-Options": "nosniff" } });
+    return new Response(renderConfiguredOutboundRequestReceipt(row, (await getRequestPolicy(shop)).policy), { headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'", "X-Content-Type-Options": "nosniff" } });
   } catch (error) { return failure(error); }
 }
 export async function action({ request }: ActionFunctionArgs) {

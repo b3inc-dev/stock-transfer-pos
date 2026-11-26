@@ -27,7 +27,7 @@ test("POS scans and extra products require a SKU difference modal before shippin
     if (body.command === "list") return response({ rows: [row], count: 1 });
     if (body.command === "detail") return response({ row });
     if (body.command === "claim") { row = { ...row, status: "working", claimed: true, version: row.version + 1 }; return response({ row }); }
-    if (body.command === "products") return response({ products: [line(3, 0)] });
+    if (body.command === "products") return body.query === "失敗" ? Response.json({ ok: false, error: "検索できませんでした" }, { status: 500 }) : response({ products: [line(3, 0)] });
     if (body.command === "preview") {
       const checked = validateOutboundActual(row.lines, body.actual, policy);
       return response({ preview: { ...checked, differences: checked.differences.map(line => ({ ...line, title: body.actual.find(item => item.inventoryItemId === line.inventoryItemId)?.title, sku: body.actual.find(item => item.inventoryItemId === line.inventoryItemId)?.sku })), token: "preview-confirmation" } });
@@ -51,7 +51,26 @@ test("POS scans and extra products require a SKU difference modal before shippin
     const item = document.querySelector("s-clickable"); assert.ok(item); item.dispatchEvent(new window.Event("click")); await wait();
     click("作業を開始"); await wait(); await wait();
     assert.equal(typeof scan, "function"); scan({ data: "1" }); scan({ data: "1" }); scan({ data: "1" }); await wait();
-    click("検索"); await wait(); click("商品3・SKU3を追加"); await wait();
+    const staleScanner = scan;
+    const inspectionScroll = document.querySelector("s-page > s-stack > s-scroll-box");
+    inspectionScroll.nextElementSibling.nextElementSibling.querySelector("s-button").dispatchEvent(new window.Event("click")); await wait();
+    assert.equal(scan, null, "readonly detail unsubscribes the scanner");
+    staleScanner({ data: "1" }); await wait();
+    assert.equal([...storage.values()].find(value => value.actual)?.actual[0].quantity, 3, "late scans cannot change detail quantities");
+    click("検品を再開"); await wait();
+    const searchField = document.querySelector("s-search-field");
+    assert.equal(searchField.closest("s-scroll-box"), null, "search stays in the fixed header");
+    searchField.value = "商品3"; searchField.dispatchEvent(new window.Event("input")); await wait(); await wait(); await wait(); await wait();
+    const addProduct = [...document.querySelectorAll("s-button")].find(button => button.id === "outbound-add-button-3");
+    assert.ok(addProduct); addProduct.dispatchEvent(new window.Event("click")); await wait();
+    searchField.value = "失敗"; searchField.dispatchEvent(new window.Event("input"));
+    addProduct.dispatchEvent(new window.Event("click"));
+    await wait(); await wait(); await wait(); await wait();
+    assert.equal([...document.querySelectorAll("s-button")].filter(button => button.id === "outbound-add-button-3").length, 0, "a failed search never restores old products");
+    assert.equal([...storage.values()].find(value => value.actual)?.actual.at(-1).quantity, 1, "a button from the old search cannot add again");
+    searchField.value = ""; searchField.dispatchEvent(new window.Event("input")); await wait();
+    const scroll = document.querySelector("s-page > s-stack > s-scroll-box"), footer = scroll.nextElementSibling.nextElementSibling;
+    assert.equal(footer.querySelectorAll("s-button").length, 3, "inspection footer has back, save and completion only");
     const reasons = [...document.querySelectorAll('s-text-field[label="理由（必須）"]')];
     assert.equal(reasons.length, 3);
     for (const input of reasons) { input.value = "店舗確認済み"; input.dispatchEvent(new window.Event("input")); }

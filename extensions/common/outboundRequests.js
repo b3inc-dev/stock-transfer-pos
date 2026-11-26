@@ -6,7 +6,7 @@ export function outboundRequestTone(status) {
   if (["requested", "working", "processing"].includes(status)) return "info";
   return "neutral";
 }
-export const DEFAULT_OUTBOUND_REQUEST_POLICY = Object.freeze({ allowUnder: false, underReason: "required", allowOver: false, overReason: "required", allowExtra: false, extraReason: "required", paperWidth: 80 });
+export const DEFAULT_OUTBOUND_REQUEST_POLICY = Object.freeze({ allowUnder: false, underReason: "required", allowOver: false, overReason: "required", allowExtra: false, extraReason: "required", paperWidth: 80, printerProfile: "standard" });
 /** @param {unknown} value */
 export function normalizeOutboundRequestPolicy(value = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("差異設定を確認してください");
@@ -15,6 +15,10 @@ export function normalizeOutboundRequestPolicy(value = {}) {
   if (input.paperWidth !== undefined) {
     if (![58, 80].includes(input.paperWidth)) throw invalid("用紙幅は58mmか80mmを選択してください");
     result.paperWidth = input.paperWidth;
+  }
+  if (input.printerProfile !== undefined) {
+    if (!["standard", "mpop_58", "mcp31lb_58"].includes(input.printerProfile)) throw invalid("プリンター補正を選択してください");
+    result.printerProfile = input.printerProfile;
   }
   for (const key of ["allowUnder", "allowOver", "allowExtra"]) {
     if (input[key] !== undefined && typeof input[key] !== "boolean") throw invalid("許可設定を確認してください");
@@ -68,5 +72,5 @@ const escape = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&a
 export function renderOutboundRequestReceipt(row, paperWidth = 80) {
   const actual = new Map((row.actualLines || []).map(line => [line.inventoryItemId, line]));
   const lines = [...row.lines, ...(row.actualLines || []).filter(line => !row.lines.some(item => item.inventoryItemId === line.inventoryItemId)).map(line => ({ ...line, quantity: 0 }))];
-  return `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>出庫依頼書</title><style>body{font:14px sans-serif;max-width:100%;width:${paperWidth === 58 ? 384 : 576}px;margin:0 auto;color:#000;background:#fff;overflow-wrap:anywhere}h1{font-size:20px}table{width:100%;border-collapse:collapse}td{border-bottom:1px solid;padding:8px 0;vertical-align:top}td:last-child{text-align:right;white-space:nowrap}small{display:block}p{white-space:pre-wrap}</style></head><body><h1>出庫依頼書</h1><p>${escape(row.number)}・版${escape(row.version)}<br>出庫元 ${escape(row.originName)}<br>移動先 ${escape(row.destinationName)}<br>希望日 ${escape(row.dueDate || "指定なし")}<br>${escape(OUTBOUND_REQUEST_LABELS[row.status])}</p><table><tbody>${lines.map(line => `<tr><td>${escape(line.title)}<small>SKU: ${escape(line.sku)}<br>JAN: ${escape(line.barcode)}</small>${actual.has(line.inventoryItemId) ? `<small>理由: ${escape(actual.get(line.inventoryItemId).reason)}</small>` : ""}</td><td>依頼 ${escape(line.quantity)}${actual.has(line.inventoryItemId) ? `<br>${row.status === "completed" ? "出庫" : "検品"} ${escape(actual.get(line.inventoryItemId).quantity)}` : ""}</td></tr>`).join("")}</tbody></table><p>${escape(row.note)}</p></body></html>`;
+  return `<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>出庫依頼書</title><style>body{font:14px sans-serif;max-width:100%;width:${paperWidth === 58 ? 384 : 576}px;margin:0 auto;color:#000;background:#fff;overflow-wrap:anywhere}h1{font-size:20px}table{width:100%;border-collapse:collapse}td{border-bottom:1px solid;padding:8px 0;vertical-align:top}td:last-child{text-align:right;white-space:nowrap}small{display:block}p{white-space:pre-wrap}</style></head><body><h1>出庫依頼書</h1><p>${escape(row.number)}・版${escape(row.version)}<br>出庫元 ${escape(row.originName)}<br>移動先 ${escape(row.destinationName)}<br>希望日 ${escape(row.dueDate || "指定なし")}<br>${escape(OUTBOUND_REQUEST_LABELS[row.status])}</p><table><tbody>${lines.map(line => `<tr><td>${escape(line.title)}<small>SKU: ${escape(line.sku)}<br>JAN: ${escape(line.barcode)}</small>${actual.has(line.inventoryItemId) ? `<small>理由: ${escape(actual.get(line.inventoryItemId).reason)}</small>` : ""}</td><td>依頼 ${escape(line.quantity)}${actual.has(line.inventoryItemId) ? `<br>${row.status === "completed" ? "出庫" : "検品"} ${escape(actual.get(line.inventoryItemId).quantity)}` : ""}</td></tr>`).join("")}</tbody></table><p>${escape(row.note)}</p></body></html>`;
 }
