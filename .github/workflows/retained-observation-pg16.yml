@@ -1,0 +1,62 @@
+name: Retained observation PostgreSQL16 acceptance
+on:
+  pull_request:
+    branches: [main, codex/retained-observation-daily-recovery-20261126]
+    paths:
+      - '.github/workflows/retained-observation-pg16.yml'
+      - 'tests/inventory-observation-pg-recovery.test.mjs'
+      - 'tests/fixtures/retained-observation-pg-worker.mjs'
+      - 'tests/fixtures/isolated-pg-guard.mjs'
+      - 'app/**'
+      - 'prisma/**'
+permissions:
+  contents: read
+jobs:
+  isolated-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-local
+          POSTGRES_DB: commercor_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U postgres -d commercor_test'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:test-only-local@127.0.0.1:5432/commercor_test
+      RUN_POS_PG_RECOVERY: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+      - name: Install isolated test tools only
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pos-pg-deps" --no-save prisma@6.16.3 @prisma/client@6.16.3 vite@6.3.6
+          ln -s "$RUNNER_TEMP/pos-pg-deps/node_modules" node_modules
+      - name: Guard disposable connection then generate actual Prisma client
+        run: |
+          node --input-type=module -e "import {assertIsolatedRecoveryDatabase} from './tests/fixtures/isolated-pg-guard.mjs'; assertIsolatedRecoveryDatabase();"
+          node_modules/.bin/prisma generate
+          node_modules/.bin/prisma db push --skip-generate
+      - name: Exercise fresh and concurrent processes over real TCP
+        run: node --test --test-reporter=tap tests/inventory-observation-pg-recovery.test.mjs
+      - name: Parent route sensitivity on the same disposable database
+        run: |
+          cp app/routes/api.inventory-snapshot-daily.tsx "$RUNNER_TEMP/candidate-daily.tsx"
+          git fetch --depth=1 origin 94fb3ea579904f65b9df9306aa7da31f84d16d06
+          git show 94fb3ea579904f65b9df9306aa7da31f84d16d06:app/routes/api.inventory-snapshot-daily.tsx > app/routes/api.inventory-snapshot-daily.tsx
+          set +e
+          node --test --test-reporter=tap tests/inventory-observation-pg-recovery.test.mjs > "$RUNNER_TEMP/parent-recovery-control.tap" 2>&1
+          parent_status=$?
+          set -e
+          cp "$RUNNER_TEMP/candidate-daily.tsx" app/routes/api.inventory-snapshot-daily.tsx
+          cmp app/routes/api.inventory-snapshot-daily.tsx "$RUNNER_TEMP/candidate-daily.tsx"
+          test "$parent_status" -ne 0
+          echo 'PARENT_DAILY_ROUTE_STRICT_CONTROL=expected_failure; candidate_restored=verified'
