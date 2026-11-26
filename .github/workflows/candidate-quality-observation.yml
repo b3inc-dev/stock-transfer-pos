@@ -40,6 +40,6 @@ jobs:
           git archive 94fb3ea579904f65b9df9306aa7da31f84d16d06 | tar -x -C "$RUNNER_TEMP/main-quality"
           ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/main-quality/node_modules"
       - name: Preserve webhook auth classification recovery and server boundary
-        run: node --test --test-reporter=tap tests/inventory-server-boundary.test.mjs tests/inventory-history-order.test.mjs tests/inventory-webhook-zero-observation.test.mjs tests/pending-sale-history.test.mjs tests/compliance-webhook.test.mjs tests/inventory-observation-daily-recovery.test.mjs tests/inventory-snapshot-cron-result.test.mjs
+        run: node --experimental-strip-types --test --test-reporter=tap tests/inventory-server-boundary.test.mjs tests/inventory-history-order.test.mjs tests/inventory-webhook-zero-observation.test.mjs tests/pending-sale-history.test.mjs tests/compliance-webhook.test.mjs tests/inventory-observation-daily-recovery.test.mjs tests/inventory-snapshot-cron-result.test.mjs
       - name: Observe full type lint build; preserve existing debt instead of declaring app green
         run: node scripts/observe-candidate-quality.mjs "$RUNNER_TEMP/main-quality"
