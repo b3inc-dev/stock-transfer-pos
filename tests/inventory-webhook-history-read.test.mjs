@@ -30,27 +30,58 @@ before(async () => {
 
 after(async () => { delete globalThis.inventoryHistoryFixture; await vite?.close(); });
 
-function historyFixture(previousQuantity, failedRead, failuresRemaining = Infinity) {
-  const rows = [];
+function historyFixture(previousQuantity, failedRead, failuresRemaining = Infinity, seedRows = []) {
+  const rows = seedRows.map(row => ({ ...row }));
   function read(method) {
     if (method === failedRead && failuresRemaining > 0) {
       failuresRemaining--;
       throw Object.assign(new Error("synthetic connection timeout"), { code: "P2024" });
     }
   }
-  const baseline = previousQuantity === null ? null : { quantityAfter: previousQuantity };
+  // The current chronology helper always sends timestamp.lt/gt and tenant/item/location
+  // scope. A timestamp predicate must filter observations, not make them disappear.
+  const baseline = previousQuantity === null ? null : {
+    id: "synthetic-baseline", shop: event.shop, inventoryItemId: "11", locationId: "22",
+    timestamp: new Date("2026-01-03T02:00:00Z"), quantityAfter: previousQuantity,
+    activity: "admin_webhook", note: "", idempotencyKey: "synthetic-baseline",
+  };
+  function matches(row, where) {
+    return Object.entries(where).every(([key, wanted]) => {
+      if (key === "OR") return wanted.some(term => matches(row, term));
+      const actual = row[key];
+      if (wanted && typeof wanted === "object" && !(wanted instanceof Date)) {
+        return Object.entries(wanted).every(([operator, value]) => {
+          if (operator === "in") return value.includes(actual);
+          if (operator === "not") return value === null ? actual != null : actual !== value;
+          if (operator === "startsWith") return typeof actual === "string" && actual.startsWith(value);
+          if (operator === "endsWith") return typeof actual === "string" && actual.endsWith(value);
+          if (operator === "lt") return new Date(actual) < new Date(value);
+          if (operator === "lte") return new Date(actual) <= new Date(value);
+          if (operator === "gt") return new Date(actual) > new Date(value);
+          if (operator === "gte") return new Date(actual) >= new Date(value);
+          throw new Error(`Unsupported synthetic history predicate: ${operator}`);
+        });
+      }
+      return wanted instanceof Date ? new Date(actual).getTime() === wanted.getTime() : actual === wanted;
+    });
+  }
+  function selected({ where, orderBy, take }) {
+    const found = [...rows, ...(baseline ? [baseline] : [])].filter(row => matches(row, where));
+    if (orderBy?.timestamp) found.sort((a, b) => (new Date(a.timestamp) - new Date(b.timestamp)) * (orderBy.timestamp === "asc" ? 1 : -1));
+    return take === undefined ? found : found.slice(0, take);
+  }
   globalThis.inventoryHistoryFixture.db.inventoryChangeLog = {
-    async findFirst({ where }) {
+    async findFirst(query) {
       read("findFirst");
-      if (where.activity || where.timestamp || where.note) return null;
-      return [...rows].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0] ?? baseline;
+      return selected(query)[0] ?? null;
     },
     async findUnique({ where }) {
       read("findUnique");
       return rows.find(row => row.idempotencyKey === where.shop_idempotencyKey.idempotencyKey);
     },
-    async findMany() { return []; },
-    async create({ data }) { rows.push(data); return data; },
+    async findMany(query) { return selected(query); },
+    async create({ data }) { const row = { id: `synthetic-${rows.length + 1}`, ...data }; rows.push(row); return row; },
+    async update({ where, data }) { const row = rows.find(item => matches(item, where)); assert.ok(row, "update targets a saved observation"); Object.assign(row, data); return row; },
   };
   return { rows, restoreRead() { failedRead = null; } };
 }
@@ -90,6 +121,20 @@ test("an absent previous observation can be recorded with an idempotency key", a
   assert.ok(fixture.rows[0].idempotencyKey);
 });
 
+test("newer observations from another shop, item or location never become this event's baseline", async () => {
+  const shared = { timestamp: new Date("2026-01-04T01:59:59Z"), activity: "admin_webhook", delta: 4, note: "" };
+  const foreign = [
+    { ...shared, id: "other-shop", shop: "other.invalid", inventoryItemId: "11", locationId: "22", quantityAfter: 100 },
+    { ...shared, id: "other-item", shop: event.shop, inventoryItemId: "99", locationId: "22", quantityAfter: 50 },
+    { ...shared, id: "other-location", shop: event.shop, inventoryItemId: "11", locationId: "99", quantityAfter: 60 },
+  ];
+  const fixture = historyFixture(10, null, Infinity, foreign);
+  assert.equal((await submit()).status, 200);
+  assert.deepEqual(fixture.rows.slice(0, foreign.length), foreign);
+  assert.equal(fixture.rows.length, foreign.length + 1);
+  assert.equal(fixture.rows.at(-1).delta, -2);
+});
+
 
 test("failure reading the fallback quantity is not treated as an absent observation", async () => {
   const fixture = historyFixture(null, null);
@@ -110,11 +155,9 @@ test("an unavailable history model is not acknowledged as a completed notificati
 });
 
 
-// Known release blocker: a failed observation can be replayed after a newer one.
-// Keep the correct expected deltas visible; TODO is not a passing acceptance test.
-test("a retry after a newer observation preserves chronological deltas", {
-  todo: "#46 / #53: durable ordering and reconciliation remain unresolved; no production release",
-}, async () => {
+// Exercise the current timestamp-scoped predecessor lookup and successor repair.
+// This nonzero-observation case does not cover #53's missing zero-delta observation.
+test("a retry after a newer observation preserves chronological deltas", async () => {
   const fixture = historyFixture(10, "findFirst", 1);
   try {
     globalThis.inventoryHistoryFixture.event = event;
