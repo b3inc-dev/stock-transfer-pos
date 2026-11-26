@@ -1,0 +1,62 @@
+{
+  "observedAt": "2026-11-26T03:33:40Z",
+  "candidate": "881ca3a100fd660191c18643ee03faafcea6818e",
+  "scope": "HTTP envelope of disabled outbound-request route on current production source; no live request",
+  "sourceBlobs": {
+    "app/routes/api.outbound-requests.tsx": "08bb4a3ae1651aab55bd50b5427eae93ef063113",
+    "app/utils/outbound-requests.server.ts": "8a1400f4cbd5d0444de5a4b625a49b17cbbaf5dd"
+  },
+  "command": "node --test tests/outbound-requests-http-guard.test.mjs",
+  "runtime": "Node24.22.3; repository TypeScript dev dependency",
+  "result": {
+    "tests": 4,
+    "passed": 4,
+    "failed": 0,
+    "skipped": 0
+  },
+  "matrix": {
+    "preflight": 6,
+    "unsupportedMethods": 5,
+    "disabledReceiptFlagValues": 8,
+    "disabledPOSTCommands": 11
+  },
+  "mutationSensitivity": [
+    {
+      "mutation": "disabled-gate-removed",
+      "passed": 2,
+      "failed": 2
+    },
+    {
+      "mutation": "method-guard-removed",
+      "passed": 3,
+      "failed": 1
+    },
+    {
+      "mutation": "no-store-header-removed",
+      "passed": 0,
+      "failed": 4
+    },
+    {
+      "mutation": "preflight-fast-path-removed",
+      "passed": 3,
+      "failed": 1
+    }
+  ],
+  "method": "TypeScript transpiles actual route; VM isolates imported external adapters. Exact feature predicate read from actual service, evaluated with synthetic env; auth/db/other adapters trap unexpected calls.",
+  "limitations": [
+    "pure route tests; no HTTP server/React Router full middleware",
+    "no actual public/cust env read",
+    "no actual authentication/HMAC/DB/migration",
+    "no store inventory/printing/POS device assertions",
+    "does not replace existing whole regression or known inventory webhook failures"
+  ],
+  "currentRelease": {
+    "custom": "Already released/enabled by designated operator; #79 comment7181600786, Shopify pos-stock-ciara-271 active/version1267046744065 per operator",
+    "main": "881ca3a100fd660191c18643ee03faafcea6818e GitHub verified",
+    "public": "Shopify tile distribution and enabling excluded by user; this test is not live flag evidence"
+  },
+  "noRuntimeChanges": true,
+  "noUIChanges": true,
+  "noDeployment": true,
+  "noRealDataWrites": true
+}
