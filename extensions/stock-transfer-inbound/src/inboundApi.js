@@ -79,6 +79,49 @@ export async function fetchPendingTransfersForDestination(destinationLocationGid
   }));
 }
 
+/** Tile count: transfers, not SKUs/shipments. Read every page without loading product details. */
+export async function fetchPendingInboundCount(destinationLocationGid) {
+  if (!/^gid:\/\/shopify\/Location\/\d+$/.test(destinationLocationGid || "")) throw new Error("POS店舗を確認してください");
+  const pending = new Set();
+  const visited = new Set();
+  let after = null;
+  const unfinished = shipment => ["DRAFT", "IN_TRANSIT", "PARTIALLY_RECEIVED"].includes(String(shipment?.status || "").toUpperCase());
+  do {
+    const data = await adminGraphql(`query PendingInboundTile($after: String) {
+      inventoryTransfers(first: 100, after: $after, sortKey: CREATED_AT, reverse: true) {
+        nodes { id status totalQuantity receivedQuantity destination { location { id } }
+          shipments(first: 10) { nodes { id status } pageInfo { hasNextPage endCursor } }
+        } pageInfo { hasNextPage endCursor }
+      }
+    }`, { after });
+    const result = data?.inventoryTransfers;
+    if (!Array.isArray(result?.nodes) || !result.pageInfo) throw new Error("入庫件数を取得できません");
+    for (const transfer of result.nodes) {
+      if (transfer.destination?.location?.id !== destinationLocationGid || ["TRANSFERRED", "CANCELED", "CANCELLED"].includes(String(transfer.status).toUpperCase())) continue;
+      if (transfer.totalQuantity > 0 && transfer.receivedQuantity >= transfer.totalQuantity) continue;
+      let shipments = transfer.shipments;
+      if (!Array.isArray(shipments?.nodes) || !shipments.pageInfo) throw new Error("配送件数を取得できません");
+      const shipmentCursors = new Set();
+      while (!shipments?.nodes?.some(unfinished) && shipments?.pageInfo?.hasNextPage) {
+        const cursor = shipments.pageInfo.endCursor;
+        if (!cursor || shipmentCursors.has(cursor)) throw new Error("配送の続きを取得できません");
+        shipmentCursors.add(cursor);
+        const next = await adminGraphql(`query PendingInboundTileShipments($id: ID!, $after: String) {
+          inventoryTransfer(id: $id) { shipments(first: 100, after: $after) { nodes { id status } pageInfo { hasNextPage endCursor } } }
+        }`, { id: transfer.id, after: cursor });
+        shipments = next?.inventoryTransfer?.shipments;
+        if (!Array.isArray(shipments?.nodes)) throw new Error("配送件数を取得できません");
+      }
+      if (shipments?.nodes?.some(unfinished)) pending.add(transfer.id);
+    }
+    if (!result.pageInfo.hasNextPage) break;
+    after = result.pageInfo.endCursor;
+    if (!after || visited.has(after)) throw new Error("入庫の続きを取得できません");
+    visited.add(after);
+  } while (after);
+  return pending.size;
+}
+
 export async function fetchTransfersForDestinationAll(destinationLocationGid, opts = {}) {
   const after = opts?.after || null;
   const first = Math.max(1, Math.min(250, Number(opts.first ?? 100)));

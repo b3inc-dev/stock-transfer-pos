@@ -340,6 +340,57 @@ export async function readInventoryCountsRaw() {
   return fullCounts;
 }
 
+/** Read-only tile summary. Prefer lightweight list metadata; never heal/write counts while rendering a tile. */
+export async function readPendingStocktakeCount(locationGid) {
+  if (!/^gid:\/\/shopify\/Location\/\d+$/.test(locationGid || "")) throw new Error("POS店舗を確認してください");
+  const data = await graphql(`query PendingStocktakeTile {
+    currentAppInstallation {
+      list: metafield(namespace: "${NS}", key: "${INVENTORY_COUNTS_LIST_KEY}") { value }
+      groupIds: metafield(namespace: "${NS}", key: "${PRODUCT_GROUP_IDS_KEY}") { value }
+    }
+  }`);
+  if (!data?.currentAppInstallation) throw new Error("棚卸件数を取得できません");
+  const root = data.currentAppInstallation;
+  let counts;
+  if (root.list?.value != null) {
+    const parsed = JSON.parse(root.list.value);
+    if (Array.isArray(parsed)) counts = parsed;
+    else {
+      if (parsed?._chunked !== true || !Number.isSafeInteger(parsed.totalChunks) || parsed.totalChunks < 1) throw new Error("棚卸一覧を確認できません");
+      counts = [];
+      for (let start = 0; start < parsed.totalChunks; start += 4) {
+        const pages = await Promise.all(Array.from({ length: Math.min(4, parsed.totalChunks - start) }, async (_, i) => {
+          const page = await graphql(`query PendingStocktakeTileChunk($key: String!) {
+            currentAppInstallation { metafield(namespace: "${NS}", key: $key) { value } }
+          }`, { key: `${INVENTORY_COUNTS_LIST_CHUNK_PREFIX}${start + i}` });
+          const raw = page?.currentAppInstallation?.metafield?.value;
+          if (raw == null) throw new Error("棚卸一覧の一部を取得できません");
+          const rows = JSON.parse(raw);
+          if (!Array.isArray(rows)) throw new Error("棚卸一覧を確認できません");
+          return rows;
+        }));
+        counts.push(...pages.flat());
+      }
+    }
+  } else counts = await readInventoryCountsRaw();
+  const location = toLocationNumericId(locationGid);
+  const matching = counts.filter(row => row && toLocationNumericId(row.locationId) === location);
+  if (!matching.some(row => !["completed", "cancelled"].includes(row.status))) return 0;
+  let groupIds = root.groupIds?.value == null ? null : JSON.parse(root.groupIds.value);
+  if (groupIds !== null && !Array.isArray(groupIds)) throw new Error("商品グループを確認できません");
+  if (!groupIds?.length) {
+    const groups = await graphql(`query PendingStocktakeTileGroups {
+      currentAppInstallation { metafield(namespace: "${NS}", key: "${PRODUCT_GROUPS_KEY}") { value } }
+    }`);
+    if (!groups?.currentAppInstallation) throw new Error("商品グループを確認できません");
+    const rows = JSON.parse(groups.currentAppInstallation.metafield?.value || "[]");
+    if (!Array.isArray(rows)) throw new Error("商品グループを確認できません");
+    groupIds = rows.map(row => row.id);
+  }
+  const rows = fixCountsStatusOnly(matching, new Set(groupIds.flatMap(id => [String(id), normalizeIdForMatch(id)])));
+  return new Set(rows.filter(row => row.id && !["completed", "cancelled"].includes(row.status)).map(row => String(row.id))).size;
+}
+
 /** 1チャンク分の配列をパート結合して返す（分割取得用） */
 function parseChunkAndMergeParts(chunk) {
   if (!Array.isArray(chunk)) return [];

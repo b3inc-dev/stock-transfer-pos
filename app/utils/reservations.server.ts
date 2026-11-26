@@ -97,6 +97,9 @@ export async function publicReservation(row: StockReservation, admin: Reservatio
     lastError: row.lastError, createdAt: row.createdAt, createdBy: row.createdBy, endedAt: row.endedAt,
     endedBy: row.endedBy, anonymizedAt: row.anonymizedAt, events: "events" in row ? row.events : [], orderId: row.orderId };
 }
+export async function reservationPendingCount(shop: string, locationId: string) {
+  return db.stockReservation.count({ where: { shop, locationId, status: { notIn: TERMINAL_RESERVATIONS } } });
+}
 export async function reservationDueCount(shop: string, locationId: string) {
   const rows = await db.stockReservation.findMany({ where: { shop, locationId, status: { notIn: TERMINAL_RESERVATIONS } }, select: { status: true, dueDate: true, nextFollowDate: true, timezone: true } });
   return rows.filter(row => needsFollowUp(row)).length;

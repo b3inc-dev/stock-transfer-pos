@@ -13,6 +13,12 @@ before(async () => {
     db: { stockReservationSettings: { async findUnique() { return globalThis.reservationApiFixture.receiptLayout ? { receiptLayout: globalThis.reservationApiFixture.receiptLayout } : null; } }, stockReservation: {
       async findFirst({ where }) { dbReads++; return where.id === row.id && where.shop === shop && where.locationId === locationId ? structuredClone(row) : null; },
       async findMany({ where }) { dbReads++; return where.shop === shop && where.locationId === locationId ? [structuredClone(row)] : []; },
+      async count({ where }) {
+        dbReads++;
+        assert.deepEqual(where, { shop, locationId, status: { notIn: ["sold", "cancelled", "failed"] } });
+        const rows = ["held", "checkout", "reserving", "cancelling", "completing", "sold", "cancelled", "failed"].map(status => ({ ...row, status, dueDate: "2099-12-31" }));
+        return rows.filter(item => item.shop === where.shop && item.locationId === where.locationId && !where.status.notIn.includes(item.status)).length;
+      },
     } },
   };
   vite = await createServer({ configFile: false, appType: "custom", server: { middlewareMode: true, hmr: false }, plugins: [{ name: "reservation-auth", enforce: "pre", resolveId(id) {
@@ -52,6 +58,14 @@ test("tile count is database-only; receipt excludes PII and enforces store grant
   const response = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=${encodeURIComponent(locationId)}`) });
   const html = await response.text(); assert.equal(response.status, 200); assert.ok(!html.includes(row.guestName)); assert.ok(!html.includes(row.contactPhone)); assert.ok(html.includes("東京都渋谷区神宮前1-2-3")); assert.ok(html.includes("03-1234-5678"));
   const denied = await loader({ request: new Request(`https://app.invalid/api/reservations?receipt=${row.id}&locationId=gid://shopify/Location/2`) }); assert.equal(denied.status, 403);
+});
+test("pending tile count includes future uncompleted holds without customer reads and retains store authorization", async () => {
+  const response = await post({ command: "pendingCount" });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, count: 5 });
+  assert.equal((await post({ command: "pendingCount", locationId: "gid://shopify/Location/2" })).status, 403);
+  globalThis.reservationApiFixture.planBlocked = true;
+  assert.equal((await post({ command: "pendingCount" })).status, 403);
 });
 
 test("product search returns SKU, JAN, image, current-store stock and cursor with bounded page size", async () => {

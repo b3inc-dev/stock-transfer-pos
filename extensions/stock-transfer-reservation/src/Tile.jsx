@@ -1,19 +1,11 @@
-/* global globalThis */
 import "@shopify/ui-extensions/preact";
 import { render } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { pendingTileSubheading } from "../../common/pendingTileCount.js";
+import { usePendingTileCount } from "../../common/usePendingTileCount.js";
 import { reservationApi } from "./api.js";
+const loadCount = async location => (await reservationApi({ command: "pendingCount", locationId: location })).count;
 export default async () => render(<Tile />, document.body);
 function Tile() {
-  const [count, setCount] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    const refresh = () => reservationApi({ command: "count" }).then(data => { if (alive) setCount(data.count); }).catch(() => { if (alive) setCount(null); });
-    refresh();
-    const timer = setInterval(refresh, 60000);
-    globalThis.addEventListener?.("focus", refresh);
-    globalThis.document?.addEventListener?.("visibilitychange", refresh);
-    return () => { alive = false; clearInterval(timer); globalThis.removeEventListener?.("focus", refresh); globalThis.document?.removeEventListener?.("visibilitychange", refresh); };
-  }, []);
-  return <s-tile heading="取置" subheading={count > 0 ? `要対応 ${count}件` : "登録・履歴"} onClick={() => shopify.action.presentModal()} />;
+  const count = usePendingTileCount(loadCount);
+  return <s-tile heading="取置" subheading={pendingTileSubheading(count, "登録・履歴")} onClick={() => shopify.action.presentModal()} />;
 }
