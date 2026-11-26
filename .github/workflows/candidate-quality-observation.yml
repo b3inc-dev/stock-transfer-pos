@@ -1,0 +1,43 @@
+name: Candidate app quality observation
+on:
+  pull_request:
+    branches: [main, codex/retained-observation-migration-rehearsal-20261126]
+    paths:
+      - '.github/workflows/candidate-quality-observation.yml'
+      - 'scripts/observe-candidate-quality.mjs'
+      - 'tests/candidate-quality-guard.test.mjs'
+      - 'app/**'
+      - 'prisma/**'
+permissions:
+  contents: read
+jobs:
+  compare-main-and-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgresql://quality:synthetic-only@127.0.0.1:1/no_connection
+      SHOPIFY_APP_URL: https://quality.invalid
+      SHOPIFY_API_KEY: '00000000000000000000000000000000'
+      SHOPIFY_API_SECRET: synthetic-quality-only
+      SCOPES: read_products
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+      - name: Install exact repository lock without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Guard isolated no-connection inputs before running app commands
+        run: |
+          node --test --test-reporter=tap tests/candidate-quality-guard.test.mjs
+          node scripts/observe-candidate-quality.mjs guard-only
+      - name: Materialize exact main into a separate temporary snapshot
+        run: |
+          git fetch --depth=1 origin 94fb3ea579904f65b9df9306aa7da31f84d16d06
+          mkdir -p "$RUNNER_TEMP/main-quality"
+          git archive 94fb3ea579904f65b9df9306aa7da31f84d16d06 | tar -x -C "$RUNNER_TEMP/main-quality"
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/main-quality/node_modules"
+      - name: Observe full type lint build; preserve existing debt instead of declaring app green
+        run: node scripts/observe-candidate-quality.mjs "$RUNNER_TEMP/main-quality"
