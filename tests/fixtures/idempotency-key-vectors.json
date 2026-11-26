@@ -1,0 +1,150 @@
+{
+  "_note": "キーの計算の表（入力と答え）。答えは Python の uuid.uuid5 で別に計算したもの。POS（extensions/common/idempotencyKey.js）とサーバー（app/utils/idempotency-key.server.ts）の両方がこの答えになることを tests/idempotency-key.test.mjs で確かめる。名前空間や材料の並べ方を変えたら作り直す（変えると送り直しのキーが前と変わる）。",
+  "namespace": "c5bcfcd2-b8f6-422b-a82c-b16e257f07a2",
+  "vectors": [
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "set_fwd",
+        "chunk": "1/1",
+        "round": "main"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmabc123xyz|set_fwd|1/1|main",
+      "key": "fc2486fd-0229-5c7a-ae2e-c79a9d0eed1a"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "set_fwd",
+        "chunk": "1/1",
+        "round": "ns1"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmabc123xyz|set_fwd|1/1|ns1",
+      "key": "db83fcd8-0a37-5ce8-a35c-84b0a44f77b2"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "set_fwd",
+        "chunk": "1/1",
+        "round": "tr1"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmabc123xyz|set_fwd|1/1|tr1",
+      "key": "633fd019-fc51-5117-b6eb-4a13105c0d05"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "set_fwd",
+        "chunk": "2/3",
+        "round": "main"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmabc123xyz|set_fwd|2/3|main",
+      "key": "25049b67-c82f-5fcd-ba0c-e494004b4b40"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "set_rb",
+        "chunk": "1/3",
+        "round": "main"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmabc123xyz|set_rb|1/3|main",
+      "key": "212a7215-c95d-5e2d-90fe-df9a48003181"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "set_fwd",
+        "chunk": "1/1",
+        "round": "main.stale1"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmabc123xyz|set_fwd|1/1|main.stale1",
+      "key": "3e7c0bc6-1739-5863-9eac-c3fc32f4ca9f"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmother999",
+        "stage": "set_fwd",
+        "chunk": "1/1",
+        "round": "main"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmother999|set_fwd|1/1|main",
+      "key": "5b203b7e-7065-57b3-ac6d-2f16532449e7"
+    },
+    {
+      "parts": {
+        "shop": "other-shop.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "set_fwd",
+        "chunk": "1/1",
+        "round": "main"
+      },
+      "material": "pst1|other-shop.myshopify.com|apply_change|cmabc123xyz|set_fwd|1/1|main",
+      "key": "f08b6d04-8ca2-529a-9629-f1404c253828"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "activate:1:42:5:5",
+        "chunk": "1/1",
+        "round": "main"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmabc123xyz|activate:1:42:5:5|1/1|main",
+      "key": "e2336266-04e2-564f-8161-f0019336ce94"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "apply_change",
+        "operationId": "cmabc123xyz",
+        "stage": "activate:1:42:-:-",
+        "chunk": "1/1",
+        "round": "main.rej1"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|apply_change|cmabc123xyz|activate:1:42:-:-|1/1|main.rej1",
+      "key": "fd5c6daf-bc2b-5019-aadd-a8d986cb9d94"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "outbound_create",
+        "operationId": "att_0f1e2d",
+        "stage": "transfer_ready",
+        "chunk": "1/3",
+        "round": "0"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|outbound_create|att_0f1e2d|transfer_ready|1/3|0",
+      "key": "604d7aa6-4a7c-5632-833b-4473155a1814"
+    },
+    {
+      "parts": {
+        "shop": "bbbincbbb.myshopify.com",
+        "kind": "inbound_receive",
+        "operationId": "gid://shopify/InventoryShipment/77:a1,b2",
+        "stage": "receive_v2",
+        "chunk": "1/1",
+        "round": "日本語"
+      },
+      "material": "pst1|bbbincbbb.myshopify.com|inbound_receive|gid://shopify/InventoryShipment/77:a1,b2|receive_v2|1/1|日本語",
+      "key": "892ff57c-4897-55fd-bb52-10754f34c601"
+    }
+  ]
+}
