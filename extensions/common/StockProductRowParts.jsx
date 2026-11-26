@@ -101,7 +101,7 @@ export function ItemLeftCompact({ showImages, imageUrl, productTitle, variantTit
   );
 }
 
-export function QtyControlCompact_3Buttons({ value, min = 1, max = 999999, title = "数量", modalId, onDec, onInc, onSetQty, onRemove, disabled = false, modern = false, addMode = false, incrementLabel }) {
+export function QtyControlCompact_3Buttons({ value, min = 1, max = 999999, title = "数量", modalId, onDec, onInc, onSetQty, onRemove, disabled = false, modern = false, addMode = false, incrementId }) {
   const v = Number.isFinite(Number(value)) ? Number(value) : min;
   const id = useMemo(() => String(modalId), [modalId]);
   const [text, setText] = useState(String(v));
@@ -116,7 +116,7 @@ export function QtyControlCompact_3Buttons({ value, min = 1, max = 999999, title
     <s-stack direction="inline" gap="small-400" alignItems="center" justifyContent="end">
       {onDec || onRemove ? <s-box inlineSize="44px"><s-button tone={onRemove && v <= min ? "critical" : "auto"} disabled={disabled || (!onRemove && v <= min)} onClick={() => onRemove && v <= min ? onRemove() : onDec?.()}>{onRemove && v <= min ? "×" : "−"}</s-button></s-box> : null}
       <s-box inlineSize={`${valueWidth}px`}><s-button disabled={disabled} command="--show" commandFor={id}>{v}</s-button></s-box>
-      <s-box inlineSize="44px"><s-button disabled={disabled || (!addMode && v >= max)} accessibilityLabel={incrementLabel} onClick={() => onInc?.()}>+</s-button></s-box>
+      <s-box inlineSize="44px"><s-button disabled={disabled || (!addMode && v >= max)} id={incrementId} onClick={() => onInc?.()}>+</s-button></s-box>
     </s-stack>
     <s-modal id={id} heading={title}><s-box padding="base" paddingBlockEnd="none"><s-stack gap="base">
       <s-text type="small" color="subdued">数量を入力してください（{min}〜{max}）</s-text>

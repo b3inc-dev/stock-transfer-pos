@@ -61,12 +61,12 @@ test("POS scans and extra products require a SKU difference modal before shippin
     const searchField = document.querySelector("s-search-field");
     assert.equal(searchField.closest("s-scroll-box"), null, "search stays in the fixed header");
     searchField.value = "商品3"; searchField.dispatchEvent(new window.Event("input")); await wait(); await wait(); await wait(); await wait();
-    const addProduct = [...document.querySelectorAll("s-button")].find(button => button.getAttribute("accessibilityLabel") === "商品3を追加");
+    const addProduct = [...document.querySelectorAll("s-button")].find(button => button.id === "outbound-add-button-3");
     assert.ok(addProduct); addProduct.dispatchEvent(new window.Event("click")); await wait();
     searchField.value = "失敗"; searchField.dispatchEvent(new window.Event("input"));
     addProduct.dispatchEvent(new window.Event("click"));
     await wait(); await wait(); await wait(); await wait();
-    assert.equal([...document.querySelectorAll("s-button")].filter(button => button.getAttribute("accessibilityLabel") === "商品3を追加").length, 0, "a failed search never restores old products");
+    assert.equal([...document.querySelectorAll("s-button")].filter(button => button.id === "outbound-add-button-3").length, 0, "a failed search never restores old products");
     assert.equal([...storage.values()].find(value => value.actual)?.actual.at(-1).quantity, 1, "a button from the old search cannot add again");
     searchField.value = ""; searchField.dispatchEvent(new window.Event("input")); await wait();
     const scroll = document.querySelector("s-page > s-stack > s-scroll-box"), footer = scroll.nextElementSibling.nextElementSibling;
