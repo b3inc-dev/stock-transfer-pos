@@ -114,7 +114,9 @@ async function handleWebhook(
           locationId: { in: historyScope.locationIds },
           timestamp: { gt: observedAt },
         },
-        orderBy: [{ timestamp: "asc" }, { idempotencyKey: "asc" }],
+        // Still-zero rows remain retained. Rotate successful/failed attempts so
+        // one such row cannot permanently hide later recoverable observations.
+        orderBy: [{ lastAttemptedAt: { sort: "asc", nulls: "first" } }, { timestamp: "asc" }, { idempotencyKey: "asc" }],
       });
       if (!next) return;
       const response = await handleWebhook(args, {
@@ -127,6 +129,10 @@ async function handleWebhook(
           inventory_adjustment_group_id: next.adjustmentGroupId ?? undefined,
         },
       }, true);
+      await db.inventoryWebhookObservation.updateMany({
+        where: { shop, idempotencyKey: next.idempotencyKey },
+        data: { lastAttemptedAt: new Date() },
+      });
       if (response.status >= 400) throw new Error("Retained inventory observation could not be re-evaluated");
     };
     const forgetRetainedObservation = async (key: string) => {
@@ -409,6 +415,14 @@ async function handleWebhook(
           // The first authenticated observation owns the key, just like history.
           update: {},
         });
+        // A predecessor may commit after the initial read but before this upsert.
+        // If it missed our retained row, close that race by re-reading now.
+        if (!replayingRetainedObservation) {
+          const current = await findPreviousQuantity(db, historyScope, updatedAt);
+          if (current.prevAvailable !== null && current.prevAvailable !== available) {
+            return await handleWebhook(args, authenticated, true);
+          }
+        }
       } catch {
         return new Response("Inventory observation unavailable", { status: 503 });
       }

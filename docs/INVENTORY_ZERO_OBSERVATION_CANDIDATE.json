@@ -7,16 +7,17 @@
   "design": {
     "chosen": "separate internal table; visible history/export/count queries unchanged",
     "rejected": "visible zero history rows or direct admin promotion bypassing sale/refund classification",
-    "columns": "shop, inventoryItemId, locationId, timestamp, available, adjustmentGroupId, idempotencyKey, generated id/createdAt; no raw payload/customer/order/token/SKU/store name",
-    "reevaluate": "after late history write or committed-anchor retry, re-evaluate the next retained same-scope observation through existing handler/pending classification, at most one replay depth",
+    "columns": "shop, inventoryItemId, locationId, timestamp, available, adjustmentGroupId, idempotencyKey, generated id/createdAt; no raw payload/customer/order/token/SKU/store name; nullable lastAttemptedAt tracks bounded replay fairness only",
+    "reevaluate": "after late history write or committed-anchor retry, re-evaluate one same-scope retained observation; lastAttemptedAt null-first/oldest-first rotates true-zero rows without deleting evidence, recursion remains1",
     "cleanup": "delete when ordinary history exists/created; shop/redact follows existing public/inhouse/reinstall safeguards",
-    "retention": "unpromoted true-zero observations follow existing shop history deletion boundary; no new TTL or cleanup scheduler introduced. Long-term volume and retention review remain required before production"
+    "retention": "unpromoted true-zero observations follow existing shop history deletion boundary; no new TTL or cleanup scheduler introduced. Long-term volume and retention review remain required before production",
+    "retentionUpsertRace": "after retention upsert re-read the preceding quantity; if a predecessor committed before retention was visible and now makes delta nonzero, re-enter the same handler once"
   },
   "validation": {
     "before": "parent runtime same strict known case:0pass1fail",
-    "after": "candidate10pass0fail0skip0TODO; chronology/reverse/replay/zero hiding/503fail/scope/recovery/pending sale+refund",
+    "after": "candidate12 zero-observation tests pass; related53pass0fail0skip including2 barrier/starvation findings",
     "migration": "isolated PGlite0.3.14 PostgreSQL17.5 WASM:1pass; newDDL/unique/shop/time/rollback; not actualPrisma TCP/PG16 concurrency",
-    "prisma": "6.16.3 validate success; client generation pending",
+    "prisma": "6.16.3 validate/generate success; actual TCP PG16 unverified",
     "fullBuildTypecheck": "not completed; existing baseline458 type errors not reclassified as new"
   },
   "noOperations": [

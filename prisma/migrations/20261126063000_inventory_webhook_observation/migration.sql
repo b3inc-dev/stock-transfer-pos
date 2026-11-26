@@ -7,6 +7,7 @@ CREATE TABLE "InventoryWebhookObservation" (
     "timestamp" TIMESTAMP(3) NOT NULL,
     "available" INTEGER NOT NULL,
     "adjustmentGroupId" TEXT,
+    "lastAttemptedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "InventoryWebhookObservation_pkey" PRIMARY KEY ("id")
 );

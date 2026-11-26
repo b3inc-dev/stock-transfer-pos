@@ -92,7 +92,10 @@ function historyFixture(previousQuantity, failedRead, failuresRemaining = Infini
       const row={...create};observations.push(row);return row;
     },
     async findFirst({where}) {
-      return observations.filter(row=>matches(row,where)).sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp)||a.idempotencyKey.localeCompare(b.idempotencyKey))[0]??null;
+      return observations.filter(row=>matches(row,where)).sort((a,b)=>(a.lastAttemptedAt==null?-Infinity:+new Date(a.lastAttemptedAt))-(b.lastAttemptedAt==null?-Infinity:+new Date(b.lastAttemptedAt))||new Date(a.timestamp)-new Date(b.timestamp)||a.idempotencyKey.localeCompare(b.idempotencyKey))[0]??null;
+    },
+    async updateMany({where,data}) {
+      let count=0;for(const row of observations)if(matches(row,where)){Object.assign(row,data);count++;}return {count};
     },
     async deleteMany({where}) {
       let count=0;for(let i=observations.length-1;i>=0;i--)if(matches(observations[i],where)){observations.splice(i,1);count++;}return {count};
@@ -182,5 +185,27 @@ test('retained positive movement uses pending-refund while preserving the existi
  assert.equal((await deliver(earlier)).status,200);assert.deepEqual(f.rows[0],prior);
  assert.deepEqual(f.rows.map(r=>[r.activity,r.quantityAfter,r.delta]),[['order_sales',8,-2],['refund',10,2]]);
  assert.equal(f.observations.length,0);assert.equal(pending.length,0);
+});
+
+test('late predecessor committed before retention upsert is rechecked before acknowledgement',async()=>{
+ const f=historyFixture(10,null),obs=globalThis.inventoryZeroObservationFixture.db.inventoryWebhookObservation,upsert=obs.upsert;
+ let reached,release;const atUpsert=new Promise(resolve=>{reached=resolve;}),barrier=new Promise(resolve=>{release=resolve;});
+ obs.upsert=async args=>{reached();await barrier;return upsert(args);};
+ const laterWork=deliver(later);await atUpsert;
+ try{assert.equal((await deliver(earlier)).status,200);}finally{release();}
+ assert.equal((await laterWork).status,200);
+ assert.deepEqual([...f.rows].sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp)).map(r=>({quantity:r.quantityAfter,delta:r.delta})),expected);
+ assert.equal(f.observations.length,0);
+});
+
+test('true-zero retained head rotates and does not starve a later nonzero observation',async()=>{
+ const f=historyFixture(10,null),obs=globalThis.inventoryZeroObservationFixture.db.inventoryWebhookObservation,find=obs.findFirst;
+ const at=i=>new Date(Date.parse('2026-01-04T02:00:00Z')+i*60000).toISOString();
+ const send=(q,i)=>deliver([q,at(i)]);
+ await send(10,5);obs.findFirst=async()=>{throw Error('synthetic transient retained read');};await send(8,4);obs.findFirst=find;
+ await send(10,3);await send(10,2);await send(8,1);
+ for(let retry=0;retry<3;retry++)assert.equal((await send(8,1)).status,200);
+ assert.ok(f.rows.some(r=>r.quantityAfter===10&&r.delta===2&&new Date(r.timestamp).toISOString()===at(5)));
+ assert.ok(f.observations.some(r=>r.available===10),'genuine-zero observations stay outside visible history');
 });
 

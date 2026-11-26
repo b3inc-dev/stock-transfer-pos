@@ -74,6 +74,7 @@ model InventoryWebhookObservation {
   timestamp         DateTime
   available         Int
   adjustmentGroupId String?
+  lastAttemptedAt   DateTime?
   createdAt         DateTime @default(now())
 
   @@unique([shop, idempotencyKey])
