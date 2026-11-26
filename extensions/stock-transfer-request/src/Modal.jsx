@@ -13,6 +13,7 @@ import { currentRequestLocation, outboundRequestApi } from "./api.js";
 
 export default async () => render(<PlanGate feature="outboundRequest" heading="出庫依頼"><OutboundRequestModal /></PlanGate>, document.body);
 const editableStatuses = ["working"];
+const productCodes = line => [line.sku ? "SKU: " + line.sku : "", line.barcode ? "JAN: " + line.barcode : ""].filter(Boolean).join(" / ");
 export function OutboundRequestModal() {
   const [history, setHistory] = useState(false);
   const [screen, setScreen] = useState("list"), [storeName, setStoreName] = useState("取得中…"), [showImages, setShowImages] = useState(true), [candidateQty, setCandidateQty] = useState({}), [searching, setSearching] = useState(false), [searchFailed, setSearchFailed] = useState(false);
@@ -20,10 +21,11 @@ export function OutboundRequestModal() {
   const [settings, setSettings] = useState(null), [shipping, setShipping] = useState(null), [tracking, setTracking] = useState({});
   const [cameraVisible, setCameraVisible] = useState(false), [scanning, setScanning] = useState(false), scanPending = useRef(0);
   const [preview, setPreview] = useState(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
+  const [productPage, setProductPage] = useState(null), [loadingMore, setLoadingMore] = useState(false), productPageLock = useRef(false);
   const [query, setQuery] = useState(""), [products, setProducts] = useState([]), [page, setPage] = useState(1), [listPage, setListPage] = useState(0), [count, setCount] = useState(0);
   const addRef = useRef(null), initialRefresh = useRef(null), screenRef = useRef("list"), queryRef = useRef(""), searchEpoch = useRef(0), productContext = useRef(null);
   const goScreen = next => { screenRef.current = next; setScreen(next); };
-  const changeQuery = value => { queryRef.current = value; searchEpoch.current++; productContext.current = null; setQuery(value); setProducts([]); setSearchFailed(false); setSearching(Boolean(value.trim())); };
+  const changeQuery = value => { queryRef.current = value; searchEpoch.current++; productContext.current = null; setQuery(value); setProducts([]); setProductPage(null); setSearchFailed(false); setSearching(Boolean(value.trim())); };
   const lock = useRef(false), alive = useRef(true), confirmRef = useRef(null), current = useRef(null), claimKey = useRef(""), draft = useRef([]), writes = useRef(Promise.resolve()), scanQueue = useRef(Promise.resolve());
   current.current = row; draft.current = actual;
   const keyFor = id => `outbound-request:${currentRequestLocation()}:${id}`;
@@ -165,10 +167,26 @@ export function OutboundRequestModal() {
     const isCurrent = () => active && searchEpoch.current === context.epoch && queryRef.current === query && current.current?.id === context.rowId && screenRef.current === "inspect";
     setSearching(true); setProducts([]); setSearchFailed(false);
     const timer = setTimeout(() => outboundRequestApi({ command: "products", query }).then(result => {
-      if (isCurrent()) { productContext.current = context; setProducts(result.products); }
+      if (isCurrent()) { productContext.current = context; setProducts(result.products); setProductPage(result.pageInfo || null); }
     }).catch(e => { if (isCurrent()) { setSearchFailed(true); setError(e.message); } }).finally(() => { if (isCurrent()) setSearching(false); }), 300);
     return () => { active = false; clearTimeout(timer); };
   }, [query, inspecting, row?.id]);
+  const loadMoreProducts = async () => {
+    const context = productContext.current, after = productPage?.endCursor;
+    if (productPageLock.current || uiBusy || searching || !productPage?.hasNextPage || !after || !context) return;
+    const isCurrent = () => alive.current && context.epoch === searchEpoch.current && context.query === queryRef.current && current.current?.id === context.rowId && screenRef.current === "inspect";
+    if (!isCurrent()) return;
+    productPageLock.current = true; setLoadingMore(true);
+    try {
+      const result = await outboundRequestApi({ command: "products", query: context.query, after });
+      if (isCurrent()) {
+        if (result.pageInfo?.hasNextPage && result.pageInfo.endCursor === after) throw new Error("商品の続きが取得できません。検索し直してください");
+        setProducts(previous => [...new Map([...previous, ...result.products].map(product => [product.variantId, product])).values()]);
+        setProductPage(result.pageInfo || null);
+      }
+    } catch (e) { if (isCurrent()) setError(e.message); }
+    finally { productPageLock.current = false; if (alive.current) setLoadingMore(false); }
+  };
   const pageInfo = getListPageSlice(actual, page, 50);
   const listInfo = { showPagination: count > 25, rangeStart: listPage * 25 + 1, rangeEnd: Math.min(count, (listPage + 1) * 25), total: count, currentPage: listPage + 1, totalPages: Math.max(1, Math.ceil(count / 25)) };
   const goList = () => run(async () => { await writes.current; setRow(null); goScreen("list"); changeQuery(""); setProducts([]); setPreview(null); await refreshList(); });
@@ -188,14 +206,14 @@ export function OutboundRequestModal() {
   };
   const footer = !row ? { leftLabel: "再読み込み", onLeft: () => run(() => refreshList()) } : inspecting
     ? { leftLabel: "戻る", onLeft: () => run(async () => { await writes.current; goScreen("detail"); changeQuery(""); }), middleLabel: "検品を保存", onMiddle: save, rightLabel: "出庫完了", onRight: prepare, rightCommand: "--show", rightCommandFor: "outbound-request-differences" }
-    : { leftLabel: "一覧へ", onLeft: goList, middleLabel: row.status !== "cancelled" ? "依頼書を印刷" : undefined, onMiddle: print, rightLabel: row.status === "requested" ? "作業を開始" : editable ? "検品を再開" : ["processing", "retryable", "uncertain"].includes(row.status) ? "出庫結果を確認・再開" : undefined, onRight: row.status === "requested" ? claim : editable ? () => goScreen("inspect") : resume };
+    : { leftLabel: "一覧へ", onLeft: goList, middleLabel: row.status !== "cancelled" ? "依頼書を印刷" : undefined, onMiddle: print, rightLabel: row.status === "requested" ? "作業を開始" : editable ? "検品を再開" : ["processing", "retryable", "uncertain"].includes(row.status) ? "結果確認・再開" : undefined, onRight: row.status === "requested" ? claim : editable ? () => goScreen("inspect") : resume };
   return <s-page heading={inspecting ? "出庫依頼の検品" : row ? "出庫依頼の詳細" : "出庫依頼"}>
     {inspecting ? <s-button slot="secondary-actions" disabled={uiBusy} onClick={toggleCamera}>{cameraVisible ? "カメラを閉じる" : "カメラスキャン"}</s-button> : null}
-    <s-stack direction="block" blockSize="100%">
+    <s-stack direction="block" gap="none" blockSize="100%" inlineSize="100%" minBlockSize="0">
       <s-box padding="base"><s-stack direction="block" gap="base">
         <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base"><s-text>ロケーション: {row?.originName || storeName}</s-text>{row ? <s-button disabled={uiBusy} onClick={() => setShowImages(previous => !previous)}>{showImages ? "画像ON" : "画像OFF"}</s-button> : null}</s-stack>
         {!row ? <>
-          <s-stack direction="inline" justifyContent="space-between" gap="small"><s-button variant={history ? "secondary" : "primary"} disabled={uiBusy} onClick={() => run(() => refreshList(0, false))}>出庫待ち</s-button><s-button variant={history ? "primary" : "secondary"} disabled={uiBusy} onClick={() => run(() => refreshList(0, true))}>履歴</s-button></s-stack>
+          <s-stack direction="inline" gap="none" inlineSize="100%"><s-box inlineSize="50%"><s-button variant={history ? "secondary" : "primary"} disabled={uiBusy} onClick={() => run(() => refreshList(0, false))}>出庫待ち</s-button></s-box><s-box inlineSize="50%"><s-button variant={history ? "primary" : "secondary"} disabled={uiBusy} onClick={() => run(() => refreshList(0, true))}>履歴</s-button></s-box></s-stack>
           <ListPageControls modern disabled={uiBusy} pageInfo={listInfo} onPageChange={next => run(() => refreshList(next - 1))} />
         </> : <>
           <s-text type="strong">{row.number}</s-text><s-text>移動先: {row.destinationName} / 希望日: {row.dueDate || "指定なし"}</s-text>
@@ -206,35 +224,35 @@ export function OutboundRequestModal() {
         </>}
       </s-stack></s-box>
       <s-divider />
-      <s-scroll-box blockSize="100%"><s-box padding="base"><s-stack direction="block" gap="base">
+      <s-scroll-box padding="none" blockSize="auto" maxBlockSize="100%" minBlockSize="0"><s-box padding="base"><s-stack direction="block" gap="base">
         {!row ? <>{rows.map(item => <s-clickable key={item.id} disabled={uiBusy} onClick={() => run(() => open(item))}><StockyRowShell><s-stack direction="block" gap="small">
           <s-stack direction="inline" justifyContent="space-between"><s-text type="strong">{item.number}</s-text><s-text type="small">{item.dueDate || "希望日指定なし"}</s-text></s-stack><s-text>移動先: {item.destinationName}</s-text><s-badge tone={outboundRequestTone(item.status)}>{OUTBOUND_REQUEST_LABELS[item.status]}</s-badge>
         </s-stack></StockyRowShell></s-clickable>)}{!rows.length && !busy ? <s-text>出庫依頼はありません。</s-text> : null}</> : <>
           {row.note ? <s-text>{row.note}</s-text> : null}
           {!row.claimed && row.status === "working" ? <s-text>別の端末で作業中です。引き継ぐ場合は管理画面で作業を中止してください。</s-text> : null}
-          {inspecting && query.trim() ? <>{!products.length && !searching && !searchFailed ? <s-text>条件に合う商品はありません。</s-text> : null}{!searching ? products.map(product => {
+          {inspecting && query.trim() ? <>{!products.length && !searching && !searchFailed ? <s-text>条件に合う商品はありません。</s-text> : null}{!searching ? <s-stack direction="block" gap="none" inlineSize="100%">{products.map(product => {
             const requested = row.lines.find(line => line.inventoryItemId === product.inventoryItemId)?.quantity || 0;
             const currentQty = actual.find(line => line.inventoryItemId === product.inventoryItemId)?.quantity || 0;
             const maximum = requested && !settings?.policy.allowOver ? Math.max(1, requested - currentQty) : 999999;
             const value = Math.min(candidateQty[product.variantId] || 1, maximum);
             const disabled = uiBusy || (!requested && !settings?.policy.allowExtra) || (requested > 0 && !settings?.policy.allowOver && currentQty >= requested);
-            return <StockyRowShell key={product.variantId}><s-stack direction="block" gap="small">
-              <ItemLeftCompact modern showImages={showImages} imageUrl={product.imageUrl} productTitle={product.productTitle || product.title} variantTitle={product.variantTitle} line3={"SKU: " + product.sku + " / JAN: " + product.barcode} />
-              <s-stack direction="inline" justifyContent="space-between" alignItems="center"><s-text type="small" color="subdued">依頼 {requested} / 検品 {currentQty}</s-text>
+            return <s-box key={product.variantId} padding="none" inlineSize="100%"><StockyRowShell><s-stack direction="block" gap="small-400" inlineSize="100%">
+              <ItemLeftCompact modern showImages={showImages} imageUrl={product.imageUrl} productTitle={product.productTitle || product.title} variantTitle={product.variantTitle} line3={productCodes(product)} />
+              <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base" inlineSize="100%"><s-text type="small" color="subdued">依頼 {requested} / 検品 {currentQty}</s-text>
                 <QtyControlCompact_3Buttons modern addMode value={value} min={1} max={maximum} title="数量を指定して追加" modalId={"outbound-add-" + product.variantId.split("/").pop()} disabled={disabled} incrementId={"outbound-add-button-" + product.variantId.split("/").pop()} onSetQty={quantity => setCandidateQty(previous => ({ ...previous, [product.variantId]: quantity }))} onInc={() => { const context = productContext.current; if (!context || context.epoch !== searchEpoch.current || context.query !== queryRef.current || current.current?.id !== context.rowId || screenRef.current !== "inspect" || lock.current) return; try { add(product, value); } catch (e) { setError(e.message); } }} />
               </s-stack>
-            </s-stack></StockyRowShell>;
-          }) : null}</> : pageInfo.displayed.map(line => {
+            </s-stack></StockyRowShell><s-divider /></s-box>;
+          })}</s-stack> : null}{productPage?.hasNextPage ? <s-button disabled={uiBusy || searching || loadingMore} onClick={loadMoreProducts}>{loadingMore ? "読み込み中…" : "さらに読み込む"}</s-button> : null}</> : <s-stack direction="block" gap="none" inlineSize="100%">{pageInfo.displayed.map(line => {
             const requested = row.lines.find(item => item.inventoryItemId === line.inventoryItemId)?.quantity || 0;
             const kind = !requested ? "extra" : line.quantity < requested ? "under" : line.quantity > requested ? "over" : null;
-            return <StockyRowShell key={line.inventoryItemId}><s-stack direction="block" gap="small">
-              <ItemLeftCompact modern showImages={showImages} imageUrl={line.imageUrl} productTitle={line.productTitle || line.title} variantTitle={line.variantTitle} line3={"SKU: " + line.sku + " / JAN: " + line.barcode} />
-              <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base"><s-text type="small" color="subdued">依頼 {requested}{requested ? "" : "・依頼外"}</s-text>
+            return <s-box key={line.inventoryItemId} padding="none" inlineSize="100%"><StockyRowShell><s-stack direction="block" gap="small-400" inlineSize="100%">
+              <ItemLeftCompact modern showImages={showImages} imageUrl={line.imageUrl} productTitle={line.productTitle || line.title} variantTitle={line.variantTitle} line3={productCodes(line)} />
+              <s-stack direction="inline" justifyContent="space-between" alignItems="center" gap="base" inlineSize="100%"><s-text type="small" color="subdued">依頼 {requested}{requested ? "" : "・依頼外"}</s-text>
                 {inspecting ? <QtyControlCompact_3Buttons modern value={line.quantity} min={0} max={requested && !settings?.policy.allowOver ? requested : 999999} modalId={"outbound-qty-" + line.inventoryItemId.split("/").pop()} disabled={uiBusy} onDec={() => patch(line.inventoryItemId, { quantity: Math.max(0, line.quantity - 1) })} onInc={() => patch(line.inventoryItemId, { quantity: line.quantity + 1 })} onSetQty={quantity => patch(line.inventoryItemId, { quantity })} /> : row.status === "requested" ? <s-text color="subdued">未検品</s-text> : <s-text>{row.status === "completed" ? "出庫 " : "検品 "}{line.quantity}</s-text>}
               </s-stack>
               {inspecting && kind && settings?.policy[kind + "Reason"] !== "none" ? <s-text-field label={"理由" + (settings?.policy[kind + "Reason"] === "required" ? "（必須）" : "（任意）")} value={line.reason || ""} disabled={!inspecting || uiBusy} onInput={event => patch(line.inventoryItemId, { reason: event.currentTarget.value })} /> : !inspecting && line.reason ? <s-text type="small" color="subdued">理由: {line.reason}</s-text> : null}
-            </s-stack></StockyRowShell>;
-          })}
+            </s-stack></StockyRowShell><s-divider /></s-box>;
+          })}</s-stack>}
           {!inspecting ? <s-button disabled={uiBusy} onClick={reload}>読み直す</s-button> : null}
           {inspecting ? <>
             <s-divider /><s-text type="strong">配送情報{shipping?.required ? "（必須）" : "（任意）"}</s-text>

@@ -1,8 +1,8 @@
 {
-  "dateJst": "2026-11-26 14:36 JST",
+  "dateJst": "2026-11-26 14:31 JST",
   "owner": "Codex scheduled pos_outbound_next",
   "scope": "new synthetic current-runtime zero-observation arrival/replay regression; test-only; no runtime fix",
-  "base": "2cc5a2c73dd487d32fc1b221c4a628f4ae8aaae4",
+  "base": "94fb3ea579904f65b9df9306aa7da31f84d16d06",
   "inheritedFinding": "https://github.com/b3inc-dev/stock-transfer-pos/issues/53#issuecomment-6945558864",
   "findingId": "POS-WEBHOOK-ZERO-001",
   "expected": "baseline10, earlier8, later10 yields chronological rows8/-2 and10/+2 regardless arrival",
@@ -31,5 +31,8 @@
     "No broad webhook retry added; no runtime change",
     "Independent review; no app merge/deploy"
   ],
-  "runtimeSourceValidation": "11 app runtime blobs match main recursive tree2bd1eddfc2d84b3e84c196896892047a3109533a; restored after mutation"
+  "runtimeSourceValidation": "11 app runtime blobs match both original2cc5a2c tree and latest main94fb tree5e7dd1; no Webhook diff in PR151; restored after scratch sensitivity",
+  "latestMain": "94fb3ea579904f65b9df9306aa7da31f84d16d06",
+  "latestMainTree": "5e7dd141aa8199eb195370cfb8657935962100d4",
+  "originalBase": "2cc5a2c73dd487d32fc1b221c4a628f4ae8aaae4"
 }

@@ -1,4 +1,5 @@
 import { receiptTypography } from "./receiptTypography";
+import { protectOutboundRequestDocument } from "./outboundRequestReceiptDocument";
 import { protectReservationDocument } from "./reservationReceiptDocument";
 /**
  * レシートのレイアウト → 印字 HTML（プレビューと印字で同じ関数を使う）
@@ -255,6 +256,8 @@ function readableTemplate(t: string): string {
 export function blocksToCode(layout: ReceiptLayout): string {
   const parts: string[] = [];
   for (const block of layout.blocks) {
+    if (layout.kind === "outbound_request" && block.type === "outbound_request_info") continue;
+    if (layout.kind === "outbound_request" && block.type === "outbound_request_items") { parts.push("<!-- outbound-request-items -->"); continue; }
     if (layout.kind === "reservation" && block.type === "reservation_info") continue;
     if (layout.kind === "reservation" && block.type === "reservation_items") { parts.push("<!-- reservation-items -->"); continue; }
     if (block.hidden) continue;
@@ -311,7 +314,7 @@ export function renderReceiptLayout(layout: ReceiptLayout, data: Record<string, 
       paper: { width_mm: layout.paperWidthMm, printable_width_mm: layout.paperWidthMm === 58 ? 48 : 72,
         ...resolvePaperPrintStyle(layout) },
     });
-    return { ok: true, html: layout.kind === "reservation" ? protectReservationDocument(html, data, layout) : html };
+    return { ok: true, html: layout.kind === "reservation" ? protectReservationDocument(html, data, layout) : layout.kind === "outbound_request" ? protectOutboundRequestDocument(html, data, layout) : html };
   } catch (e) {
     return errorResult(describeLiquidError(e));
   }

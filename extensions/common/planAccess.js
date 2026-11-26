@@ -114,6 +114,7 @@ export function applyChangeFailsOpenOnPlanCheckError(activity) {
 
 /** 管理画面の URL がどの機能か。null は誰でも開ける（ホーム・料金プラン・接続維持）。 */
 const ADMIN_PATH_FEATURES = [
+  ["/app/receipts", "settings"],
   ["/app/outbound-requests", "outboundRequest"],
   ["/app/reservations", "reservation"],
   ["/app/settings", "settings"],
