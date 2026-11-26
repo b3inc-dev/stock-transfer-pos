@@ -7,7 +7,6 @@
 import type {
   GraphQLUserError,
   InventorySetQuantitiesJson,
-  InventoryAdjustQuantitiesJson,
 } from "../types/graphql-responses";
 import { isDefiniteUnaappliedRejection } from "./apply-change-outer-catch-guard";
 import { readAvailableFromResponse, type CurrentQuantityRead } from "./current-quantity-read";
@@ -686,66 +685,4 @@ export async function fetchCurrentQuantityServer(
   const itemGid = toInventoryItemGid(inventoryItemId);
   if (!itemGid) return { ok: false, retryable: false, error: `inventoryItemId が不正です: ${inventoryItemId}` };
   return readAvailableAt(admin, locationGid, itemGid);
-}
-
-const INVENTORY_ADJUST_MAX = 250;
-
-/**
- * 相対 delta で在庫を増減（inventoryAdjustQuantities）。ロス・仕入用。
- */
-export async function adjustInventoryQuantitiesServer(
-  admin: { graphql: AdminGraphql },
-  locationId: string,
-  changes: Array<{ inventoryItemId: string; delta: number }>,
-  referenceDocumentUri?: string | null
-): Promise<{ ok: boolean; invalidCount?: number; error?: string }> {
-  const locationGid = toLocationGid(locationId);
-  const valid = (changes ?? [])
-    .filter((c) => c?.inventoryItemId && Number.isFinite(Number(c?.delta)) && Number(c.delta) !== 0)
-    .map((c) => {
-      const gid = toInventoryItemGid(c.inventoryItemId);
-      return gid ? { inventoryItemId: gid, delta: Math.floor(Number(c.delta)) } : null;
-    })
-    .filter((x): x is { inventoryItemId: string; delta: number } => x != null);
-  const invalidCount = (changes ?? []).length - valid.length;
-  if (valid.length === 0) {
-    // delta=0 のみ、または有効なアイテムが存在しない場合は変更なしで成功として扱う
-    return { ok: true, invalidCount };
-  }
-  const uri = referenceDocumentUri
-    ? (referenceDocumentUri.startsWith("gid://") ? referenceDocumentUri : `gid://stock-transfer-pos/LossEntry/${referenceDocumentUri}`)
-    : undefined;
-  for (let i = 0; i < valid.length; i += INVENTORY_ADJUST_MAX) {
-    const chunk = valid.slice(i, i + INVENTORY_ADJUST_MAX);
-    const input: Record<string, unknown> = {
-      reason: "correction",
-      name: "available",
-      changes: chunk.map((c) => ({ inventoryItemId: c.inventoryItemId, locationId: locationGid, delta: c.delta })),
-    };
-    if (uri) input.referenceDocumentUri = uri;
-    try {
-      const { response: resp, json } = await graphqlWithRetry(admin, `#graphql
-          mutation Adjust($input: InventoryAdjustQuantitiesInput!) {
-            inventoryAdjustQuantities(input: $input) {
-              inventoryAdjustmentGroup { id }
-              userErrors { field message }
-            }
-          }
-        `, { input });
-      if (!resp.ok) {
-        const errJson = json as InventoryAdjustQuantitiesJson;
-        const errMsg = errJson?.errors?.[0]?.message ?? resp.statusText ?? `HTTP ${resp.status}`;
-        return { ok: false, error: errMsg };
-      }
-      const adjustData = (json as InventoryAdjustQuantitiesJson)?.data?.inventoryAdjustQuantities;
-      const errs = adjustData?.userErrors ?? [];
-      if (errs.length) {
-        return { ok: false, error: errs.map((e: GraphQLUserError) => e.message ?? "").join(" / ") };
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: msg };
-    }
-  }
-  return { ok: true, invalidCount: invalidCount > 0 ? invalidCount : undefined };
 }

@@ -314,68 +314,6 @@ export async function writePurchaseEntries(entries) {
   }
 }
 
-// ---------- GID 変換・在庫調整（ロスと同型、delta は正で入庫） ----------
-function toLocationGid(s) {
-  if (!s) return null;
-  const str = String(s).trim();
-  if (str.startsWith("gid://shopify/Location/")) return str;
-  if (/^\d+$/.test(str)) return `gid://shopify/Location/${str}`;
-  if (str.includes("gid://")) return str;
-  return null;
-}
-
-function toInventoryItemGid(s) {
-  if (!s) return null;
-  const str = String(s).trim();
-  if (str.startsWith("gid://shopify/InventoryItem/")) return str;
-  if (/^\d+$/.test(str)) return `gid://shopify/InventoryItem/${str}`;
-  if (str.includes("gid://")) return str;
-  return null;
-}
-
-export async function adjustInventoryAtLocation({ locationId, deltas, referenceDocumentUri }) {
-  const changes = (deltas ?? [])
-    .map((x) => {
-      const inventoryItemGid = toInventoryItemGid(x?.inventoryItemId);
-      if (!inventoryItemGid || Number(x?.delta || 0) === 0) return null;
-      return { inventoryItemId: inventoryItemGid, delta: Number(x.delta) };
-    })
-    .filter((x) => x !== null);
-
-  if (!locationId || changes.length === 0) {
-    if (changes.length === 0 && (deltas ?? []).length > 0) throw new Error("有効な在庫アイテムIDがありません");
-    return null;
-  }
-
-  const locationGid = toLocationGid(locationId);
-  if (!locationGid) throw new Error(`無効なロケーションID: ${locationId}`);
-
-  const uri = referenceDocumentUri ? `gid://stock-transfer-pos/PurchaseEntry/${referenceDocumentUri}` : null;
-  const input = {
-    reason: "correction",
-    name: "available",
-    changes: changes.map((c) => ({
-      inventoryItemId: c.inventoryItemId,
-      locationId: locationGid,
-      delta: c.delta,
-    })),
-  };
-  if (uri) input.referenceDocumentUri = uri;
-
-  const m1 = `#graphql
-    mutation Adjust($input: InventoryAdjustQuantitiesInput!) {
-      inventoryAdjustQuantities(input: $input) {
-        inventoryAdjustmentGroup { id }
-        userErrors { field message }
-      }
-    }`;
-  const d1 = await graphql(m1, { input });
-  if (!d1?.inventoryAdjustQuantities) throw new Error("GraphQL response is invalid");
-  const errs = d1.inventoryAdjustQuantities.userErrors ?? [];
-  if (errs.length) throw new Error(errs.map((e) => e.message).join(" / "));
-  return d1.inventoryAdjustQuantities.inventoryAdjustmentGroup ?? null;
-}
-
 // ---------- バリアント検索・スキャン解決（拡張内完結） ----------
 function buildVariantSearchQuery(raw) {
   const q = String(raw || "").trim();
