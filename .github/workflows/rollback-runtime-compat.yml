@@ -1,0 +1,77 @@
+name: Deployed runtime rollback compatibility
+on:
+  pull_request:
+    branches: [codex/backend-quality-debt-20261128-0528]
+    paths:
+      - '.github/workflows/rollback-runtime-compat.yml'
+      - 'tests/rollback-runtime-compat-pg.test.mjs'
+permissions:
+  contents: read
+jobs:
+  legacy-to-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-local
+          POSTGRES_DB: commercor_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d commercor_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:test-only-local@127.0.0.1:5432/commercor_test
+      RUN_POS_MIGRATION_REHEARSAL: '1'
+      RUN_POS_PG_RECOVERY: '1'
+      SHOPIFY_APP_URL: https://runtime-fixture.invalid
+      SHOPIFY_API_KEY: '00000000000000000000000000000000'
+      SHOPIFY_API_SECRET: synthetic-quality-only
+      SCOPES: read_products
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+      - name: Guard disposable DB and existing positive fixture
+        run: |
+          node scripts/retained-migration-checkpoint.mjs guard-only
+          POS_START_FIXTURE=1 node tests/fixtures/production-start-fetch.mjs guard-only
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare forward migrated database from unchanged candidate
+        run: |
+          node_modules/.bin/prisma generate
+          node_modules/.bin/prisma migrate deploy
+          node tests/restored-production-start-pg.test.mjs seed
+          node scripts/retained-logical-restore-checkpoint.mjs capture
+      - name: Materialize exact deployed main without changing branch or shared files
+        run: |
+          mkdir -p "$RUNNER_TEMP/legacy-root"
+          git archive 94fb3ea579904f65b9df9306aa7da31f84d16d06 | tar -x -C "$RUNNER_TEMP/legacy-root"
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/legacy-root/node_modules"
+      - name: Generate old client, apply old migration setup and build old runtime
+        working-directory: ${{ runner.temp }}/legacy-root
+        run: |
+          node_modules/.bin/prisma generate
+          node_modules/.bin/prisma migrate deploy
+          npm run build
+      - name: Actual compiled deployed runtime and old caller preserve forward DB
+        env:
+          POS_LEGACY_ROOT: ${{ runner.temp }}/legacy-root
+        run: |
+          node --test --test-reporter=tap tests/rollback-runtime-compat-pg.test.mjs
+          node scripts/retained-logical-restore-checkpoint.mjs verify
+      - name: Regenerate current client and build candidate for return path
+        run: |
+          node_modules/.bin/prisma generate
+          npm run build
+      - name: Existing strict caller recovers preserved observation after return
+        run: node --test --test-reporter=tap tests/restored-production-start-pg.test.mjs
+      - name: Current migration history remains up to date
+        run: node_modules/.bin/prisma migrate status
