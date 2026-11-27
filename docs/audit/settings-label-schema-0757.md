@@ -1,0 +1,7 @@
+# Settings label schema compatibility (2026-11-28 07:57)
+
+Parent PR169 `6a3141cef528a8f154c061b3b47d19f14ae12560`; unchanged package lock pins Zod4.3.6. The two optional quick-day label maps used the old one-argument record form. Correct only those two expressions to the explicit string-key/string-value record supported by the installed version (official API reference https://zod.dev/api?id=records). Labels, layout, SaveBar, navigation, configuration defaults, other schemas and deployment remain unchanged.
+
+The same test imports the exact parent schema from git and expects two nonempty-record failures plus one missing/empty-map control success; candidate tests require both maps to retain valid persisted settings through the actual parseSettings caller, reject nonstring schema values without exceptions, and preserve empty/missing defaults. A schema-only fix is not an actual browser save or Store acceptance. The existing tolerant parseSettings fallback for genuinely invalid settings is unchanged; these tests do not claim that fallback now rejects every invalid setting.
+
+Latest exact-HEAD CI must also run the existing46 business regressions and the existing locked main quality comparison. Its observer success must not be called full quality clean: parent still has439 type/3117 lint errors. No live DB, Shopify API, real settings write, inventory, receiver authentication experiment, UI change, merge or deploy is performed. Older native restore and previous JSDoc repair are not re-scored.

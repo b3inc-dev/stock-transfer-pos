@@ -69,7 +69,7 @@ export const SettingsV1Schema = z.object({
     useDestinationMaster: z.boolean().optional(),
     useDesiredDeliveryDate: z.boolean().optional(),
     desiredDeliveryQuickDays: z.array(z.number()).optional(),
-    desiredDeliveryQuickDayLabels: z.record(z.string()).optional(),
+    desiredDeliveryQuickDayLabels: z.record(z.string(), z.string()).optional(),
     destinations: z.array(OrderDestinationOptionSchema).optional(),
     csvExportColumns: z.array(OrderCsvColumnSchema).optional(),
     csvExportColumnLabels: z.record(OrderCsvColumnSchema, z.string()).optional(),
@@ -86,7 +86,7 @@ export const SettingsV1Schema = z.object({
     shippingRequired: z.boolean().optional(),
     allowCustomCarrier: z.boolean().optional(),
     arrivalQuickDays: z.array(z.number()).optional(),
-    arrivalQuickDayLabels: z.record(z.string()).optional(),
+    arrivalQuickDayLabels: z.record(z.string(), z.string()).optional(),
   }).optional(),
   inbound: z.object({
     allowOverReceive: z.boolean().optional(),
