@@ -73,6 +73,8 @@ async function observe(baseline){
  const report={...summary,addedTypes,addedLint,rawAddedTypes,rawAddedLint,comparison:'normalized file+code+fullmessage multiset, positions retained but not used to tolerate shifted lines; not semantic whole-program equivalence',limitations:['Existing debt remains an integration gate','Lint observations are not waived by this report','No real database/Shopify/Store/device/deployment acceptance']};
  await writeFile(path.join(temporary,'pos-quality-report.json'),JSON.stringify(report,null,2));
  process.stdout.write('POS_QUALITY_OBSERVATION '+JSON.stringify(summary)+'\n');
+ process.stdout.write('POS_BACKEND_TYPES '+JSON.stringify(candidate.types.filter(d=>d.file.startsWith('app/utils/'))) + '\n');
+ process.stdout.write('POS_BACKEND_LINT '+JSON.stringify(candidate.lints.filter(d=>d.file.startsWith('app/utils/'))) + '\n');
  process.stdout.write('POS_QUALITY_ADDED_TYPES '+JSON.stringify(addedTypes.slice(0,30))+'\n');
  process.stdout.write('POS_QUALITY_ADDED_LINT '+JSON.stringify(addedLint.slice(0,30))+'\n');
  if(main.buildExit!==0||candidate.buildExit!==0){process.stdout.write('POS_QUALITY_BUILD_FAILURE '+logs.filter(([n])=>(n==='main-build'&&main.buildExit!==0)||(n==='candidate-build'&&candidate.buildExit!==0)).map(([n,t,stderr])=>n+'\n'+stderr.split('\n').slice(0,160).join('\n')+'\n'+t.split('\n').slice(-3).join('\n')).join('\n'));process.exitCode=1;}

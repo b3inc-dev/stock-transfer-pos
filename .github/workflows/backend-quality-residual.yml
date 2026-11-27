@@ -1,0 +1,66 @@
+name: Backend quality residual observation
+on:
+  pull_request:
+    branches: [codex/rollback-runtime-compat-20261128-0600]
+    paths:
+      - 'app/utils/**'
+      - 'extensions/common/inventoryLogWrite.js'
+      - 'scripts/observe-candidate-quality.mjs'
+      - '.github/workflows/backend-quality-residual.yml'
+permissions:
+  contents: read
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgresql://quality:synthetic-only@127.0.0.1:1/no_connection
+      SHOPIFY_APP_URL: https://quality.invalid
+      SHOPIFY_API_KEY: '00000000000000000000000000000000'
+      SHOPIFY_API_SECRET: synthetic-quality-only
+      SCOPES: read_products
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify snapshot emitted runtime equals exact parent
+        shell: bash
+        run: |
+          git show 5dd57d3525c879a101c48fbaa241273489b1fa70:app/utils/inventory-snapshot.ts > "$RUNNER_TEMP/snapshot-parent.ts"
+          node --input-type=module <<'NODE'
+          import ts from 'typescript';
+          import { readFileSync } from 'node:fs';
+          import assert from 'node:assert/strict';
+          const emit = source => ts.transpileModule(source, {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, removeComments: true}}).outputText;
+          const parent = readFileSync(process.env.RUNNER_TEMP + '/snapshot-parent.ts','utf8');
+          const candidate = readFileSync('app/utils/inventory-snapshot.ts','utf8');
+          assert.equal(emit(candidate), emit(parent));
+          console.log('SNAPSHOT_RUNTIME_IDENTICAL exact_parent=5dd57d3525c879a101c48fbaa241273489b1fa70');
+          NODE
+      - name: Strictly check the snapshot module
+        run: node_modules/.bin/tsc --strict --noEmit --skipLibCheck --target ES2022 --module ESNext --moduleResolution Bundler app/utils/inventory-snapshot.ts
+      - name: Verify shared classifier runtime is byte-equivalent after comments are erased
+        run: |
+          git show add8936007932922392e08aa5179a5cca6ebca28:extensions/common/inventoryLogWrite.js > "$RUNNER_TEMP/classifier-parent.js"
+          node --input-type=module <<'NODE'
+          import ts from 'typescript';
+          import { readFileSync } from 'node:fs';
+          import assert from 'node:assert/strict';
+          const emit = source => ts.transpileModule(source, {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, removeComments: true}}).outputText;
+          assert.equal(emit(readFileSync('extensions/common/inventoryLogWrite.js','utf8')), emit(readFileSync(process.env.RUNNER_TEMP+'/classifier-parent.js','utf8')));
+          console.log('CLASSIFIER_RUNTIME_IDENTICAL parent=add8936007932922392e08aa5179a5cca6ebca28');
+          NODE
+      - name: Existing business regression without new auth cases
+        run: node --experimental-strip-types --test --test-reporter=tap tests/inventory-log-write.test.mjs tests/inventory-history-order.test.mjs tests/inventory-webhook-zero-observation.test.mjs tests/pending-sale-history.test.mjs tests/inventory-observation-daily-recovery.test.mjs tests/inventory-snapshot-cron-result.test.mjs
+      - name: Materialize main for full comparison
+        run: |
+          mkdir -p "$RUNNER_TEMP/main-quality"
+          git archive 94fb3ea579904f65b9df9306aa7da31f84d16d06 | tar -x -C "$RUNNER_TEMP/main-quality"
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/main-quality/node_modules"
+      - name: Whole quality comparison; existing debt remains visible
+        run: node scripts/observe-candidate-quality.mjs "$RUNNER_TEMP/main-quality"

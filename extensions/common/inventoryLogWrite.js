@@ -15,7 +15,7 @@ export function toRawId(id) {
 }
 
 /**
- * @returns {"duplicate_idempotency"|"db_unavailable"|"auth_failed"|"invalid_entry"|"unknown"}
+ * @returns {{code: "duplicate_idempotency"|"db_unavailable"|"auth_failed"|"invalid_entry"|"unknown", retryable: boolean, idempotentSuccess: boolean, message: string}}
  */
 export function classifyInventoryLogWriteError(error) {
   const status = error instanceof Response ? error.status : Number(error?.status);
@@ -87,7 +87,7 @@ export function isHistoryIncompleteSummary(errorSummary) {
 /**
  * completed の再送で Shopify を再実行してよいか。
  * 履歴未完了だけなら履歴の upsert に限る。
- * @returns {"retry_history_only"|"return_completed"|"continue"}
+ * @returns {{action: "retry_history_only"|"return_completed"|"continue"}}
  */
 export function decideCompletedEventRetry(event) {
   const status = event?.status ?? "";
