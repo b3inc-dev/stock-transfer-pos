@@ -39,7 +39,7 @@ test('versioned restored retained observation reaches actual compiled server and
  const audit=join(temp,'fetch-audit.jsonl');
  try{
   const [version]=await db.$queryRawUnsafe('SHOW server_version_num');assert.ok(Number(version.server_version_num)>=160000&&Number(version.server_version_num)<170000);
-  const migrations=await db.$queryRawUnsafe('SELECT migration_name,finished_at,rolled_back_at FROM _prisma_migrations ORDER BY migration_name');assert.equal(migrations.length,13);assert.ok(migrations.every(r=>r.finished_at!==null&&r.rolled_back_at===null));
+  const migrations=await db.$queryRawUnsafe('SELECT * FROM _prisma_migrations ORDER BY migration_name');assert.equal(migrations.length,13);assert.ok(migrations.every(r=>r.finished_at!==null&&r.rolled_back_at===null));
   const restored=await db.inventoryWebhookObservation.findMany({where:{shop}});assert.equal(restored.length,1);assert.equal(restored[0].available,10);assert.equal(await db.inventoryChangeLog.count({where:{shop}}),2);assert.equal(await db.session.count({where:{shop}}),1);
   const probe=createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const port=probe.address().port;await new Promise(r=>probe.close(r));
   const url='http://127.0.0.1:'+port+'/api/inventory-snapshot-daily';
@@ -55,7 +55,7 @@ test('versioned restored retained observation reaches actual compiled server and
   const repeat=await call();assert.equal(repeat.status,0);assert.equal(JSON.parse(repeat.stdout).observationRecovery.attempted,0);assert.equal((await history()).length,2);
   const events=(await readFile(audit,'utf8')).trim().split('\n').map(s=>JSON.parse(s));assert.ok(events.filter(x=>x.kind==='synthetic_graphql').length>=3);assert.equal(events.filter(x=>x.kind==='denied_fetch').length,0,'only the known synthetic GraphQL boundary should be requested');assert.equal(events.filter(x=>x.kind==='denied_interval').length,0,'background periodic jobs must stay inactive');
   assert.ok(!output.includes('synthetic-token-CANARY'),'server must not print access tokens');
-  const after=await db.$queryRawUnsafe('SELECT migration_name,finished_at,rolled_back_at FROM _prisma_migrations ORDER BY migration_name');assert.deepEqual(after,migrations,'compiled recovery must preserve versioned history');
+  const after=await db.$queryRawUnsafe('SELECT * FROM _prisma_migrations ORDER BY migration_name');assert.deepEqual(after,migrations,'compiled recovery must preserve versioned history');
   console.log('RESTORED_PRODUCTION_CHAIN migrations13_unchanged=pass backup_before_seeded_observation=pass npm_start=pass child_cli_pg_plus2=pass repeat_idempotent=pass denied_fetch=0');
  }finally{
   if(server?.pid){try{process.kill(-server.pid,'SIGTERM');}catch{}await wait(100);}
