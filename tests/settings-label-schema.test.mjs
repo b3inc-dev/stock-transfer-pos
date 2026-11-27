@@ -4,7 +4,7 @@ const parent=process.env.POS_SETTINGS_SCHEMA_PARENT==='1';
 const {SettingsV1Schema,parseSettings}=await import(parent?'../app/utils/__audit_parent_schemas.ts':'../app/utils/schemas.ts');
 for(const [section,field] of [['order','desiredDeliveryQuickDayLabels'],['outbound','arrivalQuickDayLabels']]){
  test(section+' quick-day labels preserve valid persisted settings and reject non-string values without throwing',()=>{
-  const labels={'0':'本日','2':'2営業日後','custom':'任意'};
+  const labels={'1':'翌日','2':'2日後','30':'1ヶ月後'};
   const payload={version:1,carriers:[],visibleLocationIds:['synthetic-location'],[section]:{[field]:labels}};
   const parsed=SettingsV1Schema.safeParse(payload);
   assert.equal(parsed.success,true);
