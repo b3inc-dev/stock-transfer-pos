@@ -49,6 +49,7 @@ jobs:
           node_modules/.bin/prisma generate
           node_modules/.bin/prisma migrate deploy
           node tests/restored-production-start-pg.test.mjs seed
+          node scripts/retained-logical-restore-checkpoint.mjs capture
       - name: Materialize exact deployed main without changing branch or shared files
         run: |
           mkdir -p "$RUNNER_TEMP/legacy-root"
@@ -63,7 +64,9 @@ jobs:
       - name: Actual compiled deployed runtime and old caller preserve forward DB
         env:
           POS_LEGACY_ROOT: ${{ runner.temp }}/legacy-root
-        run: node --test --test-reporter=tap tests/rollback-runtime-compat-pg.test.mjs
+        run: |
+          node --test --test-reporter=tap tests/rollback-runtime-compat-pg.test.mjs
+          node scripts/retained-logical-restore-checkpoint.mjs verify
       - name: Regenerate current client and build candidate for return path
         run: |
           node_modules/.bin/prisma generate

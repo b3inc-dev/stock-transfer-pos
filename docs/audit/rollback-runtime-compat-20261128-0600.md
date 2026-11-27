@@ -21,3 +21,5 @@ exploration; fixed existing positive transport fixture only. Runtime/schema/CLI/
 lock/flags/UI unchanged. Existing type454/lint3117 and fullQualityGreen=false remain.
 Exact-HEAD CI, distinct A1 review and real author receipt are required.
 Prior restore/compiled/strict replay and test counts do not earn points again.
+
+Evidence precision correction: capture the existing full-table checkpoint immediately after seed and verify it after legacy setup/runtime, so old setup itself cannot silently modify the baseline. Initial test captured four tables only after old setup. This harness strengthening earns no extra points and performs no native dump/restore.
