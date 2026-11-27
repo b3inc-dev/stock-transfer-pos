@@ -4,6 +4,7 @@ on:
     branches: [codex/rollback-runtime-compat-20261128-0600]
     paths:
       - 'app/utils/**'
+      - 'extensions/common/inventoryLogWrite.js'
       - 'scripts/observe-candidate-quality.mjs'
       - '.github/workflows/backend-quality-residual.yml'
 permissions:
@@ -43,8 +44,19 @@ jobs:
           NODE
       - name: Strictly check the snapshot module
         run: node_modules/.bin/tsc --strict --noEmit --skipLibCheck --target ES2022 --module ESNext --moduleResolution Bundler app/utils/inventory-snapshot.ts
+      - name: Verify shared classifier runtime is byte-equivalent after comments are erased
+        run: |
+          git show add8936007932922392e08aa5179a5cca6ebca28:extensions/common/inventoryLogWrite.js > "$RUNNER_TEMP/classifier-parent.js"
+          node --input-type=module <<'NODE'
+          import ts from 'typescript';
+          import { readFileSync } from 'node:fs';
+          import assert from 'node:assert/strict';
+          const emit = source => ts.transpileModule(source, {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, removeComments: true}}).outputText;
+          assert.equal(emit(readFileSync('extensions/common/inventoryLogWrite.js','utf8')), emit(readFileSync(process.env.RUNNER_TEMP+'/classifier-parent.js','utf8')));
+          console.log('CLASSIFIER_RUNTIME_IDENTICAL parent=add8936007932922392e08aa5179a5cca6ebca28');
+          NODE
       - name: Existing business regression without new auth cases
-        run: node --experimental-strip-types --test --test-reporter=tap tests/inventory-history-order.test.mjs tests/inventory-webhook-zero-observation.test.mjs tests/pending-sale-history.test.mjs tests/inventory-observation-daily-recovery.test.mjs tests/inventory-snapshot-cron-result.test.mjs
+        run: node --experimental-strip-types --test --test-reporter=tap tests/inventory-log-write.test.mjs tests/inventory-history-order.test.mjs tests/inventory-webhook-zero-observation.test.mjs tests/pending-sale-history.test.mjs tests/inventory-observation-daily-recovery.test.mjs tests/inventory-snapshot-cron-result.test.mjs
       - name: Materialize main for full comparison
         run: |
           mkdir -p "$RUNNER_TEMP/main-quality"
