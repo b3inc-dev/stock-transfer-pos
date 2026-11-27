@@ -1,0 +1,81 @@
+name: Retained observation logical restore rehearsal
+on:
+  pull_request:
+    branches: [codex/cumulative-quality-20261128-0221]
+    paths:
+      - '.github/workflows/retained-observation-logical-restore.yml'
+      - 'scripts/retained-logical-restore-checkpoint.mjs'
+permissions:
+  contents: read
+jobs:
+  logical-restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-only-local
+          POSTGRES_DB: commercor_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d commercor_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:test-only-local@127.0.0.1:5432/commercor_test
+      RUN_POS_MIGRATION_REHEARSAL: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+      - name: Install parent repository lock without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Refuse any other database before fixture DDL
+        run: |
+          node --test --test-reporter=tap tests/retained-migration-guard.test.mjs
+          node scripts/retained-migration-checkpoint.mjs guard-only
+          node_modules/.bin/prisma generate
+      - name: Apply exact main migration history and seed only synthetic data
+        run: |
+          git fetch --depth=1 origin 94fb3ea579904f65b9df9306aa7da31f84d16d06
+          mkdir -p "$RUNNER_TEMP/main-migration-baseline"
+          git archive 94fb3ea579904f65b9df9306aa7da31f84d16d06 prisma | tar -x -C "$RUNNER_TEMP/main-migration-baseline"
+          node_modules/.bin/prisma migrate deploy --schema "$RUNNER_TEMP/main-migration-baseline/prisma/schema.prisma"
+          node scripts/retained-migration-checkpoint.mjs baseline
+      - name: Apply candidate history and verify preserved values and new constraints
+        run: |
+          node_modules/.bin/prisma migrate deploy
+          node scripts/retained-migration-checkpoint.mjs upgrade
+      - name: Reapply without reset or db push and verify idempotence
+        run: |
+          node_modules/.bin/prisma migrate deploy
+          node_modules/.bin/prisma migrate status
+          node scripts/retained-migration-checkpoint.mjs rerun
+      - name: Capture every public table and schema before a logical backup
+        run: node scripts/retained-logical-restore-checkpoint.mjs capture
+      - name: Dump and restore only the owned disposable PostgreSQL service database
+        env:
+          FIXTURE_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          node scripts/retained-migration-checkpoint.mjs guard-only
+          test "$CI" = true
+          test "$GITHUB_ACTIONS" = true
+          test -n "$FIXTURE_CONTAINER"
+          docker exec "$FIXTURE_CONTAINER" pg_dump --version
+          docker exec "$FIXTURE_CONTAINER" pg_restore --version
+          fixture_dump="$RUNNER_TEMP/pos-logical-restore.dump"
+          trap 'rm -f "$fixture_dump" "$RUNNER_TEMP/pos-logical-restore-checkpoint.json"' EXIT
+          docker exec "$FIXTURE_CONTAINER" pg_dump -U postgres -d commercor_test --format=custom > "$fixture_dump"
+          test -s "$fixture_dump"
+          docker exec "$FIXTURE_CONTAINER" dropdb -U postgres commercor_test
+          docker exec "$FIXTURE_CONTAINER" createdb -U postgres commercor_test
+          docker exec -i "$FIXTURE_CONTAINER" pg_restore -U postgres -d commercor_test --no-owner --no-acl --exit-on-error < "$fixture_dump"
+          node scripts/retained-logical-restore-checkpoint.mjs verify
+          node_modules/.bin/prisma migrate status
+          node scripts/retained-migration-checkpoint.mjs rerun
+          echo POS_LOGICAL_RESTORE_COMPLETE=true
