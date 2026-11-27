@@ -20,6 +20,20 @@ export type InventorySnapshotsData = {
   snapshots: DailyInventorySnapshot[];
 };
 
+/** Fields read by the existing snapshot aggregate from Shopify inventory items. */
+type SnapshotInventoryItem = {
+  unitCost?: { amount?: string | null } | null;
+  variant?: { price?: string | null; compareAtPrice?: string | null } | null;
+  inventoryLevels?: {
+    edges?: Array<{
+      node: {
+        location?: { id?: string; name?: string | null } | null;
+        quantities?: Array<{ name?: string; quantity?: number }>;
+      };
+    }>;
+  };
+};
+
 /** GraphQL の Money 型や文字列から数値を取得 */
 export function toAmount(v: unknown): number {
   if (v == null) return 0;
@@ -138,7 +152,7 @@ export function aggregateSnapshotsFromItems(
   dateStr: string
 ): DailyInventorySnapshot[] {
   const locationMap = new Map<string, DailyInventorySnapshot>();
-  for (const item of items) {
+  for (const item of items as SnapshotInventoryItem[]) {
     const unitCost = toAmount(item.unitCost?.amount ?? item.unitCost);
     const variant = item.variant ?? null;
     const retailPrice = toAmount(variant?.price);
@@ -439,7 +453,7 @@ export async function getCurrentBulkOperation(
 /** Bulk Operation の結果をダウンロードしてパースする */
 export async function downloadBulkOperationResult(
   url: string
-): Promise<any[]> {
+): Promise<unknown[]> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to download bulk operation result: ${response.statusText}`);
