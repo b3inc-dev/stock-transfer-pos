@@ -80,15 +80,15 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       { variables: { id: transferId } }
     );
 
-    const data = await resp.json();
-    if (data?.errors?.length) {
-      const errMsg = data.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ");
+    const payload = await resp.json();
+    if (payload?.errors?.length) {
+      const errMsg = payload.errors.map((e: { message?: string }) => e?.message ?? String(e)).join(", ");
       throw new Response(JSON.stringify({ error: `GraphQL error: ${errMsg}` }), {
         status: 500,
         headers: { "Content-Type": "application/json" },
       });
     }
-    const transfer = data?.data?.inventoryTransfer;
+    const transfer = payload?.data?.inventoryTransfer;
 
     if (!transfer) {
       throw new Response("Transfer not found", { status: 404 });
