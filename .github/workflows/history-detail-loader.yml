@@ -1,0 +1,46 @@
+name: History detail loader response regression
+on:
+  pull_request:
+    paths: ['app/routes/app.history.$id.tsx','tests/history-detail-loader.test.mjs','.github/workflows/history-detail-loader.yml']
+permissions: {contents: read}
+jobs:
+  loader-and-quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: postgresql://quality:synthetic-only@127.0.0.1:1/no_connection
+      SHOPIFY_APP_URL: https://quality.invalid
+      SHOPIFY_API_KEY: '00000000000000000000000000000000'
+      SHOPIFY_API_SECRET: synthetic-quality-only
+      SCOPES: read_products
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: '${{ github.event.pull_request.head.sha }}',fetch-depth: 0,persist-credentials: false}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22.14.0'}
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Reproduce exact parent loader failure
+        shell: bash
+        run: |
+          git show '730cbfbba131cb42dea2ea6f0555e080ba797470:app/routes/app.history.$id.tsx' > app/routes/__audit_parent_history.tsx
+          trap 'rm -f app/routes/__audit_parent_history.tsx' EXIT
+          node --input-type=module <<'NODE'
+          import {spawnSync} from 'node:child_process';
+          import assert from 'node:assert/strict';
+          const run=spawnSync(process.execPath,['--test','--test-reporter=tap','tests/history-detail-loader.test.mjs'],{env:{...process.env,POS_HISTORY_PARENT:'1'},encoding:'utf8'});
+          const output=run.stdout+run.stderr;
+          assert.equal(run.status,1);assert.match(output,/# pass 2/);assert.match(output,/# fail 2/);assert.match(output,/# skipped 0/);
+          assert.ok(!/ERR_MODULE_NOT_FOUND|ENOENT/.test(output));
+          console.log('HISTORY_PARENT_SENSITIVITY exact=730cbfbba131cb42dea2ea6f0555e080ba797470 pass=2 fail=2 skip=0 normal_payload_returns_500=true');
+          NODE
+      - name: Actual loader normal and existing error branches
+        run: node --test --test-reporter=tap tests/history-detail-loader.test.mjs
+      - name: Existing normal business regression
+        run: node --experimental-strip-types --test --test-reporter=tap tests/inventory-log-write.test.mjs tests/inventory-history-order.test.mjs tests/inventory-webhook-zero-observation.test.mjs tests/pending-sale-history.test.mjs tests/inventory-observation-daily-recovery.test.mjs tests/inventory-snapshot-cron-result.test.mjs
+      - name: Whole quality baseline materialization
+        run: |
+          mkdir -p "$RUNNER_TEMP/main-quality"
+          git archive 94fb3ea579904f65b9df9306aa7da31f84d16d06 | tar -x -C "$RUNNER_TEMP/main-quality"
+          ln -s "$GITHUB_WORKSPACE/node_modules" "$RUNNER_TEMP/main-quality/node_modules"
+      - name: Observe full quality debt without waiving it
+        run: node scripts/observe-candidate-quality.mjs "$RUNNER_TEMP/main-quality"
